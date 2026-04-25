@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Zeigen — Final logo</title>
+<link rel="stylesheet" href="tokens.css">
+<style>
+  html, body { margin: 0; background: #0e0f12; color: var(--fg-primary); font-family: var(--font-system); }
+  .page { max-width: 1100px; margin: 0 auto; padding: 56px 40px 96px; }
+  h1 { font-size: 28px; font-weight: 700; letter-spacing: -0.02em; margin: 0 0 6px; }
+  .lede { color: var(--fg-secondary); font-size: 14px; margin-bottom: 36px; max-width: 680px; line-height: 1.6; }
+
+  h2 { font-size: 11px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--fg-tertiary); margin: 40px 0 14px; }
+
+  /* Hero */
+  .hero { background: var(--bg-elevated); border: 1px solid var(--border-faint); border-radius: 14px; padding: 80px 40px; display: flex; align-items: center; justify-content: center; }
+
+  /* Size sheet */
+  .sizes { background: var(--bg-elevated); border: 1px solid var(--border-faint); border-radius: 10px; padding: 32px; display: flex; align-items: flex-end; justify-content: space-around; gap: 24px; }
+  .size-cell { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+  .size-cell .label { font-size: 10.5px; color: var(--fg-tertiary); letter-spacing: 0.05em; }
+
+  /* Contexts */
+  .contexts { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .ctx { background: var(--bg-elevated); border: 1px solid var(--border-faint); border-radius: 10px; overflow: hidden; }
+  .ctx-stage { padding: 28px; display: flex; align-items: center; justify-content: center; min-height: 140px; }
+  .ctx-meta { padding: 10px 16px; border-top: 1px solid var(--border-faint); font-size: 11.5px; color: var(--fg-tertiary); }
+
+  /* Mac menu bar mock */
+  .menubar { background: rgba(28, 28, 32, 0.92); backdrop-filter: blur(20px); height: 28px; display: flex; align-items: center; padding: 0 12px; gap: 14px; border-radius: 6px; width: 100%; max-width: 560px; }
+  .menubar .apple { width: 12px; height: 12px; opacity: 0.7; }
+  .menubar .item { font-size: 12px; color: rgba(255,255,255,0.85); font-weight: 500; }
+  .menubar .item.first { font-weight: 600; }
+  .menubar .spacer { flex: 1; }
+  .menubar .tray { display: flex; align-items: center; gap: 10px; }
+  .menubar .tray svg { display: block; }
+  .menubar .clock { font-size: 12px; color: rgba(255,255,255,0.85); font-variant-numeric: tabular-nums; }
+
+  /* Dock mock */
+  .dock { background: rgba(40, 40, 44, 0.7); backdrop-filter: blur(30px); border: 1px solid rgba(255,255,255,0.1); border-radius: 18px; padding: 8px; display: flex; gap: 8px; align-items: center; }
+  .dock .app { width: 48px; height: 48px; border-radius: 11px; background: linear-gradient(180deg, #444, #222); }
+
+  /* Code block */
+  pre { background: #16171a; border: 1px solid var(--border-faint); border-radius: 8px; padding: 18px 20px; font-family: var(--font-mono); font-size: 11.5px; color: var(--fg-secondary); overflow-x: auto; line-height: 1.55; margin: 0; }
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>Zeigen — final mark</h1>
+  <p class="lede">
+    Debossed Z, single shadow strip. Rounded blue square. Locked.
+  </p>
+
+  <!-- Hero -->
+  <div class="hero">
+    <svg width="240" height="240" viewBox="0 0 120 120" aria-label="Zeigen logo">
+      <rect x="6" y="6" width="108" height="108" rx="26" fill="oklch(0.58 0.18 252)"/>
+      <path d="M28 32 H92 V46 L48 78 H92 V92 H28 V78 L72 46 H28 Z" fill="oklch(0.36 0.16 260)"/>
+      <path d="M28 32 H92 V40 H28 Z" fill="#000" opacity="0.22"/>
+    </svg>
+  </div>
+
+  <!-- Sizes -->
+  <h2>At size</h2>
+  <div class="sizes">
+    <div class="size-cell">
+      <svg width="128" height="128" viewBox="0 0 120 120">
+        <rect x="6" y="6" width="108" height="108" rx="26" fill="oklch(0.58 0.18 252)"/>
+        <path d="M28 32 H92 V46 L48 78 H92 V92 H28 V78 L72 46 H28 Z" fill="oklch(0.36 0.16 260)"/>
+        <path d="M28 32 H92 V40 H28 Z" fill="#000" opacity="0.22"/>
+      </svg>
+      <div class="label">128px · App icon</div>
+    </div>
+    <div class="size-cell">
+      <svg width="64" height="64" viewBox="0 0 120 120">
+        <rect x="6" y="6" width="108" height="108" rx="26" fill="oklch(0.58 0.18 252)"/>
+        <path d="M28 32 H92 V46 L48 78 H92 V92 H28 V78 L72 46 H28 Z" fill="oklch(0.36 0.16 260)"/>
+        <path d="M28 32 H92 V40 H28 Z" fill="#000" opacity="0.22"/>
+      </svg>
+      <div class="label">64px · Dock</div>
+    </div>
+    <div class="size-cell">
+      <svg width="32" height="32" viewBox="0 0 120 120">
+        <rect x="6" y="6" width="108" height="108" rx="26" fill="oklch(0.58 0.18 252)"/>
+        <path d="M28 32 H92 V46 L48 78 H92 V92 H28 V78 L72 46 H28 Z" fill="oklch(0.36 0.16 260)"/>
+        <path d="M28 32 H92 V40 H28 Z" fill="#000" opacity="0.22"/>
+      </svg>
+      <div class="label">32px · Window</div>
+    </div>
+    <div class="size-cell">
+      <svg width="18" height="18" viewBox="0 0 120 120">
+        <rect x="6" y="6" width="108" height="108" rx="26" fill="oklch(0.58 0.18 252)"/>
+        <path d="M22 28 H98 V48 L42 78 H98 V96 H22 V78 L78 48 H22 Z" fill="oklch(0.32 0.14 260)"/>
+      </svg>
+      <div class="label">18px · Menu bar*</div>
+    </div>
+  </div>
+  <p class="lede" style="margin-top: 10px; font-size: 12px;">
+    *At menu-bar size the shadow strip drops out and the Z gets a touch larger — the bevel detail is lost anyway, so the simpler form reads better.
+  </p>
+
+  <!-- In context -->
+  <h2>In context</h2>
+  <div class="contexts">
+    <div class="ctx">
+      <div class="ctx-stage" style="background: linear-gradient(180deg, #2a2c30, #1a1b1e);">
+        <div class="menubar">
+          <svg class="apple" viewBox="0 0 24 24" fill="rgba(255,255,255,0.85)"><path d="M17.05 12.04c-.03-2.42 1.97-3.59 2.06-3.65-1.12-1.64-2.87-1.86-3.49-1.89-1.49-.15-2.9.87-3.66.87-.76 0-1.92-.85-3.16-.83-1.62.02-3.12.94-3.96 2.39-1.69 2.93-.43 7.27 1.21 9.65.8 1.16 1.76 2.47 3.01 2.42 1.21-.05 1.66-.78 3.13-.78 1.46 0 1.87.78 3.15.75 1.3-.02 2.13-1.18 2.93-2.35.92-1.35 1.3-2.66 1.32-2.73-.03-.01-2.53-.97-2.55-3.85zM14.65 4.95c.66-.81 1.11-1.92.99-3.04-.95.04-2.13.64-2.82 1.43-.62.71-1.16 1.86-1.02 2.95 1.07.08 2.16-.54 2.85-1.34z"/></svg>
+          <span class="item first">Zeigen</span>
+          <span class="item">File</span>
+          <span class="item">Edit</span>
+          <span class="item">View</span>
+          <span class="spacer"></span>
+          <div class="tray">
+            <svg width="14" height="14" viewBox="0 0 120 120">
+              <rect x="6" y="6" width="108" height="108" rx="26" fill="oklch(0.58 0.18 252)"/>
+              <path d="M22 28 H98 V48 L42 78 H98 V96 H22 V78 L78 48 H22 Z" fill="oklch(0.32 0.14 260)"/>
+            </svg>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="rgba(255,255,255,0.85)"><path d="M12 2a3 3 0 00-3 3v.5C6.7 6.4 5 8.6 5 11.2V16l-2 2v1h18v-1l-2-2v-4.8c0-2.6-1.7-4.8-4-5.7V5a3 3 0 00-3-3zm-2 19a2 2 0 104 0z"/></svg>
+            <span class="clock">9:41</span>
+          </div>
+        </div>
+      </div>
+      <div class="ctx-meta">macOS menu bar · 18px tray icon</div>
+    </div>
+    <div class="ctx">
+      <div class="ctx-stage" style="background: linear-gradient(180deg, #6a7a8a, #3a4a5a);">
+        <div class="dock">
+          <div class="app"></div>
+          <div class="app"></div>
+          <svg width="48" height="48" viewBox="0 0 120 120">
+            <rect x="6" y="6" width="108" height="108" rx="26" fill="oklch(0.58 0.18 252)"/>
+            <path d="M28 32 H92 V46 L48 78 H92 V92 H28 V78 L72 46 H28 Z" fill="oklch(0.36 0.16 260)"/>
+            <path d="M28 32 H92 V40 H28 Z" fill="#000" opacity="0.22"/>
+          </svg>
+          <div class="app"></div>
+          <div class="app"></div>
+        </div>
+      </div>
+      <div class="ctx-meta">macOS Dock · 48px app icon</div>
+    </div>
+  </div>
+
+  <!-- Source -->
+  <h2>SVG source</h2>
+  <pre>&lt;svg viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg"&gt;
+  &lt;rect x="6" y="6" width="108" height="108" rx="26" fill="oklch(0.58 0.18 252)"/&gt;
+  &lt;path d="M28 32 H92 V46 L48 78 H92 V92 H28 V78 L72 46 H28 Z" fill="oklch(0.36 0.16 260)"/&gt;
+  &lt;path d="M28 32 H92 V40 H28 Z" fill="#000" opacity="0.22"/&gt;
+&lt;/svg&gt;
+
+&lt;!-- Menu-bar variant (≤24px): drop shadow strip, fatter Z --&gt;
+&lt;svg viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg"&gt;
+  &lt;rect x="6" y="6" width="108" height="108" rx="26" fill="oklch(0.58 0.18 252)"/&gt;
+  &lt;path d="M22 28 H98 V48 L42 78 H98 V96 H22 V78 L78 48 H22 Z" fill="oklch(0.32 0.14 260)"/&gt;
+&lt;/svg&gt;</pre>
+</div>
+</body>
+</html>
