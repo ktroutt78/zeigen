@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { WebviewWindow, getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { I, Icon, P } from "./components/icons";
 
 const BUBBLE_LABEL = "webcam-bubble";
@@ -35,6 +35,7 @@ async function openBubble(deviceName: string) {
     skipTaskbar: true,
     visibleOnAllWorkspaces: true,
     shadow: false,
+    parent: "main",
   });
 
   win.once("tauri://error", (e) => {
@@ -216,6 +217,25 @@ function App() {
       closeBubble().catch(() => {});
     }
   }, [cameraName]);
+
+  useEffect(() => {
+    // macOS keeps the app alive while any window remains open. Close the
+    // bubble alongside the main window so the user's "close app" gesture
+    // actually quits everything.
+    const main = getCurrentWebviewWindow();
+    let unlisten: (() => void) | null = null;
+    main
+      .onCloseRequested(() => {
+        closeBubble().catch(() => {});
+      })
+      .then((u) => {
+        unlisten = u;
+      })
+      .catch(() => {});
+    return () => {
+      unlisten?.();
+    };
+  }, []);
 
   return (
     <main
