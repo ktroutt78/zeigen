@@ -59,14 +59,24 @@ async function closeBubble() {
 
 const COUNTDOWN_LABEL = "countdown";
 
-async function openCountdown(durationSec: number) {
+type DisplayFrame = { x: number; y: number; w: number; h: number };
+
+async function openCountdown(
+  durationSec: number,
+  displayFrame: DisplayFrame,
+) {
   const existing = await WebviewWindow.getByLabel(COUNTDOWN_LABEL);
   if (existing) await existing.close().catch(() => {});
 
+  // Don't use `fullscreen: true` — macOS fullscreen mode forces an opaque
+  // backdrop AND opens on whichever screen is "active," not the recorded one.
+  // Explicit position+size in physical pixels lands the window over the
+  // exact display being recorded, with the transparent webview intact.
   const win = new WebviewWindow(COUNTDOWN_LABEL, {
     url: `/#countdown?duration=${durationSec}`,
     title: "Countdown",
-    fullscreen: true,
+    width: 100,
+    height: 100,
     decorations: false,
     transparent: true,
     alwaysOnTop: true,
@@ -77,10 +87,22 @@ async function openCountdown(durationSec: number) {
     focus: true,
   });
 
-  win.once("tauri://created", () => {
+  win.once("tauri://created", async () => {
     invoke("make_capture_invisible", { label: COUNTDOWN_LABEL }).catch((e) => {
       console.error("make_capture_invisible(countdown) failed", e);
     });
+    try {
+      const { PhysicalPosition, PhysicalSize } = await import(
+        "@tauri-apps/api/dpi"
+      );
+      await win.setSize(new PhysicalSize(displayFrame.w, displayFrame.h));
+      await win.setPosition(
+        new PhysicalPosition(displayFrame.x, displayFrame.y),
+      );
+      await win.setFocus();
+    } catch (e) {
+      console.error("countdown positioning failed", e);
+    }
   });
   win.once("tauri://error", (e) => {
     console.error("countdown window error", e);
@@ -145,6 +167,7 @@ async function closeTimerChip() {
 
 async function awaitCountdown(
   durationSec: number,
+  displayFrame: DisplayFrame,
 ): Promise<"completed" | "cancelled"> {
   return new Promise(async (resolve) => {
     const unlistens: Array<() => void> = [];
@@ -156,7 +179,7 @@ async function awaitCountdown(
     unlistens.push(
       await listen("countdown-cancelled", () => finish("cancelled")),
     );
-    await openCountdown(durationSec);
+    await openCountdown(durationSec, displayFrame);
   });
 }
 
@@ -367,16 +390,9 @@ function App() {
       setFinalizeInfo(null);
       setLastSaved(null);
 
-      if (countdownDuration > 0) {
-        setState("countdown");
-        const result = await awaitCountdown(countdownDuration);
-        if (result === "cancelled") {
-          setState("idle");
-          return;
-        }
-        playGoSound();
-      }
-
+      // Resolve the recorded display's physical frame up front. The countdown
+      // window needs it to land on the correct screen; engine_start needs it
+      // for bubble-position-log fraction conversion.
       const display = displays.find((d) => d.id === selectedDisplay);
       const monitors = await availableMonitors();
       const monitor =
@@ -385,10 +401,22 @@ function App() {
             (m) => m.size.width === display.width && m.size.height === display.height,
           )) ||
         monitors[0];
-      const recordedDisplayX = monitor?.position.x ?? 0;
-      const recordedDisplayY = monitor?.position.y ?? 0;
-      const recordedDisplayW = monitor?.size.width ?? 0;
-      const recordedDisplayH = monitor?.size.height ?? 0;
+      const recordedFrame: DisplayFrame = {
+        x: monitor?.position.x ?? 0,
+        y: monitor?.position.y ?? 0,
+        w: monitor?.size.width ?? 0,
+        h: monitor?.size.height ?? 0,
+      };
+
+      if (countdownDuration > 0) {
+        setState("countdown");
+        const result = await awaitCountdown(countdownDuration, recordedFrame);
+        if (result === "cancelled") {
+          setState("idle");
+          return;
+        }
+        playGoSound();
+      }
 
       await invoke<string>("engine_start", {
         displayId: selectedDisplay,
@@ -397,10 +425,10 @@ function App() {
         maxFps: 30,
         webcamSize: bubbleSize,
         webcamCorner: bubbleCorner,
-        recordedDisplayX,
-        recordedDisplayY,
-        recordedDisplayW,
-        recordedDisplayH,
+        recordedDisplayX: recordedFrame.x,
+        recordedDisplayY: recordedFrame.y,
+        recordedDisplayW: recordedFrame.w,
+        recordedDisplayH: recordedFrame.h,
       });
     } catch (err) {
       setState("idle");
