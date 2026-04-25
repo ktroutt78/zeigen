@@ -75,6 +75,35 @@ Review screen that opens automatically when a recording stops. New Tauri window 
 
 **Done when:** A recording can be trimmed to a sub-segment, annotated with a text label and arrow, and exported to a new mp4 that plays correctly with annotations visible. The Phase 6 export panel is visible but inert.
 
+## Phase 3.5: Recording experience polish
+
+Numbered 3.5 because it extends Phase 3's recording UI; sequenced here because it depends on Phase 5's save pipeline.
+
+Bundles four features and one bug fix from Phase 5 UAT. All recording-lifecycle / floating-window territory.
+
+**Deliverables**
+
+1. Draggable webcam bubble — free drag with corner snapping. Pre-record and during-record. Position log written to sidecar (same pattern as the annotation sidecar).
+   - Schema change: Phase 5 currently writes a scalar `bubble_position` to the sidecar. Phase 3.5 changes it to a position log — an array of `{t, x, y}` entries — and updates Phase 5's save-pipeline reader to consume the array form. Backward-compat: a scalar value loads as a single-entry log at `t=0`.
+2. Countdown overlay before recording — full-screen, big number, single "go" sound at start. Esc cancels, Spacebar/Enter skips. Setting: 5s / 3s / Off. Not baked into the recording — SCK starts after countdown.
+3. Recording timer, primary surface on the webcam bubble — small chip integrated into the bubble. Mono font. Semi-transparent dark pill background.
+4. Recording timer, fallback when no webcam — standalone draggable chip when `cameraState === "none"`. Same visual treatment as the bubble timer. Bottom-right default, draggable.
+5. Recording timer, secondary menu bar surface — tray icon shows elapsed time. Always present, not primary.
+6. Length cap mode (opt-in) — setting: No limit / Set target. When set, timer shows `MM:SS / MM:SS`, tints orange at 80%, red at 100%. Recording continues — never auto-stops. Bubble/chip tints only; menu bar stays clean. Default: no limit.
+7. Bug fix from Phase 5 UAT — floating preview captured by SCK because `alwaysOnTop`. Shared `makeCaptureInvisible(window)` utility setting `NSWindow.sharingType = .none`. Used by floating preview, countdown overlay, draggable bubble, standalone timer chip.
+
+**Implementation order**
+
+1. `makeCaptureInvisible()` utility + apply to the existing floating preview (closes the two-bubble bug standalone).
+2. Draggable bubble (pre-record first, then during-record + position log).
+3. Countdown overlay.
+4. Timer — menu bar surface.
+5. Timer — bubble integration.
+6. Timer — standalone fallback chip.
+7. Length cap + tint warnings.
+
+**Done when:** A recording made with the bubble dragged mid-record produces a final mp4 where the bubble follows the logged path; the countdown plays before SCK starts and is not in the recording; the timer is visible on the bubble (or the standalone chip when no webcam) and on the tray icon; the length cap tints the timer at 80% / 100% without auto-stopping; the floating preview no longer appears in the captured screen.
+
 ## Phase 6: Export destinations
 
 Four output paths from the review screen. Local save already works from Phase 2; this phase adds the other three.
@@ -107,3 +136,4 @@ Only tackle after Phases 1-6 are all working end-to-end.
 - Windows and Linux builds
 - Auto-transcription, chapters, captions
 - Direct LinkedIn API posting (not possible for personal profiles)
+- A/V sync drift (surfaced in Phase 5 UAT) — separate follow-up, own diagnosis pass needed

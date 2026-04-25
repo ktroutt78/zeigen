@@ -4,6 +4,26 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-04-25 — Webcam bubble draggable, free drag with corner snapping, pre-record and during-record
+
+Matches Loom and CleanShot. Position adjustable mid-record so users can move the bubble out of the way of content they're demoing.
+
+## 2026-04-25 — Countdown duration / skip semantics
+
+5s / 3s / Off as the user-facing knob. No separate "skip hotkey toggle" setting — the right control is duration, not a parallel skip mechanism. Esc cancels (no recording starts), Spacebar/Enter skips (recording starts immediately). Countdown is not baked into the recording.
+
+## 2026-04-25 — Timer primary surface on the webcam bubble, not the menu bar
+
+Users look at the bubble constantly during recording (they're checking themselves on camera). Menu bar requires eyes-up movement that defeats the "am I close to my limit" use case. Standalone draggable chip is the fallback when no webcam. Menu bar is secondary backup, free to add since the tray icon already exists.
+
+## 2026-04-25 — Length cap is a warning, not enforcement; 80% / 100% thresholds are not user-configurable
+
+Recording never auto-stops at the cap. Warning tints (orange at 80%, red at 100%) live on the bubble/chip surface only — menu bar stays visually clean. Thresholds fixed for now; YAGNI on configurability until someone asks.
+
+## 2026-04-25 — `makeCaptureInvisible()` shared utility
+
+All floating windows visible during recording must call it (sets `NSWindow.sharingType = .none` so SCK doesn't capture them). Consumers: floating preview, countdown overlay, draggable bubble, standalone timer chip. Single utility, multiple consumers — prevents the Phase 5 two-bubble class of bug from recurring.
+
 ## 2026-04-25 — "Discard edits" is non-destructive
 
 The Phase 5 footer's "Discard edits" button resets trim handles and clears annotation overlays — it does not delete the source recording. Destructive delete is deferred to a future phase with a confirmation dialog. The mockup's original "Discard recording" wording was too aggressive for review-screen UX.
