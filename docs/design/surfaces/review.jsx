@@ -278,80 +278,98 @@ function ReviewWindow({ state = "justStopped" }) {
               <span>00:00</span><span>00:30</span><span>01:00</span><span>01:30</span><span>02:00</span><span>02:22</span>
             </div>
           </div>
+
+          {/* Action footer — Phase 5 actions */}
+          <div style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+            padding: "10px 16px", borderTop: "1px solid var(--border-faint)",
+            background: "rgba(255,255,255,0.012)",
+          }}>
+            <button style={{
+              display: "inline-flex", alignItems: "center", gap: 6,
+              background: "transparent", border: "1px solid transparent",
+              color: "var(--fg-tertiary)",
+              padding: "6px 12px", borderRadius: 6, height: 30, cursor: "pointer",
+              fontFamily: "var(--font-system)", fontSize: 12.5, fontWeight: 500,
+            }}>
+              {I.trash}<span>Discard edits</span>
+            </button>
+            <button style={{
+              display: "inline-flex", alignItems: "center", gap: 6,
+              background: "var(--accent)", border: "1px solid var(--accent)",
+              color: "#fff",
+              padding: "6px 14px", borderRadius: 6, height: 30, cursor: "pointer",
+              fontFamily: "var(--font-system)", fontSize: 12.5, fontWeight: 600,
+              letterSpacing: "-0.005em",
+            }}>
+              <Icon d="M3 8.5l3 3 7-7" size={13} stroke={1.6}/>
+              <span>Save edits</span>
+            </button>
+          </div>
         </div>
 
-        {/* RIGHT — export panel */}
+        {/* RIGHT — export panel (scaffolded for Phase 6, inert in Phase 5) */}
         <div style={{ display: "flex", flexDirection: "column", background: "var(--bg-sidebar)" }}>
           <div style={{ padding: "12px 14px 8px" }}>
-            <div style={{ fontSize: 10.5, color: "var(--fg-tertiary)", letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 600 }}>Export</div>
-          </div>
-
-          <div style={{ padding: "0 12px 8px", display: "flex", flexDirection: "column", gap: 6 }}>
-            <Dest
-              primary
-              icon={<Icon d="M3 8.5l3 3 7-7" size={14} stroke={1.6}/>}
-              title="Saved Locally"
-              sub="~/Movies/Zeigen/recording-2026-04-24-143052.mp4"
-              action={<span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11.5 }}>{I.finder}<span>Reveal</span></span>}
-            />
-            <Dest
-              icon={<Icon d="M5 2h6v3M5 2v9a1 1 0 001 1h7a1 1 0 001-1V6L11 2M3 6h6v8" size={14} stroke={1.4}/>}
-              title="Copy to Clipboard"
-              sub="Paste into Slack, Mail, Messages…"
-              kbd={<><span className="kbd">⌘</span><span className="kbd">C</span></>}
-            />
-            <Dest
-              icon={<Icon d={I.link.props.d} size={14} stroke={1.5}/>}
-              title="Upload & Share Link"
-              sub="zeigen-share.pages.dev/v/V1StGXR8Z9"
-              kbd={<><span className="kbd">⌘</span><span className="kbd">⇧</span><span className="kbd">L</span></>}
-            />
-            <Dest
-              icon={<Icon d="M2.5 5h11v9h-11zM5 8.5v3M5 6.5h.01M7.5 11.5v-3c0-.8.7-1.5 1.5-1.5s1.5.7 1.5 1.5v3M10.5 11.5v-3" size={13} stroke={1.4}/>}
-              title="Export for LinkedIn"
-              sub="MP4 · ≤ 10 min · 1080p capped"
-            />
-          </div>
-
-          <div className="hairline" style={{ margin: "6px 14px" }}/>
-
-          {/* Format presets */}
-          <div style={{ padding: "6px 14px 10px" }}>
-            <div style={{ fontSize: 10.5, color: "var(--fg-tertiary)", letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 600, marginBottom: 8 }}>Quick export</div>
-            <div style={{ display: "flex", gap: 6 }}>
-              {["MP4", "GIF", "ProRes"].map((f) => (
-                <button key={f} className="btn-secondary" style={{ flex: 1, fontSize: 12, padding: "6px 0", height: 28 }}>{f}</button>
-              ))}
+            <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
+              <span style={{ fontSize: 10.5, color: "var(--fg-tertiary)", letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 600 }}>Export</span>
+              <span style={{ fontSize: 10, color: "var(--fg-quaternary)", letterSpacing: "0.04em", textTransform: "uppercase", fontWeight: 600 }}>Coming in Phase 6</span>
             </div>
           </div>
 
-          <div className="hairline" style={{ margin: "0 14px 8px" }}/>
+          <div style={{ opacity: 0.4, pointerEvents: "none", display: "flex", flexDirection: "column" }} aria-hidden="true">
+            <div style={{ padding: "0 12px 8px", display: "flex", flexDirection: "column", gap: 6 }}>
+              <Dest
+                primary
+                icon={<Icon d="M3 8.5l3 3 7-7" size={14} stroke={1.6}/>}
+                title="Saved Locally"
+                sub="~/Movies/Zeigen/recording-2026-04-24-143052.mp4"
+                action={<span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11.5 }}>{I.finder}<span>Reveal</span></span>}
+              />
+              <Dest
+                icon={<Icon d="M5 2h6v3M5 2v9a1 1 0 001 1h7a1 1 0 001-1V6L11 2M3 6h6v8" size={14} stroke={1.4}/>}
+                title="Copy to Clipboard"
+                sub="Paste into Slack, Mail, Messages…"
+                kbd={<><span className="kbd">⌘</span><span className="kbd">C</span></>}
+              />
+              <Dest
+                icon={<Icon d={I.link.props.d} size={14} stroke={1.5}/>}
+                title="Upload & Share Link"
+                sub="zeigen-share.pages.dev/v/V1StGXR8Z9"
+                kbd={<><span className="kbd">⌘</span><span className="kbd">⇧</span><span className="kbd">L</span></>}
+              />
+              <Dest
+                icon={<Icon d="M2.5 5h11v9h-11zM5 8.5v3M5 6.5h.01M7.5 11.5v-3c0-.8.7-1.5 1.5-1.5s1.5.7 1.5 1.5v3M10.5 11.5v-3" size={13} stroke={1.4}/>}
+                title="Export for LinkedIn"
+                sub="MP4 · ≤ 10 min · 1080p capped"
+              />
+            </div>
 
-          {/* Open in editor */}
-          <div style={{ padding: "0 14px" }}>
-            <button className="btn-secondary" style={{
-              width: "100%", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 7, height: 30,
-            }}>
-              {I.external}<span>Open in Final Cut</span>
-            </button>
+            <div className="hairline" style={{ margin: "6px 14px" }}/>
+
+            {/* Format presets */}
+            <div style={{ padding: "6px 14px 10px" }}>
+              <div style={{ fontSize: 10.5, color: "var(--fg-tertiary)", letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 600, marginBottom: 8 }}>Quick export</div>
+              <div style={{ display: "flex", gap: 6 }}>
+                {["MP4", "GIF", "ProRes"].map((f) => (
+                  <button key={f} className="btn-secondary" style={{ flex: 1, fontSize: 12, padding: "6px 0", height: 28 }}>{f}</button>
+                ))}
+              </div>
+            </div>
+
+            <div className="hairline" style={{ margin: "0 14px 8px" }}/>
+
+            {/* Open in editor */}
+            <div style={{ padding: "0 14px" }}>
+              <button className="btn-secondary" style={{
+                width: "100%", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 7, height: 30,
+              }}>
+                {I.external}<span>Open in Final Cut</span>
+              </button>
+            </div>
           </div>
 
           <div style={{ flex: 1 }}/>
-
-          {/* Discard — de-emphasized */}
-          <div style={{ padding: "12px 14px", borderTop: "1px solid var(--border-faint)" }}>
-            <button style={{
-              width: "100%", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 7,
-              background: "transparent", border: "1px solid transparent", color: "var(--fg-tertiary)",
-              padding: "6px 0", borderRadius: 6, cursor: "pointer",
-              fontFamily: "var(--font-system)", fontSize: 12, fontWeight: 500,
-            }}
-            onMouseEnter={(e) => { e.currentTarget.style.borderColor = "rgba(255,80,80,0.25)"; e.currentTarget.style.color = "oklch(0.78 0.15 25)"; }}
-            onMouseLeave={(e) => { e.currentTarget.style.borderColor = "transparent"; e.currentTarget.style.color = "var(--fg-tertiary)"; }}
-            >
-              {I.trash}<span>Discard recording</span>
-            </button>
-          </div>
         </div>
       </div>
     </div>
