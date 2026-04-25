@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { Icon, P } from "./icons";
 import { useCornerSnap } from "../hooks/useCornerSnap";
 import { useBubblePositionLog } from "../hooks/useBubblePositionLog";
+import { useRecordingState } from "../hooks/useRecordingState";
+import TimerChip from "./TimerChip";
 
 // Floating circular webcam preview. Mirrors the WebcamOrbit variant from
 // docs/design/surfaces/webcam-bubble.jsx — circular feed, hover-only chrome,
@@ -66,6 +68,7 @@ export default function WebcamBubble() {
 
   useCornerSnap();
   useBubblePositionLog();
+  const { state: recState, elapsed } = useRecordingState();
 
   useEffect(() => {
     let cancelled = false;
@@ -189,6 +192,20 @@ export default function WebcamBubble() {
             // but the visible affordance reads as a Mac-style grab handle.
           >
             <Icon d={P.resize} size={11} stroke={1.4} />
+          </div>
+        )}
+
+        {(recState === "recording" || recState === "paused") && (
+          <div
+            style={{
+              position: "absolute",
+              left: "50%",
+              bottom: 14,
+              transform: "translateX(-50%)",
+              pointerEvents: "none",
+            }}
+          >
+            <TimerChip state={recState} elapsedSec={elapsed} />
           </div>
         )}
       </div>
