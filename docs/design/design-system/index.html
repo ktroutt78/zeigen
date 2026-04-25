@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Zeigen — Design System</title>
+<link rel="stylesheet" href="../tokens.css">
+<style>
+  html, body { margin: 0; padding: 0; background: #131315; color: var(--fg-primary); font-family: var(--font-system); }
+  .page { max-width: 980px; margin: 0 auto; padding: 56px 40px 96px; }
+  h1 { font-size: 32px; font-weight: 700; letter-spacing: -0.02em; margin: 0 0 6px; }
+  .lede { color: var(--fg-secondary); font-size: 14px; margin-bottom: 40px; max-width: 620px; line-height: 1.5; }
+  h2 { font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-tertiary); margin: 48px 0 16px; }
+  h3 { font-size: 14px; font-weight: 600; letter-spacing: -0.01em; margin: 24px 0 10px; color: var(--fg-primary); }
+  p, .body { font-size: 13px; line-height: 1.55; color: var(--fg-secondary); }
+  code { font-family: var(--font-mono); font-size: 11.5px; color: var(--fg-secondary); background: rgba(255,255,255,0.04); padding: 1px 5px; border-radius: 3px; }
+
+  .grid { display: grid; gap: 12px; }
+  .swatch { background: var(--bg-elevated); border: 1px solid var(--border-faint); border-radius: 8px; padding: 12px; }
+  .swatch .chip { width: 100%; height: 56px; border-radius: 6px; margin-bottom: 10px; }
+  .swatch .name { font-size: 12.5px; font-weight: 600; color: var(--fg-primary); }
+  .swatch .val  { font-family: var(--font-mono); font-size: 11px; color: var(--fg-tertiary); margin-top: 2px; }
+
+  .row-spec { display: grid; grid-template-columns: 200px 1fr; align-items: baseline; gap: 16px; padding: 10px 0; border-bottom: 1px solid var(--border-faint); }
+  .row-spec .key { font-family: var(--font-mono); font-size: 11.5px; color: var(--fg-tertiary); }
+  .row-spec .val { font-size: 13px; color: var(--fg-primary); }
+
+  .demo-card { background: var(--bg-window); border: 1px solid var(--border-strong); border-radius: 10px; padding: 24px; box-shadow: var(--shadow-md); }
+  .pre { background: #0e0f12; border: 1px solid var(--border-faint); border-radius: 8px; padding: 16px; font-family: var(--font-mono); font-size: 11.5px; color: #e3e3e7; overflow: auto; line-height: 1.55; white-space: pre; }
+
+  .sample-row { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--border-faint); }
+  .sample-row .label { width: 200px; font-family: var(--font-mono); font-size: 11px; color: var(--fg-tertiary); }
+  .sample-row .demo  { color: var(--fg-primary); }
+
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; background: rgba(255,255,255,0.06); font-size: 11px; color: var(--fg-secondary); margin-left: 8px; font-family: var(--font-mono); }
+
+  .principles { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .principle { background: var(--bg-elevated); border: 1px solid var(--border-faint); border-radius: 8px; padding: 16px; }
+  .principle h4 { font-size: 13px; font-weight: 600; margin: 0 0 6px; color: var(--fg-primary); letter-spacing: -0.005em; }
+  .principle p { margin: 0; }
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>Zeigen — Design System</h1>
+  <p class="lede">Tokens distilled from the four canonical surfaces (capture window, floating webcam, tray, post-record review). Restrained, dense, macOS-native. Dark only. One accent (electric blue) for primary actions; recording red is reserved for live-state, never brand. Typography is system-font-stack. Hairline borders over solid; soft shadows over heavy elevation.</p>
+
+  <h2>Color · Surfaces</h2>
+  <div class="grid" style="grid-template-columns: repeat(4, 1fr);">
+    <div class="swatch"><div class="chip" style="background: var(--bg-window)"></div><div class="name">window</div><div class="val">#1c1c1e</div></div>
+    <div class="swatch"><div class="chip" style="background: var(--bg-sidebar)"></div><div class="name">sidebar</div><div class="val">#242426</div></div>
+    <div class="swatch"><div class="chip" style="background: var(--bg-elevated)"></div><div class="name">elevated</div><div class="val">#2c2c2e</div></div>
+    <div class="swatch"><div class="chip" style="background: var(--bg-input)"></div><div class="name">input</div><div class="val">#1f1f21</div></div>
+  </div>
+
+  <h2>Color · Foreground</h2>
+  <div class="grid" style="grid-template-columns: repeat(4, 1fr);">
+    <div class="swatch"><div class="chip" style="background: #f2f2f7"></div><div class="name">primary</div><div class="val">#f2f2f7</div></div>
+    <div class="swatch"><div class="chip" style="background: #a8a8ad"></div><div class="name">secondary</div><div class="val">#a8a8ad</div></div>
+    <div class="swatch"><div class="chip" style="background: #6f6f74"></div><div class="name">tertiary</div><div class="val">#6f6f74</div></div>
+    <div class="swatch"><div class="chip" style="background: #4a4a4f"></div><div class="name">quaternary</div><div class="val">#4a4a4f</div></div>
+  </div>
+
+  <h2>Color · Accent + Status</h2>
+  <div class="grid" style="grid-template-columns: repeat(3, 1fr);">
+    <div class="swatch"><div class="chip" style="background: oklch(0.62 0.18 250)"></div><div class="name">accent</div><div class="val">oklch(0.62 0.18 250)</div></div>
+    <div class="swatch"><div class="chip" style="background: oklch(0.62 0.18 25)"></div><div class="name">recording</div><div class="val">oklch(0.62 0.18 25)</div></div>
+    <div class="swatch"><div class="chip" style="background: oklch(0.62 0.13 155)"></div><div class="name">success</div><div class="val">oklch(0.62 0.13 155)</div></div>
+  </div>
+  <p style="margin-top:12px"><span class="pill">rule</span> Accent only on primary CTAs and selection states. Recording red only on live-state indicators (REC dot, stop button). Success green only on confirmation pills (e.g. "iPhone connected", "Saved Locally").</p>
+
+  <h2>Type Scale</h2>
+  <div>
+    <div class="sample-row"><span class="label">--text-display · 17/1.3</span><span class="demo" style="font-size:17px; font-weight:600; letter-spacing:-0.015em">Empty state headline</span></div>
+    <div class="sample-row"><span class="label">--text-title · 14/1.35</span><span class="demo" style="font-size:14px; font-weight:600; letter-spacing:-0.01em">Pane title — Capture</span></div>
+    <div class="sample-row"><span class="label">--text-body · 13/1.45</span><span class="demo" style="font-size:13px; letter-spacing:-0.005em">Default body text size for rows and menu items.</span></div>
+    <div class="sample-row"><span class="label">--text-label · 12.5/1.4</span><span class="demo" style="font-size:12.5px; font-weight:500; letter-spacing:-0.005em">Form labels and tile titles</span></div>
+    <div class="sample-row"><span class="label">--text-small · 12/1.4</span><span class="demo" style="font-size:12px; letter-spacing:-0.005em">Dense rows, segmented controls, hotkey rows</span></div>
+    <div class="sample-row"><span class="label">--text-caption · 11/1.4</span><span class="demo" style="font-size:11px; color:var(--fg-tertiary)">Helper text, metadata, file paths</span></div>
+    <div class="sample-row"><span class="label">--text-micro · 10.5/0.06em</span><span class="demo" style="font-size:10.5px; font-weight:600; letter-spacing:0.06em; text-transform:uppercase; color:var(--fg-tertiary)">Section eyebrow</span></div>
+  </div>
+  <p style="margin-top:12px"><span class="pill">stack</span> <code>-apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", Arial, sans-serif</code> · monospace: <code>SF Mono</code> for timecodes, sizes, keyboard hints.</p>
+
+  <h2>Spacing</h2>
+  <div class="row-spec"><span class="key">base unit</span><span class="val">4px — Tailwind defaults work</span></div>
+  <div class="row-spec"><span class="key">--pad-row</span><span class="val">9px 14px (settings/menu rows)</span></div>
+  <div class="row-spec"><span class="key">--pad-pane</span><span class="val">12px 14px (pane outer)</span></div>
+  <div class="row-spec"><span class="key">--pad-tile</span><span class="val">11px 12px (source tiles, export destinations)</span></div>
+  <div class="row-spec"><span class="key">--gap-tight</span><span class="val">6px (icon ↔ label, kbd group)</span></div>
+  <div class="row-spec"><span class="key">--gap-row</span><span class="val">8px (form field gap)</span></div>
+  <div class="row-spec"><span class="key">--gap-pane</span><span class="val">12px (between sections)</span></div>
+
+  <h2>Radius</h2>
+  <div class="grid" style="grid-template-columns: repeat(6, 1fr);">
+    <div style="text-align:center"><div style="width:60px;height:60px;background:var(--bg-elevated);border:1px solid var(--border-subtle);border-radius:4px;margin:0 auto"></div><div style="font-size:11px;color:var(--fg-tertiary);margin-top:6px;font-family:var(--font-mono)">4px · xs</div></div>
+    <div style="text-align:center"><div style="width:60px;height:60px;background:var(--bg-elevated);border:1px solid var(--border-subtle);border-radius:6px;margin:0 auto"></div><div style="font-size:11px;color:var(--fg-tertiary);margin-top:6px;font-family:var(--font-mono)">6px · sm</div></div>
+    <div style="text-align:center"><div style="width:60px;height:60px;background:var(--bg-elevated);border:1px solid var(--border-subtle);border-radius:8px;margin:0 auto"></div><div style="font-size:11px;color:var(--fg-tertiary);margin-top:6px;font-family:var(--font-mono)">8px · md</div></div>
+    <div style="text-align:center"><div style="width:60px;height:60px;background:var(--bg-elevated);border:1px solid var(--border-subtle);border-radius:10px;margin:0 auto"></div><div style="font-size:11px;color:var(--fg-tertiary);margin-top:6px;font-family:var(--font-mono)">10px · lg</div></div>
+    <div style="text-align:center"><div style="width:60px;height:60px;background:var(--bg-elevated);border:1px solid var(--border-subtle);border-radius:14px;margin:0 auto"></div><div style="font-size:11px;color:var(--fg-tertiary);margin-top:6px;font-family:var(--font-mono)">14px · xl</div></div>
+    <div style="text-align:center"><div style="width:60px;height:60px;background:var(--bg-elevated);border:1px solid var(--border-subtle);border-radius:999px;margin:0 auto"></div><div style="font-size:11px;color:var(--fg-tertiary);margin-top:6px;font-family:var(--font-mono)">∞ · pill</div></div>
+  </div>
+  <p style="margin-top:12px"><span class="pill">rule</span> 6 inputs · 8 cards · 10 windows · pills always 999px. Match radii within a stack — never nest a 10 inside an 8.</p>
+
+  <h2>Shadows</h2>
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px">
+    <div style="background:var(--bg-window);padding:18px;border-radius:8px;box-shadow:var(--shadow-sm);border:1px solid var(--border-subtle)">
+      <div style="font-size:12.5px;font-weight:600">--shadow-sm</div>
+      <div style="font-size:11px;color:var(--fg-tertiary);font-family:var(--font-mono);margin-top:4px">pressed buttons</div>
+    </div>
+    <div style="background:var(--bg-window);padding:18px;border-radius:8px;box-shadow:var(--shadow-md);border:1px solid var(--border-subtle)">
+      <div style="font-size:12.5px;font-weight:600">--shadow-md</div>
+      <div style="font-size:11px;color:var(--fg-tertiary);font-family:var(--font-mono);margin-top:4px">popovers, control bars</div>
+    </div>
+    <div style="background:var(--bg-window);padding:18px;border-radius:8px;box-shadow:var(--shadow-lg);border:1px solid var(--border-subtle)">
+      <div style="font-size:12.5px;font-weight:600">--shadow-lg</div>
+      <div style="font-size:11px;color:var(--fg-tertiary);font-family:var(--font-mono);margin-top:4px">main app windows</div>
+    </div>
+  </div>
+
+  <h2>Motion</h2>
+  <div class="row-spec"><span class="key">--dur-instant 80ms</span><span class="val">Hover feedback on rows / ghost buttons. Color only.</span></div>
+  <div class="row-spec"><span class="key">--dur-quick 120ms</span><span class="val">Selection tint, toggle thumb, segmented active state.</span></div>
+  <div class="row-spec"><span class="key">--dur-smooth 160ms</span><span class="val">Border tint, focus ring fade, tile selection halo.</span></div>
+  <div class="row-spec"><span class="key">--dur-settle 240ms</span><span class="val">Surface enter/exit (review window appearing post-record).</span></div>
+  <div class="row-spec"><span class="key">ease</span><span class="val"><code>cubic-bezier(0.4, 0, 0.2, 1)</code> for everything except tray reveal.</span></div>
+  <div class="row-spec"><span class="key">tray ease</span><span class="val"><code>cubic-bezier(0.34, 1.56, 0.64, 1)</code> — slight overshoot.</span></div>
+
+  <h2>Principles</h2>
+  <div class="principles">
+    <div class="principle"><h4>Hairlines, not boxes</h4><p>Default to 1px <code>rgba(255,255,255,0.06–0.14)</code> separators. Reach for solid borders only on inputs. Never both border + shadow on the same surface.</p></div>
+    <div class="principle"><h4>One accent, one signal</h4><p>Electric blue is the only chromatic action color. Recording red is reserved for live state. Success green only confirms (saved, connected). Anything else stays neutral gray.</p></div>
+    <div class="principle"><h4>Density first, then breathe</h4><p>Rows are 22–36px. Padding is tight (9–14px). Use whitespace deliberately — a single 18px gap is more meaningful than three 12px gaps.</p></div>
+    <div class="principle"><h4>System-tonal type</h4><p>System font stack only. Tracking goes negative as size grows (-0.005 → -0.015em). Monospace only for time, size, file paths, and keyboard hints — never body.</p></div>
+    <div class="principle"><h4>Glyphs over labels</h4><p>SF-Symbols-style 1.25–1.5px stroke icons. Pair an icon with a label only when the action is destructive or unfamiliar. Tertiary fg by default; primary fg on hover.</p></div>
+    <div class="principle"><h4>Translucency for tray, not chrome</h4><p>Backdrop-blur belongs on the menu-bar tray and on overlays inside video/camera surfaces. Main app windows are opaque — no glassmorphism on the chrome itself.</p></div>
+  </div>
+
+  <h2>Tailwind Config</h2>
+  <p>See <code>design-system/tailwind.config.js</code>. Snippets you'll reach for:</p>
+  <div class="pre">// Surfaces
+bg-window | bg-sidebar | bg-elevated | bg-input
+
+// Foreground
+text-fg-primary | text-fg-secondary | text-fg-tertiary | text-fg-quaternary
+
+// Accent + status
+bg-accent | bg-accent-soft | text-accent-tint | shadow-ds-accent-ring
+bg-recording | text-recording-tint | shadow-ds-recording-ring
+bg-success-soft | text-success-tint
+
+// Type
+text-body | text-small | text-label | text-caption | text-micro
+font-system | font-mono | tracking-tightish | tracking-eyebrow
+
+// Radius / shadows
+rounded-md | rounded-lg | rounded-bubble
+shadow-ds-sm | shadow-ds-md | shadow-ds-lg | shadow-ds-xl
+
+// Motion
+duration-quick | duration-smooth | ease-ds | ease-ds-spring</div>
+
+  <h2>CSS Variables</h2>
+  <p>See <code>design/tokens.css</code>. Import once at app root; all surfaces consume from <code>:root</code>.</p>
+
+  <h2>Files</h2>
+  <div class="row-spec"><span class="key">tailwind.config.js</span><span class="val">Tailwind extension — colors, type, spacing, shadows, motion.</span></div>
+  <div class="row-spec"><span class="key">tokens.css</span><span class="val">CSS custom properties + component classes + recording-pulse keyframe.</span></div>
+  <div class="row-spec"><span class="key">capture-window.html</span><span class="val">Standalone export — refined capture window with all camera states.</span></div>
+  <div class="row-spec"><span class="key">tray-menu.html</span><span class="val">Standalone export — tray menu, idle + recording.</span></div>
+  <div class="row-spec"><span class="key">webcam-bubble.html</span><span class="val">Standalone export — floating bubble + dock pill.</span></div>
+  <div class="row-spec"><span class="key">review-window.html</span><span class="val">Standalone export — post-record review, both states.</span></div>
+</div>
+</body>
+</html>

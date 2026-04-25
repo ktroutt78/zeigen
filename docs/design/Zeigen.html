@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Zeigen — Capture Window Variations</title>
+<link rel="stylesheet" href="tokens.css">
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #1a1a1c; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; color: #f2f2f7; }
+  #root { width: 100%; height: 100vh; }
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" src="design-canvas.jsx"></script>
+<script type="text/babel" src="icons.jsx"></script>
+<script type="text/babel" src="surfaces/capture-raycast.jsx"></script>
+<script type="text/babel" src="surfaces/capture-linear.jsx"></script>
+<script type="text/babel" src="surfaces/capture-cleanshot.jsx"></script>
+<script type="text/babel" src="surfaces/capture-refined.jsx"></script>
+<script type="text/babel" src="surfaces/webcam-bubble.jsx"></script>
+<script type="text/babel" src="surfaces/review.jsx"></script>
+<script type="text/babel" src="surfaces/tray.jsx"></script>
+
+<script type="text/babel">
+function App() {
+  return (
+    <DesignCanvas>
+      <DCSection id="tray" title="Menu bar tray" subtitle="Native NSMenu look · idle + recording">
+        <DCArtboard id="tray-idle" label="Idle" width={420} height={520}>
+          <TrayContext state="idle"><TrayMenu state="idle"/></TrayContext>
+        </DCArtboard>
+        <DCArtboard id="tray-rec" label="Recording — timer + stop" width={420} height={460}>
+          <TrayContext state="recording"><TrayMenu state="recording"/></TrayContext>
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="review" title="Post-record review" subtitle="Just-stopped · mid-edit">
+        <DCArtboard id="just-stopped" label="Just stopped — no edits" width={940} height={680}>
+          <ReviewWindow state="justStopped"/>
+        </DCArtboard>
+        <DCArtboard id="mid-edit" label="Mid-edit — trim points + text annotation" width={940} height={680}>
+          <ReviewWindow state="midEdit"/>
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="webcam" title="Floating webcam preview" subtitle="Three takes · idle + hover · shown on a wallpaper">
+        <DCArtboard id="orbit" label="A · Pure orbit — chrome only on hover" width={360} height={520}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <Desktop w={340} h={240}><WebcamOrbit hover={false}/></Desktop>
+            <Desktop w={340} h={240}><WebcamOrbit hover={true}/></Desktop>
+            <div style={{ display: "flex", justifyContent: "space-between", color: "var(--fg-tertiary)", fontSize: 11, padding: "0 4px" }}>
+              <span>Idle</span><span>Hover</span>
+            </div>
+          </div>
+        </DCArtboard>
+        <DCArtboard id="halo" label="B · Halo — controls orbit the bubble" width={360} height={520}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <Desktop w={340} h={240}><WebcamHalo hover={false}/></Desktop>
+            <Desktop w={340} h={240}><WebcamHalo hover={true}/></Desktop>
+            <div style={{ display: "flex", justifyContent: "space-between", color: "var(--fg-tertiary)", fontSize: 11, padding: "0 4px" }}>
+              <span>Idle</span><span>Hover</span>
+            </div>
+          </div>
+        </DCArtboard>
+        <DCArtboard id="dock" label="C · Dock — bubble + control pill" width={360} height={520}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <Desktop w={340} h={240}><WebcamDock hover={false}/></Desktop>
+            <Desktop w={340} h={240}><WebcamDock hover={true}/></Desktop>
+            <div style={{ display: "flex", justifyContent: "space-between", color: "var(--fg-tertiary)", fontSize: 11, padding: "0 4px" }}>
+              <span>Idle</span><span>Hover</span>
+            </div>
+          </div>
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="refined" title="Capture window · refined (C)" subtitle="Three camera states stacked · idle + recording footer">
+        <DCArtboard id="no-cam" label="No webcam selected — controls hidden" width={480} height={560}>
+          <CaptureCleanShotRefined cameraState="none"/>
+        </DCArtboard>
+        <DCArtboard id="cam-selected" label="Webcam selected — inline size + corner controls" width={480} height={620}>
+          <CaptureCleanShotRefined cameraState="selected"/>
+        </DCArtboard>
+        <DCArtboard id="continuity" label="Continuity Camera — iPhone pill" width={480} height={620}>
+          <CaptureCleanShotRefined cameraState="continuity"/>
+        </DCArtboard>
+        <DCArtboard id="recording" label="Recording state — timer + stop button" width={480} height={620}>
+          <CaptureCleanShotRefined cameraState="selected" recording={true}/>
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="capture" title="Earlier explorations" subtitle="Original three directions · kept for reference">
+        <DCArtboard id="raycast" label="A · Raycast — tight, monochrome, dividers" width={480} height={420}>
+          <div style={{ padding: 0, background: "transparent" }}>
+            <CaptureRaycast/>
+          </div>
+        </DCArtboard>
+        <DCArtboard id="linear" label="B · Linear — generous, structured, refined" width={480} height={720}>
+          <div style={{ padding: 0, background: "transparent" }}>
+            <CaptureLinear/>
+          </div>
+        </DCArtboard>
+        <DCArtboard id="cleanshot" label="C · CleanShot — tiles, native toolbar, materials" width={480} height={520}>
+          <div style={{ padding: 0, background: "transparent" }}>
+            <CaptureCleanShot/>
+          </div>
+        </DCArtboard>
+      </DCSection>
+    </DesignCanvas>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
