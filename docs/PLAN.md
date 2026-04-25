@@ -64,15 +64,16 @@ Make it usable without the app window visible.
 
 ## Phase 5: Post-record review + trim + annotate
 
-Review screen that opens automatically when a recording stops.
+Review screen that opens automatically when a recording stops. New Tauri window labeled `review` (940px wide per mockup) opens on stop; main window stays hidden (per Phase 4). Separate window keeps capture and review concerns isolated and matches the eventual multi-recording flow.
 
 **Deliverables**
 - Video player with scrubber
-- Trim in/out handles, re-encode trimmed segment via ffmpeg
-- Simple annotation: text labels and arrows rendered as an overlay at export time (not destructive to the source file). Annotations stored in a sidecar JSON file next to the source mp4 (e.g., `recording-2026-04-24.annotations.json`). Schema: array of annotations, each with `type` (`text` | `arrow`), `start_time`, `end_time`, `position` (`x`, `y` as fractions of video dimensions), and `content`. Rendered via ffmpeg `filter_complex` at export time.
-- "Save trimmed version" and "Discard and keep original" options
+- Trim in/out handles. Trim always re-encodes via `h264_videotoolbox` for frame accuracy — no stream-copy keyframe-snap path. Hardware encoding makes this cheap on Apple Silicon.
+- Simple annotation: text labels and arrows rendered as an overlay at export time (not destructive to the source file). Annotations stored in a sidecar JSON file next to the source mp4 (`<basename>.annotations.json`). Schema: array of annotations, each with `type` (`text` | `arrow`), `start_time`, `end_time`, `position` (`x`, `y` as fractions of source-video dimensions), and `content`. New annotations default to `[playhead, playhead+3s]`; the timeline pip is draggable to adjust duration. At export time, text uses ffmpeg `drawtext`; arrows are pre-rasterized to transparent PNGs and composited via `overlay` with `enable='between(t,start,end)'`.
+- "Save edits" produces `<original>-edited.mp4` alongside the source; sidecar JSON updates in place. "Discard edits" reverts trim/annotation state but keeps the source recording on disk. (Destructive delete of the recording itself is deferred.)
+- Phase 6 export panel is scaffolded in the review window at full visual fidelity but disabled (opacity 0.4, `pointer-events: none`, "Coming in Phase 6" caption). Phase 6 just removes the disable.
 
-**Done when:** A recording can be trimmed to a sub-segment, annotated with a text label and arrow, and exported to a new mp4 that plays correctly with annotations visible.
+**Done when:** A recording can be trimmed to a sub-segment, annotated with a text label and arrow, and exported to a new mp4 that plays correctly with annotations visible. The Phase 6 export panel is visible but inert.
 
 ## Phase 6: Export destinations
 
