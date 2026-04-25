@@ -18,6 +18,15 @@ const root = hash.startsWith("#bubble")
   ? <TimerChipWindow />
   : <App />;
 
+// Routes that render in transparent windows must not paint the global dark
+// body background — otherwise the dark fill leaks through the transparent
+// NSWindow and the user sees a solid backdrop instead of their screen.
+const TRANSPARENT_ROUTES = ["#bubble", "#countdown", "#timer-chip"];
+if (TRANSPARENT_ROUTES.some((r) => hash.startsWith(r))) {
+  document.documentElement.style.background = "transparent";
+  document.body.style.background = "transparent";
+}
+
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>{root}</React.StrictMode>,
 );

@@ -72,6 +72,13 @@ impl Corner {
 
 const PADDING_PX: u32 = 24;
 
+// Linear-interpolated overlay position between samples.
+// For samples 0..N-1 (N >= 2):
+//   t < t_1                → segment 0: interpolate from (X_0, Y_0) toward (X_1, Y_1)
+//   t in [t_i, t_{i+1})    → segment i: interpolate from sample i to sample i+1
+//   t >= t_{N-1}           → static at (X_{N-1}, Y_{N-1})
+// max(0, ...) on the ratio prevents extrapolation in the implicit
+// pre-first-sample window if t_0 > 0.
 fn build_inline_position_expr(log: &[BubblePositionEntry]) -> (String, String) {
     debug_assert!(!log.is_empty());
     let n = log.len();
@@ -79,15 +86,26 @@ fn build_inline_position_expr(log: &[BubblePositionEntry]) -> (String, String) {
     let mut x_expr = format!("main_w*{:.4}-overlay_w/2", last.x);
     let mut y_expr = format!("main_h*{:.4}-overlay_h/2", last.y);
     for i in (0..n.saturating_sub(1)).rev() {
-        let entry = &log[i];
-        let next_t = log[i + 1].t;
+        let a = &log[i];
+        let b = &log[i + 1];
+        let dt = (b.t - a.t).max(0.001);
         x_expr = format!(
-            "if(lt(t\\,{:.3})\\,main_w*{:.4}-overlay_w/2\\,{})",
-            next_t, entry.x, x_expr
+            "if(lt(t\\,{next_t:.3})\\,main_w*({x0:.4}+({dx:.4})*max(0\\,(t-{t0:.3})/{dt:.3}))-overlay_w/2\\,{rest})",
+            next_t = b.t,
+            x0 = a.x,
+            dx = b.x - a.x,
+            t0 = a.t,
+            dt = dt,
+            rest = x_expr,
         );
         y_expr = format!(
-            "if(lt(t\\,{:.3})\\,main_h*{:.4}-overlay_h/2\\,{})",
-            next_t, entry.y, y_expr
+            "if(lt(t\\,{next_t:.3})\\,main_h*({y0:.4}+({dy:.4})*max(0\\,(t-{t0:.3})/{dt:.3}))-overlay_h/2\\,{rest})",
+            next_t = b.t,
+            y0 = a.y,
+            dy = b.y - a.y,
+            t0 = a.t,
+            dt = dt,
+            rest = y_expr,
         );
     }
     (x_expr, y_expr)
@@ -188,11 +206,30 @@ geq='lum=p(X\\,Y):a=255*lt(hypot(X-W/2\\,Y-H/2)\\,W/2)'[wc];\
             } else {
                 format!("v_{}", i - 1)
             };
-            let enable = if i + 1 < log_n {
-                let next_t = bubble_position_log[i + 1].t;
-                format!("between(t\\,{:.3}\\,{:.3})", entry.t, next_t)
+            let (enable, x_expr, y_expr) = if i + 1 < log_n {
+                let b = &bubble_position_log[i + 1];
+                let dt = (b.t - entry.t).max(0.001);
+                let enable = format!("between(t\\,{:.3}\\,{:.3})", entry.t, b.t);
+                let x = format!(
+                    "main_w*({:.4}+({:.4})*(t-{:.3})/{:.3})-overlay_w/2",
+                    entry.x,
+                    b.x - entry.x,
+                    entry.t,
+                    dt
+                );
+                let y = format!(
+                    "main_h*({:.4}+({:.4})*(t-{:.3})/{:.3})-overlay_h/2",
+                    entry.y,
+                    b.y - entry.y,
+                    entry.t,
+                    dt
+                );
+                (enable, x, y)
             } else {
-                format!("gte(t\\,{:.3})", entry.t)
+                let enable = format!("gte(t\\,{:.3})", entry.t);
+                let x = format!("main_w*{:.4}-overlay_w/2", entry.x);
+                let y = format!("main_h*{:.4}-overlay_h/2", entry.y);
+                (enable, x, y)
             };
             let next_label = if i + 1 == log_n {
                 "outv".to_string()
@@ -200,8 +237,7 @@ geq='lum=p(X\\,Y):a=255*lt(hypot(X-W/2\\,Y-H/2)\\,W/2)'[wc];\
                 format!("v_{i}")
             };
             filter.push_str(&format!(
-                "[{prev}][wc_{i}]overlay=x=main_w*{:.4}-overlay_w/2:y=main_h*{:.4}-overlay_h/2:enable={enable}:eof_action=pass[{next_label}]",
-                entry.x, entry.y
+                "[{prev}][wc_{i}]overlay=x={x_expr}:y={y_expr}:enable={enable}:eof_action=pass[{next_label}]"
             ));
             if i + 1 < log_n {
                 filter.push(';');
