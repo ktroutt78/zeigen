@@ -293,6 +293,7 @@ export default function Review() {
       // Notify main so its post-finalize toast updates from the now-stale
       // scratch path to the actual final ~/Movies/Zeigen/recording-….mp4.
       await emit("recording-committed", { final_path: outPath }).catch(() => {});
+      committedRef.current = true;
       return true;
     } catch (err) {
       setError(`save recording: ${err}`);
@@ -314,6 +315,7 @@ export default function Review() {
       // Notify main so the post-finalize toast clears — it would otherwise
       // keep pointing at the now-deleted scratch path.
       await emit("recording-discarded").catch(() => {});
+      committedRef.current = true;
       return true;
     } catch (err) {
       setError(`discard recording: ${err}`);
@@ -323,14 +325,13 @@ export default function Review() {
     }
   }, [sourcePath]);
 
-  // Refs for the close-requested handler so it sees current dirty + busy
-  // without re-registering the listener on every keystroke.
-  const dirtyRef = useRef(dirty);
+  // Refs for the close-requested handler so it sees current state without
+  // re-registering the listener on every keystroke. `committedRef` flips
+  // true once Save or Discard succeeds — closing before then must prompt
+  // so the user can't accidentally orphan a scratch dir.
   const busyRef = useRef(busy);
+  const committedRef = useRef(false);
   const proceedingRef = useRef(false);
-  useEffect(() => {
-    dirtyRef.current = dirty;
-  }, [dirty]);
   useEffect(() => {
     busyRef.current = busy;
   }, [busy]);
@@ -344,10 +345,10 @@ export default function Review() {
         if (proceedingRef.current) return; // already greenlit
         // Always preventDefault, then explicitly destroy when we want to
         // close. Tauri v2's "default close on no preventDefault" behavior
-        // proved unreliable in practice (red-button click sat there with
-        // no edits dirty); this makes the close path explicit and atomic.
+        // proved unreliable in practice; this makes the close path
+        // explicit and atomic.
         event.preventDefault();
-        if (busyRef.current || dirtyRef.current) {
+        if (busyRef.current || !committedRef.current) {
           setShowCloseModal(true);
         } else {
           proceedingRef.current = true;
@@ -1972,9 +1973,10 @@ function CloseModal({
           fontFamily: "var(--font-system)",
         }}
       >
-        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>Save your edits?</div>
+        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>Save your recording?</div>
         <div style={{ fontSize: 12.5, color: "var(--fg-secondary)", lineHeight: 1.4 }}>
-          You have unsaved changes to this recording. Discarding deletes the recording entirely.
+          This recording hasn't been saved yet. Saving moves it to ~/Movies/Zeigen.
+          Discarding deletes it.
         </div>
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
           <button
