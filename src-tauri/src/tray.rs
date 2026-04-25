@@ -23,6 +23,13 @@ pub struct UiState {
     pub selected_display: Option<u32>,
     pub selected_mic: Option<String>,
     pub selected_camera: Option<u32>,
+    #[serde(default)]
+    pub elapsed_s: f64,
+}
+
+fn fmt_mmss(elapsed_s: f64) -> String {
+    let total = elapsed_s.max(0.0) as u64;
+    format!("{:02}:{:02}", total / 60, total % 60)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -74,12 +81,12 @@ pub fn rebuild<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let menu = build_menu(app, &state)?;
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
         tray.set_menu(Some(menu))?;
-        let title: Option<&str> = match state.recording_state.as_str() {
-            "recording" => Some("● Rec"),
-            "paused" => Some("⏸"),
+        let title: Option<String> = match state.recording_state.as_str() {
+            "recording" => Some(format!("● {}", fmt_mmss(state.elapsed_s))),
+            "paused" => Some(format!("⏸ {}", fmt_mmss(state.elapsed_s))),
             _ => None,
         };
-        tray.set_title(title)?;
+        tray.set_title(title.as_deref())?;
     }
     Ok(())
 }

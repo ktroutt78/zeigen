@@ -343,6 +343,11 @@ function App() {
   };
 
   // Push UI state to Rust so the tray menu reflects current selections + state.
+  // Elapsed seconds are sent as int so the tray title only refreshes once per second.
+  const trayElapsed =
+    state === "recording" || state === "paused"
+      ? Math.floor(progress.elapsed_s)
+      : 0;
   useEffect(() => {
     invoke("update_tray_state", {
       state: {
@@ -353,9 +358,10 @@ function App() {
         selected_display: selectedDisplay,
         selected_mic: selectedMic,
         selected_camera: selectedCamera,
+        elapsed_s: trayElapsed,
       },
     }).catch(() => {});
-  }, [state, displays, mics, cameras, selectedDisplay, selectedMic, selectedCamera]);
+  }, [state, displays, mics, cameras, selectedDisplay, selectedMic, selectedCamera, trayElapsed]);
 
   // Hide the main window during recording so it doesn't appear in the capture,
   // and keep it hidden across the recording → finalize → review handoff.
