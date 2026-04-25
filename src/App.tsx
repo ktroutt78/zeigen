@@ -11,6 +11,10 @@ const DEFAULT_HOTKEY = "CmdOrCtrl+Shift+R";
 const BUBBLE_LABEL = "webcam-bubble";
 let bubbleDeviceName: string | null = null;
 
+const BUBBLE_W = 240;
+const BUBBLE_H = 240;
+const BUBBLE_MARGIN = 24;
+
 async function openBubble(deviceName: string) {
   if (bubbleDeviceName === deviceName) {
     const existing = await WebviewWindow.getByLabel(BUBBLE_LABEL);
@@ -25,11 +29,32 @@ async function openBubble(deviceName: string) {
 
   bubbleDeviceName = deviceName;
 
+  // Default position: bottom-right of the primary display, computed in
+  // logical pixels so the constructor places the window correctly without
+  // a post-creation setPosition race.
+  let x: number | undefined;
+  let y: number | undefined;
+  try {
+    const monitors = await availableMonitors();
+    const m = monitors[0];
+    if (m) {
+      const scale = m.scaleFactor || 1;
+      const rightLogical = (m.position.x + m.size.width) / scale;
+      const bottomLogical = (m.position.y + m.size.height) / scale;
+      x = rightLogical - BUBBLE_W - BUBBLE_MARGIN;
+      y = bottomLogical - BUBBLE_H - BUBBLE_MARGIN;
+    }
+  } catch {
+    // Fall back to Tauri default position
+  }
+
   const win = new WebviewWindow(BUBBLE_LABEL, {
     url: `/#bubble?name=${encodeURIComponent(deviceName)}`,
     title: "Webcam",
-    width: 240,
-    height: 240,
+    width: BUBBLE_W,
+    height: BUBBLE_H,
+    x,
+    y,
     minWidth: 120,
     minHeight: 120,
     decorations: false,
@@ -601,19 +626,19 @@ function App() {
       ? "continuity"
       : "selected";
 
-  // Bubble window only exists during recording (and paused). Pre-record /
-  // post-stop the bubble closes — the capture window is the surface for
-  // setup, the review window is the surface for after. Camera selection
-  // (cameraName, bubbleSize, bubbleCorner) persists in React state across
-  // recordings; only the window comes and goes.
+  // Bubble window lifecycle is driven by camera selection, NOT recording
+  // state. Open while a camera is selected (idle, countdown, recording,
+  // paused alike); close only when camera is deselected. The timer chip
+  // and control pill inside the bubble are gated on recording state — see
+  // WebcamBubble.tsx — but the window itself persists as long as the user
+  // wants a webcam in the loop.
   useEffect(() => {
-    const active = state === "recording" || state === "paused";
-    if (cameraName && active) {
+    if (cameraName) {
       openBubble(cameraName).catch((err) => setError(String(err)));
     } else {
       closeBubble().catch(() => {});
     }
-  }, [cameraName, state]);
+  }, [cameraName]);
 
   useEffect(() => {
     const showChip =
