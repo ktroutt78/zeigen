@@ -129,7 +129,11 @@ fn probe_duration_seconds(path: &Path) -> Result<f64, String> {
 const TRIM_EPS: f64 = 0.05;
 const DEFAULT_TEXT_SIZE_PX: f64 = 36.0;
 const DEFAULT_ARROW_STROKE_PX: f64 = 8.0;
-const FONT_FILE: &str = "/System/Library/Fonts/SFNS.ttf";
+// SFNS.ttf is a variable font with PostScript-style outlines that
+// ab_glyph 0.2.x silently rasterizes as zero-coverage — text rendered fine
+// in the preview but the saved PNGs were blank backgrounds. Geneva is a
+// plain TTF that ships with macOS and renders correctly.
+const FONT_FILE: &str = "/System/Library/Fonts/Geneva.ttf";
 
 fn probe_dimensions(path: &Path) -> Result<(u32, u32), String> {
     let output = Command::new(FFPROBE_PATH)
@@ -549,7 +553,6 @@ pub fn edit_save(source_path: String, sidecar: SidecarState) -> Result<String, S
 
     args.push(output.to_string_lossy().into_owned());
 
-    eprintln!("[edit_save] ffmpeg args: {args:?}");
     let result = Command::new(FFMPEG_PATH)
         .args(&args)
         .output()
@@ -572,13 +575,10 @@ pub fn edit_save(source_path: String, sidecar: SidecarState) -> Result<String, S
         ));
     }
 
-    // DIAGNOSTIC: keep temp dir on success so we can inspect rasterized
-    // PNGs while debugging the missing-overlay UAT issue. Restore the
-    // remove_dir_all once the bug is identified.
-    // if need_temp {
-    //     let _ = std::fs::remove_dir_all(&temp_dir);
-    // }
-    let _ = need_temp;
+    // Clean up temp dir on success. On failure we leave it for inspection.
+    if need_temp {
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
 
     Ok(output.to_string_lossy().into_owned())
 }
