@@ -123,7 +123,11 @@ export default function WebcamBubble() {
           position: "relative",
           background: "#1a1a1c",
           border: "1.5px solid rgba(255,255,255,0.12)",
-          boxShadow: "0 18px 48px rgba(0,0,0,0.55), 0 0 0 0.5px rgba(0,0,0,0.5)",
+          // Tight blur so the drop-shadow fades within the inscribed-circle's
+          // corner gap (~50px on a square 240 window) — keeps the bubble
+          // looking lifted without painting a faded square in the window's
+          // transparent corners.
+          boxShadow: "0 6px 16px rgba(0,0,0,0.45), 0 0 0 0.5px rgba(0,0,0,0.5)",
           cursor: hover ? "grab" : "default",
         }}
       >
