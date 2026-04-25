@@ -9,6 +9,7 @@ use std::sync::Mutex;
 use chrono::Local;
 use tauri::{AppHandle, Manager, State};
 
+use composite::{Corner, WebcamSize};
 use devices::DeviceList;
 use engine::{EngineClient, EngineCommand};
 use webcam::WebcamSegmenter;
@@ -20,6 +21,8 @@ struct ActiveRecording {
     stamp: String,
     final_path: PathBuf,
     webcam: Option<WebcamSegmenter>,
+    webcam_size: WebcamSize,
+    webcam_corner: Corner,
 }
 
 #[tauri::command]
@@ -43,6 +46,8 @@ fn engine_start(
     microphone_uid: Option<String>,
     camera_index: Option<u32>,
     max_fps: Option<u32>,
+    webcam_size: Option<String>,
+    webcam_corner: Option<String>,
 ) -> Result<String, String> {
     let mut active = recording.lock().map_err(|e| e.to_string())?;
     if active.is_some() {
@@ -82,9 +87,28 @@ fn engine_start(
         stamp: stamp.clone(),
         final_path: final_path.clone(),
         webcam,
+        webcam_size: parse_size(webcam_size.as_deref()),
+        webcam_corner: parse_corner(webcam_corner.as_deref()),
     });
 
     Ok(final_path.to_string_lossy().into_owned())
+}
+
+fn parse_size(s: Option<&str>) -> WebcamSize {
+    match s {
+        Some("small") => WebcamSize::Small,
+        Some("large") => WebcamSize::Large,
+        _ => WebcamSize::Medium,
+    }
+}
+
+fn parse_corner(s: Option<&str>) -> Corner {
+    match s {
+        Some("tl") => Corner::TopLeft,
+        Some("tr") => Corner::TopRight,
+        Some("bl") => Corner::BottomLeft,
+        _ => Corner::BottomRight,
+    }
 }
 
 #[tauri::command]
@@ -172,8 +196,8 @@ fn recording_finalize(recording: RecordingState<'_>) -> Result<FinalizedRecordin
             &screen_path,
             &segments,
             &rec.final_path,
-            composite::WebcamSize::Medium,
-            composite::Corner::BottomRight,
+            rec.webcam_size,
+            rec.webcam_corner,
         )?;
 
         return Ok(FinalizedRecording {

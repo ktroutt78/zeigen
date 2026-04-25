@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import "./App.css";
+import { I, Icon, P } from "./components/icons";
 
 type Display = { id: number; name: string; width: number; height: number };
 type Mic = { uid: string; name: string };
@@ -34,6 +34,15 @@ type EngineEvent =
     }
   | { event: "error"; code: string; message: string };
 
+type WebcamSize = "small" | "medium" | "large";
+type Corner = "tl" | "tr" | "bl" | "br";
+
+const NO_CAMERA = "__none__";
+
+function isContinuity(name: string): boolean {
+  return /iphone|continuity/i.test(name);
+}
+
 function App() {
   const [displays, setDisplays] = useState<Display[]>([]);
   const [mics, setMics] = useState<Mic[]>([]);
@@ -41,6 +50,8 @@ function App() {
   const [selectedDisplay, setSelectedDisplay] = useState<number | null>(null);
   const [selectedMic, setSelectedMic] = useState<string | null>(null);
   const [selectedCamera, setSelectedCamera] = useState<number | null>(null);
+  const [bubbleSize, setBubbleSize] = useState<WebcamSize>("medium");
+  const [bubbleCorner, setBubbleCorner] = useState<Corner>("br");
   const [state, setState] = useState<EngineState>("idle");
   const [progress, setProgress] = useState({ frames: 0, dropped: 0, elapsed_s: 0 });
   const [lastSaved, setLastSaved] = useState<string | null>(null);
@@ -101,9 +112,7 @@ function App() {
 
       invoke("engine_enumerate").catch((err) => setError(String(err)));
       invoke<DeviceList>("enumerate_devices")
-        .then((d) => {
-          setCameras(d.video);
-        })
+        .then((d) => setCameras(d.video))
         .catch((err) => setError(String(err)));
     };
 
@@ -125,61 +134,92 @@ function App() {
         microphoneUid: selectedMic,
         cameraIndex: selectedCamera,
         maxFps: 30,
+        webcamSize: bubbleSize,
+        webcamCorner: bubbleCorner,
       });
     } catch (err) {
       setError(String(err));
     }
   };
 
-  const pause = () => invoke("engine_pause").catch((e) => setError(String(e)));
-  const resume = () => invoke("engine_resume").catch((e) => setError(String(e)));
   const stop = () => invoke("engine_stop").catch((e) => setError(String(e)));
 
-  const finalize = async () => {
-    try {
-      const info = await invoke<FinalizedRecording>("recording_finalize");
-      setFinalizeInfo(info);
-    } catch (err) {
-      setError(String(err));
-    }
+  const refresh = () => {
+    invoke("engine_enumerate").catch((err) => setError(String(err)));
+    invoke<DeviceList>("enumerate_devices")
+      .then((d) => setCameras(d.video))
+      .catch((err) => setError(String(err)));
   };
 
-  const canStart = state === "idle" && selectedDisplay != null;
-
-  const refresh = () => invoke("engine_enumerate").catch((err) => setError(String(err)));
+  const recording = state === "recording" || state === "paused";
+  const cameraName =
+    selectedCamera == null
+      ? null
+      : cameras.find((c) => c.index === selectedCamera)?.name ?? null;
+  const cameraState: "none" | "selected" | "continuity" =
+    selectedCamera == null
+      ? "none"
+      : cameraName && isContinuity(cameraName)
+      ? "continuity"
+      : "selected";
 
   return (
-    <main className="container">
-      <h1>Recording</h1>
+    <main
+      style={{
+        minHeight: "100vh",
+        display: "flex",
+        alignItems: "flex-start",
+        justifyContent: "center",
+        padding: "24px 20px 40px",
+        background: "var(--bg-window)",
+      }}
+    >
+      <div className="mac-window accent-blue" style={{ width: 480 }}>
+        <BrandBar recording={recording} elapsed={progress.elapsed_s} onRefresh={refresh} />
 
-      <section className="refresh-row">
-        <button onClick={refresh} disabled={state !== "idle"}>
-          Refresh devices
-        </button>
-      </section>
+        <SourceTiles />
 
-      <section>
-        <label>
-          <span>Screen</span>
+        <div className="hairline" />
+
+        <div
+          style={{
+            padding: "12px 14px",
+            display: "grid",
+            gridTemplateColumns: "auto 1fr",
+            rowGap: 10,
+            columnGap: 12,
+            alignItems: "center",
+          }}
+        >
+          <RowLabel icon={I.webcam} label="Camera" />
+          <CameraRow
+            cameras={cameras}
+            value={selectedCamera}
+            onChange={setSelectedCamera}
+            cameraState={cameraState}
+            disabled={recording}
+          />
+
+          {cameraState !== "none" && (
+            <>
+              <div />
+              <WebcamControlsBar
+                size={bubbleSize}
+                onSize={setBubbleSize}
+                corner={bubbleCorner}
+                onCorner={setBubbleCorner}
+                disabled={recording}
+              />
+            </>
+          )}
+
+          <RowLabel icon={I.mic} label="Microphone" />
           <select
-            value={selectedDisplay ?? ""}
-            onChange={(e) => setSelectedDisplay(Number(e.target.value))}
-            disabled={state !== "idle"}
-          >
-            {displays.map((d) => (
-              <option key={d.id} value={d.id}>
-                {d.name} — {d.width}×{d.height}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <label>
-          <span>Microphone</span>
-          <select
+            className="select"
             value={selectedMic ?? ""}
             onChange={(e) => setSelectedMic(e.target.value || null)}
-            disabled={state !== "idle"}
+            disabled={recording}
+            style={{ width: "100%", fontSize: 12.5 }}
           >
             <option value="">No microphone</option>
             {mics.map((m) => (
@@ -188,125 +228,671 @@ function App() {
               </option>
             ))}
           </select>
-        </label>
 
-        <label>
-          <span>Webcam</span>
+          <RowLabel icon={I.monitor} label="Screen" />
           <select
-            value={selectedCamera ?? ""}
-            onChange={(e) =>
-              setSelectedCamera(e.target.value === "" ? null : Number(e.target.value))
-            }
-            disabled={state !== "idle"}
+            className="select"
+            value={selectedDisplay ?? ""}
+            onChange={(e) => setSelectedDisplay(Number(e.target.value))}
+            disabled={recording}
+            style={{ width: "100%", fontSize: 12.5 }}
           >
-            <option value="">No webcam</option>
-            {cameras.map((c) => (
-              <option key={c.index} value={c.index}>
-                {c.name}
+            {displays.map((d) => (
+              <option key={d.id} value={d.id}>
+                {d.name} — {d.width}×{d.height}
               </option>
             ))}
           </select>
-        </label>
-      </section>
+        </div>
 
-      <section className="controls">
-        <button className="primary" onClick={start} disabled={!canStart}>
-          Record
-        </button>
-        <button onClick={pause} disabled={state !== "recording"}>
-          Pause
-        </button>
-        <button onClick={resume} disabled={state !== "paused"}>
-          Resume
-        </button>
-        <button onClick={stop} disabled={state === "idle"}>
-          Stop
-        </button>
-      </section>
+        <FooterBar
+          recording={recording}
+          state={state}
+          elapsed={progress.elapsed_s}
+          canStart={state === "idle" && selectedDisplay != null}
+          onStart={start}
+          onStop={stop}
+        />
+      </div>
 
-      <StatusLine state={state} progress={progress} />
-
-      {error && <p className="error">{error}</p>}
-      {lastSaved && state === "idle" && (
-        <p className="saved">Screen saved to {lastSaved}</p>
-      )}
-      {finalizeInfo && (
-        <FinalizeInfo info={finalizeInfo} onRetry={finalize} />
-      )}
+      <BottomStack
+        error={error}
+        lastSaved={lastSaved}
+        finalizeInfo={finalizeInfo}
+        state={state}
+        progress={progress}
+      />
     </main>
   );
 }
 
-function FinalizeInfo({
-  info,
-  onRetry,
+function BrandBar({
+  recording,
+  elapsed,
+  onRefresh,
 }: {
-  info: FinalizedRecording;
-  onRetry: () => void;
+  recording: boolean;
+  elapsed: number;
+  onRefresh: () => void;
 }) {
   return (
-    <section className="finalize">
-      <h2>Finalize</h2>
-      <ul className="finalize-fields">
-        <li>
-          <span className="k">stamp</span>
-          <span className="v">{info.stamp}</span>
-        </li>
-        <li>
-          <span className="k">final_path</span>
-          <span className="v">{info.final_path}</span>
-        </li>
-        {info.sources_dir && (
-          <li>
-            <span className="k">sources_dir</span>
-            <span className="v">{info.sources_dir}</span>
-          </li>
-        )}
-        {info.webcam_segments.length > 0 && (
-          <li>
-            <span className="k">webcam_segments</span>
-            <span className="v">
-              <ol>
-                {info.webcam_segments.map((s, i) => (
-                  <li key={i}>{s}</li>
-                ))}
-              </ol>
-            </span>
-          </li>
-        )}
-        <li>
-          <span className="k">composited</span>
-          <span className="v">{info.composited ? "yes" : "no (control-flow test only)"}</span>
-        </li>
-      </ul>
-      <button onClick={onRetry}>Re-fetch finalize info</button>
-    </section>
+    <div
+      style={{
+        height: 42,
+        padding: "0 14px",
+        display: "flex",
+        alignItems: "center",
+        borderBottom: "1px solid var(--border-faint)",
+        background: "linear-gradient(to bottom, #2a2a2c, #232325)",
+      }}
+    >
+      <span
+        style={{
+          width: 18,
+          height: 18,
+          borderRadius: 5,
+          background: "linear-gradient(135deg, var(--accent), oklch(0.5 0.18 250))",
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: "#fff",
+        }}
+      >
+        <Icon d={P.play} size={9} stroke={0} fill="currentColor" />
+      </span>
+      <span
+        style={{
+          marginLeft: 7,
+          fontWeight: 600,
+          fontSize: 13,
+          letterSpacing: "-0.01em",
+        }}
+      >
+        Zeigen
+      </span>
+      {recording && (
+        <span
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            marginLeft: 10,
+            padding: "2px 7px",
+            borderRadius: 99,
+            background: "var(--recording-soft)",
+            border: "1px solid oklch(0.62 0.18 25 / 0.35)",
+            color: "var(--recording-tint)",
+            fontFamily: "var(--font-mono)",
+            fontSize: 11,
+            fontWeight: 500,
+          }}
+        >
+          <span className="rec-dot" /> REC {fmtTime(elapsed)}
+        </span>
+      )}
+      <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 2 }}>
+        <button
+          className="btn-ghost"
+          title="Refresh devices"
+          onClick={onRefresh}
+          style={{ padding: 5, color: "var(--fg-secondary)" }}
+        >
+          {I.history}
+        </button>
+        <button
+          className="btn-ghost"
+          title="Preferences"
+          style={{ padding: 5, color: "var(--fg-secondary)" }}
+        >
+          {I.gear}
+        </button>
+      </div>
+    </div>
   );
 }
 
-function StatusLine({
+function SourceTiles() {
+  // Phase 3 supports primary display only. The other tiles match the design
+  // for visual consistency but are non-functional until later phases.
+  const tiles = [
+    { id: "display", label: "Entire Display", sub: "Primary display", icon: I.monitor, on: true },
+    { id: "window", label: "Window", sub: "Coming soon", icon: I.window, on: false },
+    { id: "area", label: "Selected Area", sub: "Coming soon", icon: I.area, on: false },
+    { id: "webcam", label: "Webcam Only", sub: "Coming soon", icon: I.webcam, on: false },
+  ];
+
+  return (
+    <div style={{ padding: 14, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+      {tiles.map((s) => {
+        const active = s.on;
+        const dim = !s.on;
+        return (
+          <div
+            key={s.id}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 11,
+              padding: "11px 12px",
+              background: active ? "var(--accent-soft)" : "var(--bg-elevated)",
+              border: `1px solid ${active ? "var(--accent)" : "var(--border-faint)"}`,
+              borderRadius: 8,
+              textAlign: "left",
+              color: dim ? "var(--fg-tertiary)" : "var(--fg-primary)",
+              fontFamily: "var(--font-system)",
+              boxShadow: active ? "0 0 0 3px var(--accent-soft)" : "none",
+              transition: "all 120ms cubic-bezier(0.4, 0, 0.2, 1)",
+              opacity: dim ? 0.55 : 1,
+            }}
+          >
+            <span
+              style={{
+                width: 30,
+                height: 30,
+                borderRadius: 7,
+                flexShrink: 0,
+                background: active ? "var(--accent)" : "var(--bg-input)",
+                color: active ? "#fff" : "var(--fg-secondary)",
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                border: "1px solid var(--border-faint)",
+              }}
+            >
+              {s.icon}
+            </span>
+            <span style={{ display: "flex", flexDirection: "column", gap: 1, minWidth: 0 }}>
+              <span style={{ fontSize: 12.5, fontWeight: 600, letterSpacing: "-0.005em" }}>
+                {s.label}
+              </span>
+              <span style={{ fontSize: 11, color: "var(--fg-tertiary)" }}>{s.sub}</span>
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function RowLabel({ icon, label }: { icon: React.ReactNode; label: string }) {
+  return (
+    <div
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 7,
+        color: "var(--fg-secondary)",
+        fontSize: 12,
+      }}
+    >
+      {icon}
+      <span>{label}</span>
+    </div>
+  );
+}
+
+function CameraRow({
+  cameras,
+  value,
+  onChange,
+  cameraState,
+  disabled,
+}: {
+  cameras: Device[];
+  value: number | null;
+  onChange: (n: number | null) => void;
+  cameraState: "none" | "selected" | "continuity";
+  disabled: boolean;
+}) {
+  const selectValue = value == null ? NO_CAMERA : String(value);
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      <select
+        className="select"
+        value={selectValue}
+        onChange={(e) => {
+          const v = e.target.value;
+          onChange(v === NO_CAMERA ? null : Number(v));
+        }}
+        disabled={disabled}
+        style={{
+          flex: 1,
+          fontSize: 12.5,
+          color: cameraState === "none" ? "var(--fg-tertiary)" : "var(--fg-primary)",
+        }}
+      >
+        <option value={NO_CAMERA}>No webcam</option>
+        {cameras.map((c) => (
+          <option key={c.index} value={c.index}>
+            {c.name}
+          </option>
+        ))}
+      </select>
+      {cameraState === "continuity" && <ContinuityPill />}
+    </div>
+  );
+}
+
+function ContinuityPill() {
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 5,
+        padding: "3px 8px",
+        background: "var(--success-soft)",
+        border: "1px solid oklch(0.62 0.13 155 / 0.34)",
+        borderRadius: 99,
+        color: "var(--success-tint)",
+        fontSize: 10.5,
+        fontWeight: 500,
+        whiteSpace: "nowrap",
+        letterSpacing: "-0.005em",
+      }}
+    >
+      <span
+        style={{
+          width: 5,
+          height: 5,
+          borderRadius: 99,
+          background: "var(--success-tint)",
+          boxShadow: "0 0 0 2px oklch(0.62 0.13 155 / 0.32)",
+        }}
+      />
+      iPhone connected
+    </span>
+  );
+}
+
+function WebcamControlsBar({
+  size,
+  onSize,
+  corner,
+  onCorner,
+  disabled,
+}: {
+  size: WebcamSize;
+  onSize: (s: WebcamSize) => void;
+  corner: Corner;
+  onCorner: (c: Corner) => void;
+  disabled: boolean;
+}) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 14,
+        padding: "8px 10px",
+        background: "var(--bg-input)",
+        border: "1px solid var(--border-faint)",
+        borderRadius: 6,
+        opacity: disabled ? 0.55 : 1,
+        pointerEvents: disabled ? "none" : "auto",
+      }}
+    >
+      <div style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
+        <span style={{ fontSize: 11, color: "var(--fg-tertiary)" }}>Size</span>
+        <SizePicker value={size} onChange={onSize} />
+      </div>
+      <div style={{ width: 1, height: 16, background: "var(--border-faint)" }} />
+      <div style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
+        <span style={{ fontSize: 11, color: "var(--fg-tertiary)" }}>Corner</span>
+        <CornerPicker value={corner} onChange={onCorner} />
+      </div>
+      <div
+        style={{
+          marginLeft: "auto",
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 6,
+          color: "var(--fg-tertiary)",
+          fontSize: 11,
+        }}
+      >
+        <Icon d={<circle cx="8" cy="8" r="5" />} size={11} stroke={1.4} />
+        <span>Circle</span>
+      </div>
+    </div>
+  );
+}
+
+function SizePicker({
+  value,
+  onChange,
+}: {
+  value: WebcamSize;
+  onChange: (s: WebcamSize) => void;
+}) {
+  const opts: { id: WebcamSize; label: string }[] = [
+    { id: "small", label: "S" },
+    { id: "medium", label: "M" },
+    { id: "large", label: "L" },
+  ];
+  return (
+    <div className="segmented" style={{ padding: 2 }}>
+      {opts.map((o) => (
+        <button
+          key={o.id}
+          className={value === o.id ? "on" : ""}
+          onClick={() => onChange(o.id)}
+          style={{ minWidth: 24 }}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function CornerPicker({
+  value,
+  onChange,
+}: {
+  value: Corner;
+  onChange: (c: Corner) => void;
+}) {
+  const corners: Corner[] = ["tl", "tr", "bl", "br"];
+  return (
+    <div
+      style={{
+        width: 34,
+        height: 24,
+        background: "var(--bg-input)",
+        border: "1px solid var(--border-subtle)",
+        borderRadius: 5,
+        position: "relative",
+        display: "grid",
+        gridTemplateColumns: "1fr 1fr",
+        gridTemplateRows: "1fr 1fr",
+        padding: 2,
+        gap: 1,
+      }}
+    >
+      {corners.map((c) => {
+        const on = value === c;
+        return (
+          <button
+            key={c}
+            onClick={() => onChange(c)}
+            aria-label={`Corner ${c}`}
+            style={{
+              background: "transparent",
+              border: "none",
+              padding: 0,
+              margin: 0,
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <span
+              style={{
+                width: 6,
+                height: 6,
+                borderRadius: 1.5,
+                background: on ? "var(--accent)" : "var(--fg-quaternary)",
+              }}
+            />
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function FooterBar({
+  recording,
+  state,
+  elapsed,
+  canStart,
+  onStart,
+  onStop,
+}: {
+  recording: boolean;
+  state: EngineState;
+  elapsed: number;
+  canStart: boolean;
+  onStart: () => void;
+  onStop: () => void;
+}) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        padding: "12px 14px",
+        background: "rgba(255,255,255,0.015)",
+        borderTop: "1px solid var(--border-faint)",
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          color: "var(--fg-tertiary)",
+          fontSize: 11.5,
+        }}
+      >
+        <Icon d={P.folder} size={12} stroke={1.25} />
+        <span>
+          Saves to{" "}
+          <span style={{ color: "var(--fg-secondary)", fontFamily: "var(--font-mono)", fontSize: 11 }}>
+            ~/Movies/Zeigen
+          </span>
+        </span>
+      </div>
+      {recording ? (
+        <button
+          onClick={onStop}
+          disabled={state === "paused"}
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "7px 14px 7px 11px",
+            background: "var(--recording)",
+            color: "#fff",
+            border: "none",
+            borderRadius: 6,
+            fontFamily: "var(--font-system)",
+            fontWeight: 600,
+            fontSize: 13,
+            letterSpacing: "-0.005em",
+            cursor: "pointer",
+            boxShadow: "var(--shadow-recording-ring)",
+          }}
+        >
+          <span
+            style={{
+              width: 16,
+              height: 16,
+              borderRadius: 4,
+              background: "rgba(255,255,255,0.18)",
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <span style={{ width: 8, height: 8, borderRadius: 2, background: "#fff" }} />
+          </span>
+          <span style={{ fontVariantNumeric: "tabular-nums", fontFamily: "var(--font-mono)", fontSize: 12 }}>
+            Stop · {fmtTime(elapsed)}
+          </span>
+        </button>
+      ) : (
+        <button
+          className="btn-primary"
+          onClick={onStart}
+          disabled={!canStart}
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "7px 14px 7px 11px",
+            fontWeight: 600,
+            letterSpacing: "-0.005em",
+            opacity: canStart ? 1 : 0.55,
+            cursor: canStart ? "pointer" : "not-allowed",
+          }}
+        >
+          <span
+            style={{
+              width: 16,
+              height: 16,
+              borderRadius: 99,
+              background: "rgba(255,255,255,0.2)",
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <span style={{ width: 8, height: 8, borderRadius: 99, background: "#fff" }} />
+          </span>
+          Start Recording
+        </button>
+      )}
+    </div>
+  );
+}
+
+function BottomStack({
+  error,
+  lastSaved,
+  finalizeInfo,
+  state,
+  progress,
+}: {
+  error: string | null;
+  lastSaved: string | null;
+  finalizeInfo: FinalizedRecording | null;
+  state: EngineState;
+  progress: { frames: number; dropped: number; elapsed_s: number };
+}) {
+  if (!error && !lastSaved && !finalizeInfo && state === "idle") return null;
+  return (
+    <div
+      style={{
+        position: "fixed",
+        right: 20,
+        bottom: 20,
+        width: 360,
+        display: "flex",
+        flexDirection: "column",
+        gap: 8,
+      }}
+    >
+      {state !== "idle" && <ProgressCard state={state} progress={progress} />}
+      {error && (
+        <div
+          style={{
+            background: "var(--recording-soft)",
+            border: "1px solid oklch(0.62 0.18 25 / 0.4)",
+            borderRadius: 8,
+            padding: "10px 12px",
+            color: "var(--recording-tint)",
+            fontSize: 12,
+            wordBreak: "break-word",
+          }}
+        >
+          {error}
+        </div>
+      )}
+      {finalizeInfo && (
+        <FinalizeCard info={finalizeInfo} />
+      )}
+      {!finalizeInfo && lastSaved && state === "idle" && (
+        <div
+          style={{
+            background: "var(--bg-elevated)",
+            border: "1px solid var(--border-faint)",
+            borderRadius: 8,
+            padding: "10px 12px",
+            color: "var(--fg-secondary)",
+            fontSize: 11.5,
+            fontFamily: "var(--font-mono)",
+            wordBreak: "break-all",
+          }}
+        >
+          Saved · {lastSaved}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ProgressCard({
   state,
   progress,
 }: {
   state: EngineState;
   progress: { frames: number; dropped: number; elapsed_s: number };
 }) {
-  const label = state === "idle" ? "Idle" : state === "paused" ? "Paused" : "Recording";
-  const time = useMemo(() => formatElapsed(progress.elapsed_s), [progress.elapsed_s]);
+  const time = useMemo(() => fmtTime(progress.elapsed_s), [progress.elapsed_s]);
+  const label = state === "paused" ? "Paused" : "Recording";
   return (
-    <div className={`status status-${state}`}>
-      <span className="dot" />
-      <span className="label">{label}</span>
-      <span className="time">{time}</span>
-      <span className="frames">
-        {progress.frames} frames{progress.dropped ? ` · ${progress.dropped} dropped` : ""}
+    <div
+      style={{
+        background: "var(--bg-elevated)",
+        border: "1px solid var(--border-faint)",
+        borderRadius: 8,
+        padding: "10px 12px",
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        fontSize: 12,
+      }}
+    >
+      <span
+        className={state === "recording" ? "rec-dot" : ""}
+        style={
+          state === "paused"
+            ? { width: 8, height: 8, borderRadius: 99, background: "var(--fg-tertiary)" }
+            : undefined
+        }
+      />
+      <span style={{ fontWeight: 600, color: "var(--fg-primary)" }}>{label}</span>
+      <span style={{ fontFamily: "var(--font-mono)", color: "var(--fg-secondary)" }}>{time}</span>
+      <span style={{ marginLeft: "auto", color: "var(--fg-tertiary)", fontSize: 11 }}>
+        {progress.frames}f
+        {progress.dropped ? ` · ${progress.dropped} dropped` : ""}
       </span>
     </div>
   );
 }
 
-function formatElapsed(seconds: number): string {
-  const s = Math.floor(seconds);
+function FinalizeCard({ info }: { info: FinalizedRecording }) {
+  return (
+    <div
+      style={{
+        background: "var(--bg-elevated)",
+        border: "1px solid var(--border-faint)",
+        borderRadius: 8,
+        padding: "12px",
+        fontSize: 11.5,
+        color: "var(--fg-secondary)",
+        fontFamily: "var(--font-mono)",
+      }}
+    >
+      <div style={{ color: "var(--success-tint)", fontWeight: 600, marginBottom: 6 }}>
+        {info.composited ? "Composited" : "Saved"}
+      </div>
+      <div style={{ wordBreak: "break-all", color: "var(--fg-primary)" }}>{info.final_path}</div>
+      {info.sources_dir && (
+        <div style={{ marginTop: 4, color: "var(--fg-tertiary)", wordBreak: "break-all" }}>
+          sources · {info.sources_dir}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function fmtTime(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds));
   const mm = String(Math.floor(s / 60)).padStart(2, "0");
   const ss = String(s % 60).padStart(2, "0");
   return `${mm}:${ss}`;
