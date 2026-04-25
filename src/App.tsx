@@ -218,95 +218,94 @@ function App() {
 
   return (
     <main
+      className="accent-blue"
       style={{
         minHeight: "100vh",
         display: "flex",
-        alignItems: "flex-start",
-        justifyContent: "center",
-        padding: "24px 20px 40px",
+        flexDirection: "column",
         background: "var(--bg-window)",
+        color: "var(--fg-primary)",
       }}
     >
-      <div className="mac-window accent-blue" style={{ width: 480 }}>
-        <BrandBar recording={recording} elapsed={progress.elapsed_s} onRefresh={refresh} />
+      <BrandBar recording={recording} elapsed={progress.elapsed_s} onRefresh={refresh} />
 
-        <SourceTiles />
+      <SourceTiles />
 
-        <div className="hairline" />
+      <div className="hairline" />
 
-        <div
-          style={{
-            padding: "12px 14px",
-            display: "grid",
-            gridTemplateColumns: "auto 1fr",
-            rowGap: 10,
-            columnGap: 12,
-            alignItems: "center",
-          }}
-        >
-          <RowLabel icon={I.webcam} label="Camera" />
-          <CameraRow
-            cameras={cameras}
-            value={selectedCamera}
-            onChange={setSelectedCamera}
-            cameraState={cameraState}
-            disabled={recording}
-          />
-
-          {cameraState !== "none" && (
-            <>
-              <div />
-              <WebcamControlsBar
-                size={bubbleSize}
-                onSize={setBubbleSize}
-                corner={bubbleCorner}
-                onCorner={setBubbleCorner}
-                disabled={recording}
-              />
-            </>
-          )}
-
-          <RowLabel icon={I.mic} label="Microphone" />
-          <select
-            className="select"
-            value={selectedMic ?? ""}
-            onChange={(e) => setSelectedMic(e.target.value || null)}
-            disabled={recording}
-            style={{ width: "100%", fontSize: 12.5 }}
-          >
-            <option value="">No microphone</option>
-            {mics.map((m) => (
-              <option key={m.uid} value={m.uid}>
-                {m.name}
-              </option>
-            ))}
-          </select>
-
-          <RowLabel icon={I.monitor} label="Screen" />
-          <select
-            className="select"
-            value={selectedDisplay ?? ""}
-            onChange={(e) => setSelectedDisplay(Number(e.target.value))}
-            disabled={recording}
-            style={{ width: "100%", fontSize: 12.5 }}
-          >
-            {displays.map((d) => (
-              <option key={d.id} value={d.id}>
-                {d.name} — {d.width}×{d.height}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <FooterBar
-          recording={recording}
-          state={state}
-          elapsed={progress.elapsed_s}
-          canStart={state === "idle" && selectedDisplay != null}
-          onStart={start}
-          onStop={stop}
+      <div
+        style={{
+          padding: "12px 14px",
+          display: "grid",
+          gridTemplateColumns: "auto 1fr",
+          rowGap: 10,
+          columnGap: 12,
+          alignItems: "center",
+          flex: 1,
+        }}
+      >
+        <RowLabel icon={I.webcam} label="Camera" />
+        <CameraRow
+          cameras={cameras}
+          value={selectedCamera}
+          onChange={setSelectedCamera}
+          cameraState={cameraState}
+          disabled={recording}
         />
+
+        {cameraState !== "none" && (
+          <>
+            <div />
+            <WebcamControlsBar
+              size={bubbleSize}
+              onSize={setBubbleSize}
+              corner={bubbleCorner}
+              onCorner={setBubbleCorner}
+              disabled={recording}
+            />
+          </>
+        )}
+
+        <RowLabel icon={I.mic} label="Microphone" />
+        <select
+          className="select"
+          value={selectedMic ?? ""}
+          onChange={(e) => setSelectedMic(e.target.value || null)}
+          disabled={recording}
+          style={{ width: "100%", fontSize: 12.5 }}
+        >
+          <option value="">No microphone</option>
+          {mics.map((m) => (
+            <option key={m.uid} value={m.uid}>
+              {m.name}
+            </option>
+          ))}
+        </select>
+
+        <RowLabel icon={I.monitor} label="Screen" />
+        <select
+          className="select"
+          value={selectedDisplay ?? ""}
+          onChange={(e) => setSelectedDisplay(Number(e.target.value))}
+          disabled={recording}
+          style={{ width: "100%", fontSize: 12.5 }}
+        >
+          {displays.map((d) => (
+            <option key={d.id} value={d.id}>
+              {d.name} — {d.width}×{d.height}
+            </option>
+          ))}
+        </select>
       </div>
+
+      <FooterBar
+        recording={recording}
+        state={state}
+        elapsed={progress.elapsed_s}
+        canStart={state === "idle" && selectedDisplay != null}
+        onStart={start}
+        onStop={stop}
+      />
 
       <BottomStack
         error={error}
