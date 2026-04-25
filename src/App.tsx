@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -174,6 +174,7 @@ function App() {
     try {
       setError(null);
       setFinalizeInfo(null);
+      setLastSaved(null);
       await invoke<string>("engine_start", {
         displayId: selectedDisplay,
         microphoneUid: selectedMic,
@@ -298,6 +299,19 @@ function App() {
         </select>
       </div>
 
+      <StatusStrip
+        error={error}
+        lastSaved={lastSaved}
+        finalizeInfo={finalizeInfo}
+        progress={progress}
+        state={state}
+        onDismiss={() => {
+          setError(null);
+          setLastSaved(null);
+          setFinalizeInfo(null);
+        }}
+      />
+
       <FooterBar
         recording={recording}
         state={state}
@@ -305,14 +319,6 @@ function App() {
         canStart={state === "idle" && selectedDisplay != null}
         onStart={start}
         onStop={stop}
-      />
-
-      <BottomStack
-        error={error}
-        lastSaved={lastSaved}
-        finalizeInfo={finalizeInfo}
-        state={state}
-        progress={progress}
       />
     </main>
   );
@@ -812,132 +818,140 @@ function FooterBar({
   );
 }
 
-function BottomStack({
+function StatusStrip({
   error,
   lastSaved,
   finalizeInfo,
-  state,
   progress,
+  state,
+  onDismiss,
 }: {
   error: string | null;
   lastSaved: string | null;
   finalizeInfo: FinalizedRecording | null;
-  state: EngineState;
   progress: { frames: number; dropped: number; elapsed_s: number };
+  state: EngineState;
+  onDismiss: () => void;
 }) {
-  if (!error && !lastSaved && !finalizeInfo && state === "idle") return null;
-  return (
-    <div
-      style={{
-        position: "fixed",
-        right: 20,
-        bottom: 20,
-        width: 360,
-        display: "flex",
-        flexDirection: "column",
-        gap: 8,
-      }}
-    >
-      {state !== "idle" && <ProgressCard state={state} progress={progress} />}
-      {error && (
-        <div
-          style={{
-            background: "var(--recording-soft)",
-            border: "1px solid oklch(0.62 0.18 25 / 0.4)",
-            borderRadius: 8,
-            padding: "10px 12px",
-            color: "var(--recording-tint)",
-            fontSize: 12,
-            wordBreak: "break-word",
-          }}
-        >
-          {error}
-        </div>
-      )}
-      {finalizeInfo && (
-        <FinalizeCard info={finalizeInfo} />
-      )}
-      {!finalizeInfo && lastSaved && state === "idle" && (
-        <div
-          style={{
-            background: "var(--bg-elevated)",
-            border: "1px solid var(--border-faint)",
-            borderRadius: 8,
-            padding: "10px 12px",
-            color: "var(--fg-secondary)",
-            fontSize: 11.5,
-            fontFamily: "var(--font-mono)",
-            wordBreak: "break-all",
-          }}
-        >
-          Saved · {lastSaved}
-        </div>
-      )}
-    </div>
-  );
+  if (error) {
+    return (
+      <StripRow
+        tone="recording"
+        label="Error"
+        body={error}
+        onDismiss={onDismiss}
+      />
+    );
+  }
+  if (state === "idle" && finalizeInfo) {
+    return (
+      <StripRow
+        tone="success"
+        label={finalizeInfo.composited ? "Composited" : "Saved"}
+        body={finalizeInfo.final_path}
+        onDismiss={onDismiss}
+      />
+    );
+  }
+  if (state === "idle" && lastSaved) {
+    return (
+      <StripRow
+        tone="success"
+        label="Saved"
+        body={lastSaved}
+        onDismiss={onDismiss}
+      />
+    );
+  }
+  if (state !== "idle" && progress.dropped > 0) {
+    return (
+      <StripRow
+        tone="muted"
+        label="Frames dropped"
+        body={`${progress.dropped} of ${progress.frames}`}
+      />
+    );
+  }
+  return null;
 }
 
-function ProgressCard({
-  state,
-  progress,
+function StripRow({
+  tone,
+  label,
+  body,
+  onDismiss,
 }: {
-  state: EngineState;
-  progress: { frames: number; dropped: number; elapsed_s: number };
+  tone: "success" | "recording" | "muted";
+  label: string;
+  body: string;
+  onDismiss?: () => void;
 }) {
-  const time = useMemo(() => fmtTime(progress.elapsed_s), [progress.elapsed_s]);
-  const label = state === "paused" ? "Paused" : "Recording";
+  const palette =
+    tone === "recording"
+      ? {
+          bg: "var(--recording-soft)",
+          border: "oklch(0.62 0.18 25 / 0.35)",
+          accent: "var(--recording-tint)",
+        }
+      : tone === "success"
+      ? {
+          bg: "var(--success-soft)",
+          border: "oklch(0.62 0.13 155 / 0.34)",
+          accent: "var(--success-tint)",
+        }
+      : {
+          bg: "var(--bg-elevated)",
+          border: "var(--border-faint)",
+          accent: "var(--fg-secondary)",
+        };
   return (
     <div
       style={{
-        background: "var(--bg-elevated)",
-        border: "1px solid var(--border-faint)",
-        borderRadius: 8,
-        padding: "10px 12px",
+        margin: "0 14px 10px",
+        padding: "6px 10px",
+        background: palette.bg,
+        border: `1px solid ${palette.border}`,
+        borderRadius: 6,
         display: "flex",
         alignItems: "center",
-        gap: 10,
-        fontSize: 12,
-      }}
-    >
-      <span
-        className={state === "recording" ? "rec-dot" : ""}
-        style={
-          state === "paused"
-            ? { width: 8, height: 8, borderRadius: 99, background: "var(--fg-tertiary)" }
-            : undefined
-        }
-      />
-      <span style={{ fontWeight: 600, color: "var(--fg-primary)" }}>{label}</span>
-      <span style={{ fontFamily: "var(--font-mono)", color: "var(--fg-secondary)" }}>{time}</span>
-      <span style={{ marginLeft: "auto", color: "var(--fg-tertiary)", fontSize: 11 }}>
-        {progress.frames}f
-        {progress.dropped ? ` · ${progress.dropped} dropped` : ""}
-      </span>
-    </div>
-  );
-}
-
-function FinalizeCard({ info }: { info: FinalizedRecording }) {
-  return (
-    <div
-      style={{
-        background: "var(--bg-elevated)",
-        border: "1px solid var(--border-faint)",
-        borderRadius: 8,
-        padding: "12px",
+        gap: 8,
         fontSize: 11.5,
-        color: "var(--fg-secondary)",
-        fontFamily: "var(--font-mono)",
+        minHeight: 26,
       }}
     >
-      <div style={{ color: "var(--success-tint)", fontWeight: 600, marginBottom: 6 }}>
-        {info.composited ? "Composited" : "Saved"}
-      </div>
-      <div style={{ wordBreak: "break-all", color: "var(--fg-primary)" }}>{info.final_path}</div>
-      {info.sources_dir && (
-        <div style={{ marginTop: 4, color: "var(--fg-tertiary)", wordBreak: "break-all" }}>
-          sources · {info.sources_dir}
-        </div>
+      <span style={{ color: palette.accent, fontWeight: 600, flexShrink: 0 }}>
+        {label}
+      </span>
+      <span
+        style={{
+          color: "var(--fg-secondary)",
+          fontFamily: "var(--font-mono)",
+          fontSize: 11,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+          flex: 1,
+        }}
+        title={body}
+      >
+        {body}
+      </span>
+      {onDismiss && (
+        <button
+          onClick={onDismiss}
+          aria-label="Dismiss"
+          style={{
+            background: "transparent",
+            border: "none",
+            color: "var(--fg-tertiary)",
+            cursor: "pointer",
+            padding: 0,
+            lineHeight: 1,
+            fontSize: 14,
+          }}
+        >
+          ×
+        </button>
       )}
     </div>
   );
