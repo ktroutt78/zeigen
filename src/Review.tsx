@@ -371,7 +371,13 @@ export default function Review() {
 
   const onModalSave = useCallback(async () => {
     const ok = await saveEdits();
-    if (ok) await closeWindow();
+    if (ok) {
+      await closeWindow();
+    } else {
+      // Surface the error to the user (the error strip is rendered behind
+      // the modal). Window stays open; they can retry, discard, or fix.
+      setShowCloseModal(false);
+    }
   }, [saveEdits, closeWindow]);
 
   const onModalDiscard = useCallback(async () => {
