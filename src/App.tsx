@@ -160,6 +160,34 @@ async function awaitCountdown(
   });
 }
 
+// Played by the main window when the countdown completes. The countdown
+// window itself can't reliably trigger audio (its AudioContext is locked
+// until a user gesture inside that window, which doesn't happen on the
+// natural-end path). The main window kept user-gesture context from the
+// Start click moments earlier.
+function playGoSound() {
+  try {
+    const AC =
+      (window as any).AudioContext || (window as any).webkitAudioContext;
+    if (!AC) return;
+    const ctx = new AC();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type = "sine";
+    osc.frequency.value = 880;
+    const t = ctx.currentTime;
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(0.35, t + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.32);
+    osc.start(t);
+    osc.stop(t + 0.36);
+  } catch {
+    // best effort — silence is acceptable
+  }
+}
+
 async function openReview(
   label: string,
   finalPath: string,
@@ -346,6 +374,7 @@ function App() {
           setState("idle");
           return;
         }
+        playGoSound();
       }
 
       const display = displays.find((d) => d.id === selectedDisplay);
@@ -379,7 +408,16 @@ function App() {
     }
   };
 
-  const stop = () => invoke("engine_stop").catch((e) => setError(String(e)));
+  const stop = () => {
+    if (state === "countdown") {
+      // Stop pressed while the countdown is still playing — cancel the
+      // countdown rather than asking the engine to stop a recording it
+      // never started. Without this guard, Rust returns INVALID_STATE.
+      emit("countdown-cancelled").catch(() => {});
+      return;
+    }
+    invoke("engine_stop").catch((e) => setError(String(e)));
+  };
 
   const ctrlRef = useRef({
     state,

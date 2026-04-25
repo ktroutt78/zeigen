@@ -11,29 +11,6 @@ function readDuration(): number {
   return Number.isFinite(v) && v > 0 ? Math.floor(v) : 5;
 }
 
-function playGoSound() {
-  try {
-    const AC =
-      (window as any).AudioContext || (window as any).webkitAudioContext;
-    if (!AC) return;
-    const ctx = new AC();
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.type = "sine";
-    osc.frequency.value = 880;
-    const t = ctx.currentTime;
-    gain.gain.setValueAtTime(0.0001, t);
-    gain.gain.exponentialRampToValueAtTime(0.35, t + 0.01);
-    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.32);
-    osc.start(t);
-    osc.stop(t + 0.36);
-  } catch {
-    // best effort — no audio is fine
-  }
-}
-
 async function close() {
   try {
     await getCurrentWebviewWindow().close();
@@ -48,7 +25,6 @@ export default function CountdownOverlay() {
 
   useEffect(() => {
     if (n <= 0) {
-      playGoSound();
       emit("countdown-done").finally(close);
       return;
     }
@@ -66,7 +42,6 @@ export default function CountdownOverlay() {
         emit("countdown-cancelled").finally(close);
       } else if (e.key === " " || e.key === "Enter") {
         e.preventDefault();
-        playGoSound();
         emit("countdown-done").finally(close);
       }
     };
@@ -79,12 +54,12 @@ export default function CountdownOverlay() {
       style={{
         width: "100vw",
         height: "100vh",
-        background: "var(--bg-overlay-strong)",
+        background: "transparent",
         display: "flex",
         flexDirection: "column",
         alignItems: "center",
         justifyContent: "center",
-        color: "var(--fg-primary)",
+        color: "#ffffff",
         fontFamily: "var(--font-system)",
         userSelect: "none",
       }}
@@ -92,10 +67,12 @@ export default function CountdownOverlay() {
       <div
         key={tick}
         style={{
-          fontSize: 220,
+          fontSize: 280,
           fontWeight: 200,
           letterSpacing: "var(--track-tight)",
           lineHeight: 1,
+          textShadow:
+            "0 0 32px rgba(0,0,0,0.85), 0 0 80px rgba(0,0,0,0.55), 0 6px 24px rgba(0,0,0,0.6)",
           animation: "zg-countdown-pulse var(--dur-settle) ease-out",
         }}
       >
@@ -103,11 +80,12 @@ export default function CountdownOverlay() {
       </div>
       <div
         style={{
-          marginTop: 36,
+          marginTop: 28,
           fontSize: "var(--text-caption)",
-          color: "var(--fg-tertiary)",
+          color: "rgba(255,255,255,0.85)",
           letterSpacing: "var(--track-eyebrow)",
           textTransform: "uppercase",
+          textShadow: "0 0 12px rgba(0,0,0,0.85), 0 2px 6px rgba(0,0,0,0.7)",
         }}
       >
         Esc cancel · Space or Enter skip
