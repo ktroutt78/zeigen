@@ -1,7 +1,52 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { I, Icon, P } from "./components/icons";
+
+const BUBBLE_LABEL = "webcam-bubble";
+let bubbleDeviceName: string | null = null;
+
+async function openBubble(deviceName: string) {
+  if (bubbleDeviceName === deviceName) {
+    const existing = await WebviewWindow.getByLabel(BUBBLE_LABEL);
+    if (existing) {
+      await existing.show().catch(() => {});
+      return;
+    }
+  }
+
+  const existing = await WebviewWindow.getByLabel(BUBBLE_LABEL);
+  if (existing) await existing.close().catch(() => {});
+
+  bubbleDeviceName = deviceName;
+
+  const win = new WebviewWindow(BUBBLE_LABEL, {
+    url: `/#bubble?name=${encodeURIComponent(deviceName)}`,
+    title: "Webcam",
+    width: 240,
+    height: 240,
+    minWidth: 120,
+    minHeight: 120,
+    decorations: false,
+    transparent: true,
+    alwaysOnTop: true,
+    resizable: true,
+    skipTaskbar: true,
+    visibleOnAllWorkspaces: true,
+    shadow: false,
+  });
+
+  win.once("tauri://error", (e) => {
+    console.error("bubble window error", e);
+  });
+}
+
+async function closeBubble() {
+  bubbleDeviceName = null;
+  const existing = await WebviewWindow.getByLabel(BUBBLE_LABEL);
+  if (existing) await existing.close().catch(() => {});
+}
 
 type Display = { id: number; name: string; width: number; height: number };
 type Mic = { uid: string; name: string };
@@ -162,6 +207,14 @@ function App() {
       : cameraName && isContinuity(cameraName)
       ? "continuity"
       : "selected";
+
+  useEffect(() => {
+    if (cameraName) {
+      openBubble(cameraName).catch((err) => setError(String(err)));
+    } else {
+      closeBubble().catch(() => {});
+    }
+  }, [cameraName]);
 
   return (
     <main
