@@ -72,6 +72,37 @@ impl Corner {
 
 const PADDING_PX: u32 = 24;
 
+fn entry_in_bounds(e: &BubblePositionEntry) -> bool {
+    e.x >= 0.0 && e.x <= 1.0 && e.y >= 0.0 && e.y <= 1.0
+}
+
+fn segment_in_bounds(log: &[BubblePositionEntry], i: usize) -> bool {
+    let a_ok = entry_in_bounds(&log[i]);
+    if i + 1 < log.len() {
+        a_ok && entry_in_bounds(&log[i + 1])
+    } else {
+        a_ok
+    }
+}
+
+// Per-segment 0/1 enable expression mirroring `build_inline_position_expr`.
+// Suppresses overlay rendering for any segment whose endpoints fall outside
+// the recorded display's [0,1] frame — bubble drawn on a different monitor
+// must not leak into the recording.
+fn build_inline_enable_expr(log: &[BubblePositionEntry]) -> String {
+    let n = log.len();
+    if n == 1 {
+        return if segment_in_bounds(log, 0) { "1".into() } else { "0".into() };
+    }
+    let mut expr = if segment_in_bounds(log, n - 1) { "1".to_string() } else { "0".to_string() };
+    for i in (0..n - 1).rev() {
+        let next_t = log[i + 1].t;
+        let val = if segment_in_bounds(log, i) { "1" } else { "0" };
+        expr = format!("if(lt(t\\,{:.3})\\,{}\\,{})", next_t, val, expr);
+    }
+    expr
+}
+
 // Linear-interpolated overlay position between samples.
 // For samples 0..N-1 (N >= 2):
 //   t < t_1                → segment 0: interpolate from (X_0, Y_0) toward (X_1, Y_1)
@@ -190,8 +221,9 @@ geq='lum=p(X\\,Y):a=255*lt(hypot(X-W/2\\,Y-H/2)\\,W/2)'[wc];\
         ));
     } else if log_n <= POSITION_LOG_MAX_INLINE {
         let (x_expr, y_expr) = build_inline_position_expr(bubble_position_log);
+        let enable_expr = build_inline_enable_expr(bubble_position_log);
         filter.push_str(&format!(
-            "[screen30][wc]overlay=x={x_expr}:y={y_expr}:eof_action=pass[outv]"
+            "[screen30][wc]overlay=x={x_expr}:y={y_expr}:enable={enable_expr}:eof_action=pass[outv]"
         ));
     } else {
         filter.push_str(&format!("[wc]split={log_n}"));
@@ -206,10 +238,15 @@ geq='lum=p(X\\,Y):a=255*lt(hypot(X-W/2\\,Y-H/2)\\,W/2)'[wc];\
             } else {
                 format!("v_{}", i - 1)
             };
+            let in_bounds = segment_in_bounds(bubble_position_log, i);
             let (enable, x_expr, y_expr) = if i + 1 < log_n {
                 let b = &bubble_position_log[i + 1];
                 let dt = (b.t - entry.t).max(0.001);
-                let enable = format!("between(t\\,{:.3}\\,{:.3})", entry.t, b.t);
+                let enable = if in_bounds {
+                    format!("between(t\\,{:.3}\\,{:.3})", entry.t, b.t)
+                } else {
+                    "0".to_string()
+                };
                 let x = format!(
                     "main_w*({:.4}+({:.4})*(t-{:.3})/{:.3})-overlay_w/2",
                     entry.x,
@@ -226,7 +263,11 @@ geq='lum=p(X\\,Y):a=255*lt(hypot(X-W/2\\,Y-H/2)\\,W/2)'[wc];\
                 );
                 (enable, x, y)
             } else {
-                let enable = format!("gte(t\\,{:.3})", entry.t);
+                let enable = if in_bounds {
+                    format!("gte(t\\,{:.3})", entry.t)
+                } else {
+                    "0".to_string()
+                };
                 let x = format!("main_w*{:.4}-overlay_w/2", entry.x);
                 let y = format!("main_h*{:.4}-overlay_h/2", entry.y);
                 (enable, x, y)

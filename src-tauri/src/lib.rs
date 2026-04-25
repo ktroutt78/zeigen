@@ -215,8 +215,11 @@ fn bubble_position_event(
     if fw == 0 || fh == 0 {
         return Ok(());
     }
-    let x_frac = ((x_physical - fx as f64) / fw as f64).clamp(0.0, 1.0);
-    let y_frac = ((y_physical - fy as f64) / fh as f64).clamp(0.0, 1.0);
+    // Don't clamp to [0,1]. The composite suppresses out-of-bounds segments
+    // entirely (Bug 1 fix); clamping would leak the bubble onto an edge of
+    // the recorded display when it's actually on a different monitor.
+    let x_frac = (x_physical - fx as f64) / fw as f64;
+    let y_frac = (y_physical - fy as f64) / fh as f64;
 
     let now = Instant::now();
     if let Some((last_when, last_x, last_y)) = rec.last_logged {
