@@ -155,6 +155,8 @@ Only tackle after Phases 1-6 are all working end-to-end.
 - Settings persistence across app restarts
 - Error surface for common failures (device disappeared mid-record, disk full, permission revoked)
 - App icon, DMG installer via `tauri build`
+- Capture window sizing: remove scrollbar by fitting window height to content, loosen row spacing, group sections with breathing room
+- Identify-display button next to the Screen dropdown — click flashes a 2s translucent number overlay on each available display so the user can match the dropdown entry to a physical screen
 
 **Done when:** Zeigen can be installed fresh on another Mac from the DMG, recorded with for a real demo, and shared to LinkedIn and R2 without touching the terminal.
 
