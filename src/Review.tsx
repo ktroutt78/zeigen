@@ -340,11 +340,21 @@ export default function Review() {
     let cancelled = false;
     (async () => {
       const win = getCurrentWebviewWindow();
-      const fn = await win.onCloseRequested((event) => {
+      const fn = await win.onCloseRequested(async (event) => {
         if (proceedingRef.current) return; // already greenlit
+        // Always preventDefault, then explicitly destroy when we want to
+        // close. Tauri v2's "default close on no preventDefault" behavior
+        // proved unreliable in practice (red-button click sat there with
+        // no edits dirty); this makes the close path explicit and atomic.
+        event.preventDefault();
         if (savingRef.current || dirtyRef.current) {
-          event.preventDefault();
           setShowCloseModal(true);
+        } else {
+          proceedingRef.current = true;
+          await win.destroy().catch((err) => {
+            proceedingRef.current = false;
+            setError(`close: ${err}`);
+          });
         }
       });
       if (cancelled) {
@@ -362,7 +372,7 @@ export default function Review() {
   const closeWindow = useCallback(async () => {
     proceedingRef.current = true;
     await getCurrentWebviewWindow()
-      .close()
+      .destroy()
       .catch((err) => {
         proceedingRef.current = false;
         setError(`close: ${err}`);
