@@ -601,13 +601,19 @@ function App() {
       ? "continuity"
       : "selected";
 
+  // Bubble window only exists during recording (and paused). Pre-record /
+  // post-stop the bubble closes — the capture window is the surface for
+  // setup, the review window is the surface for after. Camera selection
+  // (cameraName, bubbleSize, bubbleCorner) persists in React state across
+  // recordings; only the window comes and goes.
   useEffect(() => {
-    if (cameraName) {
+    const active = state === "recording" || state === "paused";
+    if (cameraName && active) {
       openBubble(cameraName).catch((err) => setError(String(err)));
     } else {
       closeBubble().catch(() => {});
     }
-  }, [cameraName]);
+  }, [cameraName, state]);
 
   useEffect(() => {
     const showChip =
