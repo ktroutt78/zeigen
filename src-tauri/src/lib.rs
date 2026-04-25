@@ -3,6 +3,7 @@ mod devices;
 mod edit;
 mod engine;
 mod hotkey;
+mod macos;
 mod tray;
 mod webcam;
 
@@ -291,6 +292,7 @@ pub fn run() {
             update_tray_state,
             set_hotkey,
             quit_app,
+            macos::make_capture_invisible,
             edit::read_sidecar,
             edit::write_sidecar,
             edit::delete_sidecar,
