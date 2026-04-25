@@ -39,6 +39,11 @@ async function openBubble(deviceName: string) {
     shadow: false,
   });
 
+  win.once("tauri://created", () => {
+    invoke("make_capture_invisible", { label: BUBBLE_LABEL }).catch((e) => {
+      console.error("make_capture_invisible(bubble) failed", e);
+    });
+  });
   win.once("tauri://error", (e) => {
     console.error("bubble window error", e);
   });
