@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for the main, webcam-bubble, and review windows",
-  "windows": ["main", "webcam-bubble", "review"],
+  "windows": ["main", "webcam-bubble", "review-*"],
   "permissions": [
     "core:default",
     "opener:default",
