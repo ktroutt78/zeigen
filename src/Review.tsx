@@ -4,14 +4,13 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { emit } from "@tauri-apps/api/event";
 import { Icon, I, P } from "./components/icons";
 
-// Phase 5 review window. Layout mirrors docs/design/surfaces/review.jsx —
-// left column is player + timeline + action footer, right column is the
-// Phase 6 export panel rendered at full visual fidelity but inert.
+// Review window. Layout mirrors docs/design/surfaces/review.jsx — left
+// column is player + timeline + action footer, right column is the Phase
+// 6 export panel rendered at full visual fidelity but inert.
 //
-// C2 adds the player (HTML5 <video> via asset://), trim handles with loop
-// playback within [trimIn, trimOut], sidecar JSON read/write with
-// snapshot-on-open, and the Save/Discard/Cancel close prompt with default
-// Discard. Save edits is a stub here — C3 wires ffmpeg.
+// Operates against the Phase 5.5 scratch path: Save commits the recording
+// to ~/Movies/Zeigen/ (baking edits if any), Discard destroys the scratch
+// dir entirely. Both close the window on success.
 
 type Position = { x: number; y: number };
 
@@ -127,10 +126,12 @@ export default function Review() {
   const [trim, setTrim] = useState<Trim | null>(null);
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   const [snapshot, setSnapshot] = useState<SidecarState>(EMPTY_STATE);
-  const [hadInitialSidecar, setHadInitialSidecar] = useState(false);
 
   const [showCloseModal, setShowCloseModal] = useState(false);
+  const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [discarding, setDiscarding] = useState(false);
+  const busy = saving || discarding;
 
   // Annotation editing state.
   const [tool, setTool] = useState<Tool>(null);
@@ -220,12 +221,10 @@ export default function Review() {
       .then((state) => {
         if (cancelled) return;
         if (state) {
-          setHadInitialSidecar(true);
           setSnapshot({ trim: state.trim ?? null, annotations: state.annotations ?? [] });
           if (state.trim) setTrim(state.trim);
           if (state.annotations) setAnnotations(state.annotations);
         } else {
-          setHadInitialSidecar(false);
           setSnapshot(EMPTY_STATE);
         }
       })
@@ -274,25 +273,6 @@ export default function Review() {
     return () => window.clearTimeout(handle);
   }, [sourcePath, currentState, duration]);
 
-  const restoreSnapshot = useCallback(async (): Promise<void> => {
-    if (!sourcePath) return;
-    setTrim(snapshot.trim ?? null);
-    setAnnotations(snapshot.annotations);
-    if (hadInitialSidecar && !isLogicallyEmpty(snapshot, duration)) {
-      await invoke("write_sidecar", {
-        sourcePath,
-        state: {
-          trim: normalizeTrim(snapshot.trim ?? null, duration),
-          annotations: snapshot.annotations,
-        },
-      }).catch((err) => setError(`restore sidecar: ${err}`));
-    } else {
-      await invoke("delete_sidecar", { sourcePath }).catch((err) =>
-        setError(`delete sidecar: ${err}`),
-      );
-    }
-  }, [sourcePath, snapshot, hadInitialSidecar, duration]);
-
   // Commit the scratch recording to ~/Movies/Zeigen/. Edits in the current
   // sidecar (trim + annotations) are baked at move time via the same ffmpeg
   // pass that used to live behind "Save edits"; if there are no edits, the
@@ -322,17 +302,38 @@ export default function Review() {
     }
   }, [sourcePath, currentState, duration]);
 
-  // Refs for the close-requested handler so it sees current dirty + saving
+  // Destructive: removes the entire scratch dir (mp4 + sidecar + raw
+  // sources). Footer button always asks for confirmation first; the
+  // close-prompt path uses the modal itself as the confirmation per the
+  // single-confirmation rule.
+  const discardRecording = useCallback(async (): Promise<boolean> => {
+    if (!sourcePath) return false;
+    setDiscarding(true);
+    try {
+      await invoke("discard_recording", { scratchMp4Path: sourcePath });
+      // Notify main so the post-finalize toast clears — it would otherwise
+      // keep pointing at the now-deleted scratch path.
+      await emit("recording-discarded").catch(() => {});
+      return true;
+    } catch (err) {
+      setError(`discard recording: ${err}`);
+      return false;
+    } finally {
+      setDiscarding(false);
+    }
+  }, [sourcePath]);
+
+  // Refs for the close-requested handler so it sees current dirty + busy
   // without re-registering the listener on every keystroke.
   const dirtyRef = useRef(dirty);
-  const savingRef = useRef(saving);
+  const busyRef = useRef(busy);
   const proceedingRef = useRef(false);
   useEffect(() => {
     dirtyRef.current = dirty;
   }, [dirty]);
   useEffect(() => {
-    savingRef.current = saving;
-  }, [saving]);
+    busyRef.current = busy;
+  }, [busy]);
 
   useEffect(() => {
     let unlisten: (() => void) | null = null;
@@ -346,7 +347,7 @@ export default function Review() {
         // proved unreliable in practice (red-button click sat there with
         // no edits dirty); this makes the close path explicit and atomic.
         event.preventDefault();
-        if (savingRef.current || dirtyRef.current) {
+        if (busyRef.current || dirtyRef.current) {
           setShowCloseModal(true);
         } else {
           proceedingRef.current = true;
@@ -390,9 +391,9 @@ export default function Review() {
   }, [saveRecording, closeWindow]);
 
   const onModalDiscard = useCallback(async () => {
-    await restoreSnapshot();
+    await discardRecording();
     await closeWindow();
-  }, [restoreSnapshot, closeWindow]);
+  }, [discardRecording, closeWindow]);
 
   const onModalCancel = useCallback(() => {
     setShowCloseModal(false);
@@ -457,15 +458,43 @@ export default function Review() {
     return () => window.removeEventListener("keydown", onKey);
   }, [showCloseModal, tool, selectedIndex, editingIndex, deleteAnnotation]);
 
-  // Footer Discard restores snapshot in place (no window close).
-  const onFooterDiscard = useCallback(async () => {
-    await restoreSnapshot();
-  }, [restoreSnapshot]);
+  // Footer Discard opens an inline confirmation; on confirm we destroy
+  // the scratch dir then close the window.
+  const onFooterDiscard = useCallback(() => {
+    setShowDiscardConfirm(true);
+  }, []);
+
+  const onConfirmDiscard = useCallback(async () => {
+    setShowDiscardConfirm(false);
+    const ok = await discardRecording();
+    if (ok) await closeWindow();
+  }, [discardRecording, closeWindow]);
+
+  const onCancelDiscard = useCallback(() => {
+    setShowDiscardConfirm(false);
+  }, []);
 
   const onFooterSave = useCallback(async () => {
     const ok = await saveRecording();
     if (ok) await closeWindow();
   }, [saveRecording, closeWindow]);
+
+  // Discard-confirmation keyboard handling: Enter = Discard (destructive
+  // default per the macOS convention), Esc = Cancel. Mirrors CloseModal.
+  useEffect(() => {
+    if (!showDiscardConfirm) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onCancelDiscard();
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        onConfirmDiscard();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [showDiscardConfirm, onCancelDiscard, onConfirmDiscard]);
 
   // WebKit won't paint a video frame until the renderer is primed by
   // an actual playback start — preload="auto" + a seek-to-0.04 alone
@@ -564,8 +593,8 @@ export default function Review() {
           setTrim={setTrim}
           onFooterDiscard={onFooterDiscard}
           onFooterSave={onFooterSave}
-          dirty={dirty}
           saving={saving}
+          busy={busy}
           editor={{
             tool,
             setTool,
@@ -588,7 +617,14 @@ export default function Review() {
           onSave={onModalSave}
           onDiscard={onModalDiscard}
           onCancel={onModalCancel}
-          saving={saving}
+          busy={busy}
+        />
+      )}
+      {showDiscardConfirm && (
+        <DiscardConfirmModal
+          onConfirm={onConfirmDiscard}
+          onCancel={onCancelDiscard}
+          discarding={discarding}
         />
       )}
     </main>
@@ -653,10 +689,10 @@ type LeftColumnProps = {
   seek: (t: number) => void;
   trim: Trim | null;
   setTrim: React.Dispatch<React.SetStateAction<Trim | null>>;
-  onFooterDiscard: () => Promise<void> | void;
+  onFooterDiscard: () => void;
   onFooterSave: () => Promise<void> | void;
-  dirty: boolean;
   saving: boolean;
+  busy: boolean;
   editor: Editor;
 };
 
@@ -695,8 +731,8 @@ function LeftColumn(props: LeftColumnProps) {
       <ActionFooter
         onDiscard={props.onFooterDiscard}
         onSave={props.onFooterSave}
-        dirty={props.dirty}
         saving={props.saving}
+        busy={props.busy}
       />
     </div>
   );
@@ -1820,20 +1856,18 @@ function TrimHandle({
 function ActionFooter({
   onDiscard,
   onSave,
-  dirty,
   saving,
+  busy,
 }: {
   onDiscard: () => Promise<void> | void;
   onSave: () => Promise<void> | void;
-  dirty: boolean;
   saving: boolean;
+  busy: boolean;
 }) {
-  // Save commits the scratch recording — always available regardless of
-  // whether edits exist (no edits → backend takes the rename fast path).
-  // Discard still operates on edits in this commit; commit 3 will replace
-  // it with destructive Discard recording.
-  const canSave = !saving;
-  const canDiscard = dirty && !saving;
+  // Both buttons commit a scratch-level decision — Save bakes & moves the
+  // file out, Discard destroys the scratch dir entirely. Always enabled
+  // unless an op is in flight; Discard goes through a confirm dialog.
+  const enabled = !busy;
   return (
     <div
       style={{
@@ -1847,30 +1881,30 @@ function ActionFooter({
     >
       <button
         onClick={() => onDiscard()}
-        disabled={!canDiscard}
+        disabled={!enabled}
         style={{
           display: "inline-flex",
           alignItems: "center",
           gap: 6,
           background: "transparent",
           border: "1px solid transparent",
-          color: "var(--fg-tertiary)",
+          color: "var(--recording-tint)",
           padding: "6px 12px",
           borderRadius: 6,
           height: 30,
-          cursor: canDiscard ? "pointer" : "not-allowed",
+          cursor: enabled ? "pointer" : "not-allowed",
           fontFamily: "var(--font-system)",
           fontSize: 12.5,
           fontWeight: 500,
-          opacity: canDiscard ? 1 : 0.5,
+          opacity: enabled ? 1 : 0.5,
         }}
       >
         {I.trash}
-        <span>Discard edits</span>
+        <span>Discard recording</span>
       </button>
       <button
         onClick={() => onSave()}
-        disabled={!canSave}
+        disabled={!enabled}
         className="btn-primary"
         style={{
           display: "inline-flex",
@@ -1882,8 +1916,8 @@ function ActionFooter({
           fontSize: 12.5,
           fontWeight: 600,
           letterSpacing: "-0.005em",
-          opacity: canSave ? 1 : 0.55,
-          cursor: canSave ? "pointer" : "not-allowed",
+          opacity: enabled ? 1 : 0.55,
+          cursor: enabled ? "pointer" : "not-allowed",
         }}
       >
         <Icon d={P.check} size={13} stroke={1.6} />
@@ -1897,15 +1931,16 @@ function CloseModal({
   onSave,
   onDiscard,
   onCancel,
-  saving,
+  busy,
 }: {
   onSave: () => void;
   onDiscard: () => void;
   onCancel: () => void;
-  saving: boolean;
+  busy: boolean;
 }) {
   // Default focus on Discard, per macOS convention (Pages, Numbers, TextEdit).
-  // Enter triggers Discard; Esc triggers Cancel.
+  // Enter triggers Discard; Esc triggers Cancel. The modal itself is the
+  // confirmation for destructive Discard — no second prompt.
   const discardRef = useRef<HTMLButtonElement | null>(null);
   useEffect(() => {
     discardRef.current?.focus();
@@ -1939,8 +1974,7 @@ function CloseModal({
       >
         <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>Save your edits?</div>
         <div style={{ fontSize: 12.5, color: "var(--fg-secondary)", lineHeight: 1.4 }}>
-          You have unsaved changes to this recording. Discarding keeps the source recording on
-          disk.
+          You have unsaved changes to this recording. Discarding deletes the recording entirely.
         </div>
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
           <button
@@ -1953,27 +1987,114 @@ function CloseModal({
           <button
             ref={discardRef}
             onClick={onDiscard}
+            disabled={busy}
             className="btn-secondary"
             style={{
               padding: "5px 12px",
               height: 28,
               borderColor: "var(--border-strong)",
+              color: "var(--recording-tint)",
+              opacity: busy ? 0.6 : 1,
+              cursor: busy ? "wait" : "pointer",
             }}
           >
             Discard
           </button>
           <button
             onClick={onSave}
-            disabled={saving}
+            disabled={busy}
             className="btn-primary"
             style={{
               padding: "5px 14px",
               height: 28,
-              opacity: saving ? 0.6 : 1,
-              cursor: saving ? "wait" : "pointer",
+              opacity: busy ? 0.6 : 1,
+              cursor: busy ? "wait" : "pointer",
             }}
           >
-            {saving ? "Saving…" : "Save"}
+            {busy ? "Working…" : "Save"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DiscardConfirmModal({
+  onConfirm,
+  onCancel,
+  discarding,
+}: {
+  onConfirm: () => void;
+  onCancel: () => void;
+  discarding: boolean;
+}) {
+  // Mirrors CloseModal: destructive default focused (Discard), Esc cancels.
+  const discardRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    discardRef.current?.focus();
+  }, []);
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.55)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 1000,
+      }}
+    >
+      <div
+        style={{
+          background: "var(--bg-elevated)",
+          border: "1px solid var(--border-strong)",
+          borderRadius: 10,
+          boxShadow: "var(--shadow-lg)",
+          padding: 18,
+          width: 360,
+          color: "var(--fg-primary)",
+          fontFamily: "var(--font-system)",
+        }}
+      >
+        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>
+          Discard this recording?
+        </div>
+        <div style={{ fontSize: 12.5, color: "var(--fg-secondary)", lineHeight: 1.4 }}>
+          The recording and any edits will be deleted. This cannot be undone.
+        </div>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
+          <button
+            onClick={onCancel}
+            disabled={discarding}
+            className="btn-secondary"
+            style={{
+              padding: "5px 12px",
+              height: 28,
+              opacity: discarding ? 0.6 : 1,
+              cursor: discarding ? "wait" : "pointer",
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            ref={discardRef}
+            onClick={onConfirm}
+            disabled={discarding}
+            className="btn-secondary"
+            style={{
+              padding: "5px 12px",
+              height: 28,
+              borderColor: "var(--border-strong)",
+              color: "var(--recording-tint)",
+              opacity: discarding ? 0.6 : 1,
+              cursor: discarding ? "wait" : "pointer",
+            }}
+          >
+            {discarding ? "Discarding…" : "Discard"}
           </button>
         </div>
       </div>

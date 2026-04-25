@@ -384,6 +384,26 @@ fn commit_recording(
     Ok(final_path.to_string_lossy().into_owned())
 }
 
+// Destructive: removes the entire scratch directory (mp4 + sidecar + raw
+// sources) for a recording the user explicitly chose to throw away. Path
+// is supplied as the scratch mp4; we derive the parent and validate it
+// sits under ~/Movies/Zeigen/.scratch/ before any fs operation.
+#[tauri::command]
+fn discard_recording(scratch_mp4_path: String) -> Result<(), String> {
+    let scratch_mp4 = PathBuf::from(&scratch_mp4_path);
+    validate_scratch_path(&scratch_mp4)?;
+
+    let scratch_dir = scratch_mp4
+        .parent()
+        .ok_or_else(|| format!("scratch mp4 has no parent: {}", scratch_mp4.display()))?
+        .to_path_buf();
+    validate_scratch_path(&scratch_dir)?;
+
+    std::fs::remove_dir_all(&scratch_dir)
+        .map_err(|e| format!("remove scratch {}: {e}", scratch_dir.display()))?;
+    Ok(())
+}
+
 #[tauri::command]
 fn update_tray_state(app: AppHandle, state: tray::UiState) -> Result<(), String> {
     *app.state::<tray::TrayState>()
@@ -449,6 +469,7 @@ pub fn run() {
             edit::write_sidecar,
             edit::delete_sidecar,
             commit_recording,
+            discard_recording,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

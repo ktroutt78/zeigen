@@ -411,7 +411,9 @@ function App() {
     // The review window emits `recording-committed` after commit_recording
     // succeeds — main updates its post-finalize toast from the now-stale
     // scratch path to the actual final ~/Movies/Zeigen/recording-….mp4.
+    // `recording-discarded` clears the toast since the file is gone.
     let unlistenCommitted: (() => void) | null = null;
+    let unlistenDiscarded: (() => void) | null = null;
     listen<{ final_path: string }>("recording-committed", (e) => {
       const finalPath = e.payload.final_path;
       setLastSaved(finalPath);
@@ -424,11 +426,19 @@ function App() {
       if (cancelled) fn();
       else unlistenCommitted = fn;
     });
+    listen("recording-discarded", () => {
+      setLastSaved(null);
+      setFinalizeInfo(null);
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlistenDiscarded = fn;
+    });
 
     return () => {
       cancelled = true;
       unlistenFn?.();
       unlistenCommitted?.();
+      unlistenDiscarded?.();
     };
   }, []);
 
