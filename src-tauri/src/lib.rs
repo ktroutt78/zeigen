@@ -9,12 +9,14 @@ mod webcam;
 
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::Instant;
 
 use chrono::Local;
 use tauri::{AppHandle, Manager, State};
 
 use composite::{Corner, WebcamSize};
 use devices::DeviceList;
+use edit::BubblePositionEntry;
 use engine::{EngineClient, EngineCommand};
 use webcam::WebcamSegmenter;
 
@@ -27,6 +29,10 @@ struct ActiveRecording {
     webcam: Option<WebcamSegmenter>,
     webcam_size: WebcamSize,
     webcam_corner: Corner,
+    started_at: Instant,
+    display_frame_physical: (i32, i32, u32, u32),
+    bubble_position_log: Vec<BubblePositionEntry>,
+    last_logged: Option<(Instant, f64, f64)>,
 }
 
 #[tauri::command]
@@ -52,6 +58,10 @@ fn engine_start(
     max_fps: Option<u32>,
     webcam_size: Option<String>,
     webcam_corner: Option<String>,
+    recorded_display_x: i32,
+    recorded_display_y: i32,
+    recorded_display_w: u32,
+    recorded_display_h: u32,
 ) -> Result<String, String> {
     let mut active = recording.lock().map_err(|e| e.to_string())?;
     if active.is_some() {
@@ -93,6 +103,15 @@ fn engine_start(
         webcam,
         webcam_size: parse_size(webcam_size.as_deref()),
         webcam_corner: parse_corner(webcam_corner.as_deref()),
+        started_at: Instant::now(),
+        display_frame_physical: (
+            recorded_display_x,
+            recorded_display_y,
+            recorded_display_w,
+            recorded_display_h,
+        ),
+        bubble_position_log: Vec::new(),
+        last_logged: None,
     });
 
     Ok(final_path.to_string_lossy().into_owned())
@@ -184,6 +203,40 @@ fn recording_reset(
 }
 
 #[tauri::command]
+fn bubble_position_event(
+    recording: RecordingState<'_>,
+    x_physical: f64,
+    y_physical: f64,
+) -> Result<(), String> {
+    let mut active = recording.lock().map_err(|e| e.to_string())?;
+    let Some(rec) = active.as_mut() else { return Ok(()); };
+
+    let (fx, fy, fw, fh) = rec.display_frame_physical;
+    if fw == 0 || fh == 0 {
+        return Ok(());
+    }
+    let x_frac = ((x_physical - fx as f64) / fw as f64).clamp(0.0, 1.0);
+    let y_frac = ((y_physical - fy as f64) / fh as f64).clamp(0.0, 1.0);
+
+    let now = Instant::now();
+    if let Some((last_when, last_x, last_y)) = rec.last_logged {
+        let dx = (x_frac - last_x).abs();
+        let dy = (y_frac - last_y).abs();
+        let pos_moved = dx > 0.02 || dy > 0.02;
+        let elapsed_ms = now.duration_since(last_when).as_millis();
+        if !pos_moved && elapsed_ms <= 250 {
+            return Ok(());
+        }
+    }
+
+    let t = now.duration_since(rec.started_at).as_secs_f64();
+    rec.bubble_position_log
+        .push(BubblePositionEntry { t, x: x_frac, y: y_frac });
+    rec.last_logged = Some((now, x_frac, y_frac));
+    Ok(())
+}
+
+#[tauri::command]
 fn recording_finalize(recording: RecordingState<'_>) -> Result<FinalizedRecording, String> {
     let rec = recording
         .lock()
@@ -191,7 +244,14 @@ fn recording_finalize(recording: RecordingState<'_>) -> Result<FinalizedRecordin
         .take()
         .ok_or("no active recording")?;
 
-    if let Some(webcam) = rec.webcam {
+    let stamp = rec.stamp;
+    let final_path = rec.final_path;
+    let webcam_size = rec.webcam_size;
+    let webcam_corner = rec.webcam_corner;
+    let webcam_opt = rec.webcam;
+    let bubble_position_log = rec.bubble_position_log;
+
+    let (sources_dir, segments) = if let Some(webcam) = webcam_opt {
         let segments = webcam.segments().to_vec();
         let sources_dir = webcam.sources_dir().to_path_buf();
         let screen_path = sources_dir.join("screen.mp4");
@@ -199,28 +259,29 @@ fn recording_finalize(recording: RecordingState<'_>) -> Result<FinalizedRecordin
         composite::composite(
             &screen_path,
             &segments,
-            &rec.final_path,
-            rec.webcam_size,
-            rec.webcam_corner,
+            &final_path,
+            webcam_size,
+            webcam_corner,
         )?;
+        (Some(sources_dir), segments)
+    } else {
+        (None, Vec::new())
+    };
 
-        return Ok(FinalizedRecording {
-            stamp: rec.stamp,
-            final_path: rec.final_path.to_string_lossy().into_owned(),
-            sources_dir: Some(sources_dir.to_string_lossy().into_owned()),
-            webcam_segments: segments
-                .into_iter()
-                .map(|p| p.to_string_lossy().into_owned())
-                .collect(),
-            composited: true,
-        });
+    if !bubble_position_log.is_empty() {
+        let mut state = edit::read_sidecar_path(&final_path)?.unwrap_or_default();
+        state.bubble_position_log = bubble_position_log;
+        edit::write_sidecar_path(&final_path, &state)?;
     }
 
     Ok(FinalizedRecording {
-        stamp: rec.stamp,
-        final_path: rec.final_path.to_string_lossy().into_owned(),
-        sources_dir: None,
-        webcam_segments: Vec::new(),
+        stamp,
+        final_path: final_path.to_string_lossy().into_owned(),
+        sources_dir: sources_dir.map(|p| p.to_string_lossy().into_owned()),
+        webcam_segments: segments
+            .into_iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect(),
         composited: true,
     })
 }
@@ -293,6 +354,7 @@ pub fn run() {
             set_hotkey,
             quit_app,
             macos::make_capture_invisible,
+            bubble_position_event,
             edit::read_sidecar,
             edit::write_sidecar,
             edit::delete_sidecar,

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Icon, P } from "./icons";
 import { useCornerSnap } from "../hooks/useCornerSnap";
+import { useBubblePositionLog } from "../hooks/useBubblePositionLog";
 
 // Floating circular webcam preview. Mirrors the WebcamOrbit variant from
 // docs/design/surfaces/webcam-bubble.jsx — circular feed, hover-only chrome,
@@ -64,6 +65,7 @@ export default function WebcamBubble() {
   const [error, setError] = useState<string | null>(null);
 
   useCornerSnap();
+  useBubblePositionLog();
 
   useEffect(() => {
     let cancelled = false;

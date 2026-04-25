@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { WebviewWindow, getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { availableMonitors } from "@tauri-apps/api/window";
 import { I, Icon, P } from "./components/icons";
 
 const DEFAULT_HOTKEY = "CmdOrCtrl+Shift+R";
@@ -227,6 +228,20 @@ function App() {
       setError(null);
       setFinalizeInfo(null);
       setLastSaved(null);
+
+      const display = displays.find((d) => d.id === selectedDisplay);
+      const monitors = await availableMonitors();
+      const monitor =
+        (display &&
+          monitors.find(
+            (m) => m.size.width === display.width && m.size.height === display.height,
+          )) ||
+        monitors[0];
+      const recordedDisplayX = monitor?.position.x ?? 0;
+      const recordedDisplayY = monitor?.position.y ?? 0;
+      const recordedDisplayW = monitor?.size.width ?? 0;
+      const recordedDisplayH = monitor?.size.height ?? 0;
+
       await invoke<string>("engine_start", {
         displayId: selectedDisplay,
         microphoneUid: selectedMic,
@@ -234,6 +249,10 @@ function App() {
         maxFps: 30,
         webcamSize: bubbleSize,
         webcamCorner: bubbleCorner,
+        recordedDisplayX,
+        recordedDisplayY,
+        recordedDisplayW,
+        recordedDisplayH,
       });
     } catch (err) {
       setError(String(err));

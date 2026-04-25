@@ -4,6 +4,14 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-04-25 — Bubble position log: array-only schema from introduction
+
+`bubble_position_log` lands as an array of `{t, x, y}` entries from day one. No scalar `bubble_position` form was ever shipped, so there is no backward-compat fallback to a "single-entry log at t=0" — that path was speculatively documented during planning and removed once the implementation surface was clear.
+
+## 2026-04-25 — Bubble position log coordinates: fractions of the recorded display, clamped
+
+`x` and `y` in the log are fractions [0..1] of the *recorded display's* physical pixel frame (origin and size sent into `engine_start` from React via `availableMonitors()`). If the user drags the bubble off the recorded display onto another, coordinates clamp to [0, 1] — the composite overlay sticks to the nearest edge rather than disappearing or rendering off-frame. Multi-display correctness for picking the right monitor falls back to size-match in the rare ambiguous case.
+
 ## 2026-04-25 — Webcam bubble draggable, free drag with corner snapping, pre-record and during-record
 
 Matches Loom and CleanShot. Position adjustable mid-record so users can move the bubble out of the way of content they're demoing.

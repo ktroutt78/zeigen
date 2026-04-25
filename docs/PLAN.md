@@ -84,7 +84,7 @@ Bundles four features and one bug fix from Phase 5 UAT. All recording-lifecycle 
 **Deliverables**
 
 1. Draggable webcam bubble — free drag with corner snapping. Pre-record and during-record. Position log written to sidecar (same pattern as the annotation sidecar).
-   - Schema change: Phase 5 currently writes a scalar `bubble_position` to the sidecar. Phase 3.5 changes it to a position log — an array of `{t, x, y}` entries — and updates Phase 5's save-pipeline reader to consume the array form. Backward-compat: a scalar value loads as a single-entry log at `t=0`.
+   - Schema: a new `bubble_position_log` field on the sidecar — array of `{t, x, y}` entries, where `x` and `y` are fractions [0..1] of the *recorded display's* physical frame, clamped at edges if the bubble is dragged off. Phase 5's save-pipeline reader is extended to consume it.
 2. Countdown overlay before recording — full-screen, big number, single "go" sound at start. Esc cancels, Spacebar/Enter skips. Setting: 5s / 3s / Off. Not baked into the recording — SCK starts after countdown.
 3. Recording timer, primary surface on the webcam bubble — small chip integrated into the bubble. Mono font. Semi-transparent dark pill background.
 4. Recording timer, fallback when no webcam — standalone draggable chip when `cameraState === "none"`. Same visual treatment as the bubble timer. Bottom-right default, draggable.

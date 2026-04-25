@@ -13,6 +13,15 @@ pub struct SidecarState {
     pub trim: Option<Trim>,
     #[serde(default)]
     pub annotations: Vec<Annotation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bubble_position_log: Vec<BubblePositionEntry>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct BubblePositionEntry {
+    pub t: f64,
+    pub x: f64,
+    pub y: f64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -57,9 +66,8 @@ pub fn sidecar_path(source: &Path) -> PathBuf {
     source.with_file_name(name)
 }
 
-#[tauri::command]
-pub fn read_sidecar(source_path: String) -> Result<Option<SidecarState>, String> {
-    let p = sidecar_path(Path::new(&source_path));
+pub fn read_sidecar_path(source: &Path) -> Result<Option<SidecarState>, String> {
+    let p = sidecar_path(source);
     if !p.exists() {
         return Ok(None);
     }
@@ -70,13 +78,22 @@ pub fn read_sidecar(source_path: String) -> Result<Option<SidecarState>, String>
     Ok(Some(state))
 }
 
-#[tauri::command]
-pub fn write_sidecar(source_path: String, state: SidecarState) -> Result<(), String> {
-    let p = sidecar_path(Path::new(&source_path));
-    let data = serde_json::to_string_pretty(&state)
+pub fn write_sidecar_path(source: &Path, state: &SidecarState) -> Result<(), String> {
+    let p = sidecar_path(source);
+    let data = serde_json::to_string_pretty(state)
         .map_err(|e| format!("serialize sidecar: {e}"))?;
     std::fs::write(&p, data).map_err(|e| format!("write sidecar {}: {e}", p.display()))?;
     Ok(())
+}
+
+#[tauri::command]
+pub fn read_sidecar(source_path: String) -> Result<Option<SidecarState>, String> {
+    read_sidecar_path(Path::new(&source_path))
+}
+
+#[tauri::command]
+pub fn write_sidecar(source_path: String, state: SidecarState) -> Result<(), String> {
+    write_sidecar_path(Path::new(&source_path), &state)
 }
 
 #[tauri::command]
