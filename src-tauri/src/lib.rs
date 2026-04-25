@@ -262,6 +262,7 @@ fn recording_finalize(recording: RecordingState<'_>) -> Result<FinalizedRecordin
             &final_path,
             webcam_size,
             webcam_corner,
+            &bubble_position_log,
         )?;
         (Some(sources_dir), segments)
     } else {

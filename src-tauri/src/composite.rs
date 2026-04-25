@@ -1,8 +1,14 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::edit::BubblePositionEntry;
+
 pub(crate) const FFMPEG_PATH: &str = "/opt/homebrew/bin/ffmpeg";
 pub(crate) const FFPROBE_PATH: &str = "/opt/homebrew/bin/ffprobe";
+
+// Above this many position-log entries, the inline `if(lt(t,...))` chain
+// becomes long enough that the chained-split strategy is preferable.
+const POSITION_LOG_MAX_INLINE: usize = 20;
 
 fn probe_duration_seconds(path: &Path) -> Result<f64, String> {
     let output = Command::new(FFPROBE_PATH)
@@ -66,19 +72,40 @@ impl Corner {
 
 const PADDING_PX: u32 = 24;
 
+fn build_inline_position_expr(log: &[BubblePositionEntry]) -> (String, String) {
+    debug_assert!(!log.is_empty());
+    let n = log.len();
+    let last = &log[n - 1];
+    let mut x_expr = format!("main_w*{:.4}-overlay_w/2", last.x);
+    let mut y_expr = format!("main_h*{:.4}-overlay_h/2", last.y);
+    for i in (0..n.saturating_sub(1)).rev() {
+        let entry = &log[i];
+        let next_t = log[i + 1].t;
+        x_expr = format!(
+            "if(lt(t\\,{:.3})\\,main_w*{:.4}-overlay_w/2\\,{})",
+            next_t, entry.x, x_expr
+        );
+        y_expr = format!(
+            "if(lt(t\\,{:.3})\\,main_h*{:.4}-overlay_h/2\\,{})",
+            next_t, entry.y, y_expr
+        );
+    }
+    (x_expr, y_expr)
+}
+
 pub fn composite(
     screen_path: &Path,
     webcam_segments: &[PathBuf],
     output_path: &Path,
     size: WebcamSize,
     corner: Corner,
+    bubble_position_log: &[BubblePositionEntry],
 ) -> Result<(), String> {
     if webcam_segments.is_empty() {
         return Err("no webcam segments to composite".into());
     }
 
     let target = size.px();
-    let overlay_xy = corner.overlay_xy(PADDING_PX);
 
     // Compensate for webcam start lag relative to screen. ffmpeg's AVCaptureSession
     // takes longer to deliver its first frame than SCK does, so the webcam file is
@@ -130,9 +157,57 @@ pub fn composite(
 scale={target}:{target},\
 format=yuva420p,\
 geq='lum=p(X\\,Y):a=255*lt(hypot(X-W/2\\,Y-H/2)\\,W/2)'[wc];\
-[0:v]fps=30[screen30];\
-[screen30][wc]overlay={overlay_xy}:eof_action=pass[outv]"
+[0:v]fps=30[screen30];"
     ));
+
+    // Position the overlay. Three strategies:
+    //  - empty log → static corner (existing behavior).
+    //  - 1..=20 entries → single overlay with nested if(lt(t,...)) x/y expressions.
+    //  - >20 entries → split [wc] N ways and chain N overlays, each with `enable=between(t,...)`.
+    let log_n = bubble_position_log.len();
+    if log_n == 0 {
+        let overlay_xy = corner.overlay_xy(PADDING_PX);
+        filter.push_str(&format!(
+            "[screen30][wc]overlay={overlay_xy}:eof_action=pass[outv]"
+        ));
+    } else if log_n <= POSITION_LOG_MAX_INLINE {
+        let (x_expr, y_expr) = build_inline_position_expr(bubble_position_log);
+        filter.push_str(&format!(
+            "[screen30][wc]overlay=x={x_expr}:y={y_expr}:eof_action=pass[outv]"
+        ));
+    } else {
+        filter.push_str(&format!("[wc]split={log_n}"));
+        for i in 0..log_n {
+            filter.push_str(&format!("[wc_{i}]"));
+        }
+        filter.push(';');
+        for i in 0..log_n {
+            let entry = &bubble_position_log[i];
+            let prev = if i == 0 {
+                "screen30".to_string()
+            } else {
+                format!("v_{}", i - 1)
+            };
+            let enable = if i + 1 < log_n {
+                let next_t = bubble_position_log[i + 1].t;
+                format!("between(t\\,{:.3}\\,{:.3})", entry.t, next_t)
+            } else {
+                format!("gte(t\\,{:.3})", entry.t)
+            };
+            let next_label = if i + 1 == log_n {
+                "outv".to_string()
+            } else {
+                format!("v_{i}")
+            };
+            filter.push_str(&format!(
+                "[{prev}][wc_{i}]overlay=x=main_w*{:.4}-overlay_w/2:y=main_h*{:.4}-overlay_h/2:enable={enable}:eof_action=pass[{next_label}]",
+                entry.x, entry.y
+            ));
+            if i + 1 < log_n {
+                filter.push(';');
+            }
+        }
+    }
 
     args.push("-filter_complex".into());
     args.push(filter);
