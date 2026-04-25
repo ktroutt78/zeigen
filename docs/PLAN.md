@@ -75,7 +75,9 @@ Review screen that opens automatically when a recording stops. New Tauri window 
 
 **Done when:** A recording can be trimmed to a sub-segment, annotated with a text label and arrow, and exported to a new mp4 that plays correctly with annotations visible. The Phase 6 export panel is visible but inert.
 
-## Phase 3.5: Recording experience polish
+## Phase 3.5: Recording experience polish — **Complete (2026-04-25)**
+
+All seven deliverables shipped; UAT closed (countdown sizing, bubble ghosting, bubble lifecycle, control pill below bubble, mirror flip, black first frame in review, length cap tints).
 
 Numbered 3.5 because it extends Phase 3's recording UI; sequenced here because it depends on Phase 5's save pipeline.
 
