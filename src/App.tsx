@@ -86,6 +86,62 @@ async function openCountdown(durationSec: number) {
   });
 }
 
+const TIMER_CHIP_LABEL = "timer-chip";
+const TIMER_CHIP_W = 140;
+const TIMER_CHIP_H = 36;
+const TIMER_CHIP_MARGIN = 24;
+
+async function openTimerChip() {
+  const existing = await WebviewWindow.getByLabel(TIMER_CHIP_LABEL);
+  if (existing) {
+    await existing.show().catch(() => {});
+    return;
+  }
+
+  const win = new WebviewWindow(TIMER_CHIP_LABEL, {
+    url: `/#timer-chip`,
+    title: "Timer",
+    width: TIMER_CHIP_W,
+    height: TIMER_CHIP_H,
+    decorations: false,
+    transparent: true,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    resizable: false,
+    visibleOnAllWorkspaces: true,
+    shadow: false,
+    focus: false,
+  });
+
+  win.once("tauri://created", async () => {
+    invoke("make_capture_invisible", { label: TIMER_CHIP_LABEL }).catch((e) => {
+      console.error("make_capture_invisible(timer-chip) failed", e);
+    });
+    try {
+      const monitors = await availableMonitors();
+      const m = monitors[0];
+      if (!m) return;
+      const scale = m.scaleFactor;
+      const xPhys =
+        m.position.x + m.size.width - (TIMER_CHIP_W + TIMER_CHIP_MARGIN) * scale;
+      const yPhys =
+        m.position.y + m.size.height - (TIMER_CHIP_H + TIMER_CHIP_MARGIN) * scale;
+      const { PhysicalPosition } = await import("@tauri-apps/api/dpi");
+      await win.setPosition(new PhysicalPosition(xPhys, yPhys));
+    } catch {
+      // best effort — the window will land at default if positioning fails
+    }
+  });
+  win.once("tauri://error", (e) => {
+    console.error("timer-chip window error", e);
+  });
+}
+
+async function closeTimerChip() {
+  const existing = await WebviewWindow.getByLabel(TIMER_CHIP_LABEL);
+  if (existing) await existing.close().catch(() => {});
+}
+
 async function awaitCountdown(
   durationSec: number,
 ): Promise<"completed" | "cancelled"> {
@@ -457,6 +513,16 @@ function App() {
       closeBubble().catch(() => {});
     }
   }, [cameraName]);
+
+  useEffect(() => {
+    const showChip =
+      (state === "recording" || state === "paused") && cameraState === "none";
+    if (showChip) {
+      openTimerChip().catch(() => {});
+    } else {
+      closeTimerChip().catch(() => {});
+    }
+  }, [state, cameraState]);
 
   useEffect(() => {
     // The tray icon keeps the process alive after the main window closes, so
