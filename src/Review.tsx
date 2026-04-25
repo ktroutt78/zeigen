@@ -292,11 +292,12 @@ export default function Review() {
     }
   }, [sourcePath, snapshot, hadInitialSidecar, duration]);
 
-  // Save edits: persist sidecar, then run the ffmpeg pipeline to produce
-  // <original>-edited.mp4. Pipeline is single-pass with -ss/-to trim and
-  // h264_videotoolbox. Annotations are persisted to the sidecar but not yet
-  // rendered — C4 (text/drawtext) and C5 (arrow/overlay) extend the pipeline.
-  const saveEdits = useCallback(async (): Promise<boolean> => {
+  // Commit the scratch recording to ~/Movies/Zeigen/. Edits in the current
+  // sidecar (trim + annotations) are baked at move time via the same ffmpeg
+  // pass that used to live behind "Save edits"; if there are no edits, the
+  // backend skips ffmpeg and renames the scratch mp4 to its final home.
+  // Either way the scratch directory is removed on success.
+  const saveRecording = useCallback(async (): Promise<boolean> => {
     if (!sourcePath) return false;
     setSaving(true);
     try {
@@ -304,19 +305,14 @@ export default function Review() {
         trim: normalizeTrim(currentState.trim, duration),
         annotations: currentState.annotations,
       };
-      if (isLogicallyEmpty(norm, duration)) {
-        await invoke("delete_sidecar", { sourcePath });
-      } else {
-        await invoke("write_sidecar", { sourcePath, state: norm });
-      }
-      const outPath = await invoke<string>("edit_save", {
-        sourcePath,
+      const outPath = await invoke<string>("commit_recording", {
+        scratchMp4Path: sourcePath,
         sidecar: norm,
       });
-      console.log("Saved edited mp4:", outPath);
+      console.log("Committed recording:", outPath);
       return true;
     } catch (err) {
-      setError(`save edits: ${err}`);
+      setError(`save recording: ${err}`);
       return false;
     } finally {
       setSaving(false);
@@ -380,7 +376,7 @@ export default function Review() {
   }, []);
 
   const onModalSave = useCallback(async () => {
-    const ok = await saveEdits();
+    const ok = await saveRecording();
     if (ok) {
       await closeWindow();
     } else {
@@ -388,7 +384,7 @@ export default function Review() {
       // the modal). Window stays open; they can retry, discard, or fix.
       setShowCloseModal(false);
     }
-  }, [saveEdits, closeWindow]);
+  }, [saveRecording, closeWindow]);
 
   const onModalDiscard = useCallback(async () => {
     await restoreSnapshot();
@@ -464,9 +460,9 @@ export default function Review() {
   }, [restoreSnapshot]);
 
   const onFooterSave = useCallback(async () => {
-    const ok = await saveEdits();
+    const ok = await saveRecording();
     if (ok) await closeWindow();
-  }, [saveEdits, closeWindow]);
+  }, [saveRecording, closeWindow]);
 
   // Player wiring.
   const onLoadedMetadata = () => {
@@ -1809,7 +1805,11 @@ function ActionFooter({
   dirty: boolean;
   saving: boolean;
 }) {
-  const canSave = dirty && !saving;
+  // Save commits the scratch recording — always available regardless of
+  // whether edits exist (no edits → backend takes the rename fast path).
+  // Discard still operates on edits in this commit; commit 3 will replace
+  // it with destructive Discard recording.
+  const canSave = !saving;
   const canDiscard = dirty && !saving;
   return (
     <div
@@ -1864,7 +1864,7 @@ function ActionFooter({
         }}
       >
         <Icon d={P.check} size={13} stroke={1.6} />
-        <span>{saving ? "Saving…" : "Save edits"}</span>
+        <span>{saving ? "Saving…" : "Save recording"}</span>
       </button>
     </div>
   );

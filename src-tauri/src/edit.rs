@@ -106,20 +106,7 @@ pub fn delete_sidecar(source_path: String) -> Result<(), String> {
     Ok(())
 }
 
-fn edited_output_path(source: &Path) -> PathBuf {
-    let parent = source.parent().unwrap_or_else(|| Path::new(""));
-    let stem = source.file_stem().unwrap_or_default();
-    let ext = source
-        .extension()
-        .map(|e| e.to_owned())
-        .unwrap_or_else(|| std::ffi::OsString::from("mp4"));
-    let mut name = stem.to_os_string();
-    name.push("-edited.");
-    name.push(&ext);
-    parent.join(name)
-}
-
-fn probe_duration_seconds(path: &Path) -> Result<f64, String> {
+pub(crate) fn probe_duration_seconds(path: &Path) -> Result<f64, String> {
     let output = Command::new(FFPROBE_PATH)
         .args([
             "-v",
@@ -402,31 +389,52 @@ fn temp_dir_for(source: &Path) -> PathBuf {
     parent.join(".sources").join(format!("edit-{stem}"))
 }
 
-// Single-pass save pipeline. Trim via -ss/-to before -i; text annotations
-// rendered with drawtext (textfile=… to avoid escape headaches); arrows
-// composited as transparent PNGs in C5. Output via h264_videotoolbox.
-#[tauri::command]
-pub fn edit_save(source_path: String, sidecar: SidecarState) -> Result<String, String> {
-    let source = PathBuf::from(&source_path);
+// True when the sidecar would produce a byte-identical re-encode: no real
+// trim and no renderable annotations. Callers (e.g. commit_recording) can
+// skip the ffmpeg pipeline entirely and rename the source file instead.
+pub(crate) fn is_edit_pipeline_noop(sidecar: &SidecarState, duration: f64) -> bool {
+    let trim_real = match &sidecar.trim {
+        Some(t) => t.start > TRIM_EPS || t.out < duration - TRIM_EPS,
+        None => false,
+    };
+    let any_text = sidecar
+        .annotations
+        .iter()
+        .any(|a| a.kind == "text" && !a.content.is_empty());
+    let any_arrow = sidecar
+        .annotations
+        .iter()
+        .any(|a| a.kind == "arrow" && a.endpoint.is_some());
+    !trim_real && !any_text && !any_arrow
+}
+
+// Single-pass edit pipeline. Trim via -ss/-to before -i; text and arrow
+// annotations rasterized to PNGs and composited via overlay filters with
+// `enable=between(t,start,end)`. Output via h264_videotoolbox. Caller
+// supplies both source and output paths — `commit_recording` reads the
+// scratch mp4 and writes directly to the final ~/Movies/Zeigen/ location.
+pub(crate) fn run_edit_pipeline(
+    source: &Path,
+    output: &Path,
+    sidecar: &SidecarState,
+) -> Result<(), String> {
     if !source.exists() {
         return Err(format!("source missing: {}", source.display()));
     }
-    let output = edited_output_path(&source);
-    let duration = probe_duration_seconds(&source)?;
+    let duration = probe_duration_seconds(source)?;
 
     // Resolve effective trim.
-    let trim = match sidecar.trim {
+    let trim: Option<&Trim> = match &sidecar.trim {
         Some(t) if t.start > TRIM_EPS || t.out < duration - TRIM_EPS => Some(t),
         _ => None,
     };
-    let trim_in = trim.as_ref().map(|t| t.start).unwrap_or(0.0);
+    let trim_in = trim.map(|t| t.start).unwrap_or(0.0);
     let out_duration = trim
-        .as_ref()
         .map(|t| (t.out - t.start).max(0.0))
         .unwrap_or(duration);
 
     // Allocate temp dir for any sidecar artifacts (text files, arrow PNGs).
-    let temp_dir = temp_dir_for(&source);
+    let temp_dir = temp_dir_for(source);
     let text_anns: Vec<(usize, &Annotation)> = sidecar
         .annotations
         .iter()
@@ -460,7 +468,7 @@ pub fn edit_save(source_path: String, sidecar: SidecarState) -> Result<String, S
     // is source-sized so overlay sits at (0,0).
     let mut arrow_paths: Vec<(usize, PathBuf, &Annotation)> = Vec::new();
     if !arrow_anns.is_empty() {
-        let (sw, sh) = probe_dimensions(&source)?;
+        let (sw, sh) = probe_dimensions(source)?;
         for (idx, ann) in &arrow_anns {
             let endpoint = ann.endpoint.as_ref().expect("filtered above");
             let stroke = ann.stroke.unwrap_or(DEFAULT_ARROW_STROKE_PX);
@@ -471,7 +479,7 @@ pub fn edit_save(source_path: String, sidecar: SidecarState) -> Result<String, S
     }
 
     let mut args: Vec<String> = vec!["-y".into(), "-hide_banner".into()];
-    if let Some(t) = &trim {
+    if let Some(t) = trim {
         let start = t.start.max(0.0);
         let end = t.out.min(duration);
         if !(end > start) {
@@ -578,7 +586,7 @@ pub fn edit_save(source_path: String, sidecar: SidecarState) -> Result<String, S
     if !result.status.success() {
         let stderr = String::from_utf8_lossy(&result.stderr);
         return Err(format!(
-            "ffmpeg edit_save failed (exit {:?}):\n{}",
+            "ffmpeg edit pipeline failed (exit {:?}):\n{}",
             result.status.code(),
             stderr
                 .lines()
@@ -597,5 +605,5 @@ pub fn edit_save(source_path: String, sidecar: SidecarState) -> Result<String, S
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
-    Ok(output.to_string_lossy().into_owned())
+    Ok(())
 }

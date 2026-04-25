@@ -319,6 +319,71 @@ fn scratch_root_dir() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+// Defense against a malformed/spoofed scratch path. Any commit/discard
+// operation must work against a real subtree of ~/Movies/Zeigen/.scratch
+// — canonicalize both sides so symlinks and `..` segments can't escape.
+fn validate_scratch_path(p: &std::path::Path) -> Result<(), String> {
+    let canon = p
+        .canonicalize()
+        .map_err(|e| format!("canonicalize {}: {e}", p.display()))?;
+    let root = scratch_root_dir()?
+        .canonicalize()
+        .map_err(|e| format!("canonicalize scratch root: {e}"))?;
+    if !canon.starts_with(&root) {
+        return Err(format!("path not under scratch root: {}", p.display()));
+    }
+    Ok(())
+}
+
+// Bake any pending edits and move the result to ~/Movies/Zeigen/recording-….mp4,
+// then remove the entire scratch directory (mp4 + sidecar + raw sources).
+// When the sidecar has no real edits, skip ffmpeg entirely and just rename
+// the scratch mp4 to its final home — far cheaper for the common case of a
+// clean recording with no trim/annotations.
+#[tauri::command]
+fn commit_recording(
+    scratch_mp4_path: String,
+    sidecar: edit::SidecarState,
+) -> Result<String, String> {
+    let scratch_mp4 = PathBuf::from(&scratch_mp4_path);
+    validate_scratch_path(&scratch_mp4)?;
+    if !scratch_mp4.is_file() {
+        return Err(format!("scratch mp4 missing: {}", scratch_mp4.display()));
+    }
+
+    let scratch_dir = scratch_mp4
+        .parent()
+        .ok_or_else(|| format!("scratch mp4 has no parent: {}", scratch_mp4.display()))?
+        .to_path_buf();
+    validate_scratch_path(&scratch_dir)?;
+
+    let file_name = scratch_mp4
+        .file_name()
+        .ok_or_else(|| format!("scratch mp4 has no filename: {}", scratch_mp4.display()))?;
+    let movies = movies_dir()?;
+    std::fs::create_dir_all(&movies)
+        .map_err(|e| format!("create {}: {}", movies.display(), e))?;
+    let final_path = movies.join(file_name);
+
+    let duration = edit::probe_duration_seconds(&scratch_mp4)?;
+    if edit::is_edit_pipeline_noop(&sidecar, duration) {
+        std::fs::rename(&scratch_mp4, &final_path).map_err(|e| {
+            format!(
+                "rename {} -> {}: {e}",
+                scratch_mp4.display(),
+                final_path.display()
+            )
+        })?;
+    } else {
+        edit::run_edit_pipeline(&scratch_mp4, &final_path, &sidecar)?;
+    }
+
+    std::fs::remove_dir_all(&scratch_dir)
+        .map_err(|e| format!("remove scratch {}: {e}", scratch_dir.display()))?;
+
+    Ok(final_path.to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 fn update_tray_state(app: AppHandle, state: tray::UiState) -> Result<(), String> {
     *app.state::<tray::TrayState>()
@@ -383,7 +448,7 @@ pub fn run() {
             edit::read_sidecar,
             edit::write_sidecar,
             edit::delete_sidecar,
-            edit::edit_save,
+            commit_recording,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
