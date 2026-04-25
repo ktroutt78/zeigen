@@ -56,6 +56,53 @@ async function closeBubble() {
   if (existing) await existing.close().catch(() => {});
 }
 
+const COUNTDOWN_LABEL = "countdown";
+
+async function openCountdown(durationSec: number) {
+  const existing = await WebviewWindow.getByLabel(COUNTDOWN_LABEL);
+  if (existing) await existing.close().catch(() => {});
+
+  const win = new WebviewWindow(COUNTDOWN_LABEL, {
+    url: `/#countdown?duration=${durationSec}`,
+    title: "Countdown",
+    fullscreen: true,
+    decorations: false,
+    transparent: true,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    resizable: false,
+    visibleOnAllWorkspaces: true,
+    shadow: false,
+    focus: true,
+  });
+
+  win.once("tauri://created", () => {
+    invoke("make_capture_invisible", { label: COUNTDOWN_LABEL }).catch((e) => {
+      console.error("make_capture_invisible(countdown) failed", e);
+    });
+  });
+  win.once("tauri://error", (e) => {
+    console.error("countdown window error", e);
+  });
+}
+
+async function awaitCountdown(
+  durationSec: number,
+): Promise<"completed" | "cancelled"> {
+  return new Promise(async (resolve) => {
+    const unlistens: Array<() => void> = [];
+    const finish = (r: "completed" | "cancelled") => {
+      unlistens.forEach((u) => u());
+      resolve(r);
+    };
+    unlistens.push(await listen("countdown-done", () => finish("completed")));
+    unlistens.push(
+      await listen("countdown-cancelled", () => finish("cancelled")),
+    );
+    await openCountdown(durationSec);
+  });
+}
+
 async function openReview(
   label: string,
   finalPath: string,
@@ -88,7 +135,8 @@ type Display = { id: number; name: string; width: number; height: number };
 type Mic = { uid: string; name: string };
 type Device = { index: number; name: string };
 type DeviceList = { video: Device[]; audio: Device[]; screens: Device[] };
-type EngineState = "idle" | "recording" | "paused";
+type EngineState = "idle" | "countdown" | "recording" | "paused";
+type CountdownDuration = 0 | 3 | 5;
 
 type FinalizedRecording = {
   stamp: string;
@@ -133,6 +181,8 @@ function App() {
   const [selectedCamera, setSelectedCamera] = useState<number | null>(null);
   const [bubbleSize, setBubbleSize] = useState<WebcamSize>("medium");
   const [bubbleCorner, setBubbleCorner] = useState<Corner>("br");
+  const [countdownDuration, setCountdownDuration] =
+    useState<CountdownDuration>(5);
   const [state, setState] = useState<EngineState>("idle");
   const [progress, setProgress] = useState({ frames: 0, dropped: 0, elapsed_s: 0 });
   const [lastSaved, setLastSaved] = useState<string | null>(null);
@@ -229,6 +279,15 @@ function App() {
       setFinalizeInfo(null);
       setLastSaved(null);
 
+      if (countdownDuration > 0) {
+        setState("countdown");
+        const result = await awaitCountdown(countdownDuration);
+        if (result === "cancelled") {
+          setState("idle");
+          return;
+        }
+      }
+
       const display = displays.find((d) => d.id === selectedDisplay);
       const monitors = await availableMonitors();
       const monitor =
@@ -255,6 +314,7 @@ function App() {
         recordedDisplayH,
       });
     } catch (err) {
+      setState("idle");
       setError(String(err));
     }
   };
@@ -441,6 +501,8 @@ function App() {
               setError(String(e));
             }
           }}
+          countdownDuration={countdownDuration}
+          onCountdownDuration={setCountdownDuration}
           onClose={() => setSettingsOpen(false)}
         />
       )}
@@ -1185,10 +1247,14 @@ function StripRow({
 function SettingsPanel({
   hotkey,
   onHotkey,
+  countdownDuration,
+  onCountdownDuration,
   onClose,
 }: {
   hotkey: string;
   onHotkey: (combo: string) => void;
+  countdownDuration: CountdownDuration;
+  onCountdownDuration: (v: CountdownDuration) => void;
   onClose: () => void;
 }) {
   const [draft, setDraft] = useState(hotkey);
@@ -1261,6 +1327,52 @@ function SettingsPanel({
       <span style={{ color: "var(--fg-tertiary)", fontSize: 11 }}>
         Examples: CmdOrCtrl+Shift+R, Alt+Shift+5
       </span>
+      <label
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          color: "var(--fg-secondary)",
+          marginTop: 4,
+        }}
+      >
+        <span style={{ minWidth: 88 }}>Countdown</span>
+        <div
+          role="radiogroup"
+          aria-label="Countdown duration"
+          style={{
+            display: "inline-flex",
+            background: "var(--bg-input)",
+            border: "1px solid var(--border-subtle)",
+            borderRadius: "var(--r-sm)",
+            padding: 2,
+          }}
+        >
+          {([5, 3, 0] as CountdownDuration[]).map((v) => {
+            const active = countdownDuration === v;
+            return (
+              <button
+                key={v}
+                role="radio"
+                aria-checked={active}
+                onClick={() => onCountdownDuration(v)}
+                style={{
+                  background: active ? "var(--accent-soft)" : "transparent",
+                  color: active ? "var(--accent-tint)" : "var(--fg-secondary)",
+                  border: "none",
+                  cursor: "pointer",
+                  padding: "4px 10px",
+                  borderRadius: "var(--r-xs)",
+                  fontSize: 12,
+                  fontWeight: active ? 600 : 500,
+                }}
+              >
+                {v === 0 ? "Off" : `${v}s`}
+              </button>
+            );
+          })}
+        </div>
+      </label>
     </div>
   );
 }

@@ -4,12 +4,15 @@ import "./styles/global.css";
 import App from "./App";
 import WebcamBubble from "./components/WebcamBubble";
 import Review from "./Review";
+import CountdownOverlay from "./CountdownOverlay";
 
 const hash = window.location.hash;
 const root = hash.startsWith("#bubble")
   ? <WebcamBubble />
   : hash.startsWith("#review")
   ? <Review />
+  : hash.startsWith("#countdown")
+  ? <CountdownOverlay />
   : <App />;
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
