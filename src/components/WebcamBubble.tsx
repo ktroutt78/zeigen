@@ -16,11 +16,23 @@ function readDeviceName(): string | null {
   return params.get("name");
 }
 
+// Pin to the same camera mode the recording-side ffmpeg requests
+// (1280x720 @ 30fps). When both consumers ask for the same mode, macOS
+// doesn't renegotiate when the second consumer attaches — so the
+// preview frame doesn't visibly zoom mid-recording.
+const VIDEO_CONSTRAINTS: MediaTrackConstraints = {
+  width: { ideal: 1280 },
+  height: { ideal: 720 },
+  frameRate: { ideal: 30 },
+};
+
 async function findStream(deviceName: string | null): Promise<MediaStream> {
   // Prefer matching by label so we follow the user's Tauri-side selection.
   // Browser device IDs aren't stable across sessions; labels are.
-  const constraints: MediaStreamConstraints = { video: true, audio: false };
-  const stream = await navigator.mediaDevices.getUserMedia(constraints);
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: VIDEO_CONSTRAINTS,
+    audio: false,
+  });
 
   if (!deviceName) return stream;
 
@@ -40,7 +52,7 @@ async function findStream(deviceName: string | null): Promise<MediaStream> {
   // Switch tracks: stop the old one, request the specific device.
   stream.getTracks().forEach((t) => t.stop());
   return await navigator.mediaDevices.getUserMedia({
-    video: { deviceId: { exact: match.deviceId } },
+    video: { ...VIDEO_CONSTRAINTS, deviceId: { exact: match.deviceId } },
     audio: false,
   });
 }

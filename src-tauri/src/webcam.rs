@@ -30,6 +30,10 @@ impl WebcamSegmenter {
             .sources_dir
             .join(format!("webcam-{segment_index:02}.mp4"));
 
+        // Pin video_size so the browser-side getUserMedia preview keeps the
+        // same camera mode when ffmpeg attaches as a second consumer.
+        // Without this, macOS renegotiates to a different default mode and
+        // the preview visibly "zooms" mid-recording.
         let child = Command::new(FFMPEG_PATH)
             .args([
                 "-y",
@@ -38,6 +42,8 @@ impl WebcamSegmenter {
                 "avfoundation",
                 "-framerate",
                 "30",
+                "-video_size",
+                "1280x720",
                 "-i",
                 &self.camera_index.to_string(),
                 "-c:v",
