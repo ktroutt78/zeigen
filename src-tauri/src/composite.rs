@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const FFMPEG_PATH: &str = "/opt/homebrew/bin/ffmpeg";
-const FFPROBE_PATH: &str = "/opt/homebrew/bin/ffprobe";
+pub(crate) const FFMPEG_PATH: &str = "/opt/homebrew/bin/ffmpeg";
+pub(crate) const FFPROBE_PATH: &str = "/opt/homebrew/bin/ffprobe";
 
 fn probe_duration_seconds(path: &Path) -> Result<f64, String> {
     let output = Command::new(FFPROBE_PATH)

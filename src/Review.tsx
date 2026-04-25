@@ -186,14 +186,14 @@ export default function Review() {
     }
   }, [sourcePath, snapshot, hadInitialSidecar, duration]);
 
-  // Save edits is a stub in C2. C3 wires ffmpeg via an `edit_save` Tauri
-  // command that produces <original>-edited.mp4. The stub keeps the modal
-  // and Save-button surface area working.
+  // Save edits: persist sidecar, then run the ffmpeg pipeline to produce
+  // <original>-edited.mp4. Pipeline is single-pass with -ss/-to trim and
+  // h264_videotoolbox. Annotations are persisted to the sidecar but not yet
+  // rendered — C4 (text/drawtext) and C5 (arrow/overlay) extend the pipeline.
   const saveEdits = useCallback(async (): Promise<boolean> => {
     if (!sourcePath) return false;
     setSaving(true);
     try {
-      // Persist current state synchronously so a future re-open sees it.
       const norm: SidecarState = {
         trim: normalizeTrim(currentState.trim, duration),
         annotations: currentState.annotations,
@@ -203,7 +203,11 @@ export default function Review() {
       } else {
         await invoke("write_sidecar", { sourcePath, state: norm });
       }
-      // C3 will run the ffmpeg pipeline here and produce -edited.mp4.
+      const outPath = await invoke<string>("edit_save", {
+        sourcePath,
+        sidecar: norm,
+      });
+      console.log("Saved edited mp4:", outPath);
       return true;
     } catch (err) {
       setError(`save edits: ${err}`);

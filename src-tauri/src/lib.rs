@@ -294,6 +294,7 @@ pub fn run() {
             edit::read_sidecar,
             edit::write_sidecar,
             edit::delete_sidecar,
+            edit::edit_save,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
