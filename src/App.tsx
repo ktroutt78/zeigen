@@ -279,7 +279,8 @@ type LengthCapMode = "off" | "target";
 
 type FinalizedRecording = {
   stamp: string;
-  final_path: string;
+  scratch_dir: string;
+  scratch_mp4_path: string;
   sources_dir: string | null;
   webcam_segments: string[];
   composited: boolean;
@@ -376,7 +377,7 @@ function App() {
             invoke<FinalizedRecording>("recording_finalize")
               .then(async (info) => {
                 setFinalizeInfo(info);
-                await openReview(`review-${info.stamp}`, info.final_path, decReview);
+                await openReview(`review-${info.stamp}`, info.scratch_mp4_path, decReview);
               })
               .catch((err) => {
                 setError(String(err));
@@ -1339,7 +1340,7 @@ function StatusStrip({
       <StripRow
         tone="success"
         label={finalizeInfo.composited ? "Composited" : "Saved"}
-        body={finalizeInfo.final_path}
+        body={finalizeInfo.scratch_mp4_path}
         onDismiss={onDismiss}
       />
     );

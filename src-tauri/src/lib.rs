@@ -25,7 +25,8 @@ type RecordingState<'a> = State<'a, Mutex<Option<ActiveRecording>>>;
 
 struct ActiveRecording {
     stamp: String,
-    final_path: PathBuf,
+    scratch_dir: PathBuf,
+    scratch_mp4_path: PathBuf,
     webcam: Option<WebcamSegmenter>,
     webcam_size: WebcamSize,
     webcam_corner: Corner,
@@ -69,22 +70,21 @@ fn engine_start(
     }
 
     let stamp = Local::now().format("%Y-%m-%d-%H%M%S").to_string();
-    let movies_dir = movies_dir()?;
-    std::fs::create_dir_all(&movies_dir)
-        .map_err(|e| format!("create {}: {}", movies_dir.display(), e))?;
-    let final_path = movies_dir.join(format!("recording-{stamp}.mp4"));
+    let scratch_root = scratch_root_dir()?;
+    let scratch_dir = scratch_root.join(format!("recording-{stamp}"));
+    std::fs::create_dir_all(&scratch_dir)
+        .map_err(|e| format!("create {}: {}", scratch_dir.display(), e))?;
+    let scratch_mp4_path = scratch_dir.join(format!("recording-{stamp}.mp4"));
 
     let (screen_output, webcam) = if let Some(idx) = camera_index {
-        let sources_dir = movies_dir
-            .join(".sources")
-            .join(format!("recording-{stamp}"));
+        let sources_dir = scratch_dir.join("sources");
         std::fs::create_dir_all(&sources_dir)
             .map_err(|e| format!("create {}: {}", sources_dir.display(), e))?;
         let mut segmenter = WebcamSegmenter::new(idx, sources_dir.clone());
         segmenter.start_segment()?;
         (sources_dir.join("screen.mp4"), Some(segmenter))
     } else {
-        (final_path.clone(), None)
+        (scratch_mp4_path.clone(), None)
     };
 
     engine
@@ -99,7 +99,8 @@ fn engine_start(
 
     *active = Some(ActiveRecording {
         stamp: stamp.clone(),
-        final_path: final_path.clone(),
+        scratch_dir: scratch_dir.clone(),
+        scratch_mp4_path: scratch_mp4_path.clone(),
         webcam,
         webcam_size: parse_size(webcam_size.as_deref()),
         webcam_corner: parse_corner(webcam_corner.as_deref()),
@@ -114,7 +115,7 @@ fn engine_start(
         last_logged: None,
     });
 
-    Ok(final_path.to_string_lossy().into_owned())
+    Ok(scratch_mp4_path.to_string_lossy().into_owned())
 }
 
 fn parse_size(s: Option<&str>) -> WebcamSize {
@@ -248,7 +249,8 @@ fn recording_finalize(recording: RecordingState<'_>) -> Result<FinalizedRecordin
         .ok_or("no active recording")?;
 
     let stamp = rec.stamp;
-    let final_path = rec.final_path;
+    let scratch_dir = rec.scratch_dir;
+    let scratch_mp4_path = rec.scratch_mp4_path;
     let webcam_size = rec.webcam_size;
     let webcam_corner = rec.webcam_corner;
     let webcam_opt = rec.webcam;
@@ -262,7 +264,7 @@ fn recording_finalize(recording: RecordingState<'_>) -> Result<FinalizedRecordin
         composite::composite(
             &screen_path,
             &segments,
-            &final_path,
+            &scratch_mp4_path,
             webcam_size,
             webcam_corner,
             &bubble_position_log,
@@ -273,14 +275,15 @@ fn recording_finalize(recording: RecordingState<'_>) -> Result<FinalizedRecordin
     };
 
     if !bubble_position_log.is_empty() {
-        let mut state = edit::read_sidecar_path(&final_path)?.unwrap_or_default();
+        let mut state = edit::read_sidecar_path(&scratch_mp4_path)?.unwrap_or_default();
         state.bubble_position_log = bubble_position_log;
-        edit::write_sidecar_path(&final_path, &state)?;
+        edit::write_sidecar_path(&scratch_mp4_path, &state)?;
     }
 
     Ok(FinalizedRecording {
         stamp,
-        final_path: final_path.to_string_lossy().into_owned(),
+        scratch_dir: scratch_dir.to_string_lossy().into_owned(),
+        scratch_mp4_path: scratch_mp4_path.to_string_lossy().into_owned(),
         sources_dir: sources_dir.map(|p| p.to_string_lossy().into_owned()),
         webcam_segments: segments
             .into_iter()
@@ -293,7 +296,8 @@ fn recording_finalize(recording: RecordingState<'_>) -> Result<FinalizedRecordin
 #[derive(serde::Serialize)]
 struct FinalizedRecording {
     stamp: String,
-    final_path: String,
+    scratch_dir: String,
+    scratch_mp4_path: String,
     sources_dir: Option<String>,
     webcam_segments: Vec<String>,
     composited: bool,
@@ -302,6 +306,17 @@ struct FinalizedRecording {
 fn movies_dir() -> Result<PathBuf, String> {
     let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
     Ok(PathBuf::from(home).join("Movies/Zeigen"))
+}
+
+// Scratch root: ~/Movies/Zeigen/.scratch. Each recording gets its own
+// subdirectory containing the composited mp4, sidecar, and raw source
+// files. Discard removes the whole subdirectory; commit moves the mp4 out
+// and removes the subdirectory.
+fn scratch_root_dir() -> Result<PathBuf, String> {
+    let dir = movies_dir()?.join(".scratch");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("create {}: {}", dir.display(), e))?;
+    Ok(dir)
 }
 
 #[tauri::command]
