@@ -119,9 +119,6 @@ function ReviewWindow({ state = "justStopped" }) {
           <span style={{ color: "var(--fg-tertiary)", fontSize: 12 }}>just now</span>
         </div>
         <div style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 2 }}>
-          <button className="btn-ghost" style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "var(--fg-secondary)", fontSize: 12 }}>
-            {I.tag}<span>Tag</span>
-          </button>
           <button className="btn-ghost" style={{ padding: 5, color: "var(--fg-secondary)" }} title="More">{I.more}</button>
         </div>
       </div>
@@ -137,15 +134,10 @@ function ReviewWindow({ state = "justStopped" }) {
             color: "var(--fg-secondary)", fontSize: 12,
           }}>
             <div style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-              {state === "midEdit" ? (
-                <input className="input" defaultValue="Onboarding flow walkthrough"
-                  style={{ height: 24, padding: "2px 8px", fontSize: 12.5, fontWeight: 500, color: "var(--fg-primary)", width: 240 }}/>
-              ) : (
-                <span style={{ color: "var(--fg-primary)", fontWeight: 500, fontSize: 12.5 }}>Untitled Recording</span>
-              )}
+              <span style={{ color: "var(--fg-primary)", fontWeight: 500, fontSize: 12.5 }}>Untitled Recording</span>
               <span style={{ color: "var(--fg-tertiary)" }}>·</span>
               <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--fg-tertiary)" }}>
-                1080p · 60fps · {fmt(state === "midEdit" ? trimOut - trimIn : total)} · 86 MB
+                native res · 30fps · {fmt(state === "midEdit" ? trimOut - trimIn : total)} · .mp4
               </span>
             </div>
             <div style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
@@ -299,7 +291,7 @@ function ReviewWindow({ state = "justStopped" }) {
               primary
               icon={<Icon d="M3 8.5l3 3 7-7" size={14} stroke={1.6}/>}
               title="Saved Locally"
-              sub="~/Movies/Zeigen/Recording-2026-04-24.mov"
+              sub="~/Movies/Zeigen/recording-2026-04-24-143052.mp4"
               action={<span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11.5 }}>{I.finder}<span>Reveal</span></span>}
             />
             <Dest
