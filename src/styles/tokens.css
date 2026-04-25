@@ -72,6 +72,11 @@
   --success-soft:     oklch(0.62 0.13 155 / 0.14);
   --success-tint:     oklch(0.82 0.13 155);
 
+  /* Warning — length-cap 80% threshold tint. Slightly lighter than the
+     0.62 family so digit glyphs read clearly on the dark bubble pill. */
+  --warning:          oklch(0.72 0.16 70);
+  --warning-tint:     oklch(0.82 0.14 70);
+
   /* ─── Radius ──────────────────────────────────────────────── */
   --r-xs:     4px;    /* micro pills, frame chips                */
   --r-sm:     6px;    /* inputs, secondary buttons               */

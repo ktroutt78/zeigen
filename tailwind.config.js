@@ -62,6 +62,10 @@ export default {
           soft:    "oklch(0.62 0.13 155 / 0.14)",
           tint:    "oklch(0.82 0.13 155)",
         },
+        warning: {
+          DEFAULT: "oklch(0.72 0.16 70)",
+          tint:    "oklch(0.82 0.14 70)",
+        },
       },
       spacing: {
         "row":      "9px",
