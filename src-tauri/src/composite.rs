@@ -201,8 +201,12 @@ pub fn composite(
     } else {
         filter.push_str("[1:v]copy[wc_full];");
     }
+    // hflip matches the preview's CSS `transform: scaleX(-1)` (WebcamBubble.tsx).
+    // The invariant is preview-matches-recording; absolute orientation then
+    // depends on whether the camera pre-mirrors (Continuity does, FaceTime HD
+    // does not). See DECISIONS.md 2026-04-25.
     filter.push_str(&format!(
-        "[wc_full]crop='min(iw\\,ih)':'min(iw\\,ih)',\
+        "[wc_full]hflip,crop='min(iw\\,ih)':'min(iw\\,ih)',\
 scale={target}:{target},\
 format=yuva420p,\
 geq='lum=p(X\\,Y):a=255*lt(hypot(X-W/2\\,Y-H/2)\\,W/2)'[wc];\
