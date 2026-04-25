@@ -104,6 +104,33 @@ Bundles four features and one bug fix from Phase 5 UAT. All recording-lifecycle 
 
 **Done when:** A recording made with the bubble dragged mid-record produces a final mp4 where the bubble follows the logged path; the countdown plays before SCK starts and is not in the recording; the timer is visible on the bubble (or the standalone chip when no webcam) and on the tray icon; the length cap tints the timer at 80% / 100% without auto-stopping; the floating preview no longer appears in the captured screen.
 
+## Phase 5.5: Scratch-and-commit save model
+
+Numbered 5.5 because it corrects the Phase 5 save pipeline; sequenced after Phase 3.5 and before Phase 6 so the export panel inherits the corrected commit semantics.
+
+Phase 5 finalized recordings directly to `~/Movies/Zeigen/recording-….mp4`. That auto-saves every recording, including throwaway test takes, and only offers a non-destructive "Discard edits" in review. Comparable tools (Loom, CleanShot X, QuickTime, ScreenFlow) all hold the recording in scratch state until the user explicitly commits. Phase 5.5 aligns Zeigen with that mental model.
+
+**Deliverables**
+
+1. Recording-finalize writes the composited mp4 to a scratch path under `~/Movies/Zeigen/.scratch/<id>/` (not the final path). The sidecar JSON (and bubble position log) lives alongside the scratch mp4.
+2. The review window opens against the scratch file. All trim/annotation work happens there.
+3. Explicit **"Save recording"** button in the review footer moves the scratch mp4 to `~/Movies/Zeigen/recording-….mp4` and applies pending edits at move time. The sidecar moves with it.
+4. Explicit **"Discard recording"** button deletes the scratch directory in full (mp4 + sidecar + raw source files). Asks for confirmation.
+5. Closing the review window with unsaved state prompts: **Save / Discard / Cancel.** Default button is **Discard** (matches the destructive-modal-default decision in DECISIONS.md, 2026-04-25).
+6. **"Record another"** button in the review window. If state is unsaved, fires the same Save/Discard/Cancel prompt against the current recording first; on Save or Discard, then opens the capture window for a fresh recording.
+7. Closing the review window always restores the capture (main) window — never leaves the user with no visible app surface. Tray icon stays present regardless.
+
+**Implementation order**
+
+1. Scratch path layout + finalize routes the composite output to scratch.
+2. Review window opens against the scratch path; existing edit pipeline operates unchanged on scratch input.
+3. Save action (move scratch → final + apply edits in one pass).
+4. Discard action (delete scratch directory).
+5. Close-with-unsaved-state prompt (3-button dialog, Discard default).
+6. Record-another button + capture-window restoration on review close.
+
+**Done when:** A new recording lands in `.scratch/`, not in `~/Movies/Zeigen/`. Closing the review window with no Save click leaves nothing in `~/Movies/Zeigen/`. Clicking Save produces the expected `recording-….mp4` and removes the scratch dir. Clicking Discard removes the scratch dir and produces nothing in `~/Movies/Zeigen/`. The Record-another flow works end-to-end without leaving stranded windows.
+
 ## Phase 6: Export destinations
 
 Four output paths from the review screen. Local save already works from Phase 2; this phase adds the other three.
