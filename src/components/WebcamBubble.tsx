@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { Icon, P } from "./icons";
 import { useCornerSnap } from "../hooks/useCornerSnap";
 import { useBubblePositionLog } from "../hooks/useBubblePositionLog";
@@ -122,12 +123,11 @@ export default function WebcamBubble() {
           overflow: "hidden",
           position: "relative",
           background: "#1a1a1c",
-          border: "1.5px solid rgba(255,255,255,0.12)",
-          // Tight blur so the drop-shadow fades within the inscribed-circle's
-          // corner gap (~50px on a square 240 window) — keeps the bubble
-          // looking lifted without painting a faded square in the window's
-          // transparent corners.
-          boxShadow: "0 6px 16px rgba(0,0,0,0.45), 0 0 0 0.5px rgba(0,0,0,0.5)",
+          // White ~25% rim, no black inner hairline. Subtle drop shadow only —
+          // tight enough to fade inside the window's corner gap so the
+          // transparent backdrop reads clean.
+          border: "1.5px solid rgba(255,255,255,0.28)",
+          boxShadow: "0 4px 10px rgba(0,0,0,0.28)",
           cursor: hover ? "grab" : "default",
         }}
       >
@@ -200,17 +200,93 @@ export default function WebcamBubble() {
         )}
 
         {(recState === "recording" || recState === "paused") && (
-          <div
-            style={{
-              position: "absolute",
-              left: "50%",
-              bottom: 14,
-              transform: "translateX(-50%)",
-              pointerEvents: "none",
-            }}
-          >
-            <TimerChip state={recState} elapsedSec={elapsed} capSec={capSec} />
-          </div>
+          <>
+            <div
+              style={{
+                position: "absolute",
+                left: "50%",
+                top: 12,
+                transform: "translateX(-50%)",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+                padding: 4,
+                background: "rgba(20,20,22,0.78)",
+                backdropFilter: "blur(10px)",
+                WebkitBackdropFilter: "blur(10px)",
+                border: "0.5px solid rgba(255,255,255,0.18)",
+                borderRadius: 99,
+                boxShadow: "0 4px 14px rgba(0,0,0,0.4)",
+                pointerEvents: "auto",
+              }}
+            >
+              <button
+                title={recState === "paused" ? "Resume" : "Pause"}
+                onClick={() => {
+                  if (recState === "paused") {
+                    invoke("engine_resume").catch(() => {});
+                  } else {
+                    invoke("engine_pause").catch(() => {});
+                  }
+                }}
+                style={{
+                  width: 26,
+                  height: 26,
+                  borderRadius: 99,
+                  background: "transparent",
+                  color: "#fff",
+                  border: "none",
+                  cursor: "pointer",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+              >
+                <Icon
+                  d={recState === "paused" ? P.play : P.pause}
+                  size={12}
+                  stroke={1.5}
+                />
+              </button>
+              <button
+                title="Stop"
+                onClick={() => invoke("engine_stop").catch(() => {})}
+                style={{
+                  width: 26,
+                  height: 26,
+                  borderRadius: 99,
+                  background: "var(--recording)",
+                  color: "#fff",
+                  border: "none",
+                  cursor: "pointer",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+              >
+                <span
+                  style={{
+                    width: 8,
+                    height: 8,
+                    background: "#fff",
+                    borderRadius: 1.5,
+                    display: "inline-block",
+                  }}
+                />
+              </button>
+            </div>
+            <div
+              style={{
+                position: "absolute",
+                left: "50%",
+                bottom: 14,
+                transform: "translateX(-50%)",
+                pointerEvents: "none",
+              }}
+            >
+              <TimerChip state={recState} elapsedSec={elapsed} capSec={capSec} />
+            </div>
+          </>
         )}
       </div>
     </div>
