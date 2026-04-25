@@ -408,9 +408,27 @@ function App() {
 
     setup();
 
+    // The review window emits `recording-committed` after commit_recording
+    // succeeds — main updates its post-finalize toast from the now-stale
+    // scratch path to the actual final ~/Movies/Zeigen/recording-….mp4.
+    let unlistenCommitted: (() => void) | null = null;
+    listen<{ final_path: string }>("recording-committed", (e) => {
+      const finalPath = e.payload.final_path;
+      setLastSaved(finalPath);
+      setFinalizeInfo((prev) =>
+        prev
+          ? { ...prev, scratch_mp4_path: finalPath, sources_dir: null, composited: false }
+          : null,
+      );
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlistenCommitted = fn;
+    });
+
     return () => {
       cancelled = true;
       unlistenFn?.();
+      unlistenCommitted?.();
     };
   }, []);
 

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { emit } from "@tauri-apps/api/event";
 import { Icon, I, P } from "./components/icons";
 
 // Phase 5 review window. Layout mirrors docs/design/surfaces/review.jsx —
@@ -309,7 +310,9 @@ export default function Review() {
         scratchMp4Path: sourcePath,
         sidecar: norm,
       });
-      console.log("Committed recording:", outPath);
+      // Notify main so its post-finalize toast updates from the now-stale
+      // scratch path to the actual final ~/Movies/Zeigen/recording-….mp4.
+      await emit("recording-committed", { final_path: outPath }).catch(() => {});
       return true;
     } catch (err) {
       setError(`save recording: ${err}`);
@@ -464,16 +467,36 @@ export default function Review() {
     if (ok) await closeWindow();
   }, [saveRecording, closeWindow]);
 
-  // Player wiring.
+  // WebKit won't paint a video frame until the renderer is primed by
+  // an actual playback start — preload="auto" + a seek-to-0.04 alone
+  // leaves the element black on review-window open. A muted play() →
+  // immediate pause() forces the first frame to paint, and the frame
+  // stays visible after pause. Muted autoplay is permitted without a
+  // user gesture; we restore the original muted state on pause.
+  const primedRef = useRef(false);
+  const primeFirstFrame = useCallback(() => {
+    const v = videoRef.current;
+    if (!v || primedRef.current) return;
+    primedRef.current = true;
+    const wasMuted = v.muted;
+    v.muted = true;
+    v.play()
+      .then(() => {
+        requestAnimationFrame(() => {
+          v.pause();
+          v.muted = wasMuted;
+        });
+      })
+      .catch(() => {
+        v.muted = wasMuted;
+      });
+  }, []);
+
   const onLoadedMetadata = () => {
     const v = videoRef.current;
     if (!v) return;
     setDuration(v.duration);
-    // macOS WebKit with preload="metadata" downloads container metadata but
-    // doesn't paint a frame — the player reads black until play() is pressed.
-    // A tiny seek forces a decode so the user sees the recording's opening
-    // frame on review-window open.
-    if (v.currentTime === 0) v.currentTime = 0.04;
+    primeFirstFrame();
   };
 
   const onTimeUpdate = () => {
@@ -889,7 +912,7 @@ function VideoStage(props: VideoStageProps) {
             onPlay={props.onPlay}
             onPause={props.onPause}
             playsInline
-            preload="metadata"
+            preload="auto"
             style={{
               width: "100%",
               height: "100%",
