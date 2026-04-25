@@ -473,6 +473,11 @@ export default function Review() {
     const v = videoRef.current;
     if (!v) return;
     setDuration(v.duration);
+    // macOS WebKit with preload="metadata" downloads container metadata but
+    // doesn't paint a frame — the player reads black until play() is pressed.
+    // A tiny seek forces a decode so the user sees the recording's opening
+    // frame on review-window open.
+    if (v.currentTime === 0) v.currentTime = 0.04;
   };
 
   const onTimeUpdate = () => {
