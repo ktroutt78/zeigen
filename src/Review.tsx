@@ -20,6 +20,30 @@ type Annotation = {
   end_time: number;
   position: Position;
   content: string;
+  // Text-only: font size in source pixels. Defaults to 36 when absent.
+  size?: number;
+  // Arrow-only (C5): end point in source-fraction coords + stroke width.
+  endpoint?: Position;
+  stroke?: number;
+};
+
+type Tool = "text" | "arrow" | null;
+const DEFAULT_TEXT_SIZE = 36;
+const ANNOTATION_DEFAULT_DURATION = 3;
+const MIN_TEXT_SIZE = 12;
+const MAX_TEXT_SIZE = 200;
+
+type Editor = {
+  tool: Tool;
+  setTool: (t: Tool) => void;
+  annotations: Annotation[];
+  selectedIndex: number | null;
+  setSelectedIndex: (n: number | null) => void;
+  editingIndex: number | null;
+  setEditingIndex: (n: number | null) => void;
+  updateAnnotation: (idx: number, patch: Partial<Annotation>) => void;
+  deleteAnnotation: (idx: number) => void;
+  placeTextAt: (xFrac: number, yFrac: number) => void;
 };
 
 type Trim = { in: number; out: number };
@@ -102,6 +126,57 @@ export default function Review() {
 
   const [showCloseModal, setShowCloseModal] = useState(false);
   const [saving, setSaving] = useState(false);
+
+  // Annotation editing state.
+  const [tool, setTool] = useState<Tool>(null);
+  const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+
+  const updateAnnotation = useCallback(
+    (idx: number, patch: Partial<Annotation>) => {
+      setAnnotations((prev) =>
+        prev.map((a, i) => (i === idx ? { ...a, ...patch } : a)),
+      );
+    },
+    [],
+  );
+
+  const deleteAnnotation = useCallback(
+    (idx: number) => {
+      setAnnotations((prev) => prev.filter((_, i) => i !== idx));
+      setSelectedIndex(null);
+      setEditingIndex(null);
+    },
+    [],
+  );
+
+  const placeTextAt = useCallback(
+    (xFrac: number, yFrac: number) => {
+      const t = videoRef.current?.currentTime ?? 0;
+      const end = duration != null ? Math.min(duration, t + ANNOTATION_DEFAULT_DURATION) : t + ANNOTATION_DEFAULT_DURATION;
+      const ann: Annotation = {
+        type: "text",
+        start_time: t,
+        end_time: end,
+        position: { x: xFrac, y: yFrac },
+        content: "",
+        size: DEFAULT_TEXT_SIZE,
+      };
+      setAnnotations((prev) => {
+        const next = [...prev, ann];
+        const newIdx = next.length - 1;
+        // Defer selection/edit-mode state to a microtask so the new index is
+        // valid against the freshly-rendered list.
+        Promise.resolve().then(() => {
+          setSelectedIndex(newIdx);
+          setEditingIndex(newIdx);
+        });
+        return next;
+      });
+      setTool(null);
+    },
+    [duration],
+  );
 
   const sourceName = sourcePath ? basename(sourcePath) : "Untitled Recording";
 
@@ -293,6 +368,49 @@ export default function Review() {
     return () => window.removeEventListener("keydown", onKey);
   }, [showCloseModal, onModalCancel, onModalDiscard]);
 
+  // Global keyboard shortcuts: T/A → text tool, R → arrow tool (C5),
+  // Esc → cancel tool/selection, Backspace/Delete → delete selection.
+  // Suppressed while editing text content (contentEditable) or while the
+  // close modal is open (its own handler runs).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (showCloseModal) return;
+      const target = e.target as HTMLElement | null;
+      if (target?.isContentEditable) return;
+      if (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA") return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+      const key = e.key.toLowerCase();
+      if (key === "t" || key === "a") {
+        e.preventDefault();
+        setTool((prev) => (prev === "text" ? null : "text"));
+        setSelectedIndex(null);
+        setEditingIndex(null);
+      } else if (key === "r") {
+        e.preventDefault();
+        setTool((prev) => (prev === "arrow" ? null : "arrow"));
+        setSelectedIndex(null);
+        setEditingIndex(null);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        if (editingIndex != null) {
+          setEditingIndex(null);
+        } else if (selectedIndex != null) {
+          setSelectedIndex(null);
+        } else if (tool != null) {
+          setTool(null);
+        }
+      } else if (e.key === "Backspace" || e.key === "Delete") {
+        if (selectedIndex != null && editingIndex == null) {
+          e.preventDefault();
+          deleteAnnotation(selectedIndex);
+        }
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [showCloseModal, tool, selectedIndex, editingIndex, deleteAnnotation]);
+
   // Footer Discard restores snapshot in place (no window close).
   const onFooterDiscard = useCallback(async () => {
     await restoreSnapshot();
@@ -377,6 +495,18 @@ export default function Review() {
           onFooterSave={onFooterSave}
           dirty={dirty}
           saving={saving}
+          editor={{
+            tool,
+            setTool,
+            annotations,
+            selectedIndex,
+            setSelectedIndex,
+            editingIndex,
+            setEditingIndex,
+            updateAnnotation,
+            deleteAnnotation,
+            placeTextAt,
+          }}
         />
         <ExportPanel />
       </div>
@@ -455,6 +585,7 @@ type LeftColumnProps = {
   onFooterSave: () => Promise<void> | void;
   dirty: boolean;
   saving: boolean;
+  editor: Editor;
 };
 
 function LeftColumn(props: LeftColumnProps) {
@@ -467,7 +598,7 @@ function LeftColumn(props: LeftColumnProps) {
         minWidth: 0,
       }}
     >
-      <Toolbar duration={props.duration} trim={props.trim} />
+      <Toolbar duration={props.duration} trim={props.trim} editor={props.editor} />
       <VideoStage
         assetUrl={props.assetUrl}
         videoRef={props.videoRef}
@@ -479,6 +610,7 @@ function LeftColumn(props: LeftColumnProps) {
         currentTime={props.currentTime}
         playing={props.playing}
         togglePlay={props.togglePlay}
+        editor={props.editor}
       />
       <Timeline
         duration={props.duration}
@@ -486,6 +618,7 @@ function LeftColumn(props: LeftColumnProps) {
         trim={props.trim}
         setTrim={props.setTrim}
         seek={props.seek}
+        editor={props.editor}
       />
       <ActionFooter
         onDiscard={props.onFooterDiscard}
@@ -497,7 +630,15 @@ function LeftColumn(props: LeftColumnProps) {
   );
 }
 
-function Toolbar({ duration, trim }: { duration: number | null; trim: Trim | null }) {
+function Toolbar({
+  duration,
+  trim,
+  editor,
+}: {
+  duration: number | null;
+  trim: Trim | null;
+  editor: Editor;
+}) {
   const len =
     trim && duration != null
       ? Math.max(0, trim.out - trim.in)
@@ -525,35 +666,66 @@ function Toolbar({ duration, trim }: { duration: number | null; trim: Trim | nul
           {fmt(len)} · .mp4
         </span>
       </div>
-      <div style={{ display: "inline-flex", alignItems: "center", gap: 4, opacity: 0.5 }}>
-        <ToolButton icon={P.edit} label="Trim" kbd="T" />
-        <ToolButton icon="M2 13h12M5 10l3-7 3 7M6.5 8h3" label="Text" kbd="A" />
-        <ToolButton icon="M3 8h9M9 5l3 3-3 3" label="Arrow" kbd="R" />
+      <div style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+        <ToolButton icon={P.edit} label="Trim" kbd="T" active={false} disabled />
+        <ToolButton
+          icon="M2 13h12M5 10l3-7 3 7M6.5 8h3"
+          label="Text"
+          kbd="A"
+          active={editor.tool === "text"}
+          onClick={() => editor.setTool(editor.tool === "text" ? null : "text")}
+        />
+        <ToolButton
+          icon="M3 8h9M9 5l3 3-3 3"
+          label="Arrow"
+          kbd="R"
+          active={editor.tool === "arrow"}
+          disabled
+          title="Arrow ships in next commit"
+        />
       </div>
     </div>
   );
 }
 
-function ToolButton({ icon, label, kbd }: { icon: string; label: string; kbd: string }) {
+function ToolButton({
+  icon,
+  label,
+  kbd,
+  active,
+  disabled,
+  onClick,
+  title,
+}: {
+  icon: string;
+  label: string;
+  kbd: string;
+  active: boolean;
+  disabled?: boolean;
+  onClick?: () => void;
+  title?: string;
+}) {
   return (
     <button
-      disabled
+      onClick={disabled ? undefined : onClick}
+      disabled={disabled}
+      title={title}
       style={{
         display: "inline-flex",
         alignItems: "center",
         gap: 6,
         padding: "5px 9px",
         height: 26,
-        background: "transparent",
-        border: "1px solid transparent",
+        background: active ? "var(--accent-soft)" : "transparent",
+        border: `1px solid ${active ? "var(--accent)" : "transparent"}`,
         borderRadius: 6,
-        cursor: "not-allowed",
-        color: "var(--fg-secondary)",
+        cursor: disabled ? "not-allowed" : "pointer",
+        color: active ? "var(--fg-primary)" : "var(--fg-secondary)",
+        opacity: disabled ? 0.45 : 1,
         fontFamily: "var(--font-system)",
         fontSize: 12,
         fontWeight: 500,
       }}
-      title="Coming in next commit"
     >
       <Icon d={icon} size={12} stroke={1.4} />
       <span>{label}</span>
@@ -573,12 +745,37 @@ type VideoStageProps = {
   currentTime: number;
   playing: boolean;
   togglePlay: () => void;
+  editor: Editor;
 };
 
 function VideoStage(props: VideoStageProps) {
+  const stageRef = useRef<HTMLDivElement | null>(null);
+
+  const onStageClick = (e: React.MouseEvent) => {
+    if (props.editor.tool !== "text") {
+      // Click on empty stage with no tool active = deselect.
+      if (props.editor.tool == null && (e.target as HTMLElement).dataset.stageBg === "1") {
+        props.editor.setSelectedIndex(null);
+        props.editor.setEditingIndex(null);
+      }
+      return;
+    }
+    const rect = stageRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const xFrac = (e.clientX - rect.left) / rect.width;
+    const yFrac = (e.clientY - rect.top) / rect.height;
+    if (xFrac < 0 || xFrac > 1 || yFrac < 0 || yFrac > 1) return;
+    props.editor.placeTextAt(xFrac, yFrac);
+  };
+
+  const cursor = props.editor.tool === "text" ? "crosshair" : "default";
+
   return (
     <div style={{ position: "relative", padding: 16, background: "#0c0d10", flex: 1 }}>
       <div
+        ref={stageRef}
+        onClick={onStageClick}
+        data-stage-bg="1"
         style={{
           position: "relative",
           aspectRatio: "16 / 9",
@@ -587,6 +784,7 @@ function VideoStage(props: VideoStageProps) {
           overflow: "hidden",
           border: "1px solid rgba(255,255,255,0.06)",
           background: "#000",
+          cursor,
         }}
       >
         {props.assetUrl ? (
@@ -599,7 +797,13 @@ function VideoStage(props: VideoStageProps) {
             onPause={props.onPause}
             playsInline
             preload="metadata"
-            style={{ width: "100%", height: "100%", objectFit: "contain", background: "#000" }}
+            style={{
+              width: "100%",
+              height: "100%",
+              objectFit: "contain",
+              background: "#000",
+              pointerEvents: "none",
+            }}
           />
         ) : (
           <div
@@ -616,6 +820,12 @@ function VideoStage(props: VideoStageProps) {
             No source path
           </div>
         )}
+        <AnnotationLayer
+          stageRef={stageRef}
+          videoRef={props.videoRef}
+          editor={props.editor}
+          currentTime={props.currentTime}
+        />
         <PlayerOverlay
           playing={props.playing}
           duration={props.duration}
@@ -624,6 +834,262 @@ function VideoStage(props: VideoStageProps) {
         />
       </div>
     </div>
+  );
+}
+
+function AnnotationLayer({
+  stageRef,
+  videoRef,
+  editor,
+  currentTime,
+}: {
+  stageRef: React.MutableRefObject<HTMLDivElement | null>;
+  videoRef: React.MutableRefObject<HTMLVideoElement | null>;
+  editor: Editor;
+  currentTime: number;
+}) {
+  return (
+    <div
+      style={{
+        position: "absolute",
+        inset: 0,
+        pointerEvents: "none",
+      }}
+    >
+      {editor.annotations.map((ann, idx) => {
+        if (ann.type !== "text") return null;
+        const visible =
+          currentTime >= ann.start_time - 0.001 && currentTime <= ann.end_time + 0.001;
+        const isSelected = editor.selectedIndex === idx;
+        const isEditing = editor.editingIndex === idx;
+        if (!visible && !isSelected && !isEditing) return null;
+        return (
+          <TextAnnotationView
+            key={idx}
+            ann={ann}
+            idx={idx}
+            stageRef={stageRef}
+            videoRef={videoRef}
+            editor={editor}
+            isSelected={isSelected}
+            isEditing={isEditing}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+function TextAnnotationView({
+  ann,
+  idx,
+  stageRef,
+  videoRef,
+  editor,
+  isSelected,
+  isEditing,
+}: {
+  ann: Annotation;
+  idx: number;
+  stageRef: React.MutableRefObject<HTMLDivElement | null>;
+  videoRef: React.MutableRefObject<HTMLVideoElement | null>;
+  editor: Editor;
+  isSelected: boolean;
+  isEditing: boolean;
+}) {
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+
+  // Compute font size in CSS pixels: source-pixel size scaled by display
+  // height vs source video height. Falls back to a 1:1 mapping until video
+  // metadata is known.
+  const sourceHeight = videoRef.current?.videoHeight || 0;
+  const stageHeight = stageRef.current?.getBoundingClientRect().height || 0;
+  const scale = sourceHeight && stageHeight ? stageHeight / sourceHeight : 1;
+  const sizeSrc = ann.size ?? DEFAULT_TEXT_SIZE;
+  const sizeCss = sizeSrc * scale;
+
+  const startBodyDrag = (e: React.PointerEvent) => {
+    e.stopPropagation();
+    if (isEditing) return;
+    if (!isSelected) {
+      editor.setSelectedIndex(idx);
+    }
+    const stage = stageRef.current?.getBoundingClientRect();
+    if (!stage) return;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startPos = ann.position;
+    const onMove = (ev: PointerEvent) => {
+      const dx = (ev.clientX - startX) / stage.width;
+      const dy = (ev.clientY - startY) / stage.height;
+      editor.updateAnnotation(idx, {
+        position: {
+          x: Math.max(0, Math.min(1, startPos.x + dx)),
+          y: Math.max(0, Math.min(1, startPos.y + dy)),
+        },
+      });
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+
+  const startResize = (corner: "tl" | "tr" | "bl" | "br") => (e: React.PointerEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    const stage = stageRef.current?.getBoundingClientRect();
+    if (!stage || !sourceHeight) return;
+    const startY = e.clientY;
+    const startSize = ann.size ?? DEFAULT_TEXT_SIZE;
+    // Sign convention: dragging away from the body grows; toward shrinks.
+    const grow = corner === "br" || corner === "bl" ? 1 : -1;
+    const onMove = (ev: PointerEvent) => {
+      const dy = (ev.clientY - startY) * grow;
+      const dySrc = dy / scale; // CSS px → source px
+      const next = Math.max(MIN_TEXT_SIZE, Math.min(MAX_TEXT_SIZE, startSize + dySrc));
+      editor.updateAnnotation(idx, { size: next });
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+
+  // Auto-focus contentEditable when entering edit mode.
+  useEffect(() => {
+    if (isEditing) {
+      const el = bodyRef.current;
+      if (!el) return;
+      el.focus();
+      // Place caret at end.
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      range.collapse(false);
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+    }
+  }, [isEditing]);
+
+  const onBodyClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!isSelected) editor.setSelectedIndex(idx);
+  };
+  const onBodyDoubleClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    editor.setSelectedIndex(idx);
+    editor.setEditingIndex(idx);
+  };
+  const onContentBlur = () => {
+    const text = bodyRef.current?.innerText.trim() ?? "";
+    if (text === "") {
+      // Empty annotations are dropped on commit.
+      editor.deleteAnnotation(idx);
+      return;
+    }
+    if (text !== ann.content) {
+      editor.updateAnnotation(idx, { content: text });
+    }
+    editor.setEditingIndex(null);
+  };
+  const onContentKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      bodyRef.current?.blur();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      bodyRef.current?.blur();
+    }
+  };
+
+  const showHandles = isSelected && !isEditing;
+
+  return (
+    <div
+      onPointerDown={startBodyDrag}
+      onClick={onBodyClick}
+      onDoubleClick={onBodyDoubleClick}
+      style={{
+        position: "absolute",
+        left: `${ann.position.x * 100}%`,
+        top: `${ann.position.y * 100}%`,
+        padding: `${Math.max(3, sizeCss * 0.15)}px ${Math.max(6, sizeCss * 0.3)}px`,
+        background: "rgba(20,20,22,0.86)",
+        color: "#fff",
+        borderRadius: Math.max(3, sizeCss * 0.15),
+        border: "0.5px solid rgba(255,255,255,0.18)",
+        fontFamily: "var(--font-system)",
+        fontSize: `${sizeCss}px`,
+        lineHeight: 1.2,
+        fontWeight: 600,
+        letterSpacing: "-0.005em",
+        boxShadow: "0 6px 16px rgba(0,0,0,0.45)",
+        outline: isSelected ? "1.5px solid var(--accent)" : "none",
+        outlineOffset: 2,
+        cursor: isEditing ? "text" : isSelected ? "move" : "pointer",
+        pointerEvents: "auto",
+        whiteSpace: "pre-wrap",
+        userSelect: isEditing ? "text" : "none",
+      }}
+    >
+      <div
+        ref={bodyRef}
+        contentEditable={isEditing}
+        suppressContentEditableWarning
+        onBlur={onContentBlur}
+        onKeyDown={onContentKeyDown}
+        spellCheck={false}
+        style={{
+          outline: "none",
+          minWidth: isEditing && ann.content === "" ? `${Math.max(60, sizeCss * 2)}px` : undefined,
+        }}
+      >
+        {ann.content || (isEditing ? "" : "Type here…")}
+      </div>
+      {showHandles && (
+        <>
+          <ResizeHandle pos="tl" onPointerDown={startResize("tl")} />
+          <ResizeHandle pos="tr" onPointerDown={startResize("tr")} />
+          <ResizeHandle pos="bl" onPointerDown={startResize("bl")} />
+          <ResizeHandle pos="br" onPointerDown={startResize("br")} />
+        </>
+      )}
+    </div>
+  );
+}
+
+function ResizeHandle({
+  pos,
+  onPointerDown,
+}: {
+  pos: "tl" | "tr" | "bl" | "br";
+  onPointerDown: (e: React.PointerEvent) => void;
+}) {
+  const top = pos === "tl" || pos === "tr" ? -4 : "calc(100% - 3px)";
+  const left = pos === "tl" || pos === "bl" ? -4 : "calc(100% - 3px)";
+  const cursor =
+    pos === "tl" || pos === "br" ? "nwse-resize" : "nesw-resize";
+  return (
+    <span
+      onPointerDown={onPointerDown}
+      style={{
+        position: "absolute",
+        top,
+        left,
+        width: 7,
+        height: 7,
+        borderRadius: 1.5,
+        background: "#fff",
+        border: "1px solid var(--accent)",
+        cursor,
+        touchAction: "none",
+      }}
+    />
   );
 }
 
@@ -697,6 +1163,7 @@ type TimelineProps = {
   trim: Trim | null;
   setTrim: React.Dispatch<React.SetStateAction<Trim | null>>;
   seek: (t: number) => void;
+  editor: Editor;
 };
 
 function Timeline(props: TimelineProps) {
@@ -846,6 +1313,78 @@ function Timeline(props: TimelineProps) {
             </>
           )}
         </div>
+
+        {/* Annotation pips — one per annotation, drag to shift in time */}
+        {props.duration != null &&
+          props.editor.annotations.map((ann, idx) => {
+            const mid = (ann.start_time + ann.end_time) / 2;
+            const pct = (mid / (props.duration as number)) * 100;
+            const selected = props.editor.selectedIndex === idx;
+            const onPipDown = (e: React.PointerEvent) => {
+              e.stopPropagation();
+              e.preventDefault();
+              props.editor.setSelectedIndex(idx);
+              const track = trackRef.current;
+              if (!track || props.duration == null) return;
+              const rect = track.getBoundingClientRect();
+              const startX = e.clientX;
+              const startStart = ann.start_time;
+              const startEnd = ann.end_time;
+              const onMove = (ev: PointerEvent) => {
+                const dx = ((ev.clientX - startX) / rect.width) * (props.duration as number);
+                const dur = startEnd - startStart;
+                let nextStart = Math.max(0, startStart + dx);
+                let nextEnd = nextStart + dur;
+                if (nextEnd > (props.duration as number)) {
+                  nextEnd = props.duration as number;
+                  nextStart = nextEnd - dur;
+                }
+                props.editor.updateAnnotation(idx, {
+                  start_time: nextStart,
+                  end_time: nextEnd,
+                });
+              };
+              const onUp = () => {
+                window.removeEventListener("pointermove", onMove);
+                window.removeEventListener("pointerup", onUp);
+              };
+              window.addEventListener("pointermove", onMove);
+              window.addEventListener("pointerup", onUp);
+            };
+            const label = ann.type === "text" ? "T" : "→";
+            return (
+              <div
+                key={idx}
+                onPointerDown={onPipDown}
+                style={{
+                  position: "absolute",
+                  left: `${pct}%`,
+                  top: -2,
+                  transform: "translateX(-50%)",
+                  cursor: "grab",
+                }}
+              >
+                <span
+                  style={{
+                    display: "inline-block",
+                    width: 14,
+                    height: 14,
+                    borderRadius: 99,
+                    background: selected ? "var(--accent)" : "var(--bg-elevated)",
+                    border: "1px solid var(--accent)",
+                    color: selected ? "#fff" : "var(--accent)",
+                    textAlign: "center",
+                    lineHeight: "12px",
+                    fontSize: 9,
+                    fontWeight: 700,
+                    fontFamily: "var(--font-system)",
+                  }}
+                >
+                  {label}
+                </span>
+              </div>
+            );
+          })}
 
         {/* Trim handles */}
         {props.trim && props.duration != null && (

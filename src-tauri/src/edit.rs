@@ -28,6 +28,15 @@ pub struct Annotation {
     pub end_time: f64,
     pub position: Position,
     pub content: String,
+    // Text-only: font size in source pixels. Defaults to 36 when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<f64>,
+    // Arrow-only (C5): end point in source-fraction coords.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<Position>,
+    // Arrow-only (C5): stroke width in source pixels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stroke: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -113,10 +122,21 @@ fn probe_duration_seconds(path: &Path) -> Result<f64, String> {
 }
 
 const TRIM_EPS: f64 = 0.05;
+const DEFAULT_TEXT_SIZE_PX: f64 = 36.0;
+const FONT_FILE: &str = "/System/Library/Fonts/SFNS.ttf";
 
-// Single-pass save pipeline. C3 covers trim only — annotations are persisted
-// in the sidecar but not yet rendered. C4 (text/drawtext) and C5
-// (arrow/overlay) extend the filter graph here.
+fn temp_dir_for(source: &Path) -> PathBuf {
+    let stem = source
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown");
+    let parent = source.parent().unwrap_or_else(|| Path::new(""));
+    parent.join(".sources").join(format!("edit-{stem}"))
+}
+
+// Single-pass save pipeline. Trim via -ss/-to before -i; text annotations
+// rendered with drawtext (textfile=… to avoid escape headaches); arrows
+// composited as transparent PNGs in C5. Output via h264_videotoolbox.
 #[tauri::command]
 pub fn edit_save(source_path: String, sidecar: SidecarState) -> Result<String, String> {
     let source = PathBuf::from(&source_path);
@@ -126,11 +146,40 @@ pub fn edit_save(source_path: String, sidecar: SidecarState) -> Result<String, S
     let output = edited_output_path(&source);
     let duration = probe_duration_seconds(&source)?;
 
-    // Resolve effective trim. None or full-range collapses to no trim.
+    // Resolve effective trim.
     let trim = match sidecar.trim {
         Some(t) if t.start > TRIM_EPS || t.out < duration - TRIM_EPS => Some(t),
         _ => None,
     };
+    let trim_in = trim.as_ref().map(|t| t.start).unwrap_or(0.0);
+    let out_duration = trim
+        .as_ref()
+        .map(|t| (t.out - t.start).max(0.0))
+        .unwrap_or(duration);
+
+    // Allocate temp dir for any sidecar artifacts (text files, arrow PNGs).
+    let temp_dir = temp_dir_for(&source);
+    let text_anns: Vec<(usize, &Annotation)> = sidecar
+        .annotations
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| a.kind == "text" && !a.content.is_empty())
+        .collect();
+    let need_temp = !text_anns.is_empty();
+    if need_temp {
+        std::fs::create_dir_all(&temp_dir)
+            .map_err(|e| format!("create {}: {}", temp_dir.display(), e))?;
+    }
+
+    // Write per-annotation textfiles so we don't need to escape user content
+    // inside the filter graph.
+    let mut text_paths: Vec<(usize, PathBuf, &Annotation)> = Vec::new();
+    for (idx, ann) in &text_anns {
+        let p = temp_dir.join(format!("text-{idx}.txt"));
+        std::fs::write(&p, &ann.content)
+            .map_err(|e| format!("write text-{idx}: {e}"))?;
+        text_paths.push((*idx, p, ann));
+    }
 
     let mut args: Vec<String> = vec!["-y".into(), "-hide_banner".into()];
     if let Some(t) = &trim {
@@ -146,6 +195,49 @@ pub fn edit_save(source_path: String, sidecar: SidecarState) -> Result<String, S
     }
     args.push("-i".into());
     args.push(source.to_string_lossy().into_owned());
+
+    if !text_paths.is_empty() {
+        let mut filter = String::new();
+        let mut prev_label = String::from("0:v");
+        for (i, (_idx, path, ann)) in text_paths.iter().enumerate() {
+            let next_label = format!("v{i}");
+            // Annotation times are absolute (source timeline). After -ss
+            // before -i, output `t` starts at 0 — shift by trim_in. Clamp.
+            let start = (ann.start_time - trim_in).max(0.0);
+            let end = (ann.end_time - trim_in).max(start).min(out_duration);
+            let size = ann.size.unwrap_or(DEFAULT_TEXT_SIZE_PX);
+            // Position is fraction of source dimensions, top-left of the
+            // text box. drawtext x/y accept iw/ih expressions, so we can
+            // express the fractional position directly.
+            let x = ann.position.x.clamp(0.0, 1.0);
+            let y = ann.position.y.clamp(0.0, 1.0);
+            // Path string: drawtext lexer treats ':' as option separator.
+            // SFNS.ttf and our temp paths don't contain ':' so a plain
+            // string works. If a path ever did contain ':', escape with \\.
+            filter.push_str(&format!(
+                "[{prev_label}]drawtext=textfile={textfile}:fontfile={font}:fontsize={size}:fontcolor=white:box=1:boxcolor=0x141416cc:boxborderw=8:x=iw*{x}:y=ih*{y}:enable=between(t\\,{start:.3}\\,{end:.3})[{next_label}]",
+                prev_label = prev_label,
+                textfile = path.to_string_lossy(),
+                font = FONT_FILE,
+                size = size as i64,
+                x = x,
+                y = y,
+                start = start,
+                end = end,
+                next_label = next_label,
+            ));
+            if i + 1 < text_paths.len() {
+                filter.push(';');
+            }
+            prev_label = next_label;
+        }
+        args.push("-filter_complex".into());
+        args.push(filter);
+        args.push("-map".into());
+        args.push(format!("[{prev_label}]"));
+        args.push("-map".into());
+        args.push("0:a?".into());
+    }
 
     args.push("-c:v".into());
     args.push("h264_videotoolbox".into());
@@ -178,6 +270,11 @@ pub fn edit_save(source_path: String, sidecar: SidecarState) -> Result<String, S
                 .collect::<Vec<_>>()
                 .join("\n")
         ));
+    }
+
+    // Clean up temp dir on success. On failure we leave it for inspection.
+    if need_temp {
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     Ok(output.to_string_lossy().into_owned())
