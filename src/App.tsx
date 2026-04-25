@@ -1,8 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { WebviewWindow, getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { I, Icon, P } from "./components/icons";
+
+const DEFAULT_HOTKEY = "CmdOrCtrl+Shift+R";
 
 const BUBBLE_LABEL = "webcam-bubble";
 let bubbleDeviceName: string | null = null;
@@ -35,7 +37,6 @@ async function openBubble(deviceName: string) {
     skipTaskbar: true,
     visibleOnAllWorkspaces: true,
     shadow: false,
-    parent: "main",
   });
 
   win.once("tauri://error", (e) => {
@@ -103,6 +104,8 @@ function App() {
   const [lastSaved, setLastSaved] = useState<string | null>(null);
   const [finalizeInfo, setFinalizeInfo] = useState<FinalizedRecording | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [hotkey, setHotkey] = useState<string>(DEFAULT_HOTKEY);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   useEffect(() => {
     let unlistenFn: (() => void) | null = null;
@@ -191,6 +194,108 @@ function App() {
 
   const stop = () => invoke("engine_stop").catch((e) => setError(String(e)));
 
+  const ctrlRef = useRef({
+    state,
+    selectedDisplay,
+    start,
+    stop,
+    setSelectedCamera,
+    setSelectedMic,
+    setSelectedDisplay,
+    setSettingsOpen,
+  });
+  ctrlRef.current = {
+    state,
+    selectedDisplay,
+    start,
+    stop,
+    setSelectedCamera,
+    setSelectedMic,
+    setSelectedDisplay,
+    setSettingsOpen,
+  };
+
+  // Push UI state to Rust so the tray menu reflects current selections + state.
+  useEffect(() => {
+    invoke("update_tray_state", {
+      state: {
+        recording_state: state,
+        displays,
+        mics,
+        cameras,
+        selected_display: selectedDisplay,
+        selected_mic: selectedMic,
+        selected_camera: selectedCamera,
+      },
+    }).catch(() => {});
+  }, [state, displays, mics, cameras, selectedDisplay, selectedMic, selectedCamera]);
+
+  // Hide the main window during recording so it doesn't appear in the capture.
+  useEffect(() => {
+    const win = getCurrentWebviewWindow();
+    if (state === "idle") {
+      win.show().catch(() => {});
+    } else {
+      win.hide().catch(() => {});
+    }
+  }, [state]);
+
+  // Listen for tray clicks and global hotkey toggles.
+  useEffect(() => {
+    let unlistenTray: (() => void) | null = null;
+    let unlistenHotkey: (() => void) | null = null;
+    let cancelled = false;
+
+    (async () => {
+      const a = await listen<{ id?: string; action?: string }>("tray-action", (e) => {
+        const c = ctrlRef.current;
+        if (e.payload.action === "settings") {
+          c.setSettingsOpen(true);
+          return;
+        }
+        const id = e.payload.id ?? "";
+        if (id === "start") {
+          if (c.state === "idle" && c.selectedDisplay != null) c.start();
+        } else if (id === "stop") {
+          if (c.state !== "idle") c.stop();
+        } else if (id === "pause") {
+          invoke("engine_pause").catch(() => {});
+        } else if (id === "resume") {
+          invoke("engine_resume").catch(() => {});
+        } else if (id.startsWith("cam:")) {
+          const v = id.slice(4);
+          c.setSelectedCamera(v === "none" ? null : Number(v));
+        } else if (id.startsWith("mic:")) {
+          const v = id.slice(4);
+          c.setSelectedMic(v === "none" ? null : v);
+        } else if (id.startsWith("disp:")) {
+          c.setSelectedDisplay(Number(id.slice(5)));
+        }
+      });
+      const b = await listen<{}>("hotkey-toggle", () => {
+        const c = ctrlRef.current;
+        if (c.state === "idle") {
+          if (c.selectedDisplay != null) c.start();
+        } else {
+          c.stop();
+        }
+      });
+      if (cancelled) {
+        a();
+        b();
+        return;
+      }
+      unlistenTray = a;
+      unlistenHotkey = b;
+    })();
+
+    return () => {
+      cancelled = true;
+      unlistenTray?.();
+      unlistenHotkey?.();
+    };
+  }, []);
+
   const refresh = () => {
     invoke("engine_enumerate").catch((err) => setError(String(err)));
     invoke<DeviceList>("enumerate_devices")
@@ -219,14 +324,14 @@ function App() {
   }, [cameraName]);
 
   useEffect(() => {
-    // macOS keeps the app alive while any window remains open. Close the
-    // bubble alongside the main window so the user's "close app" gesture
-    // actually quits everything.
+    // The tray icon keeps the process alive after the main window closes, so
+    // the red close button alone won't quit. Treat it as an explicit quit.
     const main = getCurrentWebviewWindow();
     let unlisten: (() => void) | null = null;
     main
       .onCloseRequested(() => {
         closeBubble().catch(() => {});
+        invoke("quit_app").catch(() => {});
       })
       .then((u) => {
         unlisten = u;
@@ -248,7 +353,28 @@ function App() {
         color: "var(--fg-primary)",
       }}
     >
-      <BrandBar recording={recording} elapsed={progress.elapsed_s} onRefresh={refresh} />
+      <BrandBar
+        recording={recording}
+        elapsed={progress.elapsed_s}
+        onRefresh={refresh}
+        onSettings={() => setSettingsOpen((v) => !v)}
+        settingsOpen={settingsOpen}
+      />
+
+      {settingsOpen && (
+        <SettingsPanel
+          hotkey={hotkey}
+          onHotkey={async (combo) => {
+            try {
+              await invoke("set_hotkey", { combo });
+              setHotkey(combo);
+            } catch (e) {
+              setError(String(e));
+            }
+          }}
+          onClose={() => setSettingsOpen(false)}
+        />
+      )}
 
       <SourceTiles />
 
@@ -348,10 +474,14 @@ function BrandBar({
   recording,
   elapsed,
   onRefresh,
+  onSettings,
+  settingsOpen,
 }: {
   recording: boolean;
   elapsed: number;
   onRefresh: () => void;
+  onSettings: () => void;
+  settingsOpen: boolean;
 }) {
   return (
     <div
@@ -420,7 +550,13 @@ function BrandBar({
         <button
           className="btn-ghost"
           title="Preferences"
-          style={{ padding: 5, color: "var(--fg-secondary)" }}
+          onClick={onSettings}
+          style={{
+            padding: 5,
+            color: settingsOpen ? "var(--fg-primary)" : "var(--fg-secondary)",
+            background: settingsOpen ? "var(--bg-elevated)" : "transparent",
+            borderRadius: 4,
+          }}
         >
           {I.gear}
         </button>
@@ -973,6 +1109,89 @@ function StripRow({
           ×
         </button>
       )}
+    </div>
+  );
+}
+
+function SettingsPanel({
+  hotkey,
+  onHotkey,
+  onClose,
+}: {
+  hotkey: string;
+  onHotkey: (combo: string) => void;
+  onClose: () => void;
+}) {
+  const [draft, setDraft] = useState(hotkey);
+  const dirty = draft.trim() !== hotkey && draft.trim().length > 0;
+  return (
+    <div
+      style={{
+        margin: "10px 14px 0",
+        padding: 12,
+        background: "var(--bg-elevated)",
+        border: "1px solid var(--border-faint)",
+        borderRadius: 6,
+        display: "flex",
+        flexDirection: "column",
+        gap: 8,
+        fontSize: 12,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <span style={{ fontWeight: 600, color: "var(--fg-primary)" }}>Settings</span>
+        <button
+          onClick={onClose}
+          aria-label="Close settings"
+          style={{
+            background: "transparent",
+            border: "none",
+            color: "var(--fg-tertiary)",
+            cursor: "pointer",
+            padding: 0,
+            lineHeight: 1,
+            fontSize: 14,
+          }}
+        >
+          ×
+        </button>
+      </div>
+      <label
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          color: "var(--fg-secondary)",
+        }}
+      >
+        <span style={{ minWidth: 88 }}>Start/Stop hotkey</span>
+        <input
+          className="select"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          placeholder="CmdOrCtrl+Shift+R"
+          style={{
+            flex: 1,
+            fontFamily: "var(--font-mono)",
+            fontSize: 12,
+          }}
+        />
+        <button
+          className="btn-primary"
+          disabled={!dirty}
+          onClick={() => onHotkey(draft.trim())}
+          style={{
+            padding: "5px 10px",
+            opacity: dirty ? 1 : 0.5,
+            cursor: dirty ? "pointer" : "not-allowed",
+          }}
+        >
+          Apply
+        </button>
+      </label>
+      <span style={{ color: "var(--fg-tertiary)", fontSize: 11 }}>
+        Examples: CmdOrCtrl+Shift+R, Alt+Shift+5
+      </span>
     </div>
   );
 }

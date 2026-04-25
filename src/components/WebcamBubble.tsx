@@ -106,6 +106,7 @@ export default function WebcamBubble() {
       }}
     >
       <div
+        data-tauri-drag-region
         style={{
           width: "min(100vw, 100vh)",
           height: "min(100vw, 100vh)",
@@ -115,6 +116,7 @@ export default function WebcamBubble() {
           background: "#1a1a1c",
           border: "1.5px solid rgba(255,255,255,0.12)",
           boxShadow: "0 18px 48px rgba(0,0,0,0.55), 0 0 0 0.5px rgba(0,0,0,0.5)",
+          cursor: hover ? "grab" : "default",
         }}
       >
         {error ? (
@@ -146,6 +148,7 @@ export default function WebcamBubble() {
               height: "100%",
               objectFit: "cover",
               transform: "scaleX(-1)",
+              pointerEvents: "none",
             }}
           />
         )}
@@ -158,17 +161,6 @@ export default function WebcamBubble() {
             pointerEvents: "none",
           }}
         />
-
-        {hover && (
-          <div
-            data-tauri-drag-region
-            style={{
-              position: "absolute",
-              inset: 0,
-              cursor: "grab",
-            }}
-          />
-        )}
 
         {hover && (
           <div

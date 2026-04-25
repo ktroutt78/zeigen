@@ -1,6 +1,8 @@
 mod composite;
 mod devices;
 mod engine;
+mod hotkey;
+mod tray;
 mod webcam;
 
 use std::path::PathBuf;
@@ -235,15 +237,45 @@ fn movies_dir() -> Result<PathBuf, String> {
     Ok(PathBuf::from(home).join("Movies/Zeigen"))
 }
 
+#[tauri::command]
+fn update_tray_state(app: AppHandle, state: tray::UiState) -> Result<(), String> {
+    *app.state::<tray::TrayState>()
+        .0
+        .lock()
+        .expect("tray state mutex") = state;
+    tray::rebuild(&app).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_hotkey(app: AppHandle, combo: String) -> Result<(), String> {
+    hotkey::rebind(&app, &combo)
+}
+
+#[tauri::command]
+fn quit_app(app: AppHandle) {
+    app.exit(0);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, shortcut, event| {
+                    hotkey::handler(app, shortcut, event.state());
+                })
+                .build(),
+        )
         .setup(|app: &mut tauri::App| {
             let handle: AppHandle = app.handle().clone();
             let client = EngineClient::spawn(&handle, engine::engine_binary_path())?;
             app.manage(Mutex::new(client));
             app.manage(Mutex::new(None::<ActiveRecording>));
+            tray::setup(&handle)?;
+            if let Err(e) = hotkey::register_default(&handle) {
+                eprintln!("hotkey register failed: {e}");
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -255,6 +287,9 @@ pub fn run() {
             engine_stop,
             recording_reset,
             recording_finalize,
+            update_tray_state,
+            set_hotkey,
+            quit_app,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
