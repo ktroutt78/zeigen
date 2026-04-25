@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { currentMonitor } from "@tauri-apps/api/window";
 import { PhysicalPosition } from "@tauri-apps/api/dpi";
+import { PILL_STRIP_CSS } from "../constants/bubble";
 
 const SNAP_THRESHOLD_CSS_PX = 32;
 const EDGE_MARGIN_CSS_PX = 16;
@@ -18,17 +19,31 @@ async function snapToNearestCorner() {
 
   const threshold = SNAP_THRESHOLD_CSS_PX * scale;
   const margin = EDGE_MARGIN_CSS_PX * scale;
+  const pillStrip = PILL_STRIP_CSS * scale;
+
+  // The snap target is the visible circle's frame, not the window's.
+  // Circle is anchored to the top of the window and horizontally centered;
+  // its diameter matches the CSS rule in WebcamBubble:
+  // min(window.width, window.height - PILL_STRIP_CSS).
+  const circleSize = Math.min(size.width, Math.max(0, size.height - pillStrip));
+  const circleOffsetX = Math.max(0, (size.width - circleSize) / 2);
 
   const monX = monitor.position.x;
   const monY = monitor.position.y;
   const monW = monitor.size.width;
   const monH = monitor.size.height;
 
+  // Target window positions chosen so the circle (not the window) lands
+  // at the corner with EDGE_MARGIN. The pill strip below the circle may
+  // extend past the bottom edge for bottom-corner snaps; that's intentional.
   const targets = [
-    { x: monX + margin, y: monY + margin },
-    { x: monX + monW - size.width - margin, y: monY + margin },
-    { x: monX + margin, y: monY + monH - size.height - margin },
-    { x: monX + monW - size.width - margin, y: monY + monH - size.height - margin },
+    { x: monX + margin - circleOffsetX, y: monY + margin },
+    { x: monX + monW - circleSize - margin - circleOffsetX, y: monY + margin },
+    { x: monX + margin - circleOffsetX, y: monY + monH - circleSize - margin },
+    {
+      x: monX + monW - circleSize - margin - circleOffsetX,
+      y: monY + monH - circleSize - margin,
+    },
   ];
 
   let best = -1;

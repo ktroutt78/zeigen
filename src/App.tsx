@@ -5,6 +5,7 @@ import { WebviewWindow, getCurrentWebviewWindow } from "@tauri-apps/api/webviewW
 import { availableMonitors } from "@tauri-apps/api/window";
 import { emit } from "@tauri-apps/api/event";
 import { I, Icon, P } from "./components/icons";
+import { PILL_STRIP_CSS } from "./constants/bubble";
 
 const DEFAULT_HOTKEY = "CmdOrCtrl+Shift+R";
 
@@ -12,7 +13,8 @@ const BUBBLE_LABEL = "webcam-bubble";
 let bubbleDeviceName: string | null = null;
 
 const BUBBLE_W = 240;
-const BUBBLE_H = 240;
+const BUBBLE_H = BUBBLE_W + PILL_STRIP_CSS;
+const BUBBLE_MIN = 120;
 const BUBBLE_MARGIN = 24;
 
 async function openBubble(deviceName: string) {
@@ -55,8 +57,8 @@ async function openBubble(deviceName: string) {
     height: BUBBLE_H,
     x,
     y,
-    minWidth: 120,
-    minHeight: 120,
+    minWidth: BUBBLE_MIN,
+    minHeight: BUBBLE_MIN + PILL_STRIP_CSS,
     decorations: false,
     transparent: true,
     alwaysOnTop: true,

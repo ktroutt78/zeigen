@@ -5,6 +5,7 @@ import { useCornerSnap } from "../hooks/useCornerSnap";
 import { useBubblePositionLog } from "../hooks/useBubblePositionLog";
 import { useRecordingState } from "../hooks/useRecordingState";
 import TimerChip from "./TimerChip";
+import { PILL_STRIP_CSS } from "../constants/bubble";
 
 // Floating circular webcam preview. Mirrors the WebcamOrbit variant from
 // docs/design/surfaces/webcam-bubble.jsx — circular feed, hover-only chrome,
@@ -100,6 +101,8 @@ export default function WebcamBubble() {
     };
   }, []);
 
+  const recActive = recState === "recording" || recState === "paused";
+
   return (
     <div
       onMouseEnter={() => setHover(true)}
@@ -109,16 +112,17 @@ export default function WebcamBubble() {
         height: "100vh",
         background: "transparent",
         display: "flex",
+        flexDirection: "column",
         alignItems: "center",
-        justifyContent: "center",
         overflow: "hidden",
       }}
     >
       <div
         data-tauri-drag-region
         style={{
-          width: "min(100vw, 100vh)",
-          height: "min(100vw, 100vh)",
+          width: `min(100vw, calc(100vh - ${PILL_STRIP_CSS}px))`,
+          height: `min(100vw, calc(100vh - ${PILL_STRIP_CSS}px))`,
+          flexShrink: 0,
           borderRadius: "50%",
           overflow: "hidden",
           position: "relative",
@@ -199,96 +203,103 @@ export default function WebcamBubble() {
           </div>
         )}
 
-        {(recState === "recording" || recState === "paused") && (
-          <>
-            <div
-              style={{
-                position: "absolute",
-                left: "50%",
-                top: 12,
-                transform: "translateX(-50%)",
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 4,
-                padding: 4,
-                background: "rgba(20,20,22,0.78)",
-                backdropFilter: "blur(10px)",
-                WebkitBackdropFilter: "blur(10px)",
-                border: "0.5px solid rgba(255,255,255,0.18)",
-                borderRadius: 99,
-                boxShadow: "0 4px 14px rgba(0,0,0,0.4)",
-                pointerEvents: "auto",
-              }}
-            >
-              <button
-                title={recState === "paused" ? "Resume" : "Pause"}
-                onClick={() => {
-                  if (recState === "paused") {
-                    invoke("engine_resume").catch(() => {});
-                  } else {
-                    invoke("engine_pause").catch(() => {});
-                  }
-                }}
-                style={{
-                  width: 26,
-                  height: 26,
-                  borderRadius: 99,
-                  background: "transparent",
-                  color: "#fff",
-                  border: "none",
-                  cursor: "pointer",
-                  display: "inline-flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                }}
-              >
-                <Icon
-                  d={recState === "paused" ? P.play : P.pause}
-                  size={12}
-                  stroke={1.5}
-                />
-              </button>
-              <button
-                title="Stop"
-                onClick={() => invoke("engine_stop").catch(() => {})}
-                style={{
-                  width: 26,
-                  height: 26,
-                  borderRadius: 99,
-                  background: "var(--recording)",
-                  color: "#fff",
-                  border: "none",
-                  cursor: "pointer",
-                  display: "inline-flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                }}
-              >
-                <span
-                  style={{
-                    width: 8,
-                    height: 8,
-                    background: "#fff",
-                    borderRadius: 1.5,
-                    display: "inline-block",
-                  }}
-                />
-              </button>
-            </div>
-            <div
-              style={{
-                position: "absolute",
-                left: "50%",
-                bottom: 14,
-                transform: "translateX(-50%)",
-                pointerEvents: "none",
-              }}
-            >
-              <TimerChip state={recState} elapsedSec={elapsed} capSec={capSec} />
-            </div>
-          </>
+        {recActive && (
+          <div
+            style={{
+              position: "absolute",
+              left: "50%",
+              bottom: 14,
+              transform: "translateX(-50%)",
+              pointerEvents: "none",
+            }}
+          >
+            <TimerChip state={recState} elapsedSec={elapsed} capSec={capSec} />
+          </div>
         )}
       </div>
+
+      {recActive && (
+        <div
+          style={{
+            height: PILL_STRIP_CSS,
+            width: "100%",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            flexShrink: 0,
+          }}
+        >
+          <div
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 4,
+              padding: 4,
+              background: "rgba(20,20,22,0.78)",
+              backdropFilter: "blur(10px)",
+              WebkitBackdropFilter: "blur(10px)",
+              border: "0.5px solid rgba(255,255,255,0.18)",
+              borderRadius: 99,
+              boxShadow: "0 4px 14px rgba(0,0,0,0.4)",
+            }}
+          >
+            <button
+              title={recState === "paused" ? "Resume" : "Pause"}
+              onClick={() => {
+                if (recState === "paused") {
+                  invoke("engine_resume").catch(() => {});
+                } else {
+                  invoke("engine_pause").catch(() => {});
+                }
+              }}
+              style={{
+                width: 26,
+                height: 26,
+                borderRadius: 99,
+                background: "transparent",
+                color: "#fff",
+                border: "none",
+                cursor: "pointer",
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              <Icon
+                d={recState === "paused" ? P.play : P.pause}
+                size={12}
+                stroke={1.5}
+              />
+            </button>
+            <button
+              title="Stop"
+              onClick={() => invoke("engine_stop").catch(() => {})}
+              style={{
+                width: 26,
+                height: 26,
+                borderRadius: 99,
+                background: "var(--recording)",
+                color: "#fff",
+                border: "none",
+                cursor: "pointer",
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              <span
+                style={{
+                  width: 8,
+                  height: 8,
+                  background: "#fff",
+                  borderRadius: 1.5,
+                  display: "inline-block",
+                }}
+              />
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
