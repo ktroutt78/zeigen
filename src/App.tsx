@@ -7,7 +7,10 @@ import { I, Icon, P } from "./components/icons";
 const DEFAULT_HOTKEY = "CmdOrCtrl+Shift+R";
 
 const BUBBLE_LABEL = "webcam-bubble";
+const REVIEW_LABEL = "review";
 let bubbleDeviceName: string | null = null;
+
+type ReviewState = "none" | "pending" | "open";
 
 async function openBubble(deviceName: string) {
   if (bubbleDeviceName === deviceName) {
@@ -48,6 +51,30 @@ async function closeBubble() {
   bubbleDeviceName = null;
   const existing = await WebviewWindow.getByLabel(BUBBLE_LABEL);
   if (existing) await existing.close().catch(() => {});
+}
+
+async function openReview(finalPath: string, onDestroyed: () => void): Promise<void> {
+  const existing = await WebviewWindow.getByLabel(REVIEW_LABEL);
+  if (existing) await existing.close().catch(() => {});
+
+  const url = `/#review?path=${encodeURIComponent(finalPath)}`;
+  const win = new WebviewWindow(REVIEW_LABEL, {
+    url,
+    title: "Screen Recording",
+    width: 940,
+    height: 640,
+    minWidth: 720,
+    minHeight: 520,
+    resizable: true,
+    center: true,
+  });
+
+  win.once("tauri://error", (e) => {
+    console.error("review window error", e);
+  });
+  win.once("tauri://destroyed", () => {
+    onDestroyed();
+  });
 }
 
 type Display = { id: number; name: string; width: number; height: number };
@@ -106,6 +133,7 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [hotkey, setHotkey] = useState<string>(DEFAULT_HOTKEY);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [reviewState, setReviewState] = useState<ReviewState>("none");
 
   useEffect(() => {
     let unlistenFn: (() => void) | null = null;
@@ -139,16 +167,25 @@ function App() {
             break;
           case "stopped":
             setState("idle");
+            setReviewState("pending");
             setLastSaved(ev.output_path);
             setProgress({ frames: ev.frames, dropped: ev.dropped, elapsed_s: ev.duration_s });
             invoke<FinalizedRecording>("recording_finalize")
-              .then(setFinalizeInfo)
-              .catch((err) => setError(String(err)));
+              .then(async (info) => {
+                setFinalizeInfo(info);
+                await openReview(info.final_path, () => setReviewState("none"));
+                setReviewState("open");
+              })
+              .catch((err) => {
+                setError(String(err));
+                setReviewState("none");
+              });
             break;
           case "error":
             setError(`${ev.code}: ${ev.message}`);
             invoke("recording_reset").catch(() => {});
             setState("idle");
+            setReviewState("none");
             break;
         }
       });
@@ -230,15 +267,17 @@ function App() {
     }).catch(() => {});
   }, [state, displays, mics, cameras, selectedDisplay, selectedMic, selectedCamera]);
 
-  // Hide the main window during recording so it doesn't appear in the capture.
+  // Hide the main window during recording so it doesn't appear in the capture,
+  // and keep it hidden across the recording → finalize → review handoff.
+  // Main reshows once review is closed (reviewState back to "none").
   useEffect(() => {
     const win = getCurrentWebviewWindow();
-    if (state === "idle") {
+    if (state === "idle" && reviewState === "none") {
       win.show().catch(() => {});
     } else {
       win.hide().catch(() => {});
     }
-  }, [state]);
+  }, [state, reviewState]);
 
   // Listen for tray clicks and global hotkey toggles.
   useEffect(() => {
