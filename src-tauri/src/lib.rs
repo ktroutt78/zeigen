@@ -311,6 +311,11 @@ fn update_tray_state(app: AppHandle, state: tray::UiState) -> Result<(), String>
 }
 
 #[tauri::command]
+fn update_tray_elapsed(app: AppHandle, elapsed_s: f64) -> Result<(), String> {
+    tray::set_elapsed(&app, elapsed_s).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn set_hotkey(app: AppHandle, combo: String) -> Result<(), String> {
     hotkey::rebind(&app, &combo)
 }
@@ -352,6 +357,7 @@ pub fn run() {
             recording_reset,
             recording_finalize,
             update_tray_state,
+            update_tray_elapsed,
             set_hotkey,
             quit_app,
             macos::make_capture_invisible,

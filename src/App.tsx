@@ -441,11 +441,9 @@ function App() {
   };
 
   // Push UI state to Rust so the tray menu reflects current selections + state.
-  // Elapsed seconds are sent as int so the tray title only refreshes once per second.
-  const trayElapsed =
-    state === "recording" || state === "paused"
-      ? Math.floor(progress.elapsed_s)
-      : 0;
+  // Elapsed time is pushed via a separate, lightweight command (update_tray_elapsed)
+  // that only updates the title — calling set_menu while the menu is open
+  // collapses it, so we only rebuild on real state/device changes here.
   useEffect(() => {
     invoke("update_tray_state", {
       state: {
@@ -456,10 +454,18 @@ function App() {
         selected_display: selectedDisplay,
         selected_mic: selectedMic,
         selected_camera: selectedCamera,
-        elapsed_s: trayElapsed,
       },
     }).catch(() => {});
-  }, [state, displays, mics, cameras, selectedDisplay, selectedMic, selectedCamera, trayElapsed]);
+  }, [state, displays, mics, cameras, selectedDisplay, selectedMic, selectedCamera]);
+
+  const trayElapsed =
+    state === "recording" || state === "paused"
+      ? Math.floor(progress.elapsed_s)
+      : 0;
+  useEffect(() => {
+    if (state !== "recording" && state !== "paused") return;
+    invoke("update_tray_elapsed", { elapsedS: trayElapsed }).catch(() => {});
+  }, [state, trayElapsed]);
 
   // Broadcast length-cap to bubble/timer-chip windows. Emit on change AND every
   // second during recording — covers the late-mount race where a chip subscribes

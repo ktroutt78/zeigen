@@ -81,14 +81,34 @@ pub fn rebuild<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let menu = build_menu(app, &state)?;
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
         tray.set_menu(Some(menu))?;
-        let title: Option<String> = match state.recording_state.as_str() {
-            "recording" => Some(format!("● {}", fmt_mmss(state.elapsed_s))),
-            "paused" => Some(format!("⏸ {}", fmt_mmss(state.elapsed_s))),
-            _ => None,
-        };
-        tray.set_title(title.as_deref())?;
+        tray.set_title(format_title(&state.recording_state, state.elapsed_s).as_deref())?;
     }
     Ok(())
+}
+
+// Title-only update for the per-second tick. Calling `set_menu` would
+// collapse any open menu; `set_title` does not. Splits the per-second
+// elapsed refresh from menu rebuilds so users can navigate the tray menu
+// while recording.
+pub fn set_elapsed<R: Runtime>(app: &AppHandle<R>, elapsed_s: f64) -> tauri::Result<()> {
+    let recording_state = {
+        let tray_state = app.state::<TrayState>();
+        let mut state = tray_state.0.lock().expect("tray state mutex");
+        state.elapsed_s = elapsed_s;
+        state.recording_state.clone()
+    };
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        tray.set_title(format_title(&recording_state, elapsed_s).as_deref())?;
+    }
+    Ok(())
+}
+
+fn format_title(recording_state: &str, elapsed_s: f64) -> Option<String> {
+    match recording_state {
+        "recording" => Some(format!("● {}", fmt_mmss(elapsed_s))),
+        "paused" => Some(format!("⏸ {}", fmt_mmss(elapsed_s))),
+        _ => None,
+    }
 }
 
 fn handle_menu_click<R: Runtime>(app: &AppHandle<R>, id: &str) {
