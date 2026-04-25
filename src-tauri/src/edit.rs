@@ -48,8 +48,11 @@ pub struct Position {
 }
 
 pub fn sidecar_path(source: &Path) -> PathBuf {
+    // Dotfile prefix so the JSON stays next to the source mp4 but is hidden
+    // from Finder by default. Keeps ~/Movies/Zeigen tidy.
     let stem = source.file_stem().unwrap_or_default();
-    let mut name = stem.to_os_string();
+    let mut name = std::ffi::OsString::from(".");
+    name.push(stem);
     name.push(".annotations.json");
     source.with_file_name(name)
 }
@@ -546,6 +549,7 @@ pub fn edit_save(source_path: String, sidecar: SidecarState) -> Result<String, S
 
     args.push(output.to_string_lossy().into_owned());
 
+    eprintln!("[edit_save] ffmpeg args: {args:?}");
     let result = Command::new(FFMPEG_PATH)
         .args(&args)
         .output()
@@ -568,10 +572,13 @@ pub fn edit_save(source_path: String, sidecar: SidecarState) -> Result<String, S
         ));
     }
 
-    // Clean up temp dir on success. On failure we leave it for inspection.
-    if need_temp {
-        let _ = std::fs::remove_dir_all(&temp_dir);
-    }
+    // DIAGNOSTIC: keep temp dir on success so we can inspect rasterized
+    // PNGs while debugging the missing-overlay UAT issue. Restore the
+    // remove_dir_all once the bug is identified.
+    // if need_temp {
+    //     let _ = std::fs::remove_dir_all(&temp_dir);
+    // }
+    let _ = need_temp;
 
     Ok(output.to_string_lossy().into_owned())
 }
