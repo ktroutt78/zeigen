@@ -1,5 +1,6 @@
 mod composite;
 mod devices;
+mod edit;
 mod engine;
 mod hotkey;
 mod tray;
@@ -290,6 +291,9 @@ pub fn run() {
             update_tray_state,
             set_hotkey,
             quit_app,
+            edit::read_sidecar,
+            edit::write_sidecar,
+            edit::delete_sidecar,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
