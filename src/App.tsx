@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { WebviewWindow, getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { availableMonitors } from "@tauri-apps/api/window";
+import { emit } from "@tauri-apps/api/event";
 import { I, Icon, P } from "./components/icons";
 
 const DEFAULT_HOTKEY = "CmdOrCtrl+Shift+R";
@@ -193,6 +194,7 @@ type Device = { index: number; name: string };
 type DeviceList = { video: Device[]; audio: Device[]; screens: Device[] };
 type EngineState = "idle" | "countdown" | "recording" | "paused";
 type CountdownDuration = 0 | 3 | 5;
+type LengthCapMode = "off" | "target";
 
 type FinalizedRecording = {
   stamp: string;
@@ -239,6 +241,8 @@ function App() {
   const [bubbleCorner, setBubbleCorner] = useState<Corner>("br");
   const [countdownDuration, setCountdownDuration] =
     useState<CountdownDuration>(5);
+  const [lengthCapMode, setLengthCapMode] = useState<LengthCapMode>("off");
+  const [lengthCapTargetSec, setLengthCapTargetSec] = useState<number>(600);
   const [state, setState] = useState<EngineState>("idle");
   const [progress, setProgress] = useState({ frames: 0, dropped: 0, elapsed_s: 0 });
   const [lastSaved, setLastSaved] = useState<string | null>(null);
@@ -419,6 +423,21 @@ function App() {
     }).catch(() => {});
   }, [state, displays, mics, cameras, selectedDisplay, selectedMic, selectedCamera, trayElapsed]);
 
+  // Broadcast length-cap to bubble/timer-chip windows. Emit on change AND every
+  // second during recording — covers the late-mount race where a chip subscribes
+  // after main has already emitted.
+  const capSec = lengthCapMode === "target" ? lengthCapTargetSec : null;
+  useEffect(() => {
+    emit("length-cap", { capSec }).catch(() => {});
+  }, [capSec]);
+  useEffect(() => {
+    if (state !== "recording" && state !== "paused") return;
+    const id = window.setInterval(() => {
+      emit("length-cap", { capSec }).catch(() => {});
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [state, capSec]);
+
   // Hide the main window during recording so it doesn't appear in the capture,
   // and keep it hidden across the recording → finalize → review handoff.
   // Main reshows once every open review window has been closed.
@@ -575,6 +594,10 @@ function App() {
           }}
           countdownDuration={countdownDuration}
           onCountdownDuration={setCountdownDuration}
+          lengthCapMode={lengthCapMode}
+          onLengthCapMode={setLengthCapMode}
+          lengthCapTargetSec={lengthCapTargetSec}
+          onLengthCapTargetSec={setLengthCapTargetSec}
           onClose={() => setSettingsOpen(false)}
         />
       )}
@@ -1321,12 +1344,20 @@ function SettingsPanel({
   onHotkey,
   countdownDuration,
   onCountdownDuration,
+  lengthCapMode,
+  onLengthCapMode,
+  lengthCapTargetSec,
+  onLengthCapTargetSec,
   onClose,
 }: {
   hotkey: string;
   onHotkey: (combo: string) => void;
   countdownDuration: CountdownDuration;
   onCountdownDuration: (v: CountdownDuration) => void;
+  lengthCapMode: LengthCapMode;
+  onLengthCapMode: (v: LengthCapMode) => void;
+  lengthCapTargetSec: number;
+  onLengthCapTargetSec: (v: number) => void;
   onClose: () => void;
 }) {
   const [draft, setDraft] = useState(hotkey);
@@ -1444,6 +1475,72 @@ function SettingsPanel({
             );
           })}
         </div>
+      </label>
+      <label
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          color: "var(--fg-secondary)",
+        }}
+      >
+        <span style={{ minWidth: 88 }}>Length cap</span>
+        <div
+          role="radiogroup"
+          aria-label="Length cap mode"
+          style={{
+            display: "inline-flex",
+            background: "var(--bg-input)",
+            border: "1px solid var(--border-subtle)",
+            borderRadius: "var(--r-sm)",
+            padding: 2,
+          }}
+        >
+          {(["off", "target"] as LengthCapMode[]).map((v) => {
+            const active = lengthCapMode === v;
+            return (
+              <button
+                key={v}
+                role="radio"
+                aria-checked={active}
+                onClick={() => onLengthCapMode(v)}
+                style={{
+                  background: active ? "var(--accent-soft)" : "transparent",
+                  color: active ? "var(--accent-tint)" : "var(--fg-secondary)",
+                  border: "none",
+                  cursor: "pointer",
+                  padding: "4px 10px",
+                  borderRadius: "var(--r-xs)",
+                  fontSize: 12,
+                  fontWeight: active ? 600 : 500,
+                }}
+              >
+                {v === "off" ? "No limit" : "Set target"}
+              </button>
+            );
+          })}
+        </div>
+        {lengthCapMode === "target" && (
+          <>
+            <input
+              className="select"
+              type="number"
+              min={1}
+              max={120}
+              value={Math.round(lengthCapTargetSec / 60)}
+              onChange={(e) => {
+                const m = Math.max(1, Math.min(120, Number(e.target.value) || 1));
+                onLengthCapTargetSec(m * 60);
+              }}
+              style={{
+                width: 60,
+                fontFamily: "var(--font-mono)",
+                fontSize: 12,
+              }}
+            />
+            <span style={{ color: "var(--fg-tertiary)", fontSize: 11 }}>min</span>
+          </>
+        )}
       </label>
     </div>
   );
