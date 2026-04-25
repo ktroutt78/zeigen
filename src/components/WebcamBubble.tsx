@@ -68,7 +68,7 @@ export default function WebcamBubble() {
 
   useCornerSnap();
   useBubblePositionLog();
-  const { state: recState, elapsed } = useRecordingState();
+  const { state: recState, elapsed, capSec } = useRecordingState();
 
   useEffect(() => {
     let cancelled = false;
@@ -205,7 +205,7 @@ export default function WebcamBubble() {
               pointerEvents: "none",
             }}
           >
-            <TimerChip state={recState} elapsedSec={elapsed} />
+            <TimerChip state={recState} elapsedSec={elapsed} capSec={capSec} />
           </div>
         )}
       </div>

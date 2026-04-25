@@ -12,6 +12,7 @@ type EngineEventEnvelope = {
 export function useRecordingState() {
   const [state, setState] = useState<RecordingState>("idle");
   const [elapsed, setElapsed] = useState(0);
+  const [capSec, setCapSec] = useState<number | null>(null);
 
   useEffect(() => {
     let unlisten: (() => void) | null = null;
@@ -55,5 +56,25 @@ export function useRecordingState() {
     };
   }, []);
 
-  return { state, elapsed };
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    (async () => {
+      const fn = await listen<{ capSec: number | null }>("length-cap", (e) => {
+        const v = e.payload.capSec;
+        setCapSec(typeof v === "number" && v > 0 ? v : null);
+      });
+      if (cancelled) {
+        fn();
+        return;
+      }
+      unlisten = fn;
+    })();
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  return { state, elapsed, capSec };
 }
