@@ -123,7 +123,139 @@ fn probe_duration_seconds(path: &Path) -> Result<f64, String> {
 
 const TRIM_EPS: f64 = 0.05;
 const DEFAULT_TEXT_SIZE_PX: f64 = 36.0;
+const DEFAULT_ARROW_STROKE_PX: f64 = 8.0;
 const FONT_FILE: &str = "/System/Library/Fonts/SFNS.ttf";
+
+fn probe_dimensions(path: &Path) -> Result<(u32, u32), String> {
+    let output = Command::new(FFPROBE_PATH)
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0:s=x",
+        ])
+        .arg(path)
+        .output()
+        .map_err(|e| format!("ffprobe dims failed: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "ffprobe dims non-zero for {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let mut parts = s.split('x');
+    let w: u32 = parts
+        .next()
+        .ok_or_else(|| format!("ffprobe dims malformed: {s}"))?
+        .parse()
+        .map_err(|e| format!("parse width {s:?}: {e}"))?;
+    let h: u32 = parts
+        .next()
+        .ok_or_else(|| format!("ffprobe dims malformed: {s}"))?
+        .parse()
+        .map_err(|e| format!("parse height {s:?}: {e}"))?;
+    Ok((w, h))
+}
+
+// Rasterize an arrow into a transparent PNG sized to the source video.
+// Arrow is white with rounded line cap; arrowhead is a filled triangle at
+// the endpoint. Endpoints are in source-fraction coords; stroke is in
+// source pixels. Output PNG is `(src_w, src_h)` so a single overlay filter
+// (no scale) places it correctly.
+fn rasterize_arrow(
+    src_w: u32,
+    src_h: u32,
+    start: &Position,
+    end: &Position,
+    stroke_src_px: f64,
+    out_path: &Path,
+) -> Result<(), String> {
+    use tiny_skia::{
+        FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Stroke, Transform,
+    };
+
+    let mut pixmap = Pixmap::new(src_w, src_h)
+        .ok_or_else(|| format!("alloc pixmap {src_w}x{src_h} failed"))?;
+
+    let sx = (start.x.clamp(0.0, 1.0) * src_w as f64) as f32;
+    let sy = (start.y.clamp(0.0, 1.0) * src_h as f64) as f32;
+    let ex = (end.x.clamp(0.0, 1.0) * src_w as f64) as f32;
+    let ey = (end.y.clamp(0.0, 1.0) * src_h as f64) as f32;
+
+    let dx = ex - sx;
+    let dy = ey - sy;
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 1.0 {
+        // Degenerate arrow — emit an empty pixmap so the overlay is a no-op.
+        let png = pixmap
+            .encode_png()
+            .map_err(|e| format!("encode png: {e}"))?;
+        std::fs::write(out_path, png)
+            .map_err(|e| format!("write {}: {e}", out_path.display()))?;
+        return Ok(());
+    }
+
+    let stroke_w = stroke_src_px.max(1.0) as f32;
+    // Arrowhead size scales with stroke. Length 3.5x, width 3x.
+    let head_len = stroke_w * 3.5;
+    let head_w = stroke_w * 3.0;
+
+    // Shorten the line so it terminates at the base of the arrowhead, not
+    // inside it (otherwise the stroke pokes through the head fill).
+    let shaft_len = (len - head_len).max(0.0);
+    let ux = dx / len;
+    let uy = dy / len;
+    let shaft_ex = sx + ux * shaft_len;
+    let shaft_ey = sy + uy * shaft_len;
+
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(255, 255, 255, 255);
+    paint.anti_alias = true;
+
+    // Shaft
+    if shaft_len > 0.5 {
+        let mut pb = PathBuilder::new();
+        pb.move_to(sx, sy);
+        pb.line_to(shaft_ex, shaft_ey);
+        let path = pb.finish().ok_or("empty shaft path")?;
+        let mut s = Stroke::default();
+        s.width = stroke_w;
+        s.line_cap = LineCap::Round;
+        s.line_join = LineJoin::Round;
+        pixmap.stroke_path(&path, &paint, &s, Transform::identity(), None);
+    }
+
+    // Arrowhead — triangle with apex at (ex, ey), base perpendicular to
+    // the line direction, base width head_w.
+    let nx = -uy; // perpendicular
+    let ny = ux;
+    let base_cx = ex - ux * head_len;
+    let base_cy = ey - uy * head_len;
+    let bx1 = base_cx + nx * (head_w * 0.5);
+    let by1 = base_cy + ny * (head_w * 0.5);
+    let bx2 = base_cx - nx * (head_w * 0.5);
+    let by2 = base_cy - ny * (head_w * 0.5);
+
+    let mut pb = PathBuilder::new();
+    pb.move_to(ex, ey);
+    pb.line_to(bx1, by1);
+    pb.line_to(bx2, by2);
+    pb.close();
+    let head = pb.finish().ok_or("empty head path")?;
+    pixmap.fill_path(&head, &paint, FillRule::Winding, Transform::identity(), None);
+
+    let png = pixmap
+        .encode_png()
+        .map_err(|e| format!("encode png: {e}"))?;
+    std::fs::write(out_path, png).map_err(|e| format!("write {}: {e}", out_path.display()))?;
+    Ok(())
+}
 
 fn temp_dir_for(source: &Path) -> PathBuf {
     let stem = source
@@ -165,7 +297,13 @@ pub fn edit_save(source_path: String, sidecar: SidecarState) -> Result<String, S
         .enumerate()
         .filter(|(_, a)| a.kind == "text" && !a.content.is_empty())
         .collect();
-    let need_temp = !text_anns.is_empty();
+    let arrow_anns: Vec<(usize, &Annotation)> = sidecar
+        .annotations
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| a.kind == "arrow" && a.endpoint.is_some())
+        .collect();
+    let need_temp = !text_anns.is_empty() || !arrow_anns.is_empty();
     if need_temp {
         std::fs::create_dir_all(&temp_dir)
             .map_err(|e| format!("create {}: {}", temp_dir.display(), e))?;
@@ -179,6 +317,19 @@ pub fn edit_save(source_path: String, sidecar: SidecarState) -> Result<String, S
         std::fs::write(&p, &ann.content)
             .map_err(|e| format!("write text-{idx}: {e}"))?;
         text_paths.push((*idx, p, ann));
+    }
+
+    // Rasterize each arrow into source-sized transparent PNG.
+    let mut arrow_paths: Vec<(usize, PathBuf, &Annotation)> = Vec::new();
+    if !arrow_anns.is_empty() {
+        let (sw, sh) = probe_dimensions(&source)?;
+        for (idx, ann) in &arrow_anns {
+            let endpoint = ann.endpoint.as_ref().expect("filtered above");
+            let stroke = ann.stroke.unwrap_or(DEFAULT_ARROW_STROKE_PX);
+            let p = temp_dir.join(format!("arrow-{idx}.png"));
+            rasterize_arrow(sw, sh, &ann.position, endpoint, stroke, &p)?;
+            arrow_paths.push((*idx, p, ann));
+        }
     }
 
     let mut args: Vec<String> = vec!["-y".into(), "-hide_banner".into()];
@@ -196,24 +347,30 @@ pub fn edit_save(source_path: String, sidecar: SidecarState) -> Result<String, S
     args.push("-i".into());
     args.push(source.to_string_lossy().into_owned());
 
-    if !text_paths.is_empty() {
+    // Each arrow PNG is an additional input. Input indices: 0 = source,
+    // 1..N = arrow PNGs. The overlay filter references them by index.
+    for (_idx, path, _ann) in &arrow_paths {
+        args.push("-i".into());
+        args.push(path.to_string_lossy().into_owned());
+    }
+
+    let needs_filter = !text_paths.is_empty() || !arrow_paths.is_empty();
+    if needs_filter {
         let mut filter = String::new();
         let mut prev_label = String::from("0:v");
+        let mut step = 0usize;
+
+        // Text annotations first (drawtext on the base video).
         for (i, (_idx, path, ann)) in text_paths.iter().enumerate() {
-            let next_label = format!("v{i}");
+            let next_label = format!("v{step}");
+            step += 1;
             // Annotation times are absolute (source timeline). After -ss
             // before -i, output `t` starts at 0 — shift by trim_in. Clamp.
             let start = (ann.start_time - trim_in).max(0.0);
             let end = (ann.end_time - trim_in).max(start).min(out_duration);
             let size = ann.size.unwrap_or(DEFAULT_TEXT_SIZE_PX);
-            // Position is fraction of source dimensions, top-left of the
-            // text box. drawtext x/y accept iw/ih expressions, so we can
-            // express the fractional position directly.
             let x = ann.position.x.clamp(0.0, 1.0);
             let y = ann.position.y.clamp(0.0, 1.0);
-            // Path string: drawtext lexer treats ':' as option separator.
-            // SFNS.ttf and our temp paths don't contain ':' so a plain
-            // string works. If a path ever did contain ':', escape with \\.
             filter.push_str(&format!(
                 "[{prev_label}]drawtext=textfile={textfile}:fontfile={font}:fontsize={size}:fontcolor=white:box=1:boxcolor=0x141416cc:boxborderw=8:x=iw*{x}:y=ih*{y}:enable=between(t\\,{start:.3}\\,{end:.3})[{next_label}]",
                 prev_label = prev_label,
@@ -226,11 +383,35 @@ pub fn edit_save(source_path: String, sidecar: SidecarState) -> Result<String, S
                 end = end,
                 next_label = next_label,
             ));
-            if i + 1 < text_paths.len() {
+            if i + 1 < text_paths.len() || !arrow_paths.is_empty() {
                 filter.push(';');
             }
             prev_label = next_label;
         }
+
+        // Arrow overlays — each input arrow PNG (already source-sized) is
+        // composited at (0,0) gated by `enable=between(...)`. Source-fraction
+        // positioning is baked into the rasterized PNG.
+        for (i, (_idx, _path, ann)) in arrow_paths.iter().enumerate() {
+            let next_label = format!("v{step}");
+            step += 1;
+            let input_idx = i + 1; // 0 is source
+            let start = (ann.start_time - trim_in).max(0.0);
+            let end = (ann.end_time - trim_in).max(start).min(out_duration);
+            filter.push_str(&format!(
+                "[{prev_label}][{input_idx}:v]overlay=0:0:enable=between(t\\,{start:.3}\\,{end:.3})[{next_label}]",
+                prev_label = prev_label,
+                input_idx = input_idx,
+                start = start,
+                end = end,
+                next_label = next_label,
+            ));
+            if i + 1 < arrow_paths.len() {
+                filter.push(';');
+            }
+            prev_label = next_label;
+        }
+
         args.push("-filter_complex".into());
         args.push(filter);
         args.push("-map".into());

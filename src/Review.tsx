@@ -44,7 +44,11 @@ type Editor = {
   updateAnnotation: (idx: number, patch: Partial<Annotation>) => void;
   deleteAnnotation: (idx: number) => void;
   placeTextAt: (xFrac: number, yFrac: number) => void;
+  placeArrow: (start: Position, end: Position) => void;
 };
+
+const DEFAULT_ARROW_STROKE = 8;
+const ARROW_MIN_LENGTH_FRAC = 0.01;
 
 type Trim = { in: number; out: number };
 
@@ -170,6 +174,33 @@ export default function Review() {
         Promise.resolve().then(() => {
           setSelectedIndex(newIdx);
           setEditingIndex(newIdx);
+        });
+        return next;
+      });
+      setTool(null);
+    },
+    [duration],
+  );
+
+  const placeArrow = useCallback(
+    (start: Position, end: Position) => {
+      const t = videoRef.current?.currentTime ?? 0;
+      const endT =
+        duration != null ? Math.min(duration, t + ANNOTATION_DEFAULT_DURATION) : t + ANNOTATION_DEFAULT_DURATION;
+      const ann: Annotation = {
+        type: "arrow",
+        start_time: t,
+        end_time: endT,
+        position: start,
+        endpoint: end,
+        stroke: DEFAULT_ARROW_STROKE,
+        content: "",
+      };
+      setAnnotations((prev) => {
+        const next = [...prev, ann];
+        const newIdx = next.length - 1;
+        Promise.resolve().then(() => {
+          setSelectedIndex(newIdx);
         });
         return next;
       });
@@ -506,6 +537,7 @@ export default function Review() {
             updateAnnotation,
             deleteAnnotation,
             placeTextAt,
+            placeArrow,
           }}
         />
         <ExportPanel />
@@ -680,8 +712,7 @@ function Toolbar({
           label="Arrow"
           kbd="R"
           active={editor.tool === "arrow"}
-          disabled
-          title="Arrow ships in next commit"
+          onClick={() => editor.setTool(editor.tool === "arrow" ? null : "arrow")}
         />
       </div>
     </div>
@@ -750,6 +781,10 @@ type VideoStageProps = {
 
 function VideoStage(props: VideoStageProps) {
   const stageRef = useRef<HTMLDivElement | null>(null);
+  const [drawingArrow, setDrawingArrow] = useState<{
+    start: Position;
+    end: Position;
+  } | null>(null);
 
   const onStageClick = (e: React.MouseEvent) => {
     if (props.editor.tool !== "text") {
@@ -768,13 +803,54 @@ function VideoStage(props: VideoStageProps) {
     props.editor.placeTextAt(xFrac, yFrac);
   };
 
-  const cursor = props.editor.tool === "text" ? "crosshair" : "default";
+  const onStagePointerDown = (e: React.PointerEvent) => {
+    if (props.editor.tool !== "arrow") return;
+    if ((e.target as HTMLElement).dataset.stageBg !== "1") return;
+    e.preventDefault();
+    const rect = stageRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const startX = (e.clientX - rect.left) / rect.width;
+    const startY = (e.clientY - rect.top) / rect.height;
+    if (startX < 0 || startX > 1 || startY < 0 || startY > 1) return;
+    const start = { x: startX, y: startY };
+    setDrawingArrow({ start, end: start });
+    const onMove = (ev: PointerEvent) => {
+      const r = stageRef.current?.getBoundingClientRect();
+      if (!r) return;
+      const ex = Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width));
+      const ey = Math.max(0, Math.min(1, (ev.clientY - r.top) / r.height));
+      setDrawingArrow({ start, end: { x: ex, y: ey } });
+    };
+    const onUp = (ev: PointerEvent) => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      const r = stageRef.current?.getBoundingClientRect();
+      if (!r) {
+        setDrawingArrow(null);
+        return;
+      }
+      const ex = Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width));
+      const ey = Math.max(0, Math.min(1, (ev.clientY - r.top) / r.height));
+      const dx = ex - start.x;
+      const dy = ey - start.y;
+      const lenFrac = Math.sqrt(dx * dx + dy * dy);
+      setDrawingArrow(null);
+      if (lenFrac < ARROW_MIN_LENGTH_FRAC) return;
+      props.editor.placeArrow(start, { x: ex, y: ey });
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+
+  const cursor =
+    props.editor.tool === "text" || props.editor.tool === "arrow" ? "crosshair" : "default";
 
   return (
     <div style={{ position: "relative", padding: 16, background: "#0c0d10", flex: 1 }}>
       <div
         ref={stageRef}
         onClick={onStageClick}
+        onPointerDown={onStagePointerDown}
         data-stage-bg="1"
         style={{
           position: "relative",
@@ -825,6 +901,7 @@ function VideoStage(props: VideoStageProps) {
           videoRef={props.videoRef}
           editor={props.editor}
           currentTime={props.currentTime}
+          drawingArrow={drawingArrow}
         />
         <PlayerOverlay
           playing={props.playing}
@@ -842,11 +919,13 @@ function AnnotationLayer({
   videoRef,
   editor,
   currentTime,
+  drawingArrow,
 }: {
   stageRef: React.MutableRefObject<HTMLDivElement | null>;
   videoRef: React.MutableRefObject<HTMLVideoElement | null>;
   editor: Editor;
   currentTime: number;
+  drawingArrow: { start: Position; end: Position } | null;
 }) {
   return (
     <div
@@ -857,25 +936,40 @@ function AnnotationLayer({
       }}
     >
       {editor.annotations.map((ann, idx) => {
-        if (ann.type !== "text") return null;
         const visible =
           currentTime >= ann.start_time - 0.001 && currentTime <= ann.end_time + 0.001;
         const isSelected = editor.selectedIndex === idx;
         const isEditing = editor.editingIndex === idx;
         if (!visible && !isSelected && !isEditing) return null;
-        return (
-          <TextAnnotationView
-            key={idx}
-            ann={ann}
-            idx={idx}
-            stageRef={stageRef}
-            videoRef={videoRef}
-            editor={editor}
-            isSelected={isSelected}
-            isEditing={isEditing}
-          />
-        );
+        if (ann.type === "text") {
+          return (
+            <TextAnnotationView
+              key={idx}
+              ann={ann}
+              idx={idx}
+              stageRef={stageRef}
+              videoRef={videoRef}
+              editor={editor}
+              isSelected={isSelected}
+              isEditing={isEditing}
+            />
+          );
+        }
+        if (ann.type === "arrow" && ann.endpoint) {
+          return (
+            <ArrowAnnotationView
+              key={idx}
+              ann={ann}
+              idx={idx}
+              stageRef={stageRef}
+              editor={editor}
+              isSelected={isSelected}
+            />
+          );
+        }
+        return null;
       })}
+      {drawingArrow && <ArrowPreview start={drawingArrow.start} end={drawingArrow.end} />}
     </div>
   );
 }
@@ -1090,6 +1184,226 @@ function ResizeHandle({
         touchAction: "none",
       }}
     />
+  );
+}
+
+function useStageSize(stageRef: React.MutableRefObject<HTMLDivElement | null>) {
+  const [size, setSize] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    const update = () => {
+      const r = el.getBoundingClientRect();
+      setSize({ width: r.width, height: r.height });
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [stageRef]);
+  return size;
+}
+
+function ArrowMarker({ id }: { id: string }) {
+  return (
+    <marker
+      id={id}
+      markerWidth="6"
+      markerHeight="6"
+      refX="5.5"
+      refY="3"
+      orient="auto"
+      markerUnits="strokeWidth"
+    >
+      <path d="M0,0 L6,3 L0,6 z" fill="#fff" />
+    </marker>
+  );
+}
+
+function ArrowAnnotationView({
+  ann,
+  idx,
+  stageRef,
+  editor,
+  isSelected,
+}: {
+  ann: Annotation;
+  idx: number;
+  stageRef: React.MutableRefObject<HTMLDivElement | null>;
+  editor: Editor;
+  isSelected: boolean;
+}) {
+  const stageSize = useStageSize(stageRef);
+  const endpoint = ann.endpoint!;
+  const stroke = ann.stroke ?? DEFAULT_ARROW_STROKE;
+
+  // Display stroke: scale source px to CSS px using stage height as a proxy
+  // (we don't always know source dims here). At common sizes this is close
+  // enough for preview; saved arrow PNG uses the same source-px stroke.
+  const strokeCss = Math.max(2, Math.min(8, stroke * 0.35));
+  const markerId = `arrow-head-${idx}`;
+
+  const sx = ann.position.x * stageSize.width;
+  const sy = ann.position.y * stageSize.height;
+  const ex = endpoint.x * stageSize.width;
+  const ey = endpoint.y * stageSize.height;
+
+  const startEndpointDrag = (which: "start" | "end") => (e: React.PointerEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    if (!isSelected) editor.setSelectedIndex(idx);
+    const stage = stageRef.current?.getBoundingClientRect();
+    if (!stage) return;
+    const onMove = (ev: PointerEvent) => {
+      const fx = Math.max(0, Math.min(1, (ev.clientX - stage.left) / stage.width));
+      const fy = Math.max(0, Math.min(1, (ev.clientY - stage.top) / stage.height));
+      if (which === "start") {
+        editor.updateAnnotation(idx, { position: { x: fx, y: fy } });
+      } else {
+        editor.updateAnnotation(idx, { endpoint: { x: fx, y: fy } });
+      }
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+
+  const startBodyDrag = (e: React.PointerEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    if (!isSelected) editor.setSelectedIndex(idx);
+    const stage = stageRef.current?.getBoundingClientRect();
+    if (!stage) return;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startPos = ann.position;
+    const startEnd = endpoint;
+    const onMove = (ev: PointerEvent) => {
+      const dx = (ev.clientX - startX) / stage.width;
+      const dy = (ev.clientY - startY) / stage.height;
+      const np = {
+        x: Math.max(0, Math.min(1, startPos.x + dx)),
+        y: Math.max(0, Math.min(1, startPos.y + dy)),
+      };
+      const ne = {
+        x: Math.max(0, Math.min(1, startEnd.x + dx)),
+        y: Math.max(0, Math.min(1, startEnd.y + dy)),
+      };
+      editor.updateAnnotation(idx, { position: np, endpoint: ne });
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+
+  return (
+    <svg
+      style={{
+        position: "absolute",
+        inset: 0,
+        width: "100%",
+        height: "100%",
+        pointerEvents: "none",
+        overflow: "visible",
+      }}
+    >
+      <defs>
+        <ArrowMarker id={markerId} />
+      </defs>
+      {/* Visible shaft */}
+      <line
+        x1={sx}
+        y1={sy}
+        x2={ex}
+        y2={ey}
+        stroke="#fff"
+        strokeWidth={strokeCss}
+        strokeLinecap="round"
+        markerEnd={`url(#${markerId})`}
+      />
+      {/* Wider hit area for body-drag (transparent) */}
+      <line
+        x1={sx}
+        y1={sy}
+        x2={ex}
+        y2={ey}
+        stroke="transparent"
+        strokeWidth={Math.max(strokeCss + 8, 12)}
+        strokeLinecap="round"
+        style={{ pointerEvents: isSelected ? "stroke" : "stroke", cursor: "move" }}
+        onPointerDown={startBodyDrag}
+        onClick={(e) => {
+          e.stopPropagation();
+          if (!isSelected) editor.setSelectedIndex(idx);
+        }}
+      />
+      {isSelected && (
+        <>
+          <EndpointHandle cx={sx} cy={sy} onPointerDown={startEndpointDrag("start")} />
+          <EndpointHandle cx={ex} cy={ey} onPointerDown={startEndpointDrag("end")} />
+        </>
+      )}
+    </svg>
+  );
+}
+
+function EndpointHandle({
+  cx,
+  cy,
+  onPointerDown,
+}: {
+  cx: number;
+  cy: number;
+  onPointerDown: (e: React.PointerEvent) => void;
+}) {
+  return (
+    <circle
+      cx={cx}
+      cy={cy}
+      r={5}
+      fill="#fff"
+      stroke="var(--accent)"
+      strokeWidth={1.5}
+      style={{ pointerEvents: "auto", cursor: "grab", touchAction: "none" }}
+      onPointerDown={onPointerDown}
+    />
+  );
+}
+
+function ArrowPreview({ start, end }: { start: Position; end: Position }) {
+  const markerId = "arrow-preview-head";
+  return (
+    <svg
+      style={{
+        position: "absolute",
+        inset: 0,
+        width: "100%",
+        height: "100%",
+        pointerEvents: "none",
+        overflow: "visible",
+      }}
+    >
+      <defs>
+        <ArrowMarker id={markerId} />
+      </defs>
+      <line
+        x1={`${start.x * 100}%`}
+        y1={`${start.y * 100}%`}
+        x2={`${end.x * 100}%`}
+        y2={`${end.y * 100}%`}
+        stroke="#fff"
+        strokeOpacity="0.85"
+        strokeWidth={4}
+        strokeLinecap="round"
+        markerEnd={`url(#${markerId})`}
+      />
+    </svg>
   );
 }
 
