@@ -59,7 +59,13 @@ async function closeBubble() {
 
 const COUNTDOWN_LABEL = "countdown";
 
-type DisplayFrame = { x: number; y: number; w: number; h: number };
+type DisplayFrame = {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  scale: number;
+};
 
 async function openCountdown(
   durationSec: number,
@@ -68,15 +74,24 @@ async function openCountdown(
   const existing = await WebviewWindow.getByLabel(COUNTDOWN_LABEL);
   if (existing) await existing.close().catch(() => {});
 
-  // Don't use `fullscreen: true` — macOS fullscreen mode forces an opaque
-  // backdrop AND opens on whichever screen is "active," not the recorded one.
-  // Explicit position+size in physical pixels lands the window over the
-  // exact display being recorded, with the transparent webview intact.
+  // Construct with the recorded display's exact frame in logical pixels —
+  // no post-creation setSize/setPosition. The previous pattern raced with
+  // initial paint on macOS, leaving a 100x100 window with the digit clipped.
+  // Tauri's constructor accepts logical pixels; convert from the monitor's
+  // physical frame using its scaleFactor.
+  const scale = displayFrame.scale || 1;
+  const wLogical = displayFrame.w / scale;
+  const hLogical = displayFrame.h / scale;
+  const xLogical = displayFrame.x / scale;
+  const yLogical = displayFrame.y / scale;
+
   const win = new WebviewWindow(COUNTDOWN_LABEL, {
     url: `/#countdown?duration=${durationSec}`,
     title: "Countdown",
-    width: 100,
-    height: 100,
+    width: wLogical,
+    height: hLogical,
+    x: xLogical,
+    y: yLogical,
     decorations: false,
     transparent: true,
     alwaysOnTop: true,
@@ -87,22 +102,10 @@ async function openCountdown(
     focus: true,
   });
 
-  win.once("tauri://created", async () => {
+  win.once("tauri://created", () => {
     invoke("make_capture_invisible", { label: COUNTDOWN_LABEL }).catch((e) => {
       console.error("make_capture_invisible(countdown) failed", e);
     });
-    try {
-      const { PhysicalPosition, PhysicalSize } = await import(
-        "@tauri-apps/api/dpi"
-      );
-      await win.setSize(new PhysicalSize(displayFrame.w, displayFrame.h));
-      await win.setPosition(
-        new PhysicalPosition(displayFrame.x, displayFrame.y),
-      );
-      await win.setFocus();
-    } catch (e) {
-      console.error("countdown positioning failed", e);
-    }
   });
   win.once("tauri://error", (e) => {
     console.error("countdown window error", e);
@@ -406,6 +409,7 @@ function App() {
         y: monitor?.position.y ?? 0,
         w: monitor?.size.width ?? 0,
         h: monitor?.size.height ?? 0,
+        scale: monitor?.scaleFactor ?? 1,
       };
 
       if (countdownDuration > 0) {
