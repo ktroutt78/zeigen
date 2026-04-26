@@ -135,18 +135,23 @@ Phase 5 finalized recordings directly to `~/Movies/Zeigen/recording-….mp4`. Th
 
 **Done when:** A new recording lands in `.scratch/`, not in `~/Movies/Zeigen/`. Closing the review window with no Save click leaves nothing in `~/Movies/Zeigen/`. Clicking Save produces the expected `recording-….mp4` and removes the scratch dir. Clicking Discard removes the scratch dir and produces nothing in `~/Movies/Zeigen/`. The Record-another flow works end-to-end without leaving stranded windows.
 
-## Phase 6: Export destinations
+## Phase 6: Export destinations — **Complete (2026-04-26)**
 
-Four output paths from the review screen. Local save already works from Phase 2; this phase adds the other three.
+Three destinations shipped (Save locally + Reveal, Copy to Clipboard, Export for LinkedIn). Hosted Cloudflare R2 + Pages share-link path was deliberately dropped mid-phase — see DECISIONS.md 2026-04-26 entry. Zeigen is positioned as a local recording tool with smart export paths, not a hosted sharing service.
 
-**Deliverables**
-- **Save locally** — already working; add "Reveal in Finder" button
-- **Copy file to clipboard** — for drag-paste into Slack, Messages, email
-- **Cloudflare R2 + Pages bootstrap** — none of this is provisioned yet. Create the R2 bucket with public-read access so objects are fetched directly by the viewer page (delete-to-unshare is the expected UX; no signed URLs, no expiration). Create a scoped API token with *write* access only, stored in Tauri's secure store (not source) — the token is for uploads from Rust, never for reads. Create a Cloudflare Pages project named `zeigen-share` deployed to the default `zeigen-share.pages.dev` subdomain (no custom domain). Implement the `/v/[id]` viewer route that loads the public R2 object. Short-URL scheme: 10-character nanoid as the object key.
-- **Cloudflare R2 upload + share link** — upload from Rust, copy short URL to clipboard
-- **LinkedIn export** — transcode to LinkedIn-optimized preset (max 10min warning, target <200MB, H.264+AAC), reveal in Finder, copy caption template to clipboard, open `linkedin.com/feed/?shareActive=true` in browser
+The original commit plan was reshaped twice during build:
+1. First, by the product decision to drop hosted sharing (R2/Pages/credentials/SigV4 — none of it ships).
+2. Second, by an architecture revision adopting iPhone screenshot semantics for the review window: explicit Save = keep, anything else = throw away. The Phase 5.5 close-prompt was removed (later partially restored, scoped to the title-bar X on uncommitted recordings only). Copy and LinkedIn became independent destinations that produce temp/separate files without committing the source.
 
-**Done when:** Each of the four export paths produces the expected result for a 3-minute test recording. R2 link plays in an incognito browser. LinkedIn export file drags cleanly into the LinkedIn post composer.
+**What shipped**
+- Footer "Save recording" stays open after commit; right side splits into a "Saved" status and a Reveal-in-Finder button.
+- Footer "Discard recording" — instant cleanup, no confirm modal.
+- "Record another" — same iPhone-screenshot cleanup, then emits to main, then closes.
+- Close window (red X): silent if committed; Save/Discard/Cancel modal if uncommitted.
+- Copy to Clipboard row — copies source mp4 to `~/Library/Caches/com.zeigen.app/exports/recording-<stamp>/` and points NSPasteboard at the temp copy. Transient "Copied" indicator. ⌘C shortcut wired (skips when text is selected or input is focused).
+- Export for LinkedIn row — transcodes via h264_videotoolbox (high profile, yuv420p, +faststart, AAC 128k, scale-cap 1080p, bitrate solved per-duration to keep file under 200 MB). Output goes to `~/Movies/Zeigen/recording-<stamp>-linkedin.mp4` (persists across all cleanup events). Caption template lands on the clipboard, Safari opens the share composer, Finder lands on top with the file selected. Drag-then-paste-caption is the manual handoff (LinkedIn has no upload API for personal profiles).
+- App-launch sweep removes any per-recording exports cache dir older than 24h.
+- Bonus tpad fix landed mid-phase: webcam bubble visible from t=0 instead of popping in after the AVCaptureSession start lag (composite.rs).
 
 ## Phase 7: Polish pass
 
