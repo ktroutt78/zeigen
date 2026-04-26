@@ -295,6 +295,11 @@ export default function Review() {
   // final path on success, null on failure — Phase 6 export rows consume
   // the path via `ensureCommitted` to operate on the final mp4.
   const saveRecording = useCallback((): Promise<string | null> => {
+    // Idempotent: once committed, every subsequent call returns the cached
+    // final path. Without this, clicking footer Save after an export-row
+    // click (which already commits via ensureCommitted) re-invokes
+    // commit_recording on the now-stale scratch path → canonicalize ENOENT.
+    if (committedPathRef.current) return Promise.resolve(committedPathRef.current);
     if (saveInFlightRef.current) return saveInFlightRef.current;
     if (!sourcePath) return Promise.resolve(null);
     const promise = (async () => {
