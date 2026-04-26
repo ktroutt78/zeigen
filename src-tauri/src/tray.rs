@@ -9,7 +9,10 @@ use tauri::{
 };
 
 const TRAY_ID: &str = "main-tray";
-const ICON_BYTES: &[u8] = include_bytes!("../icons/32x32.png");
+// Dedicated tray asset (menu-bar variant of the Zeigen mark, no shadow strip,
+// fatter Z) so we can render the colored brand mark in the menu bar instead
+// of the alpha-only template silhouette of the full app icon.
+const ICON_BYTES: &[u8] = include_bytes!("../icons/tray-icon.png");
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct UiState {
@@ -60,7 +63,7 @@ pub fn setup<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
 
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon)
-        .icon_as_template(true)
+        .icon_as_template(false)
         .menu(&menu)
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| {

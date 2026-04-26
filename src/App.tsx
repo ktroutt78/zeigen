@@ -944,20 +944,20 @@ function BrandBar({
         background: "linear-gradient(to bottom, #2a2a2c, #232325)",
       }}
     >
-      <span
-        style={{
-          width: 18,
-          height: 18,
-          borderRadius: 5,
-          background: "linear-gradient(135deg, var(--accent), oklch(0.5 0.18 250))",
-          display: "inline-flex",
-          alignItems: "center",
-          justifyContent: "center",
-          color: "#fff",
-        }}
+      <svg
+        width="18"
+        height="18"
+        viewBox="0 0 120 120"
+        aria-label="Zeigen"
+        style={{ display: "block", flexShrink: 0 }}
       >
-        <Icon d={P.play} size={9} stroke={0} fill="currentColor" />
-      </span>
+        <rect x="6" y="6" width="108" height="108" rx="26" fill="oklch(0.58 0.18 252)" />
+        <path
+          d="M28 32 H92 V46 L48 78 H92 V92 H28 V78 L72 46 H28 Z"
+          fill="oklch(0.36 0.16 260)"
+        />
+        <path d="M28 32 H92 V40 H28 Z" fill="#000" opacity="0.22" />
+      </svg>
       <span
         style={{
           marginLeft: 7,
