@@ -15,6 +15,8 @@ struct Command: Decodable {
 struct DisplayInfo: Encodable {
     let id: UInt32
     let name: String
+    let x: Int
+    let y: Int
     let width: Int
     let height: Int
 }
@@ -43,7 +45,7 @@ func emit(_ event: Event) {
     case .enumerated(let displays, let microphones):
         json = [
             "event": "enumerated",
-            "displays": displays.map { ["id": $0.id, "name": $0.name, "width": $0.width, "height": $0.height] },
+            "displays": displays.map { ["id": $0.id, "name": $0.name, "x": $0.x, "y": $0.y, "width": $0.width, "height": $0.height] },
             "microphones": microphones.map { ["uid": $0.uid, "name": $0.name] },
         ]
     case .started(let started_at):

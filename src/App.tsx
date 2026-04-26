@@ -141,32 +141,31 @@ async function openCountdown(
 
 const IDENTIFY_LABEL_PREFIX = "identify-";
 
-type DisplayShape = { width: number; height: number };
+type DisplayShape = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
 
 async function openIdentifyOverlays(displays: DisplayShape[]) {
   if (displays.length === 0) return;
-  const monitors = await availableMonitors();
   for (let i = 0; i < displays.length; i++) {
     const display = displays[i];
-    const monitor =
-      monitors.find(
-        (m) =>
-          m.size.width === display.width && m.size.height === display.height,
-      ) || monitors[i];
-    if (!monitor) continue;
-    const scale = monitor.scaleFactor || 1;
     const label = `${IDENTIFY_LABEL_PREFIX}${i}`;
     const existing = await WebviewWindow.getByLabel(label);
     if (existing) await existing.close().catch(() => {});
-    // Use logical coords for the constructor based on this monitor's scale,
-    // then re-apply physical position + size on `tauri://created` so the
-    // window lands on the correct display even when monitors have mixed
-    // scale factors (e.g. Retina + external 1x).
+    // Constructor needs a width/height; we reset position + size to physical
+    // values on `tauri://created` so the window lands on the correct
+    // monitor regardless of the global continuous-logical-coord
+    // calculation. Display x/y/w/h come straight from the engine
+    // (CGDirectDisplay.frame), which uses the same physical coord space as
+    // Tauri's monitor.position / monitor.size.
     const win = new WebviewWindow(label, {
       url: `/#identify?n=${i + 1}`,
       title: "Identify",
-      width: monitor.size.width / scale,
-      height: monitor.size.height / scale,
+      width: 200,
+      height: 200,
       decorations: false,
       transparent: true,
       alwaysOnTop: true,
@@ -181,12 +180,8 @@ async function openIdentifyOverlays(displays: DisplayShape[]) {
         const { PhysicalPosition, PhysicalSize } = await import(
           "@tauri-apps/api/dpi"
         );
-        await win.setSize(
-          new PhysicalSize(monitor.size.width, monitor.size.height),
-        );
-        await win.setPosition(
-          new PhysicalPosition(monitor.position.x, monitor.position.y),
-        );
+        await win.setSize(new PhysicalSize(display.width, display.height));
+        await win.setPosition(new PhysicalPosition(display.x, display.y));
       } catch {
         // best effort
       }
@@ -325,7 +320,14 @@ async function openReview(
   });
 }
 
-type Display = { id: number; name: string; width: number; height: number };
+type Display = {
+  id: number;
+  name: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
 type Mic = { uid: string; name: string };
 type Device = { index: number; name: string };
 type DeviceList = { video: Device[]; audio: Device[]; screens: Device[] };
@@ -518,20 +520,22 @@ function App() {
 
       // Resolve the recorded display's physical frame up front. The countdown
       // window needs it to land on the correct screen; engine_start needs it
-      // for bubble-position-log fraction conversion.
+      // for bubble-position-log fraction conversion. Display x/y/w/h come
+      // from the engine (CGDirectDisplay.frame); match the Tauri monitor by
+      // exact position to grab the scale factor (needed for logical-pixel
+      // window positioning in the countdown constructor).
       const display = displays.find((d) => d.id === selectedDisplay);
       const monitors = await availableMonitors();
-      const monitor =
-        (display &&
-          monitors.find(
-            (m) => m.size.width === display.width && m.size.height === display.height,
-          )) ||
-        monitors[0];
+      const monitor = display
+        ? monitors.find(
+            (m) => m.position.x === display.x && m.position.y === display.y,
+          ) || monitors[0]
+        : monitors[0];
       const recordedFrame: DisplayFrame = {
-        x: monitor?.position.x ?? 0,
-        y: monitor?.position.y ?? 0,
-        w: monitor?.size.width ?? 0,
-        h: monitor?.size.height ?? 0,
+        x: display?.x ?? monitor?.position.x ?? 0,
+        y: display?.y ?? monitor?.position.y ?? 0,
+        w: display?.width ?? monitor?.size.width ?? 0,
+        h: display?.height ?? monitor?.size.height ?? 0,
         scale: monitor?.scaleFactor ?? 1,
       };
 

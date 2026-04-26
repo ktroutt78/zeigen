@@ -26,7 +26,14 @@ actor Engine {
         do {
             let shareable = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
             let displays = shareable.displays.map {
-                DisplayInfo(id: $0.displayID, name: "Display \($0.displayID)", width: Int($0.width), height: Int($0.height))
+                DisplayInfo(
+                    id: $0.displayID,
+                    name: "Display \($0.displayID)",
+                    x: Int($0.frame.origin.x),
+                    y: Int($0.frame.origin.y),
+                    width: Int($0.width),
+                    height: Int($0.height)
+                )
             }
             let mics = AVCaptureDevice.DiscoverySession(
                 deviceTypes: [.microphone, .external],
