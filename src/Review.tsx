@@ -522,10 +522,13 @@ export default function Review() {
     setShowDiscardConfirm(false);
   }, []);
 
+  // Footer Save commits the scratch and stays open so the user can use
+  // the export rows (Reveal, Copy, LinkedIn) on the now-final file. The
+  // close-requested handler will destroy the window silently after commit
+  // since committedRef.current = true short-circuits the close prompt.
   const onFooterSave = useCallback(async () => {
-    const ok = await saveRecording();
-    if (ok) await closeWindow();
-  }, [saveRecording, closeWindow]);
+    await saveRecording();
+  }, [saveRecording]);
 
   // "Record another": close this review and immediately kick off a fresh
   // capture. If the recording is unsaved, route through the close modal
@@ -658,6 +661,7 @@ export default function Review() {
           onFooterRecordAnother={onFooterRecordAnother}
           saving={saving}
           busy={busy}
+          committed={committedPath != null}
           editor={{
             tool,
             setTool,
@@ -761,6 +765,7 @@ type LeftColumnProps = {
   onFooterRecordAnother: () => Promise<void> | void;
   saving: boolean;
   busy: boolean;
+  committed: boolean;
   editor: Editor;
 };
 
@@ -802,6 +807,7 @@ function LeftColumn(props: LeftColumnProps) {
         onRecordAnother={props.onFooterRecordAnother}
         saving={props.saving}
         busy={props.busy}
+        committed={props.committed}
       />
     </div>
   );
@@ -1928,19 +1934,22 @@ function ActionFooter({
   onRecordAnother,
   saving,
   busy,
+  committed,
 }: {
   onDiscard: () => Promise<void> | void;
   onSave: () => Promise<void> | void;
   onRecordAnother: () => Promise<void> | void;
   saving: boolean;
   busy: boolean;
+  committed: boolean;
 }) {
-  // Both buttons commit a scratch-level decision — Save bakes & moves the
-  // file out, Discard destroys the scratch dir entirely. Always enabled
-  // unless an op is in flight; Discard goes through a confirm dialog.
-  // Record another reuses the close-modal flow when uncommitted, then
-  // closes this window and tells main to start a fresh capture.
-  const enabled = !busy;
+  // Save bakes & moves the scratch out; Discard destroys it. After commit
+  // both targets are gone — disable both. Record another always works.
+  // The window stays open after commit so the user can interact with the
+  // export rows; closing then is silent (committedRef short-circuits the
+  // close prompt).
+  const recordAnotherEnabled = !busy;
+  const scratchOpsEnabled = !busy && !committed;
   return (
     <div
       style={{
@@ -1955,7 +1964,7 @@ function ActionFooter({
       <div style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
         <button
           onClick={() => onRecordAnother()}
-          disabled={!enabled}
+          disabled={!recordAnotherEnabled}
           className="btn-secondary"
           style={{
             display: "inline-flex",
@@ -1967,8 +1976,8 @@ function ActionFooter({
             fontFamily: "var(--font-system)",
             fontSize: 12.5,
             fontWeight: 500,
-            cursor: enabled ? "pointer" : "not-allowed",
-            opacity: enabled ? 1 : 0.5,
+            cursor: recordAnotherEnabled ? "pointer" : "not-allowed",
+            opacity: recordAnotherEnabled ? 1 : 0.5,
           }}
         >
           <Icon d={P.play} size={11} stroke={0} fill="currentColor" />
@@ -1976,7 +1985,7 @@ function ActionFooter({
         </button>
         <button
           onClick={() => onDiscard()}
-          disabled={!enabled}
+          disabled={!scratchOpsEnabled}
           style={{
             display: "inline-flex",
             alignItems: "center",
@@ -1987,11 +1996,11 @@ function ActionFooter({
             padding: "6px 12px",
             borderRadius: 6,
             height: 30,
-            cursor: enabled ? "pointer" : "not-allowed",
+            cursor: scratchOpsEnabled ? "pointer" : "not-allowed",
             fontFamily: "var(--font-system)",
             fontSize: 12.5,
             fontWeight: 500,
-            opacity: enabled ? 1 : 0.5,
+            opacity: scratchOpsEnabled ? 1 : 0.5,
           }}
         >
           {I.trash}
@@ -2000,7 +2009,7 @@ function ActionFooter({
       </div>
       <button
         onClick={() => onSave()}
-        disabled={!enabled}
+        disabled={!scratchOpsEnabled}
         className="btn-primary"
         style={{
           display: "inline-flex",
@@ -2012,12 +2021,12 @@ function ActionFooter({
           fontSize: 12.5,
           fontWeight: 600,
           letterSpacing: "-0.005em",
-          opacity: enabled ? 1 : 0.55,
-          cursor: enabled ? "pointer" : "not-allowed",
+          opacity: scratchOpsEnabled ? 1 : 0.6,
+          cursor: scratchOpsEnabled ? "pointer" : "not-allowed",
         }}
       >
         <Icon d={P.check} size={13} stroke={1.6} />
-        <span>{saving ? "Saving…" : "Save recording"}</span>
+        <span>{saving ? "Saving…" : committed ? "Saved" : "Save recording"}</span>
       </button>
     </div>
   );
