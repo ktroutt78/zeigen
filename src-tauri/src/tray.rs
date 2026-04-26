@@ -14,7 +14,7 @@ const TRAY_ID: &str = "main-tray";
 // Loading the @2x (32x32) variant for retina sharpness; macOS downscales
 // for non-retina. Native 16x16 (tray-iconTemplate.png) and @3x (48x48,
 // tray-iconTemplate-3x.png) are committed alongside for future use.
-const ICON_BYTES: &[u8] = include_bytes!("../icons/tray-iconTemplate-2x.png");
+const ICON_BYTES: &[u8] = include_bytes!("../icons/tray-iconTemplate@2x.png");
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct UiState {
