@@ -158,13 +158,15 @@ async function openIdentifyOverlays(displays: DisplayShape[]) {
     const label = `${IDENTIFY_LABEL_PREFIX}${i}`;
     const existing = await WebviewWindow.getByLabel(label);
     if (existing) await existing.close().catch(() => {});
+    // Use logical coords for the constructor based on this monitor's scale,
+    // then re-apply physical position + size on `tauri://created` so the
+    // window lands on the correct display even when monitors have mixed
+    // scale factors (e.g. Retina + external 1x).
     const win = new WebviewWindow(label, {
       url: `/#identify?n=${i + 1}`,
       title: "Identify",
       width: monitor.size.width / scale,
       height: monitor.size.height / scale,
-      x: monitor.position.x / scale,
-      y: monitor.position.y / scale,
       decorations: false,
       transparent: true,
       alwaysOnTop: true,
@@ -174,7 +176,20 @@ async function openIdentifyOverlays(displays: DisplayShape[]) {
       shadow: false,
       focus: false,
     });
-    win.once("tauri://created", () => {
+    win.once("tauri://created", async () => {
+      try {
+        const { PhysicalPosition, PhysicalSize } = await import(
+          "@tauri-apps/api/dpi"
+        );
+        await win.setSize(
+          new PhysicalSize(monitor.size.width, monitor.size.height),
+        );
+        await win.setPosition(
+          new PhysicalPosition(monitor.position.x, monitor.position.y),
+        );
+      } catch {
+        // best effort
+      }
       invoke("make_capture_invisible", { label }).catch(() => {});
     });
   }

@@ -13,12 +13,12 @@ export default function IdentifyOverlay() {
   const [out, setOut] = useState(false);
 
   useEffect(() => {
-    const tOut = window.setTimeout(() => setOut(true), 1700);
+    const tOut = window.setTimeout(() => setOut(true), 3300);
     const tClose = window.setTimeout(() => {
       getCurrentWebviewWindow()
         .close()
         .catch(() => {});
-    }, 2000);
+    }, 3700);
     return () => {
       window.clearTimeout(tOut);
       window.clearTimeout(tClose);
