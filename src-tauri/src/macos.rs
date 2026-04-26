@@ -1,7 +1,7 @@
 use objc2::msg_send;
 use objc2::runtime::AnyObject;
 use objc2::{Encode, Encoding, RefEncode};
-use tauri::{AppHandle, LogicalSize, Manager};
+use tauri::{AppHandle, Manager};
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -15,6 +15,36 @@ unsafe impl Encode for NSPoint {
         Encoding::Struct("CGPoint", &[f64::ENCODING, f64::ENCODING]);
 }
 unsafe impl RefEncode for NSPoint {
+    const ENCODING_REF: Encoding = Encoding::Pointer(&Self::ENCODING);
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct NSSize {
+    width: f64,
+    height: f64,
+}
+
+unsafe impl Encode for NSSize {
+    const ENCODING: Encoding =
+        Encoding::Struct("CGSize", &[f64::ENCODING, f64::ENCODING]);
+}
+unsafe impl RefEncode for NSSize {
+    const ENCODING_REF: Encoding = Encoding::Pointer(&Self::ENCODING);
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct NSRect {
+    origin: NSPoint,
+    size: NSSize,
+}
+
+unsafe impl Encode for NSRect {
+    const ENCODING: Encoding =
+        Encoding::Struct("CGRect", &[NSPoint::ENCODING, NSSize::ENCODING]);
+}
+unsafe impl RefEncode for NSRect {
     const ENCODING_REF: Encoding = Encoding::Pointer(&Self::ENCODING);
 }
 
@@ -54,29 +84,26 @@ pub fn set_window_frame_cg(
     let window = app
         .get_webview_window(&label)
         .ok_or_else(|| format!("window not found: {label}"))?;
-
-    // Move the window to the target screen FIRST. set_size operates in
-    // points using the current screen's scale factor — if we resize while
-    // still on a different-scale screen, the logical-to-physical conversion
-    // happens against the wrong scale and the window ends up sized wrong
-    // when it later moves. Move first, resize on the target screen.
     let ns_window = window
         .ns_window()
         .map_err(|e| format!("ns_window: {e}"))? as *mut AnyObject;
     if ns_window.is_null() {
         return Err("ns_window is null".into());
     }
-    let origin = NSPoint {
-        x: cg_x,
-        y: primary_cocoa_height - cg_y - height,
+
+    // setFrame:display: takes the full NSRect (Cocoa coords) and applies
+    // origin + size atomically — no scale-factor confusion from two-step
+    // setFrameOrigin + set_size where the resize runs on the wrong screen.
+    let frame = NSRect {
+        origin: NSPoint {
+            x: cg_x,
+            y: primary_cocoa_height - cg_y - height,
+        },
+        size: NSSize { width, height },
     };
     unsafe {
-        let _: () = msg_send![ns_window, setFrameOrigin: origin];
+        let _: () = msg_send![ns_window, setFrame: frame display: true];
     }
-
-    window
-        .set_size(LogicalSize::new(width, height))
-        .map_err(|e| format!("set_size: {e}"))?;
 
     Ok(())
 }
