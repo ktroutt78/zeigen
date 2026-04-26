@@ -139,6 +139,47 @@ async function openCountdown(
   });
 }
 
+const IDENTIFY_LABEL_PREFIX = "identify-";
+
+type DisplayShape = { width: number; height: number };
+
+async function openIdentifyOverlays(displays: DisplayShape[]) {
+  if (displays.length === 0) return;
+  const monitors = await availableMonitors();
+  for (let i = 0; i < displays.length; i++) {
+    const display = displays[i];
+    const monitor =
+      monitors.find(
+        (m) =>
+          m.size.width === display.width && m.size.height === display.height,
+      ) || monitors[i];
+    if (!monitor) continue;
+    const scale = monitor.scaleFactor || 1;
+    const label = `${IDENTIFY_LABEL_PREFIX}${i}`;
+    const existing = await WebviewWindow.getByLabel(label);
+    if (existing) await existing.close().catch(() => {});
+    const win = new WebviewWindow(label, {
+      url: `/#identify?n=${i + 1}`,
+      title: "Identify",
+      width: monitor.size.width / scale,
+      height: monitor.size.height / scale,
+      x: monitor.position.x / scale,
+      y: monitor.position.y / scale,
+      decorations: false,
+      transparent: true,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      resizable: false,
+      visibleOnAllWorkspaces: true,
+      shadow: false,
+      focus: false,
+    });
+    win.once("tauri://created", () => {
+      invoke("make_capture_invisible", { label }).catch(() => {});
+    });
+  }
+}
+
 const TIMER_CHIP_LABEL = "timer-chip";
 const TIMER_CHIP_W = 140;
 const TIMER_CHIP_H = 36;
@@ -805,19 +846,39 @@ function App() {
         </select>
 
         <RowLabel icon={I.monitor} label="Screen" />
-        <select
-          className="select"
-          value={selectedDisplay ?? ""}
-          onChange={(e) => setSelectedDisplay(Number(e.target.value))}
-          disabled={recording}
-          style={{ width: "100%", fontSize: 12.5 }}
-        >
-          {displays.map((d) => (
-            <option key={d.id} value={d.id}>
-              {d.name} — {d.width}×{d.height}
-            </option>
-          ))}
-        </select>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <select
+            className="select"
+            value={selectedDisplay ?? ""}
+            onChange={(e) => setSelectedDisplay(Number(e.target.value))}
+            disabled={recording}
+            style={{ flex: 1, fontSize: 12.5 }}
+          >
+            {displays.map((d) => (
+              <option key={d.id} value={d.id}>
+                {d.name} — {d.width}×{d.height}
+              </option>
+            ))}
+          </select>
+          <button
+            className="btn-ghost"
+            title="Identify displays"
+            onClick={() =>
+              openIdentifyOverlays(displays).catch((e) => setError(String(e)))
+            }
+            disabled={recording || displays.length === 0}
+            style={{
+              padding: 5,
+              color: "var(--fg-secondary)",
+              flexShrink: 0,
+              opacity: recording || displays.length === 0 ? 0.4 : 1,
+              cursor:
+                recording || displays.length === 0 ? "not-allowed" : "pointer",
+            }}
+          >
+            {I.search}
+          </button>
+        </div>
       </div>
 
       <StatusStrip
