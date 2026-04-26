@@ -75,6 +75,15 @@ function basename(p: string): string {
   return i >= 0 ? p.slice(i + 1) : p;
 }
 
+// Parse the recording stamp out of a path (scratch or final). All Phase 6
+// commands that touch the per-recording exports temp dir need this stamp
+// so they can compose the dir name independent of where the recording
+// currently lives. Returns null for paths that don't look like ours.
+function parseStampFromPath(p: string): string | null {
+  const m = p.match(/recording-(\d{4}-\d{2}-\d{2}-\d{6})/);
+  return m ? m[1] : null;
+}
+
 function fmt(s: number | null | undefined): string {
   if (s == null || !isFinite(s)) return "--:--";
   const m = Math.floor(s / 60);
@@ -128,8 +137,6 @@ export default function Review() {
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   const [snapshot, setSnapshot] = useState<SidecarState>(EMPTY_STATE);
 
-  const [showCloseModal, setShowCloseModal] = useState(false);
-  const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
   const [saving, setSaving] = useState(false);
   const [discarding, setDiscarding] = useState(false);
   const busy = saving || discarding;
@@ -316,7 +323,6 @@ export default function Review() {
         // Notify main so its post-finalize toast updates from the now-stale
         // scratch path to the actual final ~/Movies/Zeigen/recording-….mp4.
         await emit("recording-committed", { final_path: outPath }).catch(() => {});
-        committedRef.current = true;
         committedPathRef.current = outPath;
         setCommittedPath(outPath);
         return outPath;
@@ -332,38 +338,28 @@ export default function Review() {
     return promise;
   }, [sourcePath, currentState, duration]);
 
-  // Destructive: removes the entire scratch dir (mp4 + sidecar + raw
-  // sources). Footer button always asks for confirmation first; the
-  // close-prompt path uses the modal itself as the confirmation per the
-  // single-confirmation rule.
-  const discardRecording = useCallback(async (): Promise<boolean> => {
-    if (!sourcePath) return false;
-    setDiscarding(true);
+  // proceedingRef gates the close-requested handler so an in-flight
+  // close (which we drive explicitly via destroy()) doesn't re-enter.
+  const proceedingRef = useRef(false);
+
+  // iPhone-screenshot semantics: every "this recording is going away"
+  // event — footer Discard, close window, "Record another" — runs the
+  // same cleanup. discard_recording on the Rust side is idempotent:
+  // skips scratch removal if the dir is already gone (post-Save) and
+  // always cleans the matching exports temp dir.
+  const cleanupScratchAndExports = useCallback(async () => {
+    if (saveInFlightRef.current) {
+      try { await saveInFlightRef.current; } catch {}
+    }
+    if (!sourcePath) return;
     try {
       await invoke("discard_recording", { scratchMp4Path: sourcePath });
-      // Notify main so the post-finalize toast clears — it would otherwise
-      // keep pointing at the now-deleted scratch path.
+      // Tell main so its post-finalize toast clears.
       await emit("recording-discarded").catch(() => {});
-      committedRef.current = true;
-      return true;
     } catch (err) {
-      setError(`discard recording: ${err}`);
-      return false;
-    } finally {
-      setDiscarding(false);
+      console.error("cleanup failed:", err);
     }
   }, [sourcePath]);
-
-  // Refs for the close-requested handler so it sees current state without
-  // re-registering the listener on every keystroke. `committedRef` flips
-  // true once Save or Discard succeeds — closing before then must prompt
-  // so the user can't accidentally orphan a scratch dir.
-  const busyRef = useRef(busy);
-  const committedRef = useRef(false);
-  const proceedingRef = useRef(false);
-  useEffect(() => {
-    busyRef.current = busy;
-  }, [busy]);
 
   useEffect(() => {
     let unlisten: (() => void) | null = null;
@@ -372,20 +368,13 @@ export default function Review() {
       const win = getCurrentWebviewWindow();
       const fn = await win.onCloseRequested(async (event) => {
         if (proceedingRef.current) return; // already greenlit
-        // Always preventDefault, then explicitly destroy when we want to
-        // close. Tauri v2's "default close on no preventDefault" behavior
-        // proved unreliable in practice; this makes the close path
-        // explicit and atomic.
         event.preventDefault();
-        if (busyRef.current || !committedRef.current) {
-          setShowCloseModal(true);
-        } else {
-          proceedingRef.current = true;
-          await win.destroy().catch((err) => {
-            proceedingRef.current = false;
-            setError(`close: ${err}`);
-          });
-        }
+        proceedingRef.current = true;
+        await cleanupScratchAndExports();
+        await win.destroy().catch((err) => {
+          proceedingRef.current = false;
+          setError(`close: ${err}`);
+        });
       });
       if (cancelled) {
         fn();
@@ -397,7 +386,7 @@ export default function Review() {
       cancelled = true;
       unlisten?.();
     };
-  }, []);
+  }, [cleanupScratchAndExports]);
 
   const closeWindow = useCallback(async () => {
     proceedingRef.current = true;
@@ -409,67 +398,15 @@ export default function Review() {
       });
   }, []);
 
-  // Set true when "Record another" is what triggered the modal — the
-  // modal's Save/Discard handlers then emit `record-another` after a
-  // successful resolve so main can kick off a fresh capture.
-  const recordAnotherRef = useRef(false);
-
   const fireRecordAnother = useCallback(async () => {
     await emit("record-another").catch(() => {});
   }, []);
 
-  const onModalSave = useCallback(async () => {
-    const ok = await saveRecording();
-    if (ok) {
-      if (recordAnotherRef.current) {
-        recordAnotherRef.current = false;
-        await fireRecordAnother();
-      }
-      await closeWindow();
-    } else {
-      // Surface the error to the user (the error strip is rendered behind
-      // the modal). Window stays open; they can retry, discard, or fix.
-      setShowCloseModal(false);
-    }
-  }, [saveRecording, closeWindow, fireRecordAnother]);
-
-  const onModalDiscard = useCallback(async () => {
-    const ok = await discardRecording();
-    if (ok && recordAnotherRef.current) {
-      recordAnotherRef.current = false;
-      await fireRecordAnother();
-    }
-    await closeWindow();
-  }, [discardRecording, closeWindow, fireRecordAnother]);
-
-  const onModalCancel = useCallback(() => {
-    recordAnotherRef.current = false;
-    setShowCloseModal(false);
-  }, []);
-
-  // Modal keyboard handling: Enter = default (Discard), Esc = Cancel.
-  useEffect(() => {
-    if (!showCloseModal) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onModalCancel();
-      } else if (e.key === "Enter") {
-        e.preventDefault();
-        onModalDiscard();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [showCloseModal, onModalCancel, onModalDiscard]);
-
   // Global keyboard shortcuts: T/A → text tool, R → arrow tool (C5),
   // Esc → cancel tool/selection, Backspace/Delete → delete selection.
-  // Suppressed while editing text content (contentEditable) or while the
-  // close modal is open (its own handler runs).
+  // Suppressed while editing text content (contentEditable).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (showCloseModal) return;
       const target = e.target as HTMLElement | null;
       if (target?.isContentEditable) return;
       if (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA") return;
@@ -504,62 +441,49 @@ export default function Review() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [showCloseModal, tool, selectedIndex, editingIndex, deleteAnnotation]);
+  }, [tool, selectedIndex, editingIndex, deleteAnnotation]);
 
-  // Footer Discard opens an inline confirmation; on confirm we destroy
-  // the scratch dir then close the window.
-  const onFooterDiscard = useCallback(() => {
-    setShowDiscardConfirm(true);
-  }, []);
+  // Footer Discard: instant cleanup + close. iPhone-screenshot semantics
+  // — no confirm modal. The user explicitly chose discard; they meant it.
+  const onFooterDiscard = useCallback(async () => {
+    setDiscarding(true);
+    try {
+      await cleanupScratchAndExports();
+      await closeWindow();
+    } finally {
+      setDiscarding(false);
+    }
+  }, [cleanupScratchAndExports, closeWindow]);
 
-  const onConfirmDiscard = useCallback(async () => {
-    setShowDiscardConfirm(false);
-    const ok = await discardRecording();
-    if (ok) await closeWindow();
-  }, [discardRecording, closeWindow]);
-
-  const onCancelDiscard = useCallback(() => {
-    setShowDiscardConfirm(false);
-  }, []);
-
-  // Footer Save commits the scratch and stays open so the user can use
-  // the export rows (Reveal, Copy, LinkedIn) on the now-final file. The
-  // close-requested handler will destroy the window silently after commit
-  // since committedRef.current = true short-circuits the close prompt.
+  // Footer Save commits the scratch but does NOT close the window. The
+  // user can now reach the export rows (Copy, LinkedIn) on the final
+  // file, plus the inline Reveal affordance next to the "Saved" button.
   const onFooterSave = useCallback(async () => {
     await saveRecording();
   }, [saveRecording]);
 
-  // "Record another": close this review and immediately kick off a fresh
-  // capture. If the recording is unsaved, route through the close modal
-  // (Save/Discard/Cancel) first so nothing leaks into scratch — the modal
-  // handlers will fire `record-another` after a successful resolve.
+  // Footer Reveal — only shown post-Save. Reveals the final mp4 in Finder.
+  const onFooterReveal = useCallback(async () => {
+    if (!committedPath) return;
+    try {
+      await revealItemInDir(committedPath);
+    } catch (err) {
+      setError(`reveal in Finder: ${err}`);
+    }
+  }, [committedPath]);
+
+  // Record another: same iPhone-screenshot cleanup, then emit so main
+  // kicks off a fresh capture, then close.
   const onFooterRecordAnother = useCallback(async () => {
-    if (committedRef.current) {
+    setDiscarding(true);
+    try {
+      await cleanupScratchAndExports();
       await fireRecordAnother();
       await closeWindow();
-    } else {
-      recordAnotherRef.current = true;
-      setShowCloseModal(true);
+    } finally {
+      setDiscarding(false);
     }
-  }, [fireRecordAnother, closeWindow]);
-
-  // Discard-confirmation keyboard handling: Enter = Discard (destructive
-  // default per the macOS convention), Esc = Cancel. Mirrors CloseModal.
-  useEffect(() => {
-    if (!showDiscardConfirm) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onCancelDiscard();
-      } else if (e.key === "Enter") {
-        e.preventDefault();
-        onConfirmDiscard();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [showDiscardConfirm, onCancelDiscard, onConfirmDiscard]);
+  }, [cleanupScratchAndExports, fireRecordAnother, closeWindow]);
 
   // WebKit won't paint a video frame until the renderer is primed by
   // an actual playback start — preload="auto" + a seek-to-0.04 alone
@@ -659,6 +583,7 @@ export default function Review() {
           onFooterDiscard={onFooterDiscard}
           onFooterSave={onFooterSave}
           onFooterRecordAnother={onFooterRecordAnother}
+          onFooterReveal={onFooterReveal}
           saving={saving}
           busy={busy}
           committed={committedPath != null}
@@ -677,27 +602,13 @@ export default function Review() {
           }}
         />
         <ExportPanel
+          sourcePath={sourcePath}
           committedPath={committedPath}
           busy={busy}
           setError={setError}
         />
       </div>
       {error && <ErrorStrip error={error} onDismiss={() => setError(null)} />}
-      {showCloseModal && (
-        <CloseModal
-          onSave={onModalSave}
-          onDiscard={onModalDiscard}
-          onCancel={onModalCancel}
-          busy={busy}
-        />
-      )}
-      {showDiscardConfirm && (
-        <DiscardConfirmModal
-          onConfirm={onConfirmDiscard}
-          onCancel={onCancelDiscard}
-          discarding={discarding}
-        />
-      )}
     </main>
   );
 }
@@ -763,6 +674,7 @@ type LeftColumnProps = {
   onFooterDiscard: () => void;
   onFooterSave: () => Promise<void> | void;
   onFooterRecordAnother: () => Promise<void> | void;
+  onFooterReveal: () => Promise<void> | void;
   saving: boolean;
   busy: boolean;
   committed: boolean;
@@ -805,6 +717,7 @@ function LeftColumn(props: LeftColumnProps) {
         onDiscard={props.onFooterDiscard}
         onSave={props.onFooterSave}
         onRecordAnother={props.onFooterRecordAnother}
+        onReveal={props.onFooterReveal}
         saving={props.saving}
         busy={props.busy}
         committed={props.committed}
@@ -1932,6 +1845,7 @@ function ActionFooter({
   onDiscard,
   onSave,
   onRecordAnother,
+  onReveal,
   saving,
   busy,
   committed,
@@ -1939,15 +1853,15 @@ function ActionFooter({
   onDiscard: () => Promise<void> | void;
   onSave: () => Promise<void> | void;
   onRecordAnother: () => Promise<void> | void;
+  onReveal: () => Promise<void> | void;
   saving: boolean;
   busy: boolean;
   committed: boolean;
 }) {
   // Save bakes & moves the scratch out; Discard destroys it. After commit
   // both targets are gone — disable both. Record another always works.
-  // The window stays open after commit so the user can interact with the
-  // export rows; closing then is silent (committedRef short-circuits the
-  // close prompt).
+  // Post-commit the right side splits into a "Saved" status pseudo-button
+  // and a Reveal-in-Finder action button.
   const recordAnotherEnabled = !busy;
   const scratchOpsEnabled = !busy && !committed;
   return (
@@ -2007,203 +1921,68 @@ function ActionFooter({
           <span>Discard recording</span>
         </button>
       </div>
-      <button
-        onClick={() => onSave()}
-        disabled={!scratchOpsEnabled}
-        className="btn-primary"
-        style={{
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 6,
-          padding: "6px 14px",
-          borderRadius: 6,
-          height: 30,
-          fontSize: 12.5,
-          fontWeight: 600,
-          letterSpacing: "-0.005em",
-          opacity: scratchOpsEnabled ? 1 : 0.6,
-          cursor: scratchOpsEnabled ? "pointer" : "not-allowed",
-        }}
-      >
-        <Icon d={P.check} size={13} stroke={1.6} />
-        <span>{saving ? "Saving…" : committed ? "Saved" : "Save recording"}</span>
-      </button>
-    </div>
-  );
-}
-
-function CloseModal({
-  onSave,
-  onDiscard,
-  onCancel,
-  busy,
-}: {
-  onSave: () => void;
-  onDiscard: () => void;
-  onCancel: () => void;
-  busy: boolean;
-}) {
-  // Default focus on Discard, per macOS convention (Pages, Numbers, TextEdit).
-  // Enter triggers Discard; Esc triggers Cancel. The modal itself is the
-  // confirmation for destructive Discard — no second prompt.
-  const discardRef = useRef<HTMLButtonElement | null>(null);
-  useEffect(() => {
-    discardRef.current?.focus();
-  }, []);
-
-  return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,0.55)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        zIndex: 1000,
-      }}
-    >
-      <div
-        style={{
-          background: "var(--bg-elevated)",
-          border: "1px solid var(--border-strong)",
-          borderRadius: 10,
-          boxShadow: "var(--shadow-lg)",
-          padding: 18,
-          width: 360,
-          color: "var(--fg-primary)",
-          fontFamily: "var(--font-system)",
-        }}
-      >
-        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>Save your recording?</div>
-        <div style={{ fontSize: 12.5, color: "var(--fg-secondary)", lineHeight: 1.4 }}>
-          This recording hasn't been saved yet. Saving moves it to ~/Movies/Zeigen.
-          Discarding deletes it.
-        </div>
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
-          <button
-            onClick={onCancel}
-            className="btn-secondary"
-            style={{ padding: "5px 12px", height: 28 }}
+      {committed ? (
+        <div style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+          <span
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              padding: "6px 12px",
+              height: 30,
+              borderRadius: 6,
+              fontSize: 12.5,
+              fontWeight: 500,
+              color: "var(--success-tint)",
+            }}
           >
-            Cancel
-          </button>
+            <Icon d={P.check} size={13} stroke={1.8} />
+            <span>Saved</span>
+          </span>
           <button
-            ref={discardRef}
-            onClick={onDiscard}
+            onClick={() => onReveal()}
             disabled={busy}
             className="btn-secondary"
             style={{
-              padding: "5px 12px",
-              height: 28,
-              borderColor: "var(--border-strong)",
-              color: "var(--recording-tint)",
-              opacity: busy ? 0.6 : 1,
-              cursor: busy ? "wait" : "pointer",
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              padding: "6px 12px",
+              borderRadius: 6,
+              height: 30,
+              fontSize: 12.5,
+              fontWeight: 500,
+              cursor: busy ? "not-allowed" : "pointer",
+              opacity: busy ? 0.5 : 1,
             }}
           >
-            Discard
-          </button>
-          <button
-            onClick={onSave}
-            disabled={busy}
-            className="btn-primary"
-            style={{
-              padding: "5px 14px",
-              height: 28,
-              opacity: busy ? 0.6 : 1,
-              cursor: busy ? "wait" : "pointer",
-            }}
-          >
-            {busy ? "Working…" : "Save"}
+            {I.finder}
+            <span>Reveal</span>
           </button>
         </div>
-      </div>
-    </div>
-  );
-}
-
-function DiscardConfirmModal({
-  onConfirm,
-  onCancel,
-  discarding,
-}: {
-  onConfirm: () => void;
-  onCancel: () => void;
-  discarding: boolean;
-}) {
-  // Mirrors CloseModal: destructive default focused (Discard), Esc cancels.
-  const discardRef = useRef<HTMLButtonElement | null>(null);
-  useEffect(() => {
-    discardRef.current?.focus();
-  }, []);
-
-  return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,0.55)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        zIndex: 1000,
-      }}
-    >
-      <div
-        style={{
-          background: "var(--bg-elevated)",
-          border: "1px solid var(--border-strong)",
-          borderRadius: 10,
-          boxShadow: "var(--shadow-lg)",
-          padding: 18,
-          width: 360,
-          color: "var(--fg-primary)",
-          fontFamily: "var(--font-system)",
-        }}
-      >
-        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>
-          Discard this recording?
-        </div>
-        <div style={{ fontSize: 12.5, color: "var(--fg-secondary)", lineHeight: 1.4 }}>
-          The recording and any edits will be deleted. This cannot be undone.
-        </div>
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
-          <button
-            onClick={onCancel}
-            disabled={discarding}
-            className="btn-secondary"
-            style={{
-              padding: "5px 12px",
-              height: 28,
-              opacity: discarding ? 0.6 : 1,
-              cursor: discarding ? "wait" : "pointer",
-            }}
-          >
-            Cancel
-          </button>
-          <button
-            ref={discardRef}
-            onClick={onConfirm}
-            disabled={discarding}
-            className="btn-secondary"
-            style={{
-              padding: "5px 12px",
-              height: 28,
-              borderColor: "var(--border-strong)",
-              color: "var(--recording-tint)",
-              opacity: discarding ? 0.6 : 1,
-              cursor: discarding ? "wait" : "pointer",
-            }}
-          >
-            {discarding ? "Discarding…" : "Discard"}
-          </button>
-        </div>
-      </div>
+      ) : (
+        <button
+          onClick={() => onSave()}
+          disabled={!scratchOpsEnabled}
+          className="btn-primary"
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            padding: "6px 14px",
+            borderRadius: 6,
+            height: 30,
+            fontSize: 12.5,
+            fontWeight: 600,
+            letterSpacing: "-0.005em",
+            opacity: scratchOpsEnabled ? 1 : 0.6,
+            cursor: scratchOpsEnabled ? "pointer" : "not-allowed",
+          }}
+        >
+          <Icon d={P.check} size={13} stroke={1.6} />
+          <span>{saving ? "Saving…" : "Save recording"}</span>
+        </button>
+      )}
     </div>
   );
 }
@@ -2262,29 +2041,20 @@ function ErrorStrip({ error, onDismiss }: { error: string; onDismiss: () => void
 }
 
 function ExportPanel({
+  sourcePath,
   committedPath,
   busy,
   setError,
 }: {
+  sourcePath: string | null;
   committedPath: string | null;
   busy: boolean;
   setError: (msg: string | null) => void;
 }) {
-  const savedLocallySub = committedPath
-    ? `~/Movies/Zeigen/${basename(committedPath)}`
-    : "~/Movies/Zeigen/recording-…mp4";
-
-  // Post-save action only — clicking is gated on a non-null committedPath.
-  // Footer Save is the sole save trigger; rows are dimmed and inert until
-  // the recording is committed.
-  const onRevealLocal = useCallback(async () => {
-    if (!committedPath) return;
-    try {
-      await revealItemInDir(committedPath);
-    } catch (err) {
-      setError(`reveal in Finder: ${err}`);
-    }
-  }, [committedPath, setError]);
+  // Effective source is the committed final path when it exists, else
+  // the scratch path. Copy and LinkedIn read whichever is current — they
+  // don't care about save state under the new architecture.
+  const effectiveSource = committedPath || sourcePath;
 
   // Transient post-copy confirmation: NSPasteboard returns silently on
   // success and the row visual otherwise gives no feedback. Flip a flag
@@ -2298,20 +2068,25 @@ function ExportPanel({
   }, [copiedAt]);
 
   const onCopyClipboard = useCallback(async () => {
-    if (!committedPath) return;
+    if (!effectiveSource) return;
+    const stamp = parseStampFromPath(effectiveSource);
+    if (!stamp) {
+      setError(`copy to clipboard: cannot parse stamp from ${effectiveSource}`);
+      return;
+    }
     try {
-      await invoke("clipboard_copy_file", { path: committedPath });
+      await invoke("clipboard_copy_recording", { stamp, sourcePath: effectiveSource });
       setCopiedAt(Date.now());
     } catch (err) {
       setError(`copy to clipboard: ${err}`);
     }
-  }, [committedPath, setError]);
+  }, [effectiveSource, setError]);
 
   // ⌘C shortcut mirrors the row click. Skip when the user has a
   // selection or is focused on an editable element so the system's
   // default text-copy behavior wins.
   useEffect(() => {
-    if (!committedPath || busy) return;
+    if (!effectiveSource || busy) return;
     const onKey = (e: KeyboardEvent) => {
       if (!e.metaKey || e.shiftKey || e.altKey || e.ctrlKey) return;
       if (e.key.toLowerCase() !== "c") return;
@@ -2325,9 +2100,7 @@ function ExportPanel({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [committedPath, busy, onCopyClipboard]);
-
-  const rowsDisabled = !committedPath || busy;
+  }, [effectiveSource, busy, onCopyClipboard]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", background: "var(--bg-sidebar)" }}>
@@ -2346,20 +2119,6 @@ function ExportPanel({
       </div>
 
       <div style={{ padding: "0 12px 8px", display: "flex", flexDirection: "column", gap: 6 }}>
-        <DestRow
-          primary
-          icon={<Icon d={P.check} size={14} stroke={1.6} />}
-          title="Saved Locally"
-          sub={savedLocallySub}
-          action={
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11.5 }}>
-              {I.finder}
-              <span>Reveal</span>
-            </span>
-          }
-          onClick={onRevealLocal}
-          disabled={rowsDisabled}
-        />
         <DestRow
           icon={<Icon d="M5 2h6v3M5 2v9a1 1 0 001 1h7a1 1 0 001-1V6L11 2M3 6h6v8" size={14} stroke={1.4} />}
           title="Copy to Clipboard"
@@ -2389,13 +2148,14 @@ function ExportPanel({
             )
           }
           onClick={onCopyClipboard}
-          disabled={rowsDisabled}
+          disabled={!effectiveSource || busy}
         />
         <DestRow
           icon={<Icon d="M2.5 5h11v9h-11zM5 8.5v3M5 6.5h.01M7.5 11.5v-3c0-.8.7-1.5 1.5-1.5s1.5.7 1.5 1.5v3M10.5 11.5v-3" size={13} stroke={1.4} />}
           title="Export for LinkedIn"
           sub="MP4 · ≤ 10 min · 1080p capped"
-          disabled={rowsDisabled}
+          kbd={<span style={{ fontSize: 10, color: "var(--fg-quaternary)", fontWeight: 600, letterSpacing: "0.04em", textTransform: "uppercase" }}>Soon</span>}
+          disabled
         />
       </div>
 

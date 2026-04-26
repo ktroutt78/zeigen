@@ -3,6 +3,7 @@ mod composite;
 mod devices;
 mod edit;
 mod engine;
+mod exports;
 mod hotkey;
 mod macos;
 mod tray;
@@ -386,23 +387,39 @@ fn commit_recording(
 }
 
 // Destructive: removes the entire scratch directory (mp4 + sidecar + raw
-// sources) for a recording the user explicitly chose to throw away. Path
-// is supplied as the scratch mp4; we derive the parent and validate it
-// sits under ~/Movies/Zeigen/.scratch/ before any fs operation.
+// sources) plus the matching exports temp dir under ~/Library/Caches.
+// Idempotent: callable repeatedly and after a successful commit_recording
+// (scratch already gone). Phase 6's iPhone-screenshot semantics route
+// every "this recording is going away" event through here — footer
+// Discard, close window, "Record another."
 #[tauri::command]
 fn discard_recording(scratch_mp4_path: String) -> Result<(), String> {
     let scratch_mp4 = PathBuf::from(&scratch_mp4_path);
-    validate_scratch_path(&scratch_mp4)?;
-
     let scratch_dir = scratch_mp4
         .parent()
         .ok_or_else(|| format!("scratch mp4 has no parent: {}", scratch_mp4.display()))?
         .to_path_buf();
-    validate_scratch_path(&scratch_dir)?;
 
-    std::fs::remove_dir_all(&scratch_dir)
-        .map_err(|e| format!("remove scratch {}: {e}", scratch_dir.display()))?;
+    // Stamp is parsed from the dir name string — no filesystem access
+    // required, so we can clean exports even after the scratch dir was
+    // removed by a prior commit_recording.
+    let stamp = stamp_from_scratch_dir_name(&scratch_dir);
+
+    if scratch_dir.exists() {
+        validate_scratch_path(&scratch_dir)?;
+        std::fs::remove_dir_all(&scratch_dir)
+            .map_err(|e| format!("remove scratch {}: {e}", scratch_dir.display()))?;
+    }
+
+    if let Some(s) = stamp {
+        let _ = exports::cleanup_recording_exports_internal(&s);
+    }
     Ok(())
+}
+
+fn stamp_from_scratch_dir_name(dir: &std::path::Path) -> Option<String> {
+    let name = dir.file_name()?.to_str()?;
+    name.strip_prefix("recording-").map(String::from)
 }
 
 #[tauri::command]
@@ -449,6 +466,9 @@ pub fn run() {
             if let Err(e) = hotkey::register_default(&handle) {
                 eprintln!("hotkey register failed: {e}");
             }
+            // Sweep stale per-recording exports left over from prior runs
+            // that crashed or force-quit before per-session cleanup ran.
+            exports::sweep_stale_exports();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -471,7 +491,8 @@ pub fn run() {
             edit::delete_sidecar,
             commit_recording,
             discard_recording,
-            clipboard::clipboard_copy_file,
+            clipboard::clipboard_copy_recording,
+            exports::cleanup_recording_exports,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

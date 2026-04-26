@@ -2,17 +2,20 @@ use objc2::class;
 use objc2::msg_send;
 use objc2::runtime::AnyObject;
 use std::ffi::CString;
+use std::path::Path;
 
-// Write a single file URL to the macOS general pasteboard. Slack, Mail,
-// Messages, and Finder all paste an NSURL fileURL as an attachment / file
-// drop, which is what we want for the Phase 6 "Copy to Clipboard" row.
+use crate::exports;
+
+// Write a single fileURL to the macOS general pasteboard. NSURL conforms
+// to NSPasteboardWriting since macOS 10.6, so writeObjects: accepts an
+// NSArray<NSURL> directly. Slack, Mail, Messages, and Finder all paste
+// it as a file attachment / drop — same UX as drag-from-Finder.
 //
 // Raw msg_send! to stay aligned with macos.rs and avoid pulling
-// objc2-app-kit / objc2-foundation. NSURL conforms to NSPasteboardWriting
-// since macOS 10.6, so writeObjects: accepts an NSArray<NSURL> directly.
-#[tauri::command]
-pub fn clipboard_copy_file(path: String) -> Result<(), String> {
-    let c_path = CString::new(path.as_str()).map_err(|e| format!("path → CString: {e}"))?;
+// objc2-app-kit / objc2-foundation.
+fn write_url_to_pasteboard(path: &Path) -> Result<(), String> {
+    let s = path.to_string_lossy();
+    let c_path = CString::new(s.as_ref()).map_err(|e| format!("path → CString: {e}"))?;
 
     unsafe {
         let ns_string_cls = class!(NSString);
@@ -25,7 +28,7 @@ pub fn clipboard_copy_file(path: String) -> Result<(), String> {
         let ns_url_cls = class!(NSURL);
         let file_url: *mut AnyObject = msg_send![ns_url_cls, fileURLWithPath: ns_path];
         if file_url.is_null() {
-            return Err(format!("NSURL fileURLWithPath nil for {path}"));
+            return Err(format!("NSURL fileURLWithPath nil for {}", path.display()));
         }
 
         let ns_array_cls = class!(NSArray);
@@ -40,13 +43,36 @@ pub fn clipboard_copy_file(path: String) -> Result<(), String> {
             return Err("NSPasteboard generalPasteboard returned nil".into());
         }
 
-        // clearContents returns the new change count (NSInteger). Discard.
         let _: i64 = msg_send![pb, clearContents];
-
         let ok: bool = msg_send![pb, writeObjects: url_array];
         if !ok {
             return Err("NSPasteboard writeObjects: returned NO".into());
         }
     }
     Ok(())
+}
+
+// Phase 6 architecture: Copy to Clipboard does NOT commit the source
+// recording. It copies the source mp4 (scratch or final, whichever is
+// current) to a stable temp path under the user's Caches dir and points
+// the clipboard at that copy. The original recording stays in scratch
+// and the user can still Save or Discard it independently.
+//
+// Source path selection happens in JS (committedPath || sourcePath).
+// Stamp is parsed from the path on the JS side and passed in explicitly
+// so this command works for both pre-save and post-save sources.
+#[tauri::command]
+pub fn clipboard_copy_recording(stamp: String, source_path: String) -> Result<(), String> {
+    let source = Path::new(&source_path);
+    if !source.is_file() {
+        return Err(format!("source missing: {}", source.display()));
+    }
+    let temp_dir = exports::recording_exports_dir(&stamp)?;
+    let file_name = source
+        .file_name()
+        .ok_or_else(|| format!("source has no filename: {}", source.display()))?;
+    let temp_file = temp_dir.join(file_name);
+    std::fs::copy(source, &temp_file)
+        .map_err(|e| format!("copy {} → {}: {e}", source.display(), temp_file.display()))?;
+    write_url_to_pasteboard(&temp_file)
 }
