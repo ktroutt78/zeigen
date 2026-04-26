@@ -2286,6 +2286,35 @@ function ExportPanel({
     }
   }, [committedPath, setError]);
 
+  const onCopyClipboard = useCallback(async () => {
+    if (!committedPath) return;
+    try {
+      await invoke("clipboard_copy_file", { path: committedPath });
+    } catch (err) {
+      setError(`copy to clipboard: ${err}`);
+    }
+  }, [committedPath, setError]);
+
+  // ⌘C shortcut mirrors the row click. Skip when the user has a
+  // selection or is focused on an editable element so the system's
+  // default text-copy behavior wins.
+  useEffect(() => {
+    if (!committedPath || busy) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.metaKey || e.shiftKey || e.altKey || e.ctrlKey) return;
+      if (e.key.toLowerCase() !== "c") return;
+      const target = e.target as HTMLElement | null;
+      if (target?.isContentEditable) return;
+      if (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA") return;
+      const sel = window.getSelection();
+      if (sel && sel.toString().length > 0) return;
+      e.preventDefault();
+      onCopyClipboard();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [committedPath, busy, onCopyClipboard]);
+
   const rowsDisabled = !committedPath || busy;
 
   return (
@@ -2329,6 +2358,7 @@ function ExportPanel({
               <span className="kbd">C</span>
             </>
           }
+          onClick={onCopyClipboard}
           disabled={rowsDisabled}
         />
         <DestRow

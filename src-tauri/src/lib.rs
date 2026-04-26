@@ -1,3 +1,4 @@
+mod clipboard;
 mod composite;
 mod devices;
 mod edit;
@@ -470,6 +471,7 @@ pub fn run() {
             edit::delete_sidecar,
             commit_recording,
             discard_recording,
+            clipboard::clipboard_copy_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
