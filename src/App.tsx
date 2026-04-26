@@ -348,12 +348,19 @@ function App() {
         switch (ev.event) {
           case "ready":
             break;
-          case "enumerated":
-            setDisplays(ev.displays);
-            setMics(ev.microphones);
-            setSelectedDisplay((prev) => prev ?? ev.displays[0]?.id ?? null);
-            setSelectedMic((prev) => prev ?? ev.microphones[0]?.uid ?? null);
+          case "enumerated": {
+            const displays = [...ev.displays].sort((a, b) =>
+              a.name.localeCompare(b.name),
+            );
+            const mics = [...ev.microphones].sort((a, b) =>
+              a.name.localeCompare(b.name),
+            );
+            setDisplays(displays);
+            setMics(mics);
+            setSelectedDisplay((prev) => prev ?? displays[0]?.id ?? null);
+            setSelectedMic((prev) => prev ?? mics[0]?.uid ?? null);
             break;
+          }
           case "started":
             setState("recording");
             setProgress({ frames: 0, dropped: 0, elapsed_s: 0 });
