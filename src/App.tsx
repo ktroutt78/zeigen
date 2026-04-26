@@ -150,22 +150,35 @@ type DisplayShape = {
 
 async function openIdentifyOverlays(displays: DisplayShape[]) {
   if (displays.length === 0) return;
+  const monitors = await availableMonitors();
   for (let i = 0; i < displays.length; i++) {
     const display = displays[i];
+    // Match the Tauri monitor by exact physical position so we can grab
+    // its scale factor for logical-pixel sizing. Position-matching beats
+    // size-matching because two external monitors at the same resolution
+    // (a common setup) collapse onto one match by size alone.
+    const monitor =
+      monitors.find(
+        (m) => m.position.x === display.x && m.position.y === display.y,
+      ) ||
+      monitors[i] ||
+      monitors[0];
+    const scale = monitor?.scaleFactor || 1;
     const label = `${IDENTIFY_LABEL_PREFIX}${i}`;
     const existing = await WebviewWindow.getByLabel(label);
     if (existing) await existing.close().catch(() => {});
-    // Create hidden, then setPosition + setSize in physical pixels, then
-    // show. macOS NSWindow ignores setFrame requests on a window that has
-    // never been ordered on-screen, so positioning before show is the only
-    // way to land the window on a non-primary monitor reliably. Display
-    // x/y/w/h come straight from the engine (CGDirectDisplay.frame), in
-    // the same physical coord space Tauri's PhysicalPosition uses.
+    // Position + size via the constructor only — same pattern as
+    // openCountdown, which lands reliably on the recorded display.
+    // Avoids the race in win.once("tauri://created", ...) where the
+    // listener registration occasionally completes after the event fires
+    // and the post-creation setPosition/setSize never runs.
     const win = new WebviewWindow(label, {
       url: `/#identify?n=${i + 1}`,
       title: "Identify",
-      width: 200,
-      height: 200,
+      width: display.width / scale,
+      height: display.height / scale,
+      x: display.x / scale,
+      y: display.y / scale,
       decorations: false,
       transparent: true,
       alwaysOnTop: true,
@@ -174,20 +187,9 @@ async function openIdentifyOverlays(displays: DisplayShape[]) {
       visibleOnAllWorkspaces: true,
       shadow: false,
       focus: false,
-      visible: false,
     });
-    win.once("tauri://created", async () => {
-      try {
-        const { PhysicalPosition, PhysicalSize } = await import(
-          "@tauri-apps/api/dpi"
-        );
-        await win.setPosition(new PhysicalPosition(display.x, display.y));
-        await win.setSize(new PhysicalSize(display.width, display.height));
-        await invoke("make_capture_invisible", { label });
-        await win.show();
-      } catch (e) {
-        console.error(`identify[${label}] setup failed`, e);
-      }
+    win.once("tauri://created", () => {
+      invoke("make_capture_invisible", { label }).catch(() => {});
     });
   }
 }
