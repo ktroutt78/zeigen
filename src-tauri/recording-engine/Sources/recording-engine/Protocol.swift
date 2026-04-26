@@ -26,9 +26,21 @@ struct MicInfo: Encodable {
     let name: String
 }
 
+struct WindowInfo: Encodable {
+    let id: UInt32
+    let app: String
+    let bundle_id: String?
+    let title: String
+    let x: Int
+    let y: Int
+    let width: Int
+    let height: Int
+    let on_screen: Bool
+}
+
 enum Event {
     case ready(version: String)
-    case enumerated(displays: [DisplayInfo], microphones: [MicInfo])
+    case enumerated(displays: [DisplayInfo], microphones: [MicInfo], windows: [WindowInfo])
     case started(started_at: String)
     case progress(frames: Int, dropped: Int, elapsed_s: Double)
     case paused(elapsed_s: Double)
@@ -42,11 +54,25 @@ func emit(_ event: Event) {
     switch event {
     case .ready(let version):
         json = ["event": "ready", "version": version]
-    case .enumerated(let displays, let microphones):
+    case .enumerated(let displays, let microphones, let windows):
         json = [
             "event": "enumerated",
             "displays": displays.map { ["id": $0.id, "name": $0.name, "x": $0.x, "y": $0.y, "width": $0.width, "height": $0.height] },
             "microphones": microphones.map { ["uid": $0.uid, "name": $0.name] },
+            "windows": windows.map { w -> [String: Any] in
+                var dict: [String: Any] = [
+                    "id": w.id,
+                    "app": w.app,
+                    "title": w.title,
+                    "x": w.x,
+                    "y": w.y,
+                    "width": w.width,
+                    "height": w.height,
+                    "on_screen": w.on_screen,
+                ]
+                if let b = w.bundle_id { dict["bundle_id"] = b }
+                return dict
+            },
         ]
     case .started(let started_at):
         json = ["event": "started", "started_at": started_at]

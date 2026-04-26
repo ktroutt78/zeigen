@@ -40,9 +40,44 @@ actor Engine {
                 mediaType: .audio,
                 position: .unspecified
             ).devices.map { MicInfo(uid: $0.uniqueID, name: $0.localizedName) }
-            emit(.enumerated(displays: displays, microphones: mics))
+            let windows = filterShareableWindows(shareable.windows)
+            emit(.enumerated(displays: displays, microphones: mics, windows: windows))
         } catch {
             emit(.error(code: "INTERNAL", message: "enumerate failed: \(error)"))
+        }
+    }
+
+    // Trim SCK's raw window list down to the set a user would plausibly pick
+    // for capture. SCShareableContent returns ~everything: menubar items,
+    // tooltips, system overlays, our own helper windows.
+    //
+    // Filters:
+    //  - skip windows owned by Zeigen itself (com.zeigen.app); they show up
+    //    because the main window doesn't set sharingType=.none. The tray
+    //    icon, bubble, countdown, etc. are excluded automatically by
+    //    makeCaptureInvisible.
+    //  - require an owning application; system surfaces have none
+    //  - require windowLayer == 0 (kCGNormalWindowLevel); higher layers are
+    //    menu bars, status items, popups, etc.
+    //  - require a reasonable minimum size (100x100); excludes 0-pt phantom
+    //    windows the OS keeps around for various reasons
+    private func filterShareableWindows(_ windows: [SCWindow]) -> [WindowInfo] {
+        windows.compactMap { w -> WindowInfo? in
+            guard let app = w.owningApplication else { return nil }
+            if app.bundleIdentifier == "com.zeigen.app" { return nil }
+            if w.windowLayer != 0 { return nil }
+            if w.frame.width < 100 || w.frame.height < 100 { return nil }
+            return WindowInfo(
+                id: w.windowID,
+                app: app.applicationName,
+                bundle_id: app.bundleIdentifier,
+                title: w.title ?? "",
+                x: Int(w.frame.origin.x),
+                y: Int(w.frame.origin.y),
+                width: Int(w.frame.width),
+                height: Int(w.frame.height),
+                on_screen: w.isOnScreen
+            )
         }
     }
 

@@ -86,13 +86,32 @@ Emitted once on startup, before any commands are processed.
 {
   "event": "enumerated",
   "displays": [
-    {"id": 1, "name": "Built-in Retina Display", "width": 2560, "height": 1664}
+    {"id": 1, "name": "Built-in Retina Display", "x": 0, "y": 0, "width": 2560, "height": 1664}
   ],
   "microphones": [
     {"uid": "BuiltInMicrophoneDevice", "name": "MacBook Air Microphone"}
+  ],
+  "windows": [
+    {
+      "id": 4231,
+      "app": "Safari",
+      "bundle_id": "com.apple.Safari",
+      "title": "Zeigen — github.com",
+      "x": 240, "y": 120,
+      "width": 1440, "height": 900,
+      "on_screen": true
+    }
   ]
 }
 ```
+
+The `windows` array lists windows the user could plausibly capture. Filters applied by the engine:
+- Owned by an application (system surfaces excluded)
+- Not owned by Zeigen itself (`com.zeigen.app`)
+- `windowLayer == 0` (normal app windows; menubar items, tooltips, popups excluded)
+- `width >= 100 && height >= 100` (skips 0-size phantom windows)
+
+`bundle_id` is omitted when SCK reports no bundle for the owning application. UI sorts and labels — the engine returns SCK's order. `on_screen: false` means the window exists but isn't visible (minimized, in another Space, behind a fullscreen app); UI may still offer it but identify-window won't render an overlay on it.
 
 ### `started`
 ```json
