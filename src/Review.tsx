@@ -133,6 +133,11 @@ export default function Review() {
   const [discarding, setDiscarding] = useState(false);
   const busy = saving || discarding;
 
+  // Tracks the post-commit final path. Mirrored as a ref so `ensureCommitted`
+  // can short-circuit synchronously without re-running the commit pipeline.
+  const [committedPath, setCommittedPath] = useState<string | null>(null);
+  const committedPathRef = useRef<string | null>(null);
+
   // Annotation editing state.
   const [tool, setTool] = useState<Tool>(null);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
@@ -277,9 +282,11 @@ export default function Review() {
   // sidecar (trim + annotations) are baked at move time via the same ffmpeg
   // pass that used to live behind "Save edits"; if there are no edits, the
   // backend skips ffmpeg and renames the scratch mp4 to its final home.
-  // Either way the scratch directory is removed on success.
-  const saveRecording = useCallback(async (): Promise<boolean> => {
-    if (!sourcePath) return false;
+  // Either way the scratch directory is removed on success. Returns the
+  // final path on success, null on failure — Phase 6 export rows consume
+  // the path via `ensureCommitted` to operate on the final mp4.
+  const saveRecording = useCallback(async (): Promise<string | null> => {
+    if (!sourcePath) return null;
     setSaving(true);
     try {
       const norm: SidecarState = {
@@ -294,14 +301,26 @@ export default function Review() {
       // scratch path to the actual final ~/Movies/Zeigen/recording-….mp4.
       await emit("recording-committed", { final_path: outPath }).catch(() => {});
       committedRef.current = true;
-      return true;
+      committedPathRef.current = outPath;
+      setCommittedPath(outPath);
+      return outPath;
     } catch (err) {
       setError(`save recording: ${err}`);
-      return false;
+      return null;
     } finally {
       setSaving(false);
     }
   }, [sourcePath, currentState, duration]);
+
+  // Phase 6: any export action calls this first. If the recording has
+  // already been committed (via footer Save or a prior export), returns
+  // the cached final path immediately. Otherwise runs the full commit
+  // pipeline and returns the new final path. Null means the user has no
+  // source loaded or the commit failed (error already surfaced).
+  const ensureCommitted = useCallback(async (): Promise<string | null> => {
+    if (committedPathRef.current) return committedPathRef.current;
+    return saveRecording();
+  }, [saveRecording]);
 
   // Destructive: removes the entire scratch dir (mp4 + sidecar + raw
   // sources). Footer button always asks for confirmation first; the
@@ -643,7 +662,11 @@ export default function Review() {
             placeArrow,
           }}
         />
-        <ExportPanel />
+        <ExportPanel
+          committedPath={committedPath}
+          ensureCommitted={ensureCommitted}
+          busy={busy}
+        />
       </div>
       {error && <ErrorStrip error={error} onDismiss={() => setError(null)} />}
       {showCloseModal && (
@@ -2219,16 +2242,81 @@ function ErrorStrip({ error, onDismiss }: { error: string; onDismiss: () => void
   );
 }
 
-function ExportPanel() {
+function ExportPanel({
+  committedPath,
+}: {
+  committedPath: string | null;
+  ensureCommitted: () => Promise<string | null>;
+  busy: boolean;
+}) {
+  const savedLocallySub = committedPath
+    ? `~/Movies/Zeigen/${basename(committedPath)}`
+    : "~/Movies/Zeigen/recording-…mp4";
+
   return (
     <div style={{ display: "flex", flexDirection: "column", background: "var(--bg-sidebar)" }}>
       <div style={{ padding: "12px 14px 8px" }}>
+        <span
+          style={{
+            fontSize: 10.5,
+            color: "var(--fg-tertiary)",
+            letterSpacing: "0.06em",
+            textTransform: "uppercase",
+            fontWeight: 600,
+          }}
+        >
+          Export
+        </span>
+      </div>
+
+      <div style={{ padding: "0 12px 8px", display: "flex", flexDirection: "column", gap: 6 }}>
+        <DestRow
+          primary
+          icon={<Icon d={P.check} size={14} stroke={1.6} />}
+          title="Saved Locally"
+          sub={savedLocallySub}
+          action={
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11.5 }}>
+              {I.finder}
+              <span>Reveal</span>
+            </span>
+          }
+        />
+        <DestRow
+          icon={<Icon d="M5 2h6v3M5 2v9a1 1 0 001 1h7a1 1 0 001-1V6L11 2M3 6h6v8" size={14} stroke={1.4} />}
+          title="Copy to Clipboard"
+          sub="Paste into Slack, Mail, Messages…"
+          kbd={
+            <>
+              <span className="kbd">⌘</span>
+              <span className="kbd">C</span>
+            </>
+          }
+        />
+        <DestRow
+          icon={<Icon d="M2.5 5h11v9h-11zM5 8.5v3M5 6.5h.01M7.5 11.5v-3c0-.8.7-1.5 1.5-1.5s1.5.7 1.5 1.5v3M10.5 11.5v-3" size={13} stroke={1.4} />}
+          title="Export for LinkedIn"
+          sub="MP4 · ≤ 10 min · 1080p capped"
+        />
+      </div>
+
+      <div className="hairline" style={{ margin: "6px 14px" }} />
+
+      <div
+        aria-hidden="true"
+        style={{
+          opacity: 0.4,
+          pointerEvents: "none",
+          padding: "6px 14px 10px",
+        }}
+      >
         <div
           style={{
             display: "flex",
             alignItems: "baseline",
             justifyContent: "space-between",
             gap: 8,
+            marginBottom: 8,
           }}
         >
           <span
@@ -2240,7 +2328,7 @@ function ExportPanel() {
               fontWeight: 600,
             }}
           >
-            Export
+            Quick export
           </span>
           <span
             style={{
@@ -2251,89 +2339,19 @@ function ExportPanel() {
               fontWeight: 600,
             }}
           >
-            Coming in Phase 6
+            Coming later
           </span>
         </div>
-      </div>
-
-      <div
-        aria-hidden="true"
-        style={{
-          opacity: 0.4,
-          pointerEvents: "none",
-          display: "flex",
-          flexDirection: "column",
-        }}
-      >
-        <div style={{ padding: "0 12px 8px", display: "flex", flexDirection: "column", gap: 6 }}>
-          <DestRow
-            primary
-            icon={<Icon d={P.check} size={14} stroke={1.6} />}
-            title="Saved Locally"
-            sub="~/Movies/Zeigen/recording-…mp4"
-            action={
-              <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11.5 }}>
-                {I.finder}
-                <span>Reveal</span>
-              </span>
-            }
-          />
-          <DestRow
-            icon={<Icon d="M5 2h6v3M5 2v9a1 1 0 001 1h7a1 1 0 001-1V6L11 2M3 6h6v8" size={14} stroke={1.4} />}
-            title="Copy to Clipboard"
-            sub="Paste into Slack, Mail, Messages…"
-            kbd={
-              <>
-                <span className="kbd">⌘</span>
-                <span className="kbd">C</span>
-              </>
-            }
-          />
-          <DestRow
-            icon={<Icon d={P.cloud} size={14} stroke={1.5} />}
-            title="Upload & Share Link"
-            sub="zeigen-share.pages.dev/v/…"
-            kbd={
-              <>
-                <span className="kbd">⌘</span>
-                <span className="kbd">⇧</span>
-                <span className="kbd">L</span>
-              </>
-            }
-          />
-          <DestRow
-            icon={<Icon d="M2.5 5h11v9h-11zM5 8.5v3M5 6.5h.01M7.5 11.5v-3c0-.8.7-1.5 1.5-1.5s1.5.7 1.5 1.5v3M10.5 11.5v-3" size={13} stroke={1.4} />}
-            title="Export for LinkedIn"
-            sub="MP4 · ≤ 10 min · 1080p capped"
-          />
-        </div>
-
-        <div className="hairline" style={{ margin: "6px 14px" }} />
-
-        <div style={{ padding: "6px 14px 10px" }}>
-          <div
-            style={{
-              fontSize: 10.5,
-              color: "var(--fg-tertiary)",
-              letterSpacing: "0.06em",
-              textTransform: "uppercase",
-              fontWeight: 600,
-              marginBottom: 8,
-            }}
-          >
-            Quick export
-          </div>
-          <div style={{ display: "flex", gap: 6 }}>
-            {["MP4", "GIF", "ProRes"].map((f) => (
-              <button
-                key={f}
-                className="btn-secondary"
-                style={{ flex: 1, fontSize: 12, padding: "6px 0", height: 28 }}
-              >
-                {f}
-              </button>
-            ))}
-          </div>
+        <div style={{ display: "flex", gap: 6 }}>
+          {["MP4", "GIF", "ProRes"].map((f) => (
+            <button
+              key={f}
+              className="btn-secondary"
+              style={{ flex: 1, fontSize: 12, padding: "6px 0", height: 28 }}
+            >
+              {f}
+            </button>
+          ))}
         </div>
       </div>
 
