@@ -155,12 +155,12 @@ async function openIdentifyOverlays(displays: DisplayShape[]) {
     const label = `${IDENTIFY_LABEL_PREFIX}${i}`;
     const existing = await WebviewWindow.getByLabel(label);
     if (existing) await existing.close().catch(() => {});
-    // Constructor needs a width/height; we reset position + size to physical
-    // values on `tauri://created` so the window lands on the correct
-    // monitor regardless of the global continuous-logical-coord
-    // calculation. Display x/y/w/h come straight from the engine
-    // (CGDirectDisplay.frame), which uses the same physical coord space as
-    // Tauri's monitor.position / monitor.size.
+    // Create hidden, then setPosition + setSize in physical pixels, then
+    // show. macOS NSWindow ignores setFrame requests on a window that has
+    // never been ordered on-screen, so positioning before show is the only
+    // way to land the window on a non-primary monitor reliably. Display
+    // x/y/w/h come straight from the engine (CGDirectDisplay.frame), in
+    // the same physical coord space Tauri's PhysicalPosition uses.
     const win = new WebviewWindow(label, {
       url: `/#identify?n=${i + 1}`,
       title: "Identify",
@@ -174,18 +174,20 @@ async function openIdentifyOverlays(displays: DisplayShape[]) {
       visibleOnAllWorkspaces: true,
       shadow: false,
       focus: false,
+      visible: false,
     });
     win.once("tauri://created", async () => {
       try {
         const { PhysicalPosition, PhysicalSize } = await import(
           "@tauri-apps/api/dpi"
         );
-        await win.setSize(new PhysicalSize(display.width, display.height));
         await win.setPosition(new PhysicalPosition(display.x, display.y));
-      } catch {
-        // best effort
+        await win.setSize(new PhysicalSize(display.width, display.height));
+        await invoke("make_capture_invisible", { label });
+        await win.show();
+      } catch (e) {
+        console.error(`identify[${label}] setup failed`, e);
       }
-      invoke("make_capture_invisible", { label }).catch(() => {});
     });
   }
 }
