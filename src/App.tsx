@@ -586,6 +586,7 @@ function App() {
   useEffect(() => {
     let unlistenTray: (() => void) | null = null;
     let unlistenHotkey: (() => void) | null = null;
+    let unlistenRecordAnother: (() => void) | null = null;
     let cancelled = false;
 
     (async () => {
@@ -622,19 +623,30 @@ function App() {
           c.stop();
         }
       });
+      // The review window's "Record another" button emits this after it
+      // resolves any pending Save/Discard. Capture window reshows via
+      // the existing reviewActivity → 0 effect; here we kick off the
+      // next recording so the user lands directly in countdown.
+      const r = await listen<{}>("record-another", () => {
+        const c = ctrlRef.current;
+        if (c.state === "idle" && c.selectedDisplay != null) c.start();
+      });
       if (cancelled) {
         a();
         b();
+        r();
         return;
       }
       unlistenTray = a;
       unlistenHotkey = b;
+      unlistenRecordAnother = r;
     })();
 
     return () => {
       cancelled = true;
       unlistenTray?.();
       unlistenHotkey?.();
+      unlistenRecordAnother?.();
     };
   }, []);
 

@@ -380,23 +380,41 @@ export default function Review() {
       });
   }, []);
 
+  // Set true when "Record another" is what triggered the modal — the
+  // modal's Save/Discard handlers then emit `record-another` after a
+  // successful resolve so main can kick off a fresh capture.
+  const recordAnotherRef = useRef(false);
+
+  const fireRecordAnother = useCallback(async () => {
+    await emit("record-another").catch(() => {});
+  }, []);
+
   const onModalSave = useCallback(async () => {
     const ok = await saveRecording();
     if (ok) {
+      if (recordAnotherRef.current) {
+        recordAnotherRef.current = false;
+        await fireRecordAnother();
+      }
       await closeWindow();
     } else {
       // Surface the error to the user (the error strip is rendered behind
       // the modal). Window stays open; they can retry, discard, or fix.
       setShowCloseModal(false);
     }
-  }, [saveRecording, closeWindow]);
+  }, [saveRecording, closeWindow, fireRecordAnother]);
 
   const onModalDiscard = useCallback(async () => {
-    await discardRecording();
+    const ok = await discardRecording();
+    if (ok && recordAnotherRef.current) {
+      recordAnotherRef.current = false;
+      await fireRecordAnother();
+    }
     await closeWindow();
-  }, [discardRecording, closeWindow]);
+  }, [discardRecording, closeWindow, fireRecordAnother]);
 
   const onModalCancel = useCallback(() => {
+    recordAnotherRef.current = false;
     setShowCloseModal(false);
   }, []);
 
@@ -479,6 +497,20 @@ export default function Review() {
     const ok = await saveRecording();
     if (ok) await closeWindow();
   }, [saveRecording, closeWindow]);
+
+  // "Record another": close this review and immediately kick off a fresh
+  // capture. If the recording is unsaved, route through the close modal
+  // (Save/Discard/Cancel) first so nothing leaks into scratch — the modal
+  // handlers will fire `record-another` after a successful resolve.
+  const onFooterRecordAnother = useCallback(async () => {
+    if (committedRef.current) {
+      await fireRecordAnother();
+      await closeWindow();
+    } else {
+      recordAnotherRef.current = true;
+      setShowCloseModal(true);
+    }
+  }, [fireRecordAnother, closeWindow]);
 
   // Discard-confirmation keyboard handling: Enter = Discard (destructive
   // default per the macOS convention), Esc = Cancel. Mirrors CloseModal.
@@ -594,6 +626,7 @@ export default function Review() {
           setTrim={setTrim}
           onFooterDiscard={onFooterDiscard}
           onFooterSave={onFooterSave}
+          onFooterRecordAnother={onFooterRecordAnother}
           saving={saving}
           busy={busy}
           editor={{
@@ -692,6 +725,7 @@ type LeftColumnProps = {
   setTrim: React.Dispatch<React.SetStateAction<Trim | null>>;
   onFooterDiscard: () => void;
   onFooterSave: () => Promise<void> | void;
+  onFooterRecordAnother: () => Promise<void> | void;
   saving: boolean;
   busy: boolean;
   editor: Editor;
@@ -732,6 +766,7 @@ function LeftColumn(props: LeftColumnProps) {
       <ActionFooter
         onDiscard={props.onFooterDiscard}
         onSave={props.onFooterSave}
+        onRecordAnother={props.onFooterRecordAnother}
         saving={props.saving}
         busy={props.busy}
       />
@@ -1857,17 +1892,21 @@ function TrimHandle({
 function ActionFooter({
   onDiscard,
   onSave,
+  onRecordAnother,
   saving,
   busy,
 }: {
   onDiscard: () => Promise<void> | void;
   onSave: () => Promise<void> | void;
+  onRecordAnother: () => Promise<void> | void;
   saving: boolean;
   busy: boolean;
 }) {
   // Both buttons commit a scratch-level decision — Save bakes & moves the
   // file out, Discard destroys the scratch dir entirely. Always enabled
   // unless an op is in flight; Discard goes through a confirm dialog.
+  // Record another reuses the close-modal flow when uncommitted, then
+  // closes this window and tells main to start a fresh capture.
   const enabled = !busy;
   return (
     <div
@@ -1880,29 +1919,52 @@ function ActionFooter({
         background: "rgba(255,255,255,0.012)",
       }}
     >
-      <button
-        onClick={() => onDiscard()}
-        disabled={!enabled}
-        style={{
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 6,
-          background: "transparent",
-          border: "1px solid transparent",
-          color: "var(--recording-tint)",
-          padding: "6px 12px",
-          borderRadius: 6,
-          height: 30,
-          cursor: enabled ? "pointer" : "not-allowed",
-          fontFamily: "var(--font-system)",
-          fontSize: 12.5,
-          fontWeight: 500,
-          opacity: enabled ? 1 : 0.5,
-        }}
-      >
-        {I.trash}
-        <span>Discard recording</span>
-      </button>
+      <div style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+        <button
+          onClick={() => onRecordAnother()}
+          disabled={!enabled}
+          className="btn-secondary"
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            padding: "6px 12px",
+            borderRadius: 6,
+            height: 30,
+            fontFamily: "var(--font-system)",
+            fontSize: 12.5,
+            fontWeight: 500,
+            cursor: enabled ? "pointer" : "not-allowed",
+            opacity: enabled ? 1 : 0.5,
+          }}
+        >
+          <Icon d={P.play} size={11} stroke={0} fill="currentColor" />
+          <span>Record another</span>
+        </button>
+        <button
+          onClick={() => onDiscard()}
+          disabled={!enabled}
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            background: "transparent",
+            border: "1px solid transparent",
+            color: "var(--recording-tint)",
+            padding: "6px 12px",
+            borderRadius: 6,
+            height: 30,
+            cursor: enabled ? "pointer" : "not-allowed",
+            fontFamily: "var(--font-system)",
+            fontSize: 12.5,
+            fontWeight: 500,
+            opacity: enabled ? 1 : 0.5,
+          }}
+        >
+          {I.trash}
+          <span>Discard recording</span>
+        </button>
+      </div>
       <button
         onClick={() => onSave()}
         disabled={!enabled}
