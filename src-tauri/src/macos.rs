@@ -1,6 +1,22 @@
 use objc2::msg_send;
 use objc2::runtime::AnyObject;
-use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager};
+use objc2::{Encode, Encoding, RefEncode};
+use tauri::{AppHandle, LogicalSize, Manager};
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct NSPoint {
+    x: f64,
+    y: f64,
+}
+
+unsafe impl Encode for NSPoint {
+    const ENCODING: Encoding =
+        Encoding::Struct("CGPoint", &[f64::ENCODING, f64::ENCODING]);
+}
+unsafe impl RefEncode for NSPoint {
+    const ENCODING_REF: Encoding = Encoding::Pointer(&Self::ENCODING);
+}
 
 #[tauri::command]
 pub fn make_capture_invisible(app: AppHandle, label: String) -> Result<(), String> {
@@ -19,11 +35,12 @@ pub fn make_capture_invisible(app: AppHandle, label: String) -> Result<(), Strin
     Ok(())
 }
 
-// Position + resize a window in CG logical coords (origin top-left of
-// primary, Y down — matches the engine's SCDisplay frame). Routes through
-// Tauri's Rust set_position/set_size which on macOS handle negative x for
-// screens left of the primary, where the TS WebviewWindow constructor
-// silently drops them.
+// Plant a window with CG-coords frame, given the primary screen's Cocoa
+// height (passed from TS via Tauri's monitors API). Tauri's own
+// set_position drops negative x on macOS for screens left of primary, so
+// we use the underlying NSWindow.setFrameOrigin: directly with the
+// Cocoa-flipped Y. Size goes through Tauri's set_size which doesn't have
+// the negative-coord problem.
 #[tauri::command]
 pub fn set_window_frame_cg(
     app: AppHandle,
@@ -32,15 +49,29 @@ pub fn set_window_frame_cg(
     cg_y: f64,
     width: f64,
     height: f64,
+    primary_cocoa_height: f64,
 ) -> Result<(), String> {
     let window = app
         .get_webview_window(&label)
         .ok_or_else(|| format!("window not found: {label}"))?;
-    window
-        .set_position(LogicalPosition::new(cg_x, cg_y))
-        .map_err(|e| format!("set_position: {e}"))?;
+
     window
         .set_size(LogicalSize::new(width, height))
         .map_err(|e| format!("set_size: {e}"))?;
+
+    let ns_window = window
+        .ns_window()
+        .map_err(|e| format!("ns_window: {e}"))? as *mut AnyObject;
+    if ns_window.is_null() {
+        return Err("ns_window is null".into());
+    }
+
+    let origin = NSPoint {
+        x: cg_x,
+        y: primary_cocoa_height - cg_y - height,
+    };
+    unsafe {
+        let _: () = msg_send![ns_window, setFrameOrigin: origin];
+    }
     Ok(())
 }

@@ -150,6 +150,17 @@ type DisplayShape = {
 
 async function openIdentifyOverlays(displays: DisplayShape[]) {
   if (displays.length === 0) return;
+  // Primary screen Cocoa height is needed in Rust to flip CG (top-left,
+  // Y down) into Cocoa (bottom-left, Y up) for NSWindow.setFrameOrigin.
+  // Pull it from the Tauri monitor at (0, 0).
+  const monitors = await availableMonitors();
+  const primary =
+    monitors.find((m) => m.position.x === 0 && m.position.y === 0) ||
+    monitors[0];
+  const primaryCocoaHeight =
+    primary && primary.scaleFactor
+      ? primary.size.height / primary.scaleFactor
+      : 1080;
   for (let i = 0; i < displays.length; i++) {
     const display = displays[i];
     const label = `${IDENTIFY_LABEL_PREFIX}${i}`;
@@ -158,9 +169,9 @@ async function openIdentifyOverlays(displays: DisplayShape[]) {
     new WebviewWindow(label, {
       url: `/#identify?n=${i + 1}`,
       title: "Identify",
-      // Initial size doesn't matter — Rust setFrame resizes the window to
-      // the target display's bounds. Tauri's TS constructor x/y silently
-      // drops negative coords on macOS, so we don't pass any.
+      // Initial size doesn't matter — Rust setSize resizes after creation.
+      // Constructor x/y omitted because Tauri silently drops negative on
+      // macOS for screens left of primary.
       width: 400,
       height: 400,
       decorations: false,
@@ -172,10 +183,6 @@ async function openIdentifyOverlays(displays: DisplayShape[]) {
       shadow: false,
       focus: false,
     });
-    // Poll until Tauri registers the window in its window list, then ask
-    // Rust to NSWindow.setFrame using engine CG coords. Polling sidesteps
-    // the win.once registration race (listener sometimes registers after
-    // tauri://created has fired).
     void (async () => {
       for (let attempt = 0; attempt < 50; attempt++) {
         const win = await WebviewWindow.getByLabel(label);
@@ -187,6 +194,7 @@ async function openIdentifyOverlays(displays: DisplayShape[]) {
               cgY: display.y,
               width: display.width,
               height: display.height,
+              primaryCocoaHeight,
             });
             await invoke("make_capture_invisible", { label });
           } catch (e) {
