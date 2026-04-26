@@ -2286,10 +2286,22 @@ function ExportPanel({
     }
   }, [committedPath, setError]);
 
+  // Transient post-copy confirmation: NSPasteboard returns silently on
+  // success and the row visual otherwise gives no feedback. Flip a flag
+  // for ~1.5s so the row swaps its ⌘C kbd for a green check + "Copied".
+  const [copiedAt, setCopiedAt] = useState(0);
+  const copied = copiedAt > 0;
+  useEffect(() => {
+    if (copiedAt === 0) return;
+    const t = window.setTimeout(() => setCopiedAt(0), 1500);
+    return () => window.clearTimeout(t);
+  }, [copiedAt]);
+
   const onCopyClipboard = useCallback(async () => {
     if (!committedPath) return;
     try {
       await invoke("clipboard_copy_file", { path: committedPath });
+      setCopiedAt(Date.now());
     } catch (err) {
       setError(`copy to clipboard: ${err}`);
     }
@@ -2352,11 +2364,29 @@ function ExportPanel({
           icon={<Icon d="M5 2h6v3M5 2v9a1 1 0 001 1h7a1 1 0 001-1V6L11 2M3 6h6v8" size={14} stroke={1.4} />}
           title="Copy to Clipboard"
           sub="Paste into Slack, Mail, Messages…"
+          action={
+            copied ? (
+              <span
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 4,
+                  fontSize: 11.5,
+                  color: "var(--success-tint)",
+                }}
+              >
+                <Icon d={P.check} size={12} stroke={1.8} />
+                <span>Copied</span>
+              </span>
+            ) : undefined
+          }
           kbd={
-            <>
-              <span className="kbd">⌘</span>
-              <span className="kbd">C</span>
-            </>
+            copied ? undefined : (
+              <>
+                <span className="kbd">⌘</span>
+                <span className="kbd">C</span>
+              </>
+            )
           }
           onClick={onCopyClipboard}
           disabled={rowsDisabled}
