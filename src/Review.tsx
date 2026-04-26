@@ -2285,10 +2285,13 @@ function ExportPanel({
       await invoke("clipboard_copy_text", {
         text: "New screen recording — [your description here]",
       }).catch(() => {});
-      // Reveal first, then open URL — LinkedIn opening can take focus
-      // and we want the file selected in Finder waiting for the drag.
-      await revealItemInDir(outPath).catch(() => {});
+      // Open Safari first so its activate-on-launch fires, then reveal
+      // in Finder — Finder ends up on top with the file selected, ready
+      // for the user to drag it into the now-cued-up LinkedIn composer.
+      // LinkedIn has no upload API for personal profiles, so the manual
+      // drag is the design (CLAUDE.md gotchas).
       await openUrl("https://www.linkedin.com/feed/?shareActive=true").catch(() => {});
+      await revealItemInDir(outPath).catch(() => {});
       setLinkedinExportedAt(Date.now());
     } catch (err) {
       setError(`linkedin export: ${err}`);
