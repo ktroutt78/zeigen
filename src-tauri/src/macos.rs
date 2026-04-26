@@ -55,17 +55,17 @@ pub fn set_window_frame_cg(
         .get_webview_window(&label)
         .ok_or_else(|| format!("window not found: {label}"))?;
 
-    window
-        .set_size(LogicalSize::new(width, height))
-        .map_err(|e| format!("set_size: {e}"))?;
-
+    // Move the window to the target screen FIRST. set_size operates in
+    // points using the current screen's scale factor — if we resize while
+    // still on a different-scale screen, the logical-to-physical conversion
+    // happens against the wrong scale and the window ends up sized wrong
+    // when it later moves. Move first, resize on the target screen.
     let ns_window = window
         .ns_window()
         .map_err(|e| format!("ns_window: {e}"))? as *mut AnyObject;
     if ns_window.is_null() {
         return Err("ns_window is null".into());
     }
-
     let origin = NSPoint {
         x: cg_x,
         y: primary_cocoa_height - cg_y - height,
@@ -73,5 +73,10 @@ pub fn set_window_frame_cg(
     unsafe {
         let _: () = msg_send![ns_window, setFrameOrigin: origin];
     }
+
+    window
+        .set_size(LogicalSize::new(width, height))
+        .map_err(|e| format!("set_size: {e}"))?;
+
     Ok(())
 }
