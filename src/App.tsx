@@ -405,9 +405,12 @@ function App() {
           case "ready":
             break;
           case "enumerated": {
-            const displays = [...ev.displays].sort((a, b) =>
-              a.name.localeCompare(b.name),
-            );
+            // CGDirectDisplayID values (e.g. id=27) leak through as "Display 27"
+            // from the engine. Rename to user-friendly Display 1..N matching
+            // dropdown position so the Identify overlay numbers line up.
+            const displays = [...ev.displays]
+              .sort((a, b) => a.name.localeCompare(b.name))
+              .map((d, i) => ({ ...d, name: `Display ${i + 1}` }));
             const mics = [...ev.microphones].sort((a, b) =>
               a.name.localeCompare(b.name),
             );
