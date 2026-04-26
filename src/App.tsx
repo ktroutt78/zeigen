@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { WebviewWindow, getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { availableMonitors } from "@tauri-apps/api/window";
+import { LogicalSize } from "@tauri-apps/api/dpi";
 import { emit } from "@tauri-apps/api/event";
 import { I, Icon, P } from "./components/icons";
 import { PILL_STRIP_CSS } from "./constants/bubble";
@@ -657,6 +658,29 @@ function App() {
       .catch((err) => setError(String(err)));
   };
 
+  const mainRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    const el = mainRef.current;
+    if (!el) return;
+    const win = getCurrentWebviewWindow();
+    let raf = 0;
+    const sync = () => {
+      const h = Math.ceil(el.getBoundingClientRect().height);
+      if (h <= 0) return;
+      win.setSize(new LogicalSize(480, h)).catch(() => {});
+    };
+    const ro = new ResizeObserver(() => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(sync);
+    });
+    ro.observe(el);
+    sync();
+    return () => {
+      ro.disconnect();
+      cancelAnimationFrame(raf);
+    };
+  }, []);
+
   const recording = state === "recording" || state === "paused";
   const cameraName =
     selectedCamera == null
@@ -714,9 +738,9 @@ function App() {
 
   return (
     <main
+      ref={mainRef}
       className="accent-blue"
       style={{
-        minHeight: "100vh",
         display: "flex",
         flexDirection: "column",
         background: "var(--bg-window)",
@@ -758,13 +782,12 @@ function App() {
 
       <div
         style={{
-          padding: "12px 14px",
+          padding: "16px 18px",
           display: "grid",
           gridTemplateColumns: "auto 1fr",
-          rowGap: 10,
+          rowGap: 14,
           columnGap: 12,
           alignItems: "center",
-          flex: 1,
         }}
       >
         <RowLabel icon={I.webcam} label="Camera" />
@@ -952,7 +975,7 @@ function SourceTiles() {
   ];
 
   return (
-    <div style={{ padding: 14, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+    <div style={{ padding: 16, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
       {tiles.map((s) => {
         const active = s.on;
         const dim = !s.on;
@@ -963,7 +986,7 @@ function SourceTiles() {
               display: "flex",
               alignItems: "center",
               gap: 11,
-              padding: "11px 12px",
+              padding: "13px 12px",
               background: active ? "var(--accent-soft)" : "var(--bg-elevated)",
               border: `1px solid ${active ? "var(--accent)" : "var(--border-faint)"}`,
               borderRadius: 8,
