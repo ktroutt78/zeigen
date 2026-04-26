@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { emit } from "@tauri-apps/api/event";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Icon, I, P } from "./components/icons";
 
 // Review window. Layout mirrors docs/design/surfaces/review.jsx — left
@@ -666,6 +667,7 @@ export default function Review() {
           committedPath={committedPath}
           ensureCommitted={ensureCommitted}
           busy={busy}
+          setError={setError}
         />
       </div>
       {error && <ErrorStrip error={error} onDismiss={() => setError(null)} />}
@@ -2244,14 +2246,32 @@ function ErrorStrip({ error, onDismiss }: { error: string; onDismiss: () => void
 
 function ExportPanel({
   committedPath,
+  ensureCommitted,
+  busy,
+  setError,
 }: {
   committedPath: string | null;
   ensureCommitted: () => Promise<string | null>;
   busy: boolean;
+  setError: (msg: string | null) => void;
 }) {
   const savedLocallySub = committedPath
     ? `~/Movies/Zeigen/${basename(committedPath)}`
     : "~/Movies/Zeigen/recording-…mp4";
+
+  // Saved Locally → commit if needed, then reveal in Finder. The Tauri
+  // opener plugin's revealItemInDir uses NSWorkspace under the hood, which
+  // selects the file inside its parent folder rather than just opening the
+  // folder.
+  const onRevealLocal = useCallback(async () => {
+    const path = await ensureCommitted();
+    if (!path) return;
+    try {
+      await revealItemInDir(path);
+    } catch (err) {
+      setError(`reveal in Finder: ${err}`);
+    }
+  }, [ensureCommitted, setError]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", background: "var(--bg-sidebar)" }}>
@@ -2281,6 +2301,8 @@ function ExportPanel({
               <span>Reveal</span>
             </span>
           }
+          onClick={onRevealLocal}
+          disabled={busy}
         />
         <DestRow
           icon={<Icon d="M5 2h6v3M5 2v9a1 1 0 001 1h7a1 1 0 001-1V6L11 2M3 6h6v8" size={14} stroke={1.4} />}
@@ -2367,6 +2389,8 @@ function DestRow({
   action,
   kbd,
   primary,
+  onClick,
+  disabled,
 }: {
   icon: React.ReactNode;
   title: string;
@@ -2374,9 +2398,13 @@ function DestRow({
   action?: React.ReactNode;
   kbd?: React.ReactNode;
   primary?: boolean;
+  onClick?: () => void;
+  disabled?: boolean;
 }) {
   return (
     <button
+      onClick={onClick}
+      disabled={disabled}
       style={{
         display: "grid",
         gridTemplateColumns: "28px 1fr auto",
@@ -2387,7 +2415,8 @@ function DestRow({
         background: primary ? "var(--accent-soft)" : "var(--bg-elevated)",
         border: `1px solid ${primary ? "var(--accent)" : "var(--border-faint)"}`,
         borderRadius: 7,
-        cursor: "pointer",
+        cursor: disabled ? "default" : "pointer",
+        opacity: disabled ? 0.5 : 1,
         textAlign: "left",
         color: "var(--fg-primary)",
         fontFamily: "var(--font-system)",
