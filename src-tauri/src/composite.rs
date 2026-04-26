@@ -158,10 +158,18 @@ pub fn composite(
 
     // Compensate for webcam start lag relative to screen. ffmpeg's AVCaptureSession
     // takes longer to deliver its first frame than SCK does, so the webcam file is
-    // typically a few hundred milliseconds shorter than screen.mp4. Without this offset,
+    // typically a few hundred milliseconds shorter than screen.mp4. Without compensation,
     // composite playback shows the webcam ~Nms ahead of the audio.
-    // Multi-segment recordings (pause/resume) get the offset applied to the first segment
-    // only — pause/resume sync drift is a separate concern handled later.
+    //
+    // Strategy: pad the webcam track at the start with a clone of its first frame
+    // (via `tpad=start_duration=<lead_in>:start_mode=clone` in the filter graph below).
+    // This keeps the bubble visible from t=0 — frozen for the lag, then animating
+    // normally — while still aligning real webcam frames with the audio timeline.
+    // Replaces the previous `-itsoffset` approach which left the bubble missing
+    // for the lead_in window.
+    //
+    // Multi-segment recordings (pause/resume) get the pad applied to the head of
+    // the concatenated stream — pause/resume sync drift is a separate concern.
     let screen_dur = probe_duration_seconds(screen_path)?;
     let webcam_total: f64 = webcam_segments
         .iter()
@@ -175,11 +183,7 @@ pub fn composite(
         "-i".into(),
         screen_path.to_string_lossy().into_owned(),
     ];
-    for (i, seg) in webcam_segments.iter().enumerate() {
-        if i == 0 && lead_in > 0.001 {
-            args.push("-itsoffset".into());
-            args.push(format!("{lead_in:.3}"));
-        }
+    for seg in webcam_segments.iter() {
         args.push("-i".into());
         args.push(seg.to_string_lossy().into_owned());
     }
@@ -193,13 +197,26 @@ pub fn composite(
     //   the webcam track ends (Continuity drop / shorter webcam case).
     let n = webcam_segments.len();
     let mut filter = String::new();
+    // Pad the head of the webcam track so the bubble is visible from t=0
+    // even when ffmpeg's AVCaptureSession lagged behind SCK. start_mode=clone
+    // duplicates the first decoded frame; threshold matches the previous
+    // -itsoffset gate so we don't insert a 0s tpad on aligned recordings.
+    let head_pad = if lead_in > 0.001 {
+        format!(",tpad=start_duration={lead_in:.3}:start_mode=clone")
+    } else {
+        String::new()
+    };
     if n > 1 {
         for i in 0..n {
             filter.push_str(&format!("[{}:v]", i + 1));
         }
-        filter.push_str(&format!("concat=n={n}:v=1:a=0[wc_full];"));
-    } else {
+        filter.push_str(&format!("concat=n={n}:v=1:a=0{head_pad}[wc_full];"));
+    } else if head_pad.is_empty() {
         filter.push_str("[1:v]copy[wc_full];");
+    } else {
+        // tpad sits inline on input 1 — copy is unnecessary when we're
+        // applying any filter at all.
+        filter.push_str(&format!("[1:v]tpad=start_duration={lead_in:.3}:start_mode=clone[wc_full];"));
     }
     // hflip matches the preview's CSS `transform: scaleX(-1)` (WebcamBubble.tsx).
     // The invariant is preview-matches-recording; absolute orientation then
