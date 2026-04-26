@@ -48,8 +48,6 @@ unsafe impl RefEncode for CGRect {
     const ENCODING_REF: Encoding = Encoding::Pointer(&Self::ENCODING);
 }
 
-// NSRect on 64-bit macOS is a typedef for CGRect.
-type NSRect = CGRect;
 
 #[tauri::command]
 pub fn make_capture_invisible(app: AppHandle, label: String) -> Result<(), String> {
@@ -68,17 +66,21 @@ pub fn make_capture_invisible(app: AppHandle, label: String) -> Result<(), Strin
     Ok(())
 }
 
-// Plant a window full-screen on a specific display by CGDirectDisplayID.
-// Used by the identify-display overlay so each window lands on its target
-// monitor regardless of macOS coordinate-system quirks (negative x for
-// screens left of primary, mixed scale factors, etc.). Iterates
-// NSScreen.screens, matches by NSScreenNumber, and applies the screen's
-// frame via NSWindow.setFrame.
+// Plant a window with a specific Cocoa-points frame.
+// The TS caller passes CG (top-left origin, Y down) coordinates from the
+// engine's SCDisplay frame; we convert to Cocoa (bottom-left origin, Y up)
+// using the primary screen's height and call NSWindow.setFrame.
+// Bypasses Tauri's TS WebviewWindow constructor x/y, which silently drops
+// negative coords on macOS (breaks identify overlays for screens left of
+// the primary).
 #[tauri::command]
-pub fn position_window_on_display(
+pub fn set_window_frame_cg(
     app: AppHandle,
     label: String,
-    display_id: u32,
+    cg_x: f64,
+    cg_y: f64,
+    width: f64,
+    height: f64,
 ) -> Result<(), String> {
     let window = app
         .get_webview_window(&label)
@@ -93,35 +95,27 @@ pub fn position_window_on_display(
     unsafe {
         let screens: *mut AnyObject = msg_send![class!(NSScreen), screens];
         if screens.is_null() {
-            return Err("NSScreen.screens returned nil".into());
+            return Err("NSScreen.screens nil".into());
         }
         let count: usize = msg_send![screens, count];
-
-        let key_cstr = b"NSScreenNumber\0";
-        let key: *mut AnyObject =
-            msg_send![class!(NSString), stringWithUTF8String: key_cstr.as_ptr() as *const i8];
-
-        for i in 0..count {
-            let screen: *mut AnyObject = msg_send![screens, objectAtIndex: i];
-            if screen.is_null() {
-                continue;
-            }
-            let device_desc: *mut AnyObject = msg_send![screen, deviceDescription];
-            if device_desc.is_null() {
-                continue;
-            }
-            let number: *mut AnyObject = msg_send![device_desc, objectForKey: key];
-            if number.is_null() {
-                continue;
-            }
-            let screen_id: u32 = msg_send![number, unsignedIntValue];
-            if screen_id == display_id {
-                let frame: NSRect = msg_send![screen, frame];
-                let _: () = msg_send![ns_window, setFrame: frame display: true animate: false];
-                return Ok(());
-            }
+        if count == 0 {
+            return Err("no screens".into());
         }
-    }
+        let primary: *mut AnyObject = msg_send![screens, objectAtIndex: 0usize];
+        if primary.is_null() {
+            return Err("primary screen nil".into());
+        }
+        let primary_frame: CGRect = msg_send![primary, frame];
 
-    Err(format!("display id {display_id} not found in NSScreen.screens"))
+        let frame = CGRect {
+            origin: CGPoint {
+                x: cg_x,
+                y: primary_frame.size.height - cg_y - height,
+            },
+            size: CGSize { width, height },
+        };
+        let display_views: bool = true;
+        let _: () = msg_send![ns_window, setFrame: frame display: display_views];
+    }
+    Ok(())
 }

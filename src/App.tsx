@@ -142,7 +142,10 @@ async function openCountdown(
 const IDENTIFY_LABEL_PREFIX = "identify-";
 
 type DisplayShape = {
-  id: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 };
 
 async function openIdentifyOverlays(displays: DisplayShape[]) {
@@ -155,10 +158,9 @@ async function openIdentifyOverlays(displays: DisplayShape[]) {
     new WebviewWindow(label, {
       url: `/#identify?n=${i + 1}`,
       title: "Identify",
-      // Initial size doesn't matter — the Rust setFrame call resizes the
-      // window to the target screen's bounds. Tauri's TS constructor x/y
-      // doesn't honor negative coords on macOS for screens left of the
-      // primary, so we don't pass any.
+      // Initial size doesn't matter — Rust setFrame resizes the window to
+      // the target display's bounds. Tauri's TS constructor x/y silently
+      // drops negative coords on macOS, so we don't pass any.
       width: 400,
       height: 400,
       decorations: false,
@@ -170,19 +172,21 @@ async function openIdentifyOverlays(displays: DisplayShape[]) {
       shadow: false,
       focus: false,
     });
-    // Poll briefly until Tauri registers the window in its window list,
-    // then ask Rust to NSWindow.setFrame to the target NSScreen by
-    // CGDirectDisplayID. Polling avoids the win.once registration race
-    // (listener sometimes registers after `tauri://created` has already
-    // fired, missing the event).
+    // Poll until Tauri registers the window in its window list, then ask
+    // Rust to NSWindow.setFrame using engine CG coords. Polling sidesteps
+    // the win.once registration race (listener sometimes registers after
+    // tauri://created has fired).
     void (async () => {
       for (let attempt = 0; attempt < 50; attempt++) {
         const win = await WebviewWindow.getByLabel(label);
         if (win) {
           try {
-            await invoke("position_window_on_display", {
+            await invoke("set_window_frame_cg", {
               label,
-              displayId: display.id,
+              cgX: display.x,
+              cgY: display.y,
+              width: display.width,
+              height: display.height,
             });
             await invoke("make_capture_invisible", { label });
           } catch (e) {
