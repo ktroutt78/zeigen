@@ -134,17 +134,18 @@ export default function Review() {
   const [discarding, setDiscarding] = useState(false);
   const busy = saving || discarding;
 
-  // Tracks the post-commit final path. Mirrored as a ref so `ensureCommitted`
+  // Tracks the post-commit final path. Mirrored as a ref so saveRecording
   // can short-circuit synchronously without re-running the commit pipeline.
+  // Phase 6 export rows read this state to decide whether they're enabled.
   const [committedPath, setCommittedPath] = useState<string | null>(null);
   const committedPathRef = useRef<string | null>(null);
 
   // In-flight promise for an active commit_recording call. Concurrent
-  // saveRecording invocations (e.g., user double-clicks Reveal before the
+  // saveRecording invocations (e.g., footer Save clicked twice before the
   // disabled state propagates through React render) share this promise so
-  // commit_recording runs exactly once per scratch. Without this, the
-  // first call moves scratch → final and the second hits canonicalize on
-  // the now-missing scratch path.
+  // commit_recording runs exactly once per scratch. Without this, the first
+  // call moves scratch → final and the second hits canonicalize on the
+  // now-missing scratch path.
   const saveInFlightRef = useRef<Promise<string | null> | null>(null);
 
   // Annotation editing state.
@@ -292,13 +293,12 @@ export default function Review() {
   // pass that used to live behind "Save edits"; if there are no edits, the
   // backend skips ffmpeg and renames the scratch mp4 to its final home.
   // Either way the scratch directory is removed on success. Returns the
-  // final path on success, null on failure — Phase 6 export rows consume
-  // the path via `ensureCommitted` to operate on the final mp4.
+  // final path on success, null on failure. Sets committedPath state which
+  // gates the Phase 6 export rows.
   const saveRecording = useCallback((): Promise<string | null> => {
     // Idempotent: once committed, every subsequent call returns the cached
-    // final path. Without this, clicking footer Save after an export-row
-    // click (which already commits via ensureCommitted) re-invokes
-    // commit_recording on the now-stale scratch path → canonicalize ENOENT.
+    // final path. Guards against re-invoking commit_recording on the
+    // now-stale scratch path (would fail canonicalize ENOENT).
     if (committedPathRef.current) return Promise.resolve(committedPathRef.current);
     if (saveInFlightRef.current) return saveInFlightRef.current;
     if (!sourcePath) return Promise.resolve(null);
@@ -331,16 +331,6 @@ export default function Review() {
     saveInFlightRef.current = promise;
     return promise;
   }, [sourcePath, currentState, duration]);
-
-  // Phase 6: any export action calls this first. If the recording has
-  // already been committed (via footer Save or a prior export), returns
-  // the cached final path immediately. Otherwise runs the full commit
-  // pipeline and returns the new final path. Null means the user has no
-  // source loaded or the commit failed (error already surfaced).
-  const ensureCommitted = useCallback(async (): Promise<string | null> => {
-    if (committedPathRef.current) return committedPathRef.current;
-    return saveRecording();
-  }, [saveRecording]);
 
   // Destructive: removes the entire scratch dir (mp4 + sidecar + raw
   // sources). Footer button always asks for confirmation first; the
@@ -684,7 +674,6 @@ export default function Review() {
         />
         <ExportPanel
           committedPath={committedPath}
-          ensureCommitted={ensureCommitted}
           busy={busy}
           setError={setError}
         />
@@ -2265,12 +2254,10 @@ function ErrorStrip({ error, onDismiss }: { error: string; onDismiss: () => void
 
 function ExportPanel({
   committedPath,
-  ensureCommitted,
   busy,
   setError,
 }: {
   committedPath: string | null;
-  ensureCommitted: () => Promise<string | null>;
   busy: boolean;
   setError: (msg: string | null) => void;
 }) {
@@ -2278,19 +2265,19 @@ function ExportPanel({
     ? `~/Movies/Zeigen/${basename(committedPath)}`
     : "~/Movies/Zeigen/recording-…mp4";
 
-  // Saved Locally → commit if needed, then reveal in Finder. The Tauri
-  // opener plugin's revealItemInDir uses NSWorkspace under the hood, which
-  // selects the file inside its parent folder rather than just opening the
-  // folder.
+  // Post-save action only — clicking is gated on a non-null committedPath.
+  // Footer Save is the sole save trigger; rows are dimmed and inert until
+  // the recording is committed.
   const onRevealLocal = useCallback(async () => {
-    const path = await ensureCommitted();
-    if (!path) return;
+    if (!committedPath) return;
     try {
-      await revealItemInDir(path);
+      await revealItemInDir(committedPath);
     } catch (err) {
       setError(`reveal in Finder: ${err}`);
     }
-  }, [ensureCommitted, setError]);
+  }, [committedPath, setError]);
+
+  const rowsDisabled = !committedPath || busy;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", background: "var(--bg-sidebar)" }}>
@@ -2321,7 +2308,7 @@ function ExportPanel({
             </span>
           }
           onClick={onRevealLocal}
-          disabled={busy}
+          disabled={rowsDisabled}
         />
         <DestRow
           icon={<Icon d="M5 2h6v3M5 2v9a1 1 0 001 1h7a1 1 0 001-1V6L11 2M3 6h6v8" size={14} stroke={1.4} />}
@@ -2333,11 +2320,13 @@ function ExportPanel({
               <span className="kbd">C</span>
             </>
           }
+          disabled={rowsDisabled}
         />
         <DestRow
           icon={<Icon d="M2.5 5h11v9h-11zM5 8.5v3M5 6.5h.01M7.5 11.5v-3c0-.8.7-1.5 1.5-1.5s1.5.7 1.5 1.5v3M10.5 11.5v-3" size={13} stroke={1.4} />}
           title="Export for LinkedIn"
           sub="MP4 · ≤ 10 min · 1080p capped"
+          disabled={rowsDisabled}
         />
       </div>
 
