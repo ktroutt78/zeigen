@@ -12,9 +12,9 @@ This reverses the close-prompt portion of the 2026-04-25 "Recordings go to scrat
 
 Implementation:
 - Footer "Save recording" — commits scratch → final. Optional. Window stays open after commit so the user can use the export rows. Reveal-in-Finder affordance appears next to the disabled "Saved" pseudo-button.
-- Footer "Discard recording" — destructive, deletes scratch + per-recording temp dir. No confirm modal. Disabled after Save (scratch is gone).
+- Footer "Discard recording" — destructive, deletes scratch + per-recording temp dir. No confirm modal — the click is itself the explicit choice. Disabled after Save (scratch is gone).
 - "Record another" — same cleanup as Discard, then emits `record-another`, then closes.
-- Close window (title bar X) — same cleanup as Discard, then destroys.
+- Close window (title bar X) — when committed, silent cleanup + destroy. When uncommitted, shows a Save / Discard / Cancel modal (Discard default, matching the original Phase 5.5 modal). Rationale for keeping this one prompt: the red X is an ambiguous gesture (users habitually close windows), unlike the explicit footer Discard click. Without confirmation, accidental close → silent discard punishes the wrong instinct.
 - Copy to Clipboard row — copies the source mp4 to `~/Library/Caches/com.zeigen.app/exports/recording-<stamp>/` and points NSPasteboard at the temp copy. Does not commit. Available regardless of save state.
 - Export for LinkedIn row — produces a separate `recording-<stamp>-linkedin.mp4` in `~/Movies/Zeigen/`. Does not commit the original. The LinkedIn-preset file persists across all cleanup events. (Wired in a follow-up commit; row shows "Soon" in this commit.)
 - The Saved Locally row is removed — Save lives only on the footer.

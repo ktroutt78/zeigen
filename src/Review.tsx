@@ -139,6 +139,7 @@ export default function Review() {
 
   const [saving, setSaving] = useState(false);
   const [discarding, setDiscarding] = useState(false);
+  const [showCloseModal, setShowCloseModal] = useState(false);
   const busy = saving || discarding;
 
   // Tracks the post-commit final path. Mirrored as a ref so saveRecording
@@ -369,12 +370,21 @@ export default function Review() {
       const fn = await win.onCloseRequested(async (event) => {
         if (proceedingRef.current) return; // already greenlit
         event.preventDefault();
-        proceedingRef.current = true;
-        await cleanupScratchAndExports();
-        await win.destroy().catch((err) => {
-          proceedingRef.current = false;
-          setError(`close: ${err}`);
-        });
+        // Already saved → silent close. The cache temp dir still needs
+        // cleanup but the user has nothing to lose.
+        if (committedPathRef.current) {
+          proceedingRef.current = true;
+          await cleanupScratchAndExports();
+          await win.destroy().catch((err) => {
+            proceedingRef.current = false;
+            setError(`close: ${err}`);
+          });
+          return;
+        }
+        // Uncommitted → red X is an ambiguous gesture. Prompt for an
+        // explicit choice. Footer Discard remains direct (no modal)
+        // because that click is itself the explicit choice.
+        setShowCloseModal(true);
       });
       if (cancelled) {
         fn();
@@ -404,9 +414,11 @@ export default function Review() {
 
   // Global keyboard shortcuts: T/A → text tool, R → arrow tool (C5),
   // Esc → cancel tool/selection, Backspace/Delete → delete selection.
-  // Suppressed while editing text content (contentEditable).
+  // Suppressed while the close modal is open (its own handler runs)
+  // and while editing text content (contentEditable).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (showCloseModal) return;
       const target = e.target as HTMLElement | null;
       if (target?.isContentEditable) return;
       if (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA") return;
@@ -441,7 +453,7 @@ export default function Review() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [tool, selectedIndex, editingIndex, deleteAnnotation]);
+  }, [showCloseModal, tool, selectedIndex, editingIndex, deleteAnnotation]);
 
   // Footer Discard: instant cleanup + close. iPhone-screenshot semantics
   // — no confirm modal. The user explicitly chose discard; they meant it.
@@ -472,8 +484,8 @@ export default function Review() {
     }
   }, [committedPath]);
 
-  // Record another: same iPhone-screenshot cleanup, then emit so main
-  // kicks off a fresh capture, then close.
+  // Record another: same cleanup as Discard, then emit so main kicks
+  // off a fresh capture, then close.
   const onFooterRecordAnother = useCallback(async () => {
     setDiscarding(true);
     try {
@@ -484,6 +496,55 @@ export default function Review() {
       setDiscarding(false);
     }
   }, [cleanupScratchAndExports, fireRecordAnother, closeWindow]);
+
+  // Close-modal handlers (red X on uncommitted recording). Mirror the
+  // footer buttons but each path also closes the window on success.
+  const onModalSave = useCallback(async () => {
+    const out = await saveRecording();
+    if (out) {
+      setShowCloseModal(false);
+      // Save commits the scratch; cleanupScratchAndExports then runs an
+      // idempotent discard_recording (no-op for scratch, cleans the
+      // exports cache dir).
+      await cleanupScratchAndExports();
+      await closeWindow();
+    } else {
+      // Save failed; surface the error and let the user retry/discard.
+      setShowCloseModal(false);
+    }
+  }, [saveRecording, cleanupScratchAndExports, closeWindow]);
+
+  const onModalDiscard = useCallback(async () => {
+    setShowCloseModal(false);
+    setDiscarding(true);
+    try {
+      await cleanupScratchAndExports();
+      await closeWindow();
+    } finally {
+      setDiscarding(false);
+    }
+  }, [cleanupScratchAndExports, closeWindow]);
+
+  const onModalCancel = useCallback(() => {
+    setShowCloseModal(false);
+  }, []);
+
+  // Modal keyboard: Enter = Discard (destructive default per macOS
+  // convention — Pages, Numbers, TextEdit), Esc = Cancel.
+  useEffect(() => {
+    if (!showCloseModal) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onModalCancel();
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        onModalDiscard();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [showCloseModal, onModalCancel, onModalDiscard]);
 
   // WebKit won't paint a video frame until the renderer is primed by
   // an actual playback start — preload="auto" + a seek-to-0.04 alone
@@ -609,6 +670,14 @@ export default function Review() {
         />
       </div>
       {error && <ErrorStrip error={error} onDismiss={() => setError(null)} />}
+      {showCloseModal && (
+        <CloseModal
+          onSave={onModalSave}
+          onDiscard={onModalDiscard}
+          onCancel={onModalCancel}
+          busy={busy}
+        />
+      )}
     </main>
   );
 }
@@ -1983,6 +2052,100 @@ function ActionFooter({
           <span>{saving ? "Saving…" : "Save recording"}</span>
         </button>
       )}
+    </div>
+  );
+}
+
+function CloseModal({
+  onSave,
+  onDiscard,
+  onCancel,
+  busy,
+}: {
+  onSave: () => void;
+  onDiscard: () => void;
+  onCancel: () => void;
+  busy: boolean;
+}) {
+  // Default focus on Discard, per macOS convention (Pages, Numbers,
+  // TextEdit). Enter triggers Discard; Esc triggers Cancel.
+  const discardRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    discardRef.current?.focus();
+  }, []);
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.55)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 1000,
+      }}
+    >
+      <div
+        style={{
+          background: "var(--bg-elevated)",
+          border: "1px solid var(--border-strong)",
+          borderRadius: 10,
+          boxShadow: "var(--shadow-lg)",
+          padding: 18,
+          width: 360,
+          color: "var(--fg-primary)",
+          fontFamily: "var(--font-system)",
+        }}
+      >
+        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>
+          Save your recording?
+        </div>
+        <div style={{ fontSize: 12.5, color: "var(--fg-secondary)", lineHeight: 1.4 }}>
+          This recording hasn't been saved yet. Saving moves it to ~/Movies/Zeigen.
+          Discarding deletes it.
+        </div>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
+          <button
+            onClick={onCancel}
+            className="btn-secondary"
+            style={{ padding: "5px 12px", height: 28 }}
+          >
+            Cancel
+          </button>
+          <button
+            ref={discardRef}
+            onClick={onDiscard}
+            disabled={busy}
+            className="btn-secondary"
+            style={{
+              padding: "5px 12px",
+              height: 28,
+              borderColor: "var(--border-strong)",
+              color: "var(--recording-tint)",
+              opacity: busy ? 0.6 : 1,
+              cursor: busy ? "wait" : "pointer",
+            }}
+          >
+            Discard
+          </button>
+          <button
+            onClick={onSave}
+            disabled={busy}
+            className="btn-primary"
+            style={{
+              padding: "5px 14px",
+              height: 28,
+              opacity: busy ? 0.6 : 1,
+              cursor: busy ? "wait" : "pointer",
+            }}
+          >
+            {busy ? "Working…" : "Save"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
