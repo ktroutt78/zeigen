@@ -153,22 +153,28 @@ The original commit plan was reshaped twice during build:
 - App-launch sweep removes any per-recording exports cache dir older than 24h.
 - Bonus tpad fix landed mid-phase: webcam bubble visible from t=0 instead of popping in after the AVCaptureSession start lag (composite.rs).
 
-## Phase 7: Polish pass — **Partial (2026-04-26)**
+## Phase 7: Polish pass — **Complete (2026-04-26)**
 
-Three deliverables shipped this pass; the rest are deferred to a future phase. Sequenced after Phase 6 once recording, review, and export were all stable end-to-end.
+Three deliverables shipped this pass. The original phase scope listed seven items; four of those were reclassified at the close of the pass — three to backlog (low urgency, do when needed) and one (DMG installer) deferred until after Phase 9 since the app keeps gaining capabilities and shipping a bundle now would lock in pre-window-capture functionality.
 
 **Shipped**
 - Capture window sizing — fixed 480x700, settings panel always visible (no toggle), loosened row spacing, dropdowns alpha-sorted, displays renamed to sequential "Display 1..N" instead of raw CGDirectDisplayIDs.
 - Identify-display button next to the Screen dropdown — click flashes a translucent number overlay on each physical display via NSWindow.setFrame in Cocoa coords. Works on first-class macOS displays. **Does not render on DisplayLink-driven displays** — see DECISIONS.md 2026-04-26.
 - App icon + brand identity — finalized Zeigen mark across the Dock, DMG, BrandBar swatch, and tray (template-style outlined Z, alpha-tinted by macOS). index.html title corrected from the Tauri scaffold default.
 
-**Deferred**
-- Recording preset picker (16:9 default, 1:1 square, 9:16 vertical)
-- Settings persistence across app restarts
-- Error surface for common failures (device disappeared mid-record, disk full, permission revoked)
-- DMG installer via `tauri build`
+**Done when:** Capture window fits its content without scrolling at any state combination; clicking Identify flashes a number on each physical display in dropdown order; the Zeigen mark replaces the placeholder icon on Dock and tray. ✓
 
-**Done when (this pass):** Capture window fits its content without scrolling at any state combination; clicking Identify flashes a number on each physical display in dropdown order; the Zeigen mark replaces the placeholder icon on Dock and tray. The original "fresh DMG install + record + share" Done-When carries over to the deferred-items follow-up phase.
+## Backlog
+
+Items that were considered but didn't earn a phase. Pull from here when a real need surfaces.
+
+- **Settings persistence across app restarts** — hotkey, countdown duration, length cap, bubble size/corner all reset to defaults on launch. Tauri store plugin or localStorage if/when this becomes annoying.
+- **Error surface for common failures** — device disappeared mid-record, disk full, permission revoked. Existing StatusStrip handles engine errors but coverage hasn't been audited end-to-end. Survey gaps when a real failure surprises a recording.
+- **Recording preset picker (16:9 / 1:1 / 9:16)** — would require composite + export pipeline changes. YAGNI for the current use case (analytics demos are 16:9); reconsider only if a non-16:9 demand appears.
+
+## Post-Phase-9 ship prep
+
+- **DMG installer via `tauri build`** — run after Phase 8 (window capture) and Phase 9 (drawing tools) ship so the first packaged build reflects the full feature set. **Will ship unsigned** — Gatekeeper warning on first launch is acceptable for a personal tool; users can right-click → Open to bypass.
 
 ## Deferred / out of scope
 
