@@ -9,12 +9,12 @@ use tauri::{
 };
 
 const TRAY_ID: &str = "main-tray";
-// Template-style tray asset — outlined Z glyph rendered as alpha only so
-// macOS can tint it with the menu-bar foreground color in light + dark mode.
-// 44x44 retina @2x size; macOS downscales for non-retina menu bars.
-// Source: docs/design/tray-icon-Template.svg. Native 22x22 also committed
-// alongside as tray-icon-Template.png in case future code paths want both.
-const ICON_BYTES: &[u8] = include_bytes!("../icons/tray-icon-Template@2x.png");
+// Template-style tray asset — alpha-only PNG so macOS tints it with the
+// menu-bar foreground color (handles light + dark + active states).
+// Loading the @2x (32x32) variant for retina sharpness; macOS downscales
+// for non-retina. Native 16x16 (tray-iconTemplate.png) and @3x (48x48,
+// tray-iconTemplate-3x.png) are committed alongside for future use.
+const ICON_BYTES: &[u8] = include_bytes!("../icons/tray-iconTemplate-2x.png");
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct UiState {
