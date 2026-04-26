@@ -1,7 +1,7 @@
-# Tauri + React + Typescript
+# Zeigen
 
-This template should help get you started developing with Tauri, React and Typescript in Vite.
+Personal Loom-style screen + webcam recorder for dashboard and analytics demos. Tauri desktop app, macOS-only.
 
-## Recommended IDE Setup
+## Known limitations
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+- **DisplayLink-driven displays.** Recording works (ScreenCaptureKit can capture them), but the countdown overlay and the Identify-display button can't show on a DisplayLink display — macOS does not reliably allow `NSWindow` placement on virtual displays from third-party drivers. Choose the display from the dropdown directly in that case.

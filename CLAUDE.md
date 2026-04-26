@@ -24,6 +24,7 @@ Out of scope: real-time annotation, Windows/Linux, transcription, team features.
 - macOS requires Screen Recording, Camera, and Mic permissions.
 - Use a single audio source to avoid sync drift.
 - LinkedIn has no direct upload API for personal profiles. Export path opens composer and relies on manual drag-in.
+- DisplayLink-driven displays enumerate via SCK/CGDisplay (so they record fine) but `NSWindow.setFrame` placement on them is unreliable — macOS doesn't officially support windows on virtual displays from third-party drivers. Identify-display button and countdown overlay won't render on a DisplayLink screen. No fix at the application layer.
 
 ## Coding standards
 
