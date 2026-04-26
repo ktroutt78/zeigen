@@ -331,7 +331,6 @@ function App() {
   const [finalizeInfo, setFinalizeInfo] = useState<FinalizedRecording | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [hotkey, setHotkey] = useState<string>(DEFAULT_HOTKEY);
-  const [settingsOpen, setSettingsOpen] = useState(false);
   // Counter of in-flight or open review windows. Each `stopped` event
   // increments; the window's destroy listener (or finalize-error path)
   // decrements. Main window stays hidden while > 0.
@@ -515,7 +514,6 @@ function App() {
     setSelectedCamera,
     setSelectedMic,
     setSelectedDisplay,
-    setSettingsOpen,
   });
   ctrlRef.current = {
     state,
@@ -525,7 +523,6 @@ function App() {
     setSelectedCamera,
     setSelectedMic,
     setSelectedDisplay,
-    setSettingsOpen,
   };
 
   // Push UI state to Rust so the tray menu reflects current selections + state.
@@ -592,10 +589,6 @@ function App() {
     (async () => {
       const a = await listen<{ id?: string; action?: string }>("tray-action", (e) => {
         const c = ctrlRef.current;
-        if (e.payload.action === "settings") {
-          c.setSettingsOpen(true);
-          return;
-        }
         const id = e.payload.id ?? "";
         if (id === "start") {
           if (c.state === "idle" && c.selectedDisplay != null) c.start();
@@ -716,51 +709,36 @@ function App() {
     <main
       className="accent-blue"
       style={{
-        height: "100vh",
+        minHeight: "100vh",
         display: "flex",
         flexDirection: "column",
         background: "var(--bg-window)",
         color: "var(--fg-primary)",
-        overflow: "hidden",
       }}
     >
       <BrandBar
         recording={recording}
         elapsed={progress.elapsed_s}
         onRefresh={refresh}
-        onSettings={() => setSettingsOpen((v) => !v)}
-        settingsOpen={settingsOpen}
       />
 
-      <div
-        style={{
-          flex: 1,
-          minHeight: 0,
-          overflowY: "auto",
-          display: "flex",
-          flexDirection: "column",
+      <SettingsPanel
+        hotkey={hotkey}
+        onHotkey={async (combo) => {
+          try {
+            await invoke("set_hotkey", { combo });
+            setHotkey(combo);
+          } catch (e) {
+            setError(String(e));
+          }
         }}
-      >
-      {settingsOpen && (
-        <SettingsPanel
-          hotkey={hotkey}
-          onHotkey={async (combo) => {
-            try {
-              await invoke("set_hotkey", { combo });
-              setHotkey(combo);
-            } catch (e) {
-              setError(String(e));
-            }
-          }}
-          countdownDuration={countdownDuration}
-          onCountdownDuration={setCountdownDuration}
-          lengthCapMode={lengthCapMode}
-          onLengthCapMode={setLengthCapMode}
-          lengthCapTargetSec={lengthCapTargetSec}
-          onLengthCapTargetSec={setLengthCapTargetSec}
-          onClose={() => setSettingsOpen(false)}
-        />
-      )}
+        countdownDuration={countdownDuration}
+        onCountdownDuration={setCountdownDuration}
+        lengthCapMode={lengthCapMode}
+        onLengthCapMode={setLengthCapMode}
+        lengthCapTargetSec={lengthCapTargetSec}
+        onLengthCapTargetSec={setLengthCapTargetSec}
+      />
 
       <SourceTiles />
 
@@ -774,6 +752,7 @@ function App() {
           rowGap: 14,
           columnGap: 12,
           alignItems: "center",
+          flex: 1,
         }}
       >
         <RowLabel icon={I.webcam} label="Camera" />
@@ -842,7 +821,6 @@ function App() {
           setFinalizeInfo(null);
         }}
       />
-      </div>
 
       <FooterBar
         recording={recording}
@@ -860,14 +838,10 @@ function BrandBar({
   recording,
   elapsed,
   onRefresh,
-  onSettings,
-  settingsOpen,
 }: {
   recording: boolean;
   elapsed: number;
   onRefresh: () => void;
-  onSettings: () => void;
-  settingsOpen: boolean;
 }) {
   return (
     <div
@@ -932,19 +906,6 @@ function BrandBar({
           style={{ padding: 5, color: "var(--fg-secondary)" }}
         >
           {I.history}
-        </button>
-        <button
-          className="btn-ghost"
-          title="Preferences"
-          onClick={onSettings}
-          style={{
-            padding: 5,
-            color: settingsOpen ? "var(--fg-primary)" : "var(--fg-secondary)",
-            background: settingsOpen ? "var(--bg-elevated)" : "transparent",
-            borderRadius: 4,
-          }}
-        >
-          {I.gear}
         </button>
       </div>
     </div>
@@ -1508,7 +1469,6 @@ function SettingsPanel({
   onLengthCapMode,
   lengthCapTargetSec,
   onLengthCapTargetSec,
-  onClose,
 }: {
   hotkey: string;
   onHotkey: (combo: string) => void;
@@ -1518,7 +1478,6 @@ function SettingsPanel({
   onLengthCapMode: (v: LengthCapMode) => void;
   lengthCapTargetSec: number;
   onLengthCapTargetSec: (v: number) => void;
-  onClose: () => void;
 }) {
   const [draft, setDraft] = useState(hotkey);
   const dirty = draft.trim() !== hotkey && draft.trim().length > 0;
@@ -1536,24 +1495,7 @@ function SettingsPanel({
         fontSize: 12,
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <span style={{ fontWeight: 600, color: "var(--fg-primary)" }}>Settings</span>
-        <button
-          onClick={onClose}
-          aria-label="Close settings"
-          style={{
-            background: "transparent",
-            border: "none",
-            color: "var(--fg-tertiary)",
-            cursor: "pointer",
-            padding: 0,
-            lineHeight: 1,
-            fontSize: 14,
-          }}
-        >
-          ×
-        </button>
-      </div>
+      <span style={{ fontWeight: 600, color: "var(--fg-primary)" }}>Settings</span>
       <label
         style={{
           display: "flex",

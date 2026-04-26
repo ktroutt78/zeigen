@@ -16,9 +16,9 @@
         "label": "main",
         "title": "Zeigen",
         "width": 480,
-        "height": 540,
+        "height": 700,
         "minWidth": 460,
-        "minHeight": 540,
+        "minHeight": 700,
         "resizable": false
       }
     ],

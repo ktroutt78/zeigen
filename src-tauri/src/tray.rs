@@ -113,13 +113,6 @@ fn format_title(recording_state: &str, elapsed_s: f64) -> Option<String> {
 
 fn handle_menu_click<R: Runtime>(app: &AppHandle<R>, id: &str) {
     match id {
-        "settings" => {
-            if let Some(win) = app.get_webview_window("main") {
-                let _ = win.show();
-                let _ = win.set_focus();
-            }
-            let _ = app.emit("tray-action", serde_json::json!({ "action": "settings" }));
-        }
         "quit" => {
             app.exit(0);
         }
@@ -192,9 +185,6 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, state: &UiState) -> tauri::Result<
     }
     let screen_sub = screen_sub.build()?;
 
-    let settings = MenuItemBuilder::with_id("settings", "Settings…")
-        .accelerator("CmdOrCtrl+,")
-        .build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "Quit Zeigen")
         .accelerator("CmdOrCtrl+Q")
         .build(app)?;
@@ -208,8 +198,6 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, state: &UiState) -> tauri::Result<
         .item(&cam_sub)
         .item(&mic_sub)
         .item(&screen_sub)
-        .separator()
-        .item(&settings)
         .separator()
         .item(&quit)
         .build()
