@@ -401,7 +401,9 @@ function App() {
 
       invoke("engine_enumerate").catch((err) => setError(String(err)));
       invoke<DeviceList>("enumerate_devices")
-        .then((d) => setCameras(d.video))
+        .then((d) =>
+          setCameras([...d.video].sort((a, b) => a.name.localeCompare(b.name))),
+        )
         .catch((err) => setError(String(err)));
     };
 
@@ -646,7 +648,9 @@ function App() {
   const refresh = () => {
     invoke("engine_enumerate").catch((err) => setError(String(err)));
     invoke<DeviceList>("enumerate_devices")
-      .then((d) => setCameras(d.video))
+      .then((d) =>
+        setCameras([...d.video].sort((a, b) => a.name.localeCompare(b.name))),
+      )
       .catch((err) => setError(String(err)));
   };
 
