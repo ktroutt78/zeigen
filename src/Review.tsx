@@ -139,6 +139,14 @@ export default function Review() {
   const [committedPath, setCommittedPath] = useState<string | null>(null);
   const committedPathRef = useRef<string | null>(null);
 
+  // In-flight promise for an active commit_recording call. Concurrent
+  // saveRecording invocations (e.g., user double-clicks Reveal before the
+  // disabled state propagates through React render) share this promise so
+  // commit_recording runs exactly once per scratch. Without this, the
+  // first call moves scratch → final and the second hits canonicalize on
+  // the now-missing scratch path.
+  const saveInFlightRef = useRef<Promise<string | null> | null>(null);
+
   // Annotation editing state.
   const [tool, setTool] = useState<Tool>(null);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
@@ -286,31 +294,37 @@ export default function Review() {
   // Either way the scratch directory is removed on success. Returns the
   // final path on success, null on failure — Phase 6 export rows consume
   // the path via `ensureCommitted` to operate on the final mp4.
-  const saveRecording = useCallback(async (): Promise<string | null> => {
-    if (!sourcePath) return null;
-    setSaving(true);
-    try {
-      const norm: SidecarState = {
-        trim: normalizeTrim(currentState.trim, duration),
-        annotations: currentState.annotations,
-      };
-      const outPath = await invoke<string>("commit_recording", {
-        scratchMp4Path: sourcePath,
-        sidecar: norm,
-      });
-      // Notify main so its post-finalize toast updates from the now-stale
-      // scratch path to the actual final ~/Movies/Zeigen/recording-….mp4.
-      await emit("recording-committed", { final_path: outPath }).catch(() => {});
-      committedRef.current = true;
-      committedPathRef.current = outPath;
-      setCommittedPath(outPath);
-      return outPath;
-    } catch (err) {
-      setError(`save recording: ${err}`);
-      return null;
-    } finally {
-      setSaving(false);
-    }
+  const saveRecording = useCallback((): Promise<string | null> => {
+    if (saveInFlightRef.current) return saveInFlightRef.current;
+    if (!sourcePath) return Promise.resolve(null);
+    const promise = (async () => {
+      setSaving(true);
+      try {
+        const norm: SidecarState = {
+          trim: normalizeTrim(currentState.trim, duration),
+          annotations: currentState.annotations,
+        };
+        const outPath = await invoke<string>("commit_recording", {
+          scratchMp4Path: sourcePath,
+          sidecar: norm,
+        });
+        // Notify main so its post-finalize toast updates from the now-stale
+        // scratch path to the actual final ~/Movies/Zeigen/recording-….mp4.
+        await emit("recording-committed", { final_path: outPath }).catch(() => {});
+        committedRef.current = true;
+        committedPathRef.current = outPath;
+        setCommittedPath(outPath);
+        return outPath;
+      } catch (err) {
+        setError(`save recording: ${err}`);
+        return null;
+      } finally {
+        setSaving(false);
+        saveInFlightRef.current = null;
+      }
+    })();
+    saveInFlightRef.current = promise;
+    return promise;
   }, [sourcePath, currentState, duration]);
 
   // Phase 6: any export action calls this first. If the recording has
