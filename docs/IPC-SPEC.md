@@ -38,10 +38,13 @@ Begin a recording.
 }
 ```
 Fields:
-- `display_id` (uint) — `CGDirectDisplayID`, returned by `enumerated`.
+- `display_id` (uint) — `CGDirectDisplayID`, returned by `enumerated`. Mutually exclusive with `window_id`; exactly one is required.
+- `window_id` (uint) — `CGWindowID`, returned by `enumerated`. Captures only that window's content (occluding windows are invisible in the recording). Mutually exclusive with `display_id`.
 - `microphone_uid` (string) — CoreAudio device UID, returned by `enumerated`. Pass `null` to record silent video (no mic).
 - `output_path` (string) — absolute path; parent directory must already exist.
 - `max_fps` (uint, optional) — frame rate ceiling. Default 30. SCK delivers VFR; this is the max, not the guaranteed rate.
+
+For window captures the engine sizes the output to native pixels (window's point size × the containing display's scale factor) and fixes that resolution for the lifetime of the recording. Resizing the window mid-record is allowed but the resized content gets letterboxed/padded inside the original frame.
 
 Response: `started` event, then periodic `progress` events, then `stopped` (after `stop`) or `error`.
 
@@ -159,6 +162,7 @@ Emitted after `stop` completes.
 Codes:
 - `PERMISSION_DENIED` — Screen Recording or Microphone permission not granted
 - `DISPLAY_NOT_FOUND` — `display_id` not present in current enumeration
+- `WINDOW_NOT_FOUND` — `window_id` not present in current enumeration
 - `MIC_NOT_FOUND` — `microphone_uid` not present in current enumeration
 - `OUTPUT_PATH_INVALID` — parent dir missing, not writable, or path exists and can't be overwritten
 - `WRITER_FAILED` — AVAssetWriter failed to start or finalize

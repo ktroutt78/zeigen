@@ -86,13 +86,24 @@ actor Engine {
             emit(.error(code: "INVALID_STATE", message: "already recording"))
             return
         }
-        guard let displayID = cmd.display_id, let outputPath = cmd.output_path else {
-            emit(.error(code: "INVALID_COMMAND", message: "start requires display_id and output_path"))
+        guard let outputPath = cmd.output_path else {
+            emit(.error(code: "INVALID_COMMAND", message: "start requires output_path"))
+            return
+        }
+        let source: RecordingSession.Source
+        switch (cmd.display_id, cmd.window_id) {
+        case let (id?, nil): source = .display(id)
+        case let (nil, id?): source = .window(id)
+        case (nil, nil):
+            emit(.error(code: "INVALID_COMMAND", message: "start requires display_id or window_id"))
+            return
+        case (_?, _?):
+            emit(.error(code: "INVALID_COMMAND", message: "start requires exactly one of display_id or window_id"))
             return
         }
         do {
             let newSession = try await RecordingSession(
-                displayID: displayID,
+                source: source,
                 microphoneUID: cmd.microphone_uid,
                 outputPath: outputPath,
                 maxFPS: cmd.max_fps ?? 30

@@ -5,6 +5,7 @@ import Foundation
 struct Command: Decodable {
     let command: String
     let display_id: UInt32?
+    let window_id: UInt32?
     let microphone_uid: String?
     let output_path: String?
     let max_fps: Int?

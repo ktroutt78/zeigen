@@ -35,7 +35,12 @@ final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendable {
         }
     }
 
-    init(displayID: UInt32, microphoneUID: String?, outputPath: String, maxFPS: Int) async throws {
+    enum Source {
+        case display(UInt32)
+        case window(UInt32)
+    }
+
+    init(source: Source, microphoneUID: String?, outputPath: String, maxFPS: Int) async throws {
         self.outputURL = URL(fileURLWithPath: outputPath)
 
         let parent = outputURL.deletingLastPathComponent()
@@ -45,12 +50,33 @@ final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendable {
         try? FileManager.default.removeItem(at: outputURL)
 
         let shareable = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
-        guard let display = shareable.displays.first(where: { $0.displayID == displayID }) else {
-            throw EngineError(code: "DISPLAY_NOT_FOUND", message: "display_id \(displayID) not present")
-        }
 
-        let width = Int(display.width)
-        let height = Int(display.height)
+        let filter: SCContentFilter
+        let width: Int
+        let height: Int
+        switch source {
+        case .display(let displayID):
+            guard let display = shareable.displays.first(where: { $0.displayID == displayID }) else {
+                throw EngineError(code: "DISPLAY_NOT_FOUND", message: "display_id \(displayID) not present")
+            }
+            filter = SCContentFilter(display: display, excludingWindows: [])
+            width = Int(display.width)
+            height = Int(display.height)
+        case .window(let windowID):
+            guard let window = shareable.windows.first(where: { $0.windowID == windowID }) else {
+                throw EngineError(code: "WINDOW_NOT_FOUND", message: "window_id \(windowID) not present")
+            }
+            filter = SCContentFilter(desktopIndependentWindow: window)
+            // SCWindow.frame is in points; SCK delivers at the size we ask
+            // for in config.width/height. Ask for native pixels so the
+            // capture isn't downscaled on a Retina display: multiply the
+            // window's point size by the scale of the display containing
+            // its center. Falls back to 1.0 if no containing display is
+            // found (window straddling the void after a display unplug).
+            let scale = Self.displayScale(for: window.frame, in: shareable.displays)
+            width = max(2, Int((window.frame.width * scale).rounded()))
+            height = max(2, Int((window.frame.height * scale).rounded()))
+        }
 
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
         let videoSettings: [String: Any] = [
@@ -86,7 +112,6 @@ final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendable {
             audioInput = input
         }
 
-        let filter = SCContentFilter(display: display, excludingWindows: [])
         let config = SCStreamConfiguration()
         config.width = width
         config.height = height
@@ -286,6 +311,20 @@ final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendable {
                 if ok { audioAppended += 1 } else { audioDropped += 1 }
             }
         }
+    }
+
+    // Find the SCK display containing the window's center, then derive
+    // points-to-pixels by comparing the display's pixel size to its frame.
+    // Falls back to 1.0 (treat points as pixels) when the window doesn't
+    // overlap any known display.
+    static func displayScale(for windowFrame: CGRect, in displays: [SCDisplay]) -> CGFloat {
+        let center = CGPoint(x: windowFrame.midX, y: windowFrame.midY)
+        guard let display = displays.first(where: { $0.frame.contains(center) }),
+              display.frame.width > 0
+        else {
+            return 1.0
+        }
+        return CGFloat(display.width) / display.frame.width
     }
 
     private func adjustTiming(_ buffer: CMSampleBuffer, offset: CMTime) -> CMSampleBuffer? {
