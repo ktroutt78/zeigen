@@ -486,6 +486,7 @@ pub fn run() {
             set_hotkey,
             quit_app,
             macos::make_capture_invisible,
+            macos::position_window_on_display,
             bubble_position_event,
             edit::read_sidecar,
             edit::write_sidecar,

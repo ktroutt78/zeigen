@@ -142,43 +142,25 @@ async function openCountdown(
 const IDENTIFY_LABEL_PREFIX = "identify-";
 
 type DisplayShape = {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
+  id: number;
 };
 
 async function openIdentifyOverlays(displays: DisplayShape[]) {
   if (displays.length === 0) return;
-  const monitors = await availableMonitors();
   for (let i = 0; i < displays.length; i++) {
     const display = displays[i];
-    // Match the Tauri monitor by exact physical position so we can grab
-    // its scale factor for logical-pixel sizing. Position-matching beats
-    // size-matching because two external monitors at the same resolution
-    // (a common setup) collapse onto one match by size alone.
-    const monitor =
-      monitors.find(
-        (m) => m.position.x === display.x && m.position.y === display.y,
-      ) ||
-      monitors[i] ||
-      monitors[0];
-    const scale = monitor?.scaleFactor || 1;
     const label = `${IDENTIFY_LABEL_PREFIX}${i}`;
     const existing = await WebviewWindow.getByLabel(label);
     if (existing) await existing.close().catch(() => {});
-    // Position + size via the constructor only — same pattern as
-    // openCountdown, which lands reliably on the recorded display.
-    // Avoids the race in win.once("tauri://created", ...) where the
-    // listener registration occasionally completes after the event fires
-    // and the post-creation setPosition/setSize never runs.
-    const win = new WebviewWindow(label, {
+    new WebviewWindow(label, {
       url: `/#identify?n=${i + 1}`,
       title: "Identify",
-      width: display.width / scale,
-      height: display.height / scale,
-      x: display.x / scale,
-      y: display.y / scale,
+      // Initial size doesn't matter — the Rust setFrame call resizes the
+      // window to the target screen's bounds. Tauri's TS constructor x/y
+      // doesn't honor negative coords on macOS for screens left of the
+      // primary, so we don't pass any.
+      width: 400,
+      height: 400,
       decorations: false,
       transparent: true,
       alwaysOnTop: true,
@@ -188,9 +170,30 @@ async function openIdentifyOverlays(displays: DisplayShape[]) {
       shadow: false,
       focus: false,
     });
-    win.once("tauri://created", () => {
-      invoke("make_capture_invisible", { label }).catch(() => {});
-    });
+    // Poll briefly until Tauri registers the window in its window list,
+    // then ask Rust to NSWindow.setFrame to the target NSScreen by
+    // CGDirectDisplayID. Polling avoids the win.once registration race
+    // (listener sometimes registers after `tauri://created` has already
+    // fired, missing the event).
+    void (async () => {
+      for (let attempt = 0; attempt < 50; attempt++) {
+        const win = await WebviewWindow.getByLabel(label);
+        if (win) {
+          try {
+            await invoke("position_window_on_display", {
+              label,
+              displayId: display.id,
+            });
+            await invoke("make_capture_invisible", { label });
+          } catch (e) {
+            console.error(`[identify] ${label} setup failed`, e);
+          }
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      console.error(`[identify] ${label} window never registered`);
+    })();
   }
 }
 
