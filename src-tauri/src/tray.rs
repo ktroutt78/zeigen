@@ -9,9 +9,9 @@ use tauri::{
 };
 
 const TRAY_ID: &str = "main-tray";
-// Dedicated tray asset (menu-bar variant of the Zeigen mark, no shadow strip,
-// fatter Z) so we can render the colored brand mark in the menu bar instead
-// of the alpha-only template silhouette of the full app icon.
+// Template-style tray asset — outlined Z glyph rendered as alpha only so
+// macOS can tint it with the menu-bar foreground color in light + dark mode.
+// Source: docs/design/tray-icon-Template.svg.
 const ICON_BYTES: &[u8] = include_bytes!("../icons/tray-icon.png");
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -63,7 +63,7 @@ pub fn setup<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
 
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon)
-        .icon_as_template(false)
+        .icon_as_template(true)
         .menu(&menu)
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| {
