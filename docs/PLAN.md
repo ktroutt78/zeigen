@@ -106,7 +106,9 @@ Bundles four features and one bug fix from Phase 5 UAT. All recording-lifecycle 
 
 **Done when:** A recording made with the bubble dragged mid-record produces a final mp4 where the bubble follows the logged path; the countdown plays before SCK starts and is not in the recording; the timer is visible on the bubble (or the standalone chip when no webcam) and on the tray icon; the length cap tints the timer at 80% / 100% without auto-stopping; the floating preview no longer appears in the captured screen.
 
-## Phase 5.5: Scratch-and-commit save model
+## Phase 5.5: Scratch-and-commit save model — **Complete (2026-04-26)**
+
+All seven deliverables shipped across five atomic commits; UAT closed (scratch routing, commit/discard backends, footer button overhaul, close-prompt always fires until commit, Record another auto-start). One UAT fix commit between steps 2 and 3 covered the asset-protocol scope for `.scratch/`, the first-frame paint via muted play+pause prime, and the post-commit toast refresh.
 
 Numbered 5.5 because it corrects the Phase 5 save pipeline; sequenced after Phase 3.5 and before Phase 6 so the export panel inherits the corrected commit semantics.
 
