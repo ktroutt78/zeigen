@@ -5,6 +5,7 @@ mod edit;
 mod engine;
 mod exports;
 mod hotkey;
+mod linkedin;
 mod macos;
 mod tray;
 mod webcam;
@@ -492,7 +493,9 @@ pub fn run() {
             commit_recording,
             discard_recording,
             clipboard::clipboard_copy_recording,
+            clipboard::clipboard_copy_text,
             exports::cleanup_recording_exports,
+            linkedin::linkedin_export,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

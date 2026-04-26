@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { emit } from "@tauri-apps/api/event";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { revealItemInDir, openUrl } from "@tauri-apps/plugin-opener";
 import { Icon, I, P } from "./components/icons";
 
 // Review window. Layout mirrors docs/design/surfaces/review.jsx — left
@@ -665,6 +665,7 @@ export default function Review() {
         <ExportPanel
           sourcePath={sourcePath}
           committedPath={committedPath}
+          duration={duration}
           busy={busy}
           setError={setError}
         />
@@ -2206,11 +2207,13 @@ function ErrorStrip({ error, onDismiss }: { error: string; onDismiss: () => void
 function ExportPanel({
   sourcePath,
   committedPath,
+  duration,
   busy,
   setError,
 }: {
   sourcePath: string | null;
   committedPath: string | null;
+  duration: number | null;
   busy: boolean;
   setError: (msg: string | null) => void;
 }) {
@@ -2244,6 +2247,55 @@ function ExportPanel({
       setError(`copy to clipboard: ${err}`);
     }
   }, [effectiveSource, setError]);
+
+  // LinkedIn export: transcode to a separate recording-<stamp>-linkedin.mp4
+  // in ~/Movies/Zeigen (does NOT commit the original), drop the caption
+  // template on the pasteboard, reveal in Finder, and open the LinkedIn
+  // share composer. The user drags the file in, then ⌘V pastes the caption.
+  const [linkedinExporting, setLinkedinExporting] = useState(false);
+  const [linkedinExportedAt, setLinkedinExportedAt] = useState(0);
+  const linkedinExported = linkedinExportedAt > 0;
+  useEffect(() => {
+    if (linkedinExportedAt === 0) return;
+    const t = window.setTimeout(() => setLinkedinExportedAt(0), 1500);
+    return () => window.clearTimeout(t);
+  }, [linkedinExportedAt]);
+
+  const onLinkedinExport = useCallback(async () => {
+    if (!effectiveSource || linkedinExporting) return;
+    const stamp = parseStampFromPath(effectiveSource);
+    if (!stamp) {
+      setError(`linkedin export: cannot parse stamp from ${effectiveSource}`);
+      return;
+    }
+    if (duration != null && duration > 600) {
+      const ok = window.confirm(
+        "LinkedIn caps videos at 10 minutes. Export anyway?",
+      );
+      if (!ok) return;
+    }
+    setLinkedinExporting(true);
+    try {
+      const outPath = await invoke<string>("linkedin_export", {
+        stamp,
+        sourcePath: effectiveSource,
+      });
+      // Caption first so the user's clipboard has it ready when they
+      // ⌘V into the LinkedIn post composer.
+      await invoke("clipboard_copy_text", {
+        text: "New screen recording — [your description here]",
+      }).catch(() => {});
+      // Reveal first, then open URL — LinkedIn opening can take focus
+      // and we want the file selected in Finder waiting for the drag.
+      await revealItemInDir(outPath).catch(() => {});
+      await openUrl("https://www.linkedin.com/feed/?shareActive=true").catch(() => {});
+      setLinkedinExportedAt(Date.now());
+    } catch (err) {
+      setError(`linkedin export: ${err}`);
+    } finally {
+      setLinkedinExporting(false);
+    }
+  }, [effectiveSource, duration, linkedinExporting, setError]);
 
   // ⌘C shortcut mirrors the row click. Skip when the user has a
   // selection or is focused on an editable element so the system's
@@ -2316,9 +2368,29 @@ function ExportPanel({
         <DestRow
           icon={<Icon d="M2.5 5h11v9h-11zM5 8.5v3M5 6.5h.01M7.5 11.5v-3c0-.8.7-1.5 1.5-1.5s1.5.7 1.5 1.5v3M10.5 11.5v-3" size={13} stroke={1.4} />}
           title="Export for LinkedIn"
-          sub="MP4 · ≤ 10 min · 1080p capped"
-          kbd={<span style={{ fontSize: 10, color: "var(--fg-quaternary)", fontWeight: 600, letterSpacing: "0.04em", textTransform: "uppercase" }}>Soon</span>}
-          disabled
+          sub={
+            linkedinExporting
+              ? "Transcoding…"
+              : "MP4 · ≤ 10 min · 1080p capped"
+          }
+          action={
+            linkedinExported ? (
+              <span
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 4,
+                  fontSize: 11.5,
+                  color: "var(--success-tint)",
+                }}
+              >
+                <Icon d={P.check} size={12} stroke={1.8} />
+                <span>Exported</span>
+              </span>
+            ) : undefined
+          }
+          onClick={onLinkedinExport}
+          disabled={!effectiveSource || busy || linkedinExporting}
         />
       </div>
 

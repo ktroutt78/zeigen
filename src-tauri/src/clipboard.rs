@@ -61,6 +61,45 @@ fn write_url_to_pasteboard(path: &Path) -> Result<(), String> {
 // Source path selection happens in JS (committedPath || sourcePath).
 // Stamp is parsed from the path on the JS side and passed in explicitly
 // so this command works for both pre-save and post-save sources.
+// Plain-text variant — used by the LinkedIn export flow to drop a caption
+// template on the pasteboard for paste-into-LinkedIn-post. NSPasteboard
+// holds one item that supplies multiple representations; setString:forType:
+// with NSPasteboardTypeString (UTI public.utf8-plain-text) is the
+// canonical write for plaintext.
+#[tauri::command]
+pub fn clipboard_copy_text(text: String) -> Result<(), String> {
+    let c_text = CString::new(text).map_err(|e| format!("text → CString: {e}"))?;
+    let c_type =
+        CString::new("public.utf8-plain-text").map_err(|e| format!("type → CString: {e}"))?;
+
+    unsafe {
+        let ns_string_cls = class!(NSString);
+        let ns_text: *mut AnyObject =
+            msg_send![ns_string_cls, stringWithUTF8String: c_text.as_ptr()];
+        if ns_text.is_null() {
+            return Err("NSString stringWithUTF8String returned nil for text".into());
+        }
+        let ns_type: *mut AnyObject =
+            msg_send![ns_string_cls, stringWithUTF8String: c_type.as_ptr()];
+        if ns_type.is_null() {
+            return Err("NSString stringWithUTF8String returned nil for type".into());
+        }
+
+        let ns_pb_cls = class!(NSPasteboard);
+        let pb: *mut AnyObject = msg_send![ns_pb_cls, generalPasteboard];
+        if pb.is_null() {
+            return Err("NSPasteboard generalPasteboard returned nil".into());
+        }
+
+        let _: i64 = msg_send![pb, clearContents];
+        let ok: bool = msg_send![pb, setString: ns_text forType: ns_type];
+        if !ok {
+            return Err("NSPasteboard setString:forType: returned NO".into());
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn clipboard_copy_recording(stamp: String, source_path: String) -> Result<(), String> {
     let source = Path::new(&source_path);
