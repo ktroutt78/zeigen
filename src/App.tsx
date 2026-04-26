@@ -3,7 +3,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { WebviewWindow, getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { availableMonitors } from "@tauri-apps/api/window";
-import { LogicalSize } from "@tauri-apps/api/dpi";
 import { emit } from "@tauri-apps/api/event";
 import { I, Icon, P } from "./components/icons";
 import { PILL_STRIP_CSS } from "./constants/bubble";
@@ -658,29 +657,6 @@ function App() {
       .catch((err) => setError(String(err)));
   };
 
-  const mainRef = useRef<HTMLElement | null>(null);
-  useEffect(() => {
-    const el = mainRef.current;
-    if (!el) return;
-    const win = getCurrentWebviewWindow();
-    let raf = 0;
-    const sync = () => {
-      const h = Math.ceil(el.getBoundingClientRect().height);
-      if (h <= 0) return;
-      win.setSize(new LogicalSize(480, h)).catch(() => {});
-    };
-    const ro = new ResizeObserver(() => {
-      cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(sync);
-    });
-    ro.observe(el);
-    sync();
-    return () => {
-      ro.disconnect();
-      cancelAnimationFrame(raf);
-    };
-  }, []);
-
   const recording = state === "recording" || state === "paused";
   const cameraName =
     selectedCamera == null
@@ -738,13 +714,14 @@ function App() {
 
   return (
     <main
-      ref={mainRef}
       className="accent-blue"
       style={{
+        height: "100vh",
         display: "flex",
         flexDirection: "column",
         background: "var(--bg-window)",
         color: "var(--fg-primary)",
+        overflow: "hidden",
       }}
     >
       <BrandBar
@@ -755,6 +732,15 @@ function App() {
         settingsOpen={settingsOpen}
       />
 
+      <div
+        style={{
+          flex: 1,
+          minHeight: 0,
+          overflowY: "auto",
+          display: "flex",
+          flexDirection: "column",
+        }}
+      >
       {settingsOpen && (
         <SettingsPanel
           hotkey={hotkey}
@@ -856,6 +842,7 @@ function App() {
           setFinalizeInfo(null);
         }}
       />
+      </div>
 
       <FooterBar
         recording={recording}
