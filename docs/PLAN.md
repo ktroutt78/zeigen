@@ -153,19 +153,22 @@ The original commit plan was reshaped twice during build:
 - App-launch sweep removes any per-recording exports cache dir older than 24h.
 - Bonus tpad fix landed mid-phase: webcam bubble visible from t=0 instead of popping in after the AVCaptureSession start lag (composite.rs).
 
-## Phase 7: Polish pass
+## Phase 7: Polish pass — **Partial (2026-04-26)**
 
-Only tackle after Phases 1-6 are all working end-to-end.
+Three deliverables shipped this pass; the rest are deferred to a future phase. Sequenced after Phase 6 once recording, review, and export were all stable end-to-end.
 
-**Deliverables**
+**Shipped**
+- Capture window sizing — fixed 480x700, settings panel always visible (no toggle), loosened row spacing, dropdowns alpha-sorted, displays renamed to sequential "Display 1..N" instead of raw CGDirectDisplayIDs.
+- Identify-display button next to the Screen dropdown — click flashes a translucent number overlay on each physical display via NSWindow.setFrame in Cocoa coords. Works on first-class macOS displays. **Does not render on DisplayLink-driven displays** — see DECISIONS.md 2026-04-26.
+- App icon + brand identity — finalized Zeigen mark across the Dock, DMG, BrandBar swatch, and tray (template-style outlined Z, alpha-tinted by macOS). index.html title corrected from the Tauri scaffold default.
+
+**Deferred**
 - Recording preset picker (16:9 default, 1:1 square, 9:16 vertical)
 - Settings persistence across app restarts
 - Error surface for common failures (device disappeared mid-record, disk full, permission revoked)
-- App icon, DMG installer via `tauri build`
-- Capture window sizing: remove scrollbar by fitting window height to content, loosen row spacing, group sections with breathing room
-- Identify-display button next to the Screen dropdown — click flashes a 2s translucent number overlay on each available display so the user can match the dropdown entry to a physical screen
+- DMG installer via `tauri build`
 
-**Done when:** Zeigen can be installed fresh on another Mac from the DMG, recorded with for a real demo, and shared to LinkedIn and R2 without touching the terminal.
+**Done when (this pass):** Capture window fits its content without scrolling at any state combination; clicking Identify flashes a number on each physical display in dropdown order; the Zeigen mark replaces the placeholder icon on Dock and tray. The original "fresh DMG install + record + share" Done-When carries over to the deferred-items follow-up phase.
 
 ## Deferred / out of scope
 
