@@ -155,6 +155,12 @@ Emitted after `stop` completes.
 }
 ```
 
+### `window_frame`
+Only emitted while a `window`-mode recording is active. 5Hz cadence (200ms). Reports the captured window's current `CGWindowListCopyWindowInfo` bounds so the consumer can map screen-space coordinates (e.g., the floating bubble) into window-relative fractions even as the user moves or resizes the window mid-record. `on_screen: false` means the window has been minimized, hidden, or moved to a Space the engine isn't observing — frame values are still the last-known bounds.
+```json
+{"event": "window_frame", "x": 240, "y": 120, "width": 1440, "height": 900, "on_screen": true}
+```
+
 ### `error`
 ```json
 {"event": "error", "code": "PERMISSION_DENIED", "message": "Screen Recording permission not granted"}

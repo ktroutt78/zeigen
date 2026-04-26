@@ -114,6 +114,9 @@ actor Engine {
             let started = ISO8601DateFormatter().string(from: Date())
             emit(.started(started_at: started))
             startProgressTimer()
+            if newSession.capturedWindowID != nil {
+                startWindowFrameTimer()
+            }
         } catch let err as EngineError {
             emit(.error(code: err.code, message: err.message))
         } catch {
@@ -174,6 +177,40 @@ actor Engine {
     private func emitProgressIfRecording() {
         guard state == .recording, let s = session else { return }
         emit(.progress(frames: s.frameCount, dropped: s.droppedCount, elapsed_s: s.elapsedSeconds))
+    }
+
+    // 5Hz cadence chosen so the bubble-tracks-window logic in Rust has
+    // tight enough samples that a fast window drag doesn't visibly
+    // displace the bubble within the captured frame. CGWindowListCopyWindowInfo
+    // is a single Mach call (~1ms); 5Hz is well under any meaningful budget.
+    // Emits in both .recording and .paused states so the UI can keep its
+    // window-frame cache fresh during pause.
+    private func startWindowFrameTimer() {
+        Task { [weak self] in
+            while let self, await self.state != .idle {
+                await self.emitWindowFrameIfActive()
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+        }
+    }
+
+    private func emitWindowFrameIfActive() {
+        guard state != .idle, let s = session, let wid = s.capturedWindowID else { return }
+        let opts: CGWindowListOption = [.optionIncludingWindow]
+        guard let raw = CGWindowListCopyWindowInfo(opts, wid) as? [[String: Any]],
+              let entry = raw.first
+        else { return }
+        let onScreen = (entry[kCGWindowIsOnscreen as String] as? Bool) ?? false
+        guard let boundsDict = entry[kCGWindowBounds as String] as? NSDictionary,
+              let bounds = CGRect(dictionaryRepresentation: boundsDict)
+        else { return }
+        emit(.window_frame(
+            x: Int(bounds.origin.x),
+            y: Int(bounds.origin.y),
+            width: Int(bounds.size.width),
+            height: Int(bounds.size.height),
+            on_screen: onScreen
+        ))
     }
 }
 

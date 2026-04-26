@@ -47,6 +47,7 @@ enum Event {
     case paused(elapsed_s: Double)
     case resumed(elapsed_s: Double)
     case stopped(output_path: String, duration_s: Double, bytes: Int64, frames: Int, dropped: Int)
+    case window_frame(x: Int, y: Int, width: Int, height: Int, on_screen: Bool)
     case error(code: String, message: String)
 }
 
@@ -88,6 +89,8 @@ func emit(_ event: Event) {
             "event": "stopped", "output_path": output_path, "duration_s": duration_s,
             "bytes": bytes, "frames": frames, "dropped": dropped,
         ]
+    case .window_frame(let x, let y, let width, let height, let on_screen):
+        json = ["event": "window_frame", "x": x, "y": y, "width": width, "height": height, "on_screen": on_screen]
     case .error(let code, let message):
         json = ["event": "error", "code": code, "message": message]
     }

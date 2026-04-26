@@ -26,6 +26,8 @@ final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendable {
     private var lastVideoArrivalHost: CMTime = .invalid
     private var heartbeatTimer: DispatchSourceTimer?
 
+    let capturedWindowID: UInt32?
+
     var frameCount: Int { lock.withLock { frames } }
     var droppedCount: Int { lock.withLock { dropped } }
     var elapsedSeconds: Double {
@@ -54,6 +56,7 @@ final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendable {
         let filter: SCContentFilter
         let width: Int
         let height: Int
+        let resolvedWindowID: UInt32?
         switch source {
         case .display(let displayID):
             guard let display = shareable.displays.first(where: { $0.displayID == displayID }) else {
@@ -62,6 +65,7 @@ final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendable {
             filter = SCContentFilter(display: display, excludingWindows: [])
             width = Int(display.width)
             height = Int(display.height)
+            resolvedWindowID = nil
         case .window(let windowID):
             guard let window = shareable.windows.first(where: { $0.windowID == windowID }) else {
                 throw EngineError(code: "WINDOW_NOT_FOUND", message: "window_id \(windowID) not present")
@@ -76,7 +80,9 @@ final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendable {
             let scale = Self.displayScale(for: window.frame, in: shareable.displays)
             width = max(2, Int((window.frame.width * scale).rounded()))
             height = max(2, Int((window.frame.height * scale).rounded()))
+            resolvedWindowID = windowID
         }
+        self.capturedWindowID = resolvedWindowID
 
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
         let videoSettings: [String: Any] = [
