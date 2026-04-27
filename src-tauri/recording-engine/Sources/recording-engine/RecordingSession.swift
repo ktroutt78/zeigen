@@ -81,16 +81,10 @@ final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendable {
             width = max(2, Int((window.frame.width * scale).rounded()))
             height = max(2, Int((window.frame.height * scale).rounded()))
             resolvedWindowID = windowID
-            // Bring the captured window's owning app to the foreground so
-            // the user can see what they're recording. Activates the app,
-            // not necessarily the specific window — multi-window apps may
-            // surface a sibling — but it's a strict improvement over the
-            // user staring at whatever was on top while SCK silently
-            // captures content they can't see.
-            if let app = window.owningApplication {
-                NSRunningApplication(processIdentifier: pid_t(app.processID))?
-                    .activate()
-            }
+            // Foregrounding the captured app from here crashes the engine
+            // (CGS_REQUIRE_INIT — the CLI binary has no NSApplication).
+            // Move this to the Rust/Tauri main process where NSApplication
+            // is set up, or skip it.
         }
         self.capturedWindowID = resolvedWindowID
 

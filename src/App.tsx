@@ -632,7 +632,12 @@ function App() {
       // Stop pressed while the countdown is still playing — cancel the
       // countdown rather than asking the engine to stop a recording it
       // never started. Without this guard, Rust returns INVALID_STATE.
+      // Force state back to idle even if the cancel event has no
+      // listener (countdown already completed but engine never sent
+      // started — a stuck state we need to recover from).
       emit("countdown-cancelled").catch(() => {});
+      setState("idle");
+      invoke("recording_reset").catch(() => {});
       return;
     }
     invoke("engine_stop").catch((e) => setError(String(e)));
@@ -712,6 +717,24 @@ function App() {
       cap_sec: capSec,
     }).catch(() => {});
   }, [state, progress.elapsed_s, capSec]);
+
+  // Watchdog: detect a stuck "countdown" state (engine accepted start but
+  // never emitted `started` or `error` — e.g., engine crash). Fires
+  // `countdownDuration + 5` seconds after entering countdown; cleared
+  // immediately if state transitions normally. Recovers the UI without
+  // requiring an app force-quit.
+  useEffect(() => {
+    if (state !== "countdown") return;
+    const ms = (countdownDuration + 5) * 1000;
+    const id = window.setTimeout(() => {
+      setError(
+        "Recording engine didn't respond. If this persists, restart Zeigen.",
+      );
+      setState("idle");
+      invoke("recording_reset").catch(() => {});
+    }, ms);
+    return () => window.clearTimeout(id);
+  }, [state, countdownDuration]);
 
   // Hide the main window during recording so it doesn't appear in the capture,
   // and keep it hidden across the recording → finalize → review handoff.
