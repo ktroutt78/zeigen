@@ -209,6 +209,70 @@ async function openIdentifyOverlays(displays: DisplayShape[]) {
   }
 }
 
+const IDENTIFY_WINDOW_LABEL_PREFIX = "identify-window-";
+
+// Outline a captured window with a translucent rectangle + corner badge so
+// the user can confirm "yes, that's the window I picked." Mirrors the
+// display-identify pattern: open a transparent NSWindow at the target's
+// CG bounds, let the overlay component handle its own fade-out and self-close.
+async function openIdentifyWindowOverlay(window: WindowSource) {
+  const monitors = await availableMonitors();
+  const primary =
+    monitors.find((m) => m.position.x === 0 && m.position.y === 0) ||
+    monitors[0];
+  const primaryCocoaHeight =
+    primary && primary.scaleFactor
+      ? primary.size.height / primary.scaleFactor
+      : 1080;
+  const label = `${IDENTIFY_WINDOW_LABEL_PREFIX}${window.id}`;
+  const existing = await WebviewWindow.getByLabel(label);
+  if (existing) await existing.close().catch(() => {});
+  const params = new URLSearchParams({
+    app: window.app,
+    title: window.title,
+  });
+  new WebviewWindow(label, {
+    url: `/#identify-window?${params.toString()}`,
+    title: "Identify",
+    // Initial size doesn't matter — Rust set_window_frame_cg resizes after
+    // creation. Constructor x/y omitted because Tauri silently drops
+    // negative on macOS for screens left of primary.
+    width: 400,
+    height: 400,
+    decorations: false,
+    transparent: true,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    resizable: false,
+    visibleOnAllWorkspaces: true,
+    shadow: false,
+    focus: false,
+  });
+  void (async () => {
+    for (let attempt = 0; attempt < 50; attempt++) {
+      const win = await WebviewWindow.getByLabel(label);
+      if (win) {
+        try {
+          await invoke("set_window_frame_cg", {
+            label,
+            cgX: window.x,
+            cgY: window.y,
+            width: window.width,
+            height: window.height,
+            primaryCocoaHeight,
+          });
+          await invoke("make_capture_invisible", { label });
+        } catch (e) {
+          console.error(`[identify-window] ${label} setup failed`, e);
+        }
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    console.error(`[identify-window] ${label} window never registered`);
+  })();
+}
+
 const TIMER_CHIP_LABEL = "timer-chip";
 const TIMER_CHIP_W = 140;
 const TIMER_CHIP_H = 36;
@@ -1001,6 +1065,9 @@ function App() {
               windows={windows}
               value={selectedWindow}
               onChange={setSelectedWindow}
+              onIdentify={(w) =>
+                openIdentifyWindowOverlay(w).catch((e) => setError(String(e)))
+              }
               disabled={recording}
             />
           </>
@@ -1206,14 +1273,17 @@ function WindowRow({
   windows,
   value,
   onChange,
+  onIdentify,
   disabled,
 }: {
   windows: WindowSource[];
   value: number | null;
   onChange: (n: number | null) => void;
+  onIdentify: (w: WindowSource) => void;
   disabled: boolean;
 }) {
   const empty = windows.length === 0;
+  const selected = value == null ? null : windows.find((w) => w.id === value);
   return (
     // minWidth: 0 + overflow: hidden on the wrapper, plus minmax(0, 1fr)
     // on the parent grid (above) — three places to clamp because webkit's
@@ -1246,6 +1316,21 @@ function WindowRow({
           );
         })}
       </select>
+      <button
+        className="btn-ghost"
+        title="Identify window"
+        onClick={() => selected && onIdentify(selected)}
+        disabled={disabled || !selected}
+        style={{
+          padding: 5,
+          color: "var(--fg-secondary)",
+          flexShrink: 0,
+          opacity: disabled || !selected ? 0.4 : 1,
+          cursor: disabled || !selected ? "not-allowed" : "pointer",
+        }}
+      >
+        {I.search}
+      </button>
     </div>
   );
 }

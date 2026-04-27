@@ -7,6 +7,7 @@ import Review from "./Review";
 import CountdownOverlay from "./CountdownOverlay";
 import TimerChipWindow from "./TimerChipWindow";
 import IdentifyOverlay from "./IdentifyOverlay";
+import IdentifyWindowOverlay from "./IdentifyWindowOverlay";
 
 const hash = window.location.hash;
 const root = hash.startsWith("#bubble")
@@ -17,6 +18,8 @@ const root = hash.startsWith("#bubble")
   ? <CountdownOverlay />
   : hash.startsWith("#timer-chip")
   ? <TimerChipWindow />
+  : hash.startsWith("#identify-window")
+  ? <IdentifyWindowOverlay />
   : hash.startsWith("#identify")
   ? <IdentifyOverlay />
   : <App />;
