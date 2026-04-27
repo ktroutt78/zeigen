@@ -15,7 +15,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use chrono::Local;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Listener, Manager, State};
 
 use composite::{Corner, WebcamSize};
 use devices::DeviceList;
@@ -34,9 +34,21 @@ struct ActiveRecording {
     webcam_size: WebcamSize,
     webcam_corner: Corner,
     started_at: Instant,
-    display_frame_physical: (i32, i32, u32, u32),
+    mode: CaptureMode,
     bubble_position_log: Vec<BubblePositionEntry>,
     last_logged: Option<(Instant, f64, f64)>,
+}
+
+// Display mode pins the capture frame at recording start (the chosen display
+// can't move). Window mode tracks the captured window's live bounds via the
+// engine's 5Hz window_frame events; frame is None until the first event
+// arrives, so the very first bubble samples may no-op while we wait for the
+// initial frame. Both frames are physical pixels in screen space.
+enum CaptureMode {
+    Display { frame: (i32, i32, u32, u32) },
+    // `id` consumed by c8 edge cases (e.g. correlate window-closed errors
+    // with the captured window).
+    Window { #[allow(dead_code)] id: u32, frame: Option<(i32, i32, u32, u32)> },
 }
 
 #[tauri::command]
@@ -56,17 +68,34 @@ fn engine_enumerate(state: EngineState<'_>) -> Result<(), String> {
 fn engine_start(
     engine: EngineState<'_>,
     recording: RecordingState<'_>,
-    display_id: u32,
+    display_id: Option<u32>,
+    window_id: Option<u32>,
     microphone_uid: Option<String>,
     camera_index: Option<u32>,
     max_fps: Option<u32>,
     webcam_size: Option<String>,
     webcam_corner: Option<String>,
-    recorded_display_x: i32,
-    recorded_display_y: i32,
-    recorded_display_w: u32,
-    recorded_display_h: u32,
+    recorded_display_x: Option<i32>,
+    recorded_display_y: Option<i32>,
+    recorded_display_w: Option<u32>,
+    recorded_display_h: Option<u32>,
 ) -> Result<String, String> {
+    let mode = match (display_id, window_id) {
+        (Some(_), None) => CaptureMode::Display {
+            frame: (
+                recorded_display_x.ok_or("recorded_display_x required for display capture")?,
+                recorded_display_y.ok_or("recorded_display_y required for display capture")?,
+                recorded_display_w.ok_or("recorded_display_w required for display capture")?,
+                recorded_display_h.ok_or("recorded_display_h required for display capture")?,
+            ),
+        },
+        (None, Some(id)) => CaptureMode::Window { id, frame: None },
+        (None, None) => return Err("must provide display_id or window_id".into()),
+        (Some(_), Some(_)) => {
+            return Err("provide exactly one of display_id or window_id".into())
+        }
+    };
+
     let mut active = recording.lock().map_err(|e| e.to_string())?;
     if active.is_some() {
         return Err("recording already in progress".into());
@@ -95,6 +124,7 @@ fn engine_start(
         .map_err(|e| e.to_string())?
         .send(&EngineCommand::Start {
             display_id,
+            window_id,
             microphone_uid,
             output_path: screen_output.to_string_lossy().into_owned(),
             max_fps,
@@ -108,12 +138,7 @@ fn engine_start(
         webcam_size: parse_size(webcam_size.as_deref()),
         webcam_corner: parse_corner(webcam_corner.as_deref()),
         started_at: Instant::now(),
-        display_frame_physical: (
-            recorded_display_x,
-            recorded_display_y,
-            recorded_display_w,
-            recorded_display_h,
-        ),
+        mode,
         bubble_position_log: Vec::new(),
         last_logged: None,
     });
@@ -215,13 +240,23 @@ fn bubble_position_event(
     let mut active = recording.lock().map_err(|e| e.to_string())?;
     let Some(rec) = active.as_mut() else { return Ok(()); };
 
-    let (fx, fy, fw, fh) = rec.display_frame_physical;
+    // Display: pinned frame from engine_start. Window: latest frame from the
+    // engine's 5Hz window_frame stream. The Window None case happens only in
+    // the brief window between recording-start and the first window_frame
+    // event arriving (~200ms).
+    let frame = match &rec.mode {
+        CaptureMode::Display { frame } => Some(*frame),
+        CaptureMode::Window { frame, .. } => *frame,
+    };
+    let Some((fx, fy, fw, fh)) = frame else { return Ok(()); };
     if fw == 0 || fh == 0 {
         return Ok(());
     }
     // Don't clamp to [0,1]. The composite suppresses out-of-bounds segments
     // entirely (Bug 1 fix); clamping would leak the bubble onto an edge of
-    // the recorded display when it's actually on a different monitor.
+    // the recorded display when it's actually on a different monitor — and
+    // for window mode, dragging the bubble off the captured window simply
+    // shouldn't render in the recording.
     let x_frac = (x_physical - fx as f64) / fw as f64;
     let y_frac = (y_physical - fy as f64) / fh as f64;
 
@@ -470,6 +505,38 @@ pub fn run() {
             // Sweep stale per-recording exports left over from prior runs
             // that crashed or force-quit before per-session cleanup ran.
             exports::sweep_stale_exports();
+
+            // Tap engine-event window_frame messages into the active
+            // recording's CaptureMode so bubble_position_event can convert
+            // physical coords into fractions of the window's *current*
+            // bounds (5Hz from the engine).
+            let handle_for_wf = handle.clone();
+            handle.listen("engine-event", move |event| {
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(event.payload())
+                else {
+                    return;
+                };
+                if value.get("event").and_then(|v| v.as_str()) != Some("window_frame") {
+                    return;
+                }
+                let Some(x) = value.get("x").and_then(|v| v.as_i64()) else { return };
+                let Some(y) = value.get("y").and_then(|v| v.as_i64()) else { return };
+                let Some(w) = value.get("width").and_then(|v| v.as_i64()) else { return };
+                let Some(h) = value.get("height").and_then(|v| v.as_i64()) else { return };
+                if w <= 0 || h <= 0 {
+                    return;
+                }
+                let state = handle_for_wf.state::<Mutex<Option<ActiveRecording>>>();
+                // Bind the lock guard in the same scope as `state` so its
+                // drop order is well-defined (the if-let expression form
+                // produces a temporary with a too-long lifetime here).
+                let Ok(mut active) = state.lock() else { return };
+                if let Some(rec) = active.as_mut() {
+                    if let CaptureMode::Window { frame, .. } = &mut rec.mode {
+                        *frame = Some((x as i32, y as i32, w as u32, h as u32));
+                    }
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

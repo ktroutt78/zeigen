@@ -16,7 +16,10 @@ pub struct EngineClient {
 pub enum EngineCommand {
     Enumerate,
     Start {
-        display_id: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display_id: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        window_id: Option<u32>,
         microphone_uid: Option<String>,
         output_path: String,
         max_fps: Option<u32>,
