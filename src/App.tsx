@@ -923,7 +923,11 @@ function App() {
         style={{
           padding: "16px 18px",
           display: "grid",
-          gridTemplateColumns: "auto 1fr",
+          // minmax(0, 1fr) instead of 1fr — without the explicit 0 min,
+          // a 1fr track grows to fit its intrinsic min-content (e.g. a
+          // long select option label) and pushes the fixed 480px capture
+          // window into horizontal scroll.
+          gridTemplateColumns: "auto minmax(0, 1fr)",
           rowGap: 14,
           columnGap: 12,
           alignItems: "center",
@@ -1228,11 +1232,11 @@ function WindowRow({
 }) {
   const empty = windows.length === 0;
   return (
-    // minWidth: 0 on both flex container and select prevents long option
-    // labels (e.g. "Microsoft Teams — Chat | … | … | Microsoft Teams")
-    // from forcing the grid column wider than its 1fr allotment, which
-    // was triggering scrollbars on the fixed 480x700 capture window.
-    <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+    // minWidth: 0 + overflow: hidden on the wrapper, plus minmax(0, 1fr)
+    // on the parent grid (above) — three places to clamp because webkit's
+    // native <select> still tries to grow to its widest option's text in
+    // some layout configs.
+    <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0, overflow: "hidden" }}>
       <select
         className="select"
         value={value ?? ""}
