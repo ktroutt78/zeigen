@@ -231,6 +231,21 @@ fn recording_reset(
     Ok(())
 }
 
+// Like recording_reset but does NOT send Stop to the engine. Use when the
+// engine has already reported an error (and so already self-reset to idle)
+// — sending Stop to an idle engine produces a follow-on INVALID_STATE error
+// that overwrites the original. This path only cleans up Rust-side state
+// (the active recording handle, the webcam ffmpeg child).
+#[tauri::command]
+fn recording_cleanup_local(recording: RecordingState<'_>) -> Result<(), String> {
+    if let Some(mut rec) = recording.lock().map_err(|e| e.to_string())?.take() {
+        if let Some(webcam) = rec.webcam.as_mut() {
+            let _ = webcam.stop_segment();
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn bubble_position_event(
     recording: RecordingState<'_>,
@@ -547,6 +562,7 @@ pub fn run() {
             engine_resume,
             engine_stop,
             recording_reset,
+            recording_cleanup_local,
             recording_finalize,
             update_tray_state,
             update_tray_elapsed,

@@ -496,7 +496,10 @@ function App() {
             break;
           case "error":
             setError(`${ev.code}: ${ev.message}`);
-            invoke("recording_reset").catch(() => {});
+            // Engine self-resets to idle on any error it emits — sending
+            // Stop here would produce a follow-on INVALID_STATE error
+            // that overwrites the original. Use the local-only cleanup.
+            invoke("recording_cleanup_local").catch(() => {});
             setState("idle");
             // Engine errors during recording happen before the stop/finalize
             // pipeline increments — nothing to decrement here.
