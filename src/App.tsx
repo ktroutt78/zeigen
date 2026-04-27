@@ -347,9 +347,21 @@ type Display = {
   width: number;
   height: number;
 };
+type WindowSource = {
+  id: number;
+  app: string;
+  bundle_id?: string;
+  title: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  on_screen: boolean;
+};
 type Mic = { uid: string; name: string };
 type Device = { index: number; name: string };
 type DeviceList = { video: Device[]; audio: Device[]; screens: Device[] };
+type SourceKind = "display" | "window";
 type EngineState = "idle" | "countdown" | "recording" | "paused";
 type CountdownDuration = 0 | 3 | 5;
 type LengthCapMode = "off" | "target";
@@ -365,7 +377,7 @@ type FinalizedRecording = {
 
 type EngineEvent =
   | { event: "ready"; version: string }
-  | { event: "enumerated"; displays: Display[]; microphones: Mic[] }
+  | { event: "enumerated"; displays: Display[]; microphones: Mic[]; windows: WindowSource[] }
   | { event: "started"; started_at: string }
   | { event: "progress"; frames: number; dropped: number; elapsed_s: number }
   | { event: "paused"; elapsed_s: number }
@@ -391,9 +403,12 @@ function isContinuity(name: string): boolean {
 
 function App() {
   const [displays, setDisplays] = useState<Display[]>([]);
+  const [windows, setWindows] = useState<WindowSource[]>([]);
   const [mics, setMics] = useState<Mic[]>([]);
   const [cameras, setCameras] = useState<Device[]>([]);
+  const [sourceKind, setSourceKind] = useState<SourceKind>("display");
   const [selectedDisplay, setSelectedDisplay] = useState<number | null>(null);
+  const [selectedWindow, setSelectedWindow] = useState<number | null>(null);
   const [selectedMic, setSelectedMic] = useState<string | null>(null);
   const [selectedCamera, setSelectedCamera] = useState<number | null>(null);
   const [bubbleSize, setBubbleSize] = useState<WebcamSize>("medium");
@@ -435,10 +450,19 @@ function App() {
             const mics = [...ev.microphones].sort((a, b) =>
               a.name.localeCompare(b.name),
             );
+            // Alpha sort by app then title; focus-aware "currently focused
+            // app to the top" lands in a follow-up commit.
+            const wins = [...(ev.windows ?? [])].sort((a, b) => {
+              const app = a.app.localeCompare(b.app);
+              return app !== 0 ? app : a.title.localeCompare(b.title);
+            });
             setDisplays(displays);
             setMics(mics);
+            setWindows(wins);
             setSelectedDisplay((prev) => prev ?? displays[0]?.id ?? null);
             setSelectedMic((prev) => prev ?? mics[0]?.uid ?? null);
+            // Don't auto-select a window — empty default forces an explicit
+            // pick once the user toggles the Window source.
             break;
           }
           case "started":
@@ -531,30 +555,46 @@ function App() {
   }, []);
 
   const start = async () => {
-    if (selectedDisplay == null) return;
+    if (sourceKind === "display" && selectedDisplay == null) return;
+    if (sourceKind === "window" && selectedWindow == null) return;
     try {
       setError(null);
       setFinalizeInfo(null);
       setLastSaved(null);
 
-      // Resolve the recorded display's physical frame up front. The countdown
-      // window needs it to land on the correct screen; engine_start needs it
-      // for bubble-position-log fraction conversion. Display x/y/w/h come
-      // from the engine (CGDirectDisplay.frame); match the Tauri monitor by
-      // exact position to grab the scale factor (needed for logical-pixel
-      // window positioning in the countdown constructor).
-      const display = displays.find((d) => d.id === selectedDisplay);
+      // Resolve the screen the countdown should land on. Display mode uses
+      // the chosen display directly; window mode picks whichever display
+      // contains the captured window's center (falls back to primary).
+      // engine_start additionally needs recorded_display_* in display mode
+      // for bubble-position-log fraction conversion — window mode skips
+      // those and the engine drives bubble fractions off its 5Hz
+      // window_frame events instead.
       const monitors = await availableMonitors();
-      const monitor = display
+      let countdownDisplay: Display | undefined;
+      if (sourceKind === "display") {
+        countdownDisplay = displays.find((d) => d.id === selectedDisplay);
+      } else {
+        const win = windows.find((w) => w.id === selectedWindow);
+        if (win) {
+          const cx = win.x + win.width / 2;
+          const cy = win.y + win.height / 2;
+          countdownDisplay = displays.find(
+            (d) => cx >= d.x && cx < d.x + d.width && cy >= d.y && cy < d.y + d.height,
+          );
+        }
+      }
+      const monitor = countdownDisplay
         ? monitors.find(
-            (m) => m.position.x === display.x && m.position.y === display.y,
+            (m) =>
+              m.position.x === countdownDisplay!.x &&
+              m.position.y === countdownDisplay!.y,
           ) || monitors[0]
         : monitors[0];
       const recordedFrame: DisplayFrame = {
-        x: display?.x ?? monitor?.position.x ?? 0,
-        y: display?.y ?? monitor?.position.y ?? 0,
-        w: display?.width ?? monitor?.size.width ?? 0,
-        h: display?.height ?? monitor?.size.height ?? 0,
+        x: countdownDisplay?.x ?? monitor?.position.x ?? 0,
+        y: countdownDisplay?.y ?? monitor?.position.y ?? 0,
+        w: countdownDisplay?.width ?? monitor?.size.width ?? 0,
+        h: countdownDisplay?.height ?? monitor?.size.height ?? 0,
         scale: monitor?.scaleFactor ?? 1,
       };
 
@@ -569,16 +609,17 @@ function App() {
       }
 
       await invoke<string>("engine_start", {
-        displayId: selectedDisplay,
+        displayId: sourceKind === "display" ? selectedDisplay : null,
+        windowId: sourceKind === "window" ? selectedWindow : null,
         microphoneUid: selectedMic,
         cameraIndex: selectedCamera,
         maxFps: 30,
         webcamSize: bubbleSize,
         webcamCorner: bubbleCorner,
-        recordedDisplayX: recordedFrame.x,
-        recordedDisplayY: recordedFrame.y,
-        recordedDisplayW: recordedFrame.w,
-        recordedDisplayH: recordedFrame.h,
+        recordedDisplayX: sourceKind === "display" ? recordedFrame.x : null,
+        recordedDisplayY: sourceKind === "display" ? recordedFrame.y : null,
+        recordedDisplayW: sourceKind === "display" ? recordedFrame.w : null,
+        recordedDisplayH: sourceKind === "display" ? recordedFrame.h : null,
       });
     } catch (err) {
       setState("idle");
@@ -597,9 +638,11 @@ function App() {
     invoke("engine_stop").catch((e) => setError(String(e)));
   };
 
+  const canStartNow =
+    sourceKind === "display" ? selectedDisplay != null : selectedWindow != null;
   const ctrlRef = useRef({
     state,
-    selectedDisplay,
+    canStartNow,
     start,
     stop,
     setSelectedCamera,
@@ -608,7 +651,7 @@ function App() {
   });
   ctrlRef.current = {
     state,
-    selectedDisplay,
+    canStartNow,
     start,
     stop,
     setSelectedCamera,
@@ -682,7 +725,7 @@ function App() {
         const c = ctrlRef.current;
         const id = e.payload.id ?? "";
         if (id === "start") {
-          if (c.state === "idle" && c.selectedDisplay != null) c.start();
+          if (c.state === "idle" && c.canStartNow) c.start();
         } else if (id === "stop") {
           if (c.state !== "idle") c.stop();
         } else if (id === "pause") {
@@ -702,7 +745,7 @@ function App() {
       const b = await listen<{}>("hotkey-toggle", () => {
         const c = ctrlRef.current;
         if (c.state === "idle") {
-          if (c.selectedDisplay != null) c.start();
+          if (c.canStartNow) c.start();
         } else {
           c.stop();
         }
@@ -713,7 +756,7 @@ function App() {
       // next recording so the user lands directly in countdown.
       const r = await listen<{}>("record-another", () => {
         const c = ctrlRef.current;
-        if (c.state === "idle" && c.selectedDisplay != null) c.start();
+        if (c.state === "idle" && c.canStartNow) c.start();
       });
       if (cancelled) {
         a();
@@ -833,7 +876,11 @@ function App() {
         onLengthCapTargetSec={setLengthCapTargetSec}
       />
 
-      <SourceTiles />
+      <SourceTiles
+        sourceKind={sourceKind}
+        onSourceKind={setSourceKind}
+        disabled={recording}
+      />
 
       <div className="hairline" />
 
@@ -886,40 +933,56 @@ function App() {
           ))}
         </select>
 
-        <RowLabel icon={I.monitor} label="Screen" />
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <select
-            className="select"
-            value={selectedDisplay ?? ""}
-            onChange={(e) => setSelectedDisplay(Number(e.target.value))}
-            disabled={recording}
-            style={{ flex: 1, fontSize: 12.5 }}
-          >
-            {displays.map((d) => (
-              <option key={d.id} value={d.id}>
-                {d.name} — {d.width}×{d.height}
-              </option>
-            ))}
-          </select>
-          <button
-            className="btn-ghost"
-            title="Identify displays"
-            onClick={() =>
-              openIdentifyOverlays(displays).catch((e) => setError(String(e)))
-            }
-            disabled={recording || displays.length === 0}
-            style={{
-              padding: 5,
-              color: "var(--fg-secondary)",
-              flexShrink: 0,
-              opacity: recording || displays.length === 0 ? 0.4 : 1,
-              cursor:
-                recording || displays.length === 0 ? "not-allowed" : "pointer",
-            }}
-          >
-            {I.search}
-          </button>
-        </div>
+        {sourceKind === "display" ? (
+          <>
+            <RowLabel icon={I.monitor} label="Screen" />
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <select
+                className="select"
+                value={selectedDisplay ?? ""}
+                onChange={(e) => setSelectedDisplay(Number(e.target.value))}
+                disabled={recording}
+                style={{ flex: 1, fontSize: 12.5 }}
+              >
+                {displays.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.name} — {d.width}×{d.height}
+                  </option>
+                ))}
+              </select>
+              <button
+                className="btn-ghost"
+                title="Identify displays"
+                onClick={() =>
+                  openIdentifyOverlays(displays).catch((e) => setError(String(e)))
+                }
+                disabled={recording || displays.length === 0}
+                style={{
+                  padding: 5,
+                  color: "var(--fg-secondary)",
+                  flexShrink: 0,
+                  opacity: recording || displays.length === 0 ? 0.4 : 1,
+                  cursor:
+                    recording || displays.length === 0
+                      ? "not-allowed"
+                      : "pointer",
+                }}
+              >
+                {I.search}
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <RowLabel icon={I.window} label="Window" />
+            <WindowRow
+              windows={windows}
+              value={selectedWindow}
+              onChange={setSelectedWindow}
+              disabled={recording}
+            />
+          </>
+        )}
       </div>
 
       <StatusStrip
@@ -939,7 +1002,12 @@ function App() {
         recording={recording}
         state={state}
         elapsed={progress.elapsed_s}
-        canStart={state === "idle" && selectedDisplay != null}
+        canStart={
+          state === "idle" &&
+          (sourceKind === "display"
+            ? selectedDisplay != null
+            : selectedWindow != null)
+        }
         onStart={start}
         onStop={stop}
       />
@@ -1025,25 +1093,48 @@ function BrandBar({
   );
 }
 
-function SourceTiles() {
-  // Phase 3 supports primary display only. The other tiles match the design
-  // for visual consistency but are non-functional until later phases.
-  const tiles = [
-    { id: "display", label: "Entire Display", sub: "Primary display", icon: I.monitor, on: true },
-    { id: "window", label: "Window", sub: "Coming soon", icon: I.window, on: false },
-    { id: "area", label: "Selected Area", sub: "Coming soon", icon: I.area, on: false },
-    { id: "webcam", label: "Webcam Only", sub: "Coming soon", icon: I.webcam, on: false },
+function SourceTiles({
+  sourceKind,
+  onSourceKind,
+  disabled,
+}: {
+  sourceKind: SourceKind;
+  onSourceKind: (k: SourceKind) => void;
+  disabled: boolean;
+}) {
+  // Display + Window are wired source kinds. Selected Area and Webcam Only
+  // remain visual placeholders for now — the design intentionally shows the
+  // full grid so the destinations look planned, not absent.
+  const tiles: Array<{
+    id: string;
+    label: string;
+    sub: string;
+    icon: React.ReactNode;
+    kind?: SourceKind;
+  }> = [
+    { id: "display", label: "Entire Display", sub: "Pick a screen", icon: I.monitor, kind: "display" },
+    { id: "window", label: "Window", sub: "Pick an app window", icon: I.window, kind: "window" },
+    { id: "area", label: "Selected Area", sub: "Coming soon", icon: I.area },
+    { id: "webcam", label: "Webcam Only", sub: "Coming soon", icon: I.webcam },
   ];
 
   return (
     <div style={{ padding: 16, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
       {tiles.map((s) => {
-        const active = s.on;
-        const dim = !s.on;
+        const selectable = s.kind !== undefined;
+        const active = selectable && s.kind === sourceKind;
+        const dim = !selectable;
+        const interactive = selectable && !disabled;
         return (
-          <div
+          <button
             key={s.id}
+            type="button"
+            onClick={() => {
+              if (interactive && s.kind) onSourceKind(s.kind);
+            }}
+            disabled={!interactive}
             style={{
+              all: "unset",
               display: "flex",
               alignItems: "center",
               gap: 11,
@@ -1056,7 +1147,8 @@ function SourceTiles() {
               fontFamily: "var(--font-system)",
               boxShadow: active ? "0 0 0 3px var(--accent-soft)" : "none",
               transition: "all 120ms cubic-bezier(0.4, 0, 0.2, 1)",
-              opacity: dim ? 0.55 : 1,
+              opacity: dim ? 0.55 : disabled ? 0.7 : 1,
+              cursor: interactive ? "pointer" : "not-allowed",
             }}
           >
             <span
@@ -1081,9 +1173,53 @@ function SourceTiles() {
               </span>
               <span style={{ fontSize: 11, color: "var(--fg-tertiary)" }}>{s.sub}</span>
             </span>
-          </div>
+          </button>
         );
       })}
+    </div>
+  );
+}
+
+function WindowRow({
+  windows,
+  value,
+  onChange,
+  disabled,
+}: {
+  windows: WindowSource[];
+  value: number | null;
+  onChange: (n: number | null) => void;
+  disabled: boolean;
+}) {
+  const empty = windows.length === 0;
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      <select
+        className="select"
+        value={value ?? ""}
+        onChange={(e) => onChange(e.target.value === "" ? null : Number(e.target.value))}
+        disabled={disabled || empty}
+        style={{
+          flex: 1,
+          fontSize: 12.5,
+          color: value == null ? "var(--fg-tertiary)" : "var(--fg-primary)",
+        }}
+      >
+        <option value="">{empty ? "No windows available" : "Select a window…"}</option>
+        {windows.map((w) => {
+          // App — Title; fall back to "Untitled" when SCK gives no title
+          // (common for transient panels). Off-screen tag keeps the user
+          // from picking something invisible by accident.
+          const title = w.title.trim() || "Untitled";
+          const tag = w.on_screen ? "" : " (hidden)";
+          return (
+            <option key={w.id} value={w.id}>
+              {w.app} — {title}
+              {tag}
+            </option>
+          );
+        })}
+      </select>
     </div>
   );
 }
