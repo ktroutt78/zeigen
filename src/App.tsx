@@ -1215,14 +1215,11 @@ function WindowRow({
         <option value="">{empty ? "No windows available" : "Select a window…"}</option>
         {windows.map((w) => {
           // App — Title; fall back to "Untitled" when SCK gives no title
-          // (common for transient panels). Off-screen tag keeps the user
-          // from picking something invisible by accident.
+          // (common for app panels and helper surfaces).
           const title = w.title.trim() || "Untitled";
-          const tag = w.on_screen ? "" : " (hidden)";
           return (
             <option key={w.id} value={w.id}>
               {w.app} — {title}
-              {tag}
             </option>
           );
         })}

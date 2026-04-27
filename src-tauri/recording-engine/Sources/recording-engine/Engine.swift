@@ -47,30 +47,89 @@ actor Engine {
         }
     }
 
+    // Apple ships hundreds of background processes (Control Center, Siri,
+    // News widgets, etc.) that all expose SCWindows. Allowlist the Apple
+    // apps a user would plausibly want to capture; everything else under
+    // com.apple.* is rejected. Add to this list if a real Apple app is
+    // missing — better to undershoot than swamp the picker.
+    private static let appleAllowlist: Set<String> = [
+        "com.apple.Safari",
+        "com.apple.MobileSMS",
+        "com.apple.Music",
+        "com.apple.iCal",
+        "com.apple.Notes",
+        "com.apple.mail",
+        "com.apple.finder",
+        "com.apple.Terminal",
+        "com.apple.MobileSlideShow",
+        "com.apple.Preview",
+        "com.apple.iWork.Pages",
+        "com.apple.iWork.Numbers",
+        "com.apple.iWork.Keynote",
+        "com.apple.systempreferences",
+        "com.apple.dt.Xcode",
+        "com.apple.QuickTimePlayerX",
+        "com.apple.iBooksX",
+        "com.apple.AppStore",
+        "com.apple.Maps",
+        "com.apple.podcasts",
+        "com.apple.TV",
+        "com.apple.ScriptEditor2",
+        "com.apple.Console",
+        "com.apple.ActivityMonitor",
+        "com.apple.calculator",
+        "com.apple.Reminders",
+        "com.apple.shortcuts",
+        "com.apple.facetime",
+        "com.apple.iMovieApp",
+        "com.apple.garageband10",
+        "com.apple.dictionary",
+        "com.apple.freeform",
+    ]
+
     // Trim SCK's raw window list down to the set a user would plausibly pick
     // for capture. SCShareableContent returns ~everything: menubar items,
-    // tooltips, system overlays, our own helper windows.
+    // tooltips, system overlays, password-manager autofill helpers,
+    // Electron WebView sub-frames, hidden helper windows.
     //
-    // Filters:
-    //  - skip windows owned by Zeigen itself (com.zeigen.app); they show up
-    //    because the main window doesn't set sharingType=.none. The tray
-    //    icon, bubble, countdown, etc. are excluded automatically by
-    //    makeCaptureInvisible.
-    //  - require an owning application; system surfaces have none
-    //  - require windowLayer == 0 (kCGNormalWindowLevel); higher layers are
-    //    menu bars, status items, popups, etc.
-    //  - require a reasonable minimum size (100x100); excludes 0-pt phantom
-    //    windows the OS keeps around for various reasons
+    // Filters (each rejects):
+    //  - Owned by Zeigen itself (com.zeigen.app)
+    //  - No owning application (system surfaces)
+    //  - windowLayer != 0 (menu bars, status items, popups, tooltips)
+    //  - < 100x100 (phantom 0-pt windows the OS keeps around)
+    //  - !isOnScreen — SCK can't capture content of a window the OS
+    //    isn't drawing; recording one would yield blank or stale frames
+    //  - com.apple.* and not in the allowlist (system noise)
+    //  - app name contains "WebView" (Electron/Chromium sub-frames like
+    //    "Microsoft Teams WebView" — the real surface is the sibling
+    //    without the suffix)
+    //
+    // Then a dedupe pass: apps occasionally expose multiple SCWindows
+    // with identical (app, title) — different windowIDs, but functionally
+    // the same surface from the user's POV. Keep the largest; the
+    // smaller ones are usually dormant helper windows.
     private func filterShareableWindows(_ windows: [SCWindow]) -> [WindowInfo] {
-        windows.compactMap { w -> WindowInfo? in
+        let candidates: [WindowInfo] = windows.compactMap { w -> WindowInfo? in
             guard let app = w.owningApplication else { return nil }
-            if app.bundleIdentifier == "com.zeigen.app" { return nil }
+            let bundleID = app.bundleIdentifier
+            if bundleID == "com.zeigen.app" { return nil }
+            // Dev builds run as a CLI binary outside any .app bundle, so
+            // SCK reports bundleIdentifier as "". Catch our own window by
+            // name when the bundle is missing.
+            if bundleID.isEmpty && app.applicationName.lowercased() == "zeigen" {
+                return nil
+            }
             if w.windowLayer != 0 { return nil }
             if w.frame.width < 100 || w.frame.height < 100 { return nil }
+            if !w.isOnScreen { return nil }
+            if bundleID.hasPrefix("com.apple.") && !Self.appleAllowlist.contains(bundleID) {
+                return nil
+            }
+            if app.applicationName.contains("WebView") { return nil }
             return WindowInfo(
                 id: w.windowID,
                 app: app.applicationName,
-                bundle_id: app.bundleIdentifier,
+                bundle_id: bundleID,
                 title: w.title ?? "",
                 x: Int(w.frame.origin.x),
                 y: Int(w.frame.origin.y),
@@ -79,6 +138,19 @@ actor Engine {
                 on_screen: w.isOnScreen
             )
         }
+
+        var byKey: [String: WindowInfo] = [:]
+        for w in candidates {
+            let key = "\(w.bundle_id ?? w.app)|\(w.title)"
+            if let existing = byKey[key] {
+                if w.width * w.height > existing.width * existing.height {
+                    byKey[key] = w
+                }
+            } else {
+                byKey[key] = w
+            }
+        }
+        return Array(byKey.values)
     }
 
     private func handleStart(_ cmd: Command) async {
