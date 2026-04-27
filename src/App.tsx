@@ -392,9 +392,6 @@ type EngineEvent =
     }
   | { event: "error"; code: string; message: string };
 
-type WebcamSize = "small" | "medium" | "large";
-type Corner = "tl" | "tr" | "bl" | "br";
-
 const NO_CAMERA = "__none__";
 
 function isContinuity(name: string): boolean {
@@ -411,8 +408,6 @@ function App() {
   const [selectedWindow, setSelectedWindow] = useState<number | null>(null);
   const [selectedMic, setSelectedMic] = useState<string | null>(null);
   const [selectedCamera, setSelectedCamera] = useState<number | null>(null);
-  const [bubbleSize, setBubbleSize] = useState<WebcamSize>("medium");
-  const [bubbleCorner, setBubbleCorner] = useState<Corner>("br");
   const [countdownDuration, setCountdownDuration] =
     useState<CountdownDuration>(5);
   const [lengthCapMode, setLengthCapMode] = useState<LengthCapMode>("off");
@@ -617,8 +612,6 @@ function App() {
         microphoneUid: selectedMic,
         cameraIndex: selectedCamera,
         maxFps: 30,
-        webcamSize: bubbleSize,
-        webcamCorner: bubbleCorner,
         recordedDisplayX: sourceKind === "display" ? recordedFrame.x : null,
         recordedDisplayY: sourceKind === "display" ? recordedFrame.y : null,
         recordedDisplayW: sourceKind === "display" ? recordedFrame.w : null,
@@ -945,19 +938,6 @@ function App() {
           cameraState={cameraState}
           disabled={recording}
         />
-
-        {cameraState !== "none" && (
-          <>
-            <div />
-            <WebcamControlsBar
-              size={bubbleSize}
-              onSize={setBubbleSize}
-              corner={bubbleCorner}
-              onCorner={setBubbleCorner}
-              disabled={recording}
-            />
-          </>
-        )}
 
         <RowLabel icon={I.mic} label="Microphone" />
         <select
@@ -1358,144 +1338,6 @@ function ContinuityPill() {
       />
       iPhone connected
     </span>
-  );
-}
-
-function WebcamControlsBar({
-  size,
-  onSize,
-  corner,
-  onCorner,
-  disabled,
-}: {
-  size: WebcamSize;
-  onSize: (s: WebcamSize) => void;
-  corner: Corner;
-  onCorner: (c: Corner) => void;
-  disabled: boolean;
-}) {
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 14,
-        padding: "8px 10px",
-        background: "var(--bg-input)",
-        border: "1px solid var(--border-faint)",
-        borderRadius: 6,
-        opacity: disabled ? 0.55 : 1,
-        pointerEvents: disabled ? "none" : "auto",
-      }}
-    >
-      <div style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
-        <span style={{ fontSize: 11, color: "var(--fg-tertiary)" }}>Size</span>
-        <SizePicker value={size} onChange={onSize} />
-      </div>
-      <div style={{ width: 1, height: 16, background: "var(--border-faint)" }} />
-      <div style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
-        <span style={{ fontSize: 11, color: "var(--fg-tertiary)" }}>Corner</span>
-        <CornerPicker value={corner} onChange={onCorner} />
-      </div>
-      <div
-        style={{
-          marginLeft: "auto",
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 6,
-          color: "var(--fg-tertiary)",
-          fontSize: 11,
-        }}
-      >
-        <Icon d={<circle cx="8" cy="8" r="5" />} size={11} stroke={1.4} />
-        <span>Circle</span>
-      </div>
-    </div>
-  );
-}
-
-function SizePicker({
-  value,
-  onChange,
-}: {
-  value: WebcamSize;
-  onChange: (s: WebcamSize) => void;
-}) {
-  const opts: { id: WebcamSize; label: string }[] = [
-    { id: "small", label: "S" },
-    { id: "medium", label: "M" },
-    { id: "large", label: "L" },
-  ];
-  return (
-    <div className="segmented" style={{ padding: 2 }}>
-      {opts.map((o) => (
-        <button
-          key={o.id}
-          className={value === o.id ? "on" : ""}
-          onClick={() => onChange(o.id)}
-          style={{ minWidth: 24 }}
-        >
-          {o.label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function CornerPicker({
-  value,
-  onChange,
-}: {
-  value: Corner;
-  onChange: (c: Corner) => void;
-}) {
-  const corners: Corner[] = ["tl", "tr", "bl", "br"];
-  return (
-    <div
-      style={{
-        width: 34,
-        height: 24,
-        background: "var(--bg-input)",
-        border: "1px solid var(--border-subtle)",
-        borderRadius: 5,
-        position: "relative",
-        display: "grid",
-        gridTemplateColumns: "1fr 1fr",
-        gridTemplateRows: "1fr 1fr",
-        padding: 2,
-        gap: 1,
-      }}
-    >
-      {corners.map((c) => {
-        const on = value === c;
-        return (
-          <button
-            key={c}
-            onClick={() => onChange(c)}
-            aria-label={`Corner ${c}`}
-            style={{
-              background: "transparent",
-              border: "none",
-              padding: 0,
-              margin: 0,
-              cursor: "pointer",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-            }}
-          >
-            <span
-              style={{
-                width: 6,
-                height: 6,
-                borderRadius: 1.5,
-                background: on ? "var(--accent)" : "var(--fg-quaternary)",
-              }}
-            />
-          </button>
-        );
-      })}
-    </div>
   );
 }
 
