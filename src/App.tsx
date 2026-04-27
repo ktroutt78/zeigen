@@ -1193,7 +1193,11 @@ function WindowRow({
 }) {
   const empty = windows.length === 0;
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+    // minWidth: 0 on both flex container and select prevents long option
+    // labels (e.g. "Microsoft Teams — Chat | … | … | Microsoft Teams")
+    // from forcing the grid column wider than its 1fr allotment, which
+    // was triggering scrollbars on the fixed 480x700 capture window.
+    <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
       <select
         className="select"
         value={value ?? ""}
@@ -1201,8 +1205,11 @@ function WindowRow({
         disabled={disabled || empty}
         style={{
           flex: 1,
+          minWidth: 0,
+          maxWidth: "100%",
           fontSize: 12.5,
           color: value == null ? "var(--fg-tertiary)" : "var(--fg-primary)",
+          textOverflow: "ellipsis",
         }}
       >
         <option value="">{empty ? "No windows available" : "Select a window…"}</option>
