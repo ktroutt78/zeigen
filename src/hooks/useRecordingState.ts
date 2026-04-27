@@ -76,5 +76,38 @@ export function useRecordingState() {
     };
   }, []);
 
+  // Redundant signal from the main window (App.tsx broadcasts on every state
+  // change). Catches the case where this hook mounted after the engine
+  // emitted `started` and missed it. App.tsx's "countdown" maps to "idle"
+  // here — bubble controls only show during real recording.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    (async () => {
+      const fn = await listen<{
+        state: "idle" | "countdown" | "recording" | "paused";
+        elapsed_s: number;
+        cap_sec: number | null;
+      }>("recording-state", (e) => {
+        const s = e.payload.state;
+        setState(s === "countdown" ? "idle" : s);
+        if (typeof e.payload.elapsed_s === "number") {
+          setElapsed(e.payload.elapsed_s);
+        }
+        const cap = e.payload.cap_sec;
+        setCapSec(typeof cap === "number" && cap > 0 ? cap : null);
+      });
+      if (cancelled) {
+        fn();
+        return;
+      }
+      unlisten = fn;
+    })();
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
+
   return { state, elapsed, capSec };
 }

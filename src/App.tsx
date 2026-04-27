@@ -701,6 +701,18 @@ function App() {
     return () => window.clearInterval(id);
   }, [state, capSec]);
 
+  // Broadcast recording state so satellite windows (bubble, timer chip) get
+  // their controls in sync even if they missed the engine's `started` event
+  // (late listener registration, focus-related event drops, etc.). Goes
+  // alongside the existing engine-event subscription as a redundant signal.
+  useEffect(() => {
+    emit("recording-state", {
+      state,
+      elapsed_s: progress.elapsed_s,
+      cap_sec: capSec,
+    }).catch(() => {});
+  }, [state, progress.elapsed_s, capSec]);
+
   // Hide the main window during recording so it doesn't appear in the capture,
   // and keep it hidden across the recording → finalize → review handoff.
   // Main reshows once every open review window has been closed.
