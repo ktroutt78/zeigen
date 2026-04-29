@@ -29,6 +29,10 @@ pub struct UiState {
     pub selected_mic: Option<String>,
     pub selected_camera: Option<u32>,
     #[serde(default)]
+    pub source_kind: String,
+    #[serde(default)]
+    pub selected_window: Option<u32>,
+    #[serde(default)]
     pub elapsed_s: f64,
 }
 
@@ -132,9 +136,13 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, state: &UiState) -> tauri::Result<
     let paused = state.recording_state == "paused";
     let active = recording || paused;
 
+    let has_source = match state.source_kind.as_str() {
+        "window" => state.selected_window.is_some(),
+        _ => state.selected_display.is_some(),
+    };
     let start = MenuItemBuilder::with_id("start", "Start Recording")
         .accelerator("CmdOrCtrl+Shift+R")
-        .enabled(!active && state.selected_display.is_some())
+        .enabled(!active && has_source)
         .build(app)?;
     let stop = MenuItemBuilder::with_id("stop", "Stop Recording")
         .accelerator("CmdOrCtrl+Shift+R")

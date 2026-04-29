@@ -752,9 +752,21 @@ function App() {
         selected_display: selectedDisplay,
         selected_mic: selectedMic,
         selected_camera: selectedCamera,
+        source_kind: sourceKind,
+        selected_window: selectedWindow,
       },
     }).catch(() => {});
-  }, [state, displays, mics, cameras, selectedDisplay, selectedMic, selectedCamera]);
+  }, [
+    state,
+    displays,
+    mics,
+    cameras,
+    selectedDisplay,
+    selectedMic,
+    selectedCamera,
+    sourceKind,
+    selectedWindow,
+  ]);
 
   const trayElapsed =
     state === "recording" || state === "paused"
