@@ -34,21 +34,28 @@ export default function IdentifyWindowOverlay() {
       style={{
         width: "100vw",
         height: "100vh",
-        background: "transparent",
         position: "relative",
-        boxSizing: "border-box",
-        // 4px accent border traces the captured window's frame so the user
-        // can spot which window is the one they picked.
-        border: "4px solid var(--accent)",
-        borderRadius: 6,
-        boxShadow:
-          "0 0 0 1px rgba(0,0,0,0.5) inset, 0 0 24px rgba(0, 102, 255, 0.5)",
         opacity: out ? 0 : 1,
         transition: "opacity 280ms ease",
         pointerEvents: "none",
         userSelect: "none",
       }}
     >
+      {/* Border + tint live on a child layer, not the root. WKWebView
+          inside a fully-transparent NSWindow optimizes away paint on the
+          document root, so a `border` declared there silently no-ops. */}
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
+          boxSizing: "border-box",
+          border: "4px solid var(--accent)",
+          borderRadius: 6,
+          background: "rgba(0, 102, 255, 0.10)",
+          boxShadow:
+            "0 0 0 1px rgba(0,0,0,0.55) inset, 0 0 24px rgba(0, 102, 255, 0.55)",
+        }}
+      />
       <div
         style={{
           position: "absolute",
