@@ -251,6 +251,7 @@ fn bubble_position_event(
     recording: RecordingState<'_>,
     x_physical: f64,
     y_physical: f64,
+    diameter_physical: Option<f64>,
 ) -> Result<(), String> {
     let mut active = recording.lock().map_err(|e| e.to_string())?;
     let Some(rec) = active.as_mut() else { return Ok(()); };
@@ -287,8 +288,12 @@ fn bubble_position_event(
     }
 
     let t = now.duration_since(rec.started_at).as_secs_f64();
-    rec.bubble_position_log
-        .push(BubblePositionEntry { t, x: x_frac, y: y_frac });
+    rec.bubble_position_log.push(BubblePositionEntry {
+        t,
+        x: x_frac,
+        y: y_frac,
+        diameter: diameter_physical,
+    });
     rec.last_logged = Some((now, x_frac, y_frac));
     Ok(())
 }

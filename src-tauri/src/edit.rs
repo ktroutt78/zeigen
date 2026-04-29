@@ -22,6 +22,11 @@ pub struct BubblePositionEntry {
     pub t: f64,
     pub x: f64,
     pub y: f64,
+    // Bubble circle diameter in physical pixels at this sample. None on
+    // sidecars written before phase 8; the composite falls back to the
+    // legacy WebcamSize::px() default in that case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diameter: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

@@ -154,7 +154,17 @@ pub fn composite(
         return Err("no webcam segments to composite".into());
     }
 
-    let target = size.px();
+    // Prefer the live bubble diameter (sampled in physical pixels at record
+    // time) over the legacy WebcamSize default. The Size/Corner UI controls
+    // were removed in phase 8; the bubble is now drag-resizable and the
+    // composite has to honor whatever the user shipped. First-entry only —
+    // resizing mid-recording is rare and a single source-of-truth keeps the
+    // ffmpeg `scale` filter constant. None means an old sidecar; fall back.
+    let target = bubble_position_log
+        .first()
+        .and_then(|e| e.diameter)
+        .map(|d| d.round().max(1.0) as u32)
+        .unwrap_or_else(|| size.px());
 
     // Compensate for webcam start lag relative to screen. ffmpeg's AVCaptureSession
     // takes longer to deliver its first frame than SCK does, so the webcam file is

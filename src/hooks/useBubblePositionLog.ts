@@ -22,16 +22,25 @@ async function reportPosition() {
     // Report the visible circle's center, not the window's. The circle is
     // anchored to the top of the window (with a transparent pill strip
     // below); its diameter mirrors the CSS rule in WebcamBubble.
-    const pillStrip = PILL_STRIP_CSS * scale;
-    const circleSize = Math.min(
+    //
+    // All dimensions get divided by scaleFactor to land in *logical points*
+    // because that's what the engine reports for display/window frames on
+    // M-series macs in scaled "looks like" mode. The Rust fraction math
+    // (x_frac = (cx - fx) / fw) needs numerator and denominator in the
+    // same units; otherwise fractions land outside [0,1] and the composite
+    // suppresses the overlay entirely.
+    const pillStripPhys = PILL_STRIP_CSS * scale;
+    const circleSizePhys = Math.min(
       size.width,
-      Math.max(0, size.height - pillStrip),
+      Math.max(0, size.height - pillStripPhys),
     );
-    const cx = pos.x + size.width / 2;
-    const cy = pos.y + circleSize / 2;
+    const cx = (pos.x + size.width / 2) / scale;
+    const cy = (pos.y + circleSizePhys / 2) / scale;
+    const diameter = circleSizePhys / scale;
     await invoke("bubble_position_event", {
       xPhysical: cx,
       yPhysical: cy,
+      diameterPhysical: diameter,
     });
   } catch {
     // Window may be transitioning (closing, hidden) — drop silently.

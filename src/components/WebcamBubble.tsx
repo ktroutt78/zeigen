@@ -1,11 +1,62 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { Icon, P } from "./icons";
 import { useCornerSnap } from "../hooks/useCornerSnap";
 import { useBubblePositionLog } from "../hooks/useBubblePositionLog";
 import { useRecordingState } from "../hooks/useRecordingState";
 import TimerChip from "./TimerChip";
 import { PILL_STRIP_CSS } from "../constants/bubble";
+
+type Octant =
+  | "East"
+  | "North"
+  | "NorthEast"
+  | "NorthWest"
+  | "South"
+  | "SouthEast"
+  | "SouthWest"
+  | "West";
+
+// Eight-octant direction from a click on the circle's edge. atan2 gives
+// angle in [-π, π] with 0 along +x; screen-Y points down, so SE is +π/4.
+function octantForAngle(rad: number): Octant {
+  const oct = Math.round(rad / (Math.PI / 4));
+  const norm = ((oct % 8) + 8) % 8;
+  return (
+    [
+      "East",
+      "SouthEast",
+      "South",
+      "SouthWest",
+      "West",
+      "NorthWest",
+      "North",
+      "NorthEast",
+    ] as Octant[]
+  )[norm];
+}
+
+function cursorForOctant(d: Octant): string {
+  switch (d) {
+    case "East":
+    case "West":
+      return "ew-resize";
+    case "North":
+    case "South":
+      return "ns-resize";
+    case "NorthEast":
+    case "SouthWest":
+      return "nesw-resize";
+    case "NorthWest":
+    case "SouthEast":
+      return "nwse-resize";
+  }
+}
+
+const BUBBLE_MIN_DIAM = 120;
+const BUBBLE_MAX_DIAM = 800;
 
 // Floating circular webcam preview. Mirrors the WebcamOrbit variant from
 // docs/design/surfaces/webcam-bubble.jsx — circular feed, hover-only chrome,
@@ -67,10 +118,83 @@ export default function WebcamBubble() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [hover, setHover] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [ringCursor, setRingCursor] = useState<string>("nwse-resize");
 
   useCornerSnap();
   useBubblePositionLog();
   const { state: recState, elapsed, capSec } = useRecordingState();
+
+  const onRingMove = (e: React.PointerEvent<SVGPathElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const angle = Math.atan2(e.clientY - cy, e.clientX - cx);
+    setRingCursor(cursorForOctant(octantForAngle(angle)));
+  };
+
+  // macOS has no native "start resize drag" API for transparent
+  // decoration-less windows (Tauri's startResizeDragging silently no-ops),
+  // so drive the resize by hand: every pointermove sets the new diameter
+  // such that the cursor stays at the circle's edge, and re-anchors the
+  // window so the circle's center stays put. Pointer capture keeps events
+  // flowing even when the mouse moves outside the bubble window's bounds.
+  const onRingDown = (e: React.PointerEvent<SVGPathElement>) => {
+    e.stopPropagation();
+    e.preventDefault();
+    const target = e.currentTarget;
+    const pointerId = e.pointerId;
+
+    void (async () => {
+      const win = getCurrentWebviewWindow();
+      const dpr = window.devicePixelRatio || 1;
+      const initialPos = await win.outerPosition();
+      const initialSize = await win.outerSize();
+      const initialDiamLogical = initialSize.width / dpr;
+      // Circle is anchored at the top of the window with the pill strip
+      // below; circle center y is therefore (windowTop + diameter/2).
+      const centerXLogical = initialPos.x / dpr + initialDiamLogical / 2;
+      const centerYLogical = initialPos.y / dpr + initialDiamLogical / 2;
+
+      try {
+        target.setPointerCapture(pointerId);
+      } catch {
+        // best effort
+      }
+
+      const onMove = (ev: PointerEvent) => {
+        const dx = ev.screenX - centerXLogical;
+        const dy = ev.screenY - centerYLogical;
+        const r = Math.hypot(dx, dy);
+        const newDiam = Math.max(
+          BUBBLE_MIN_DIAM,
+          Math.min(BUBBLE_MAX_DIAM, 2 * r),
+        );
+        const newWidth = newDiam;
+        const newHeight = newDiam + PILL_STRIP_CSS;
+        const newX = centerXLogical - newDiam / 2;
+        const newY = centerYLogical - newDiam / 2;
+        win.setSize(new LogicalSize(newWidth, newHeight)).catch(() => {});
+        win
+          .setPosition(new LogicalPosition(newX, newY))
+          .catch(() => {});
+      };
+
+      const cleanup = () => {
+        try {
+          target.releasePointerCapture(pointerId);
+        } catch {
+          // best effort
+        }
+        target.removeEventListener("pointermove", onMove);
+        target.removeEventListener("pointerup", cleanup);
+        target.removeEventListener("pointercancel", cleanup);
+      };
+
+      target.addEventListener("pointermove", onMove);
+      target.addEventListener("pointerup", cleanup);
+      target.addEventListener("pointercancel", cleanup);
+    })();
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -178,30 +302,32 @@ export default function WebcamBubble() {
           }}
         />
 
-        {hover && (
-          <div
-            style={{
-              position: "absolute",
-              right: 8,
-              bottom: 8,
-              width: 24,
-              height: 24,
-              borderRadius: 99,
-              background: "rgba(0,0,0,0.55)",
-              backdropFilter: "blur(6px)",
-              color: "#fff",
-              display: "inline-flex",
-              alignItems: "center",
-              justifyContent: "center",
-              border: "0.5px solid rgba(255,255,255,0.2)",
-              cursor: "se-resize",
-            }}
-            // The bubble window is system-resizable from any edge in Tauri,
-            // but the visible affordance reads as a Mac-style grab handle.
-          >
-            <Icon d={P.resize} size={11} stroke={1.4} />
-          </div>
-        )}
+        {/* Annular hit target on the circle's outer edge — pointerdown
+            triggers a native macOS resize via Tauri's startResizeDragging,
+            with the direction inferred from which octant was clicked. The
+            SVG fills the whole bubble box; even-odd path leaves a hole in
+            the middle so drag-region (move) still works inside the circle. */}
+        <svg
+          viewBox="0 0 100 100"
+          preserveAspectRatio="none"
+          style={{
+            position: "absolute",
+            inset: 0,
+            width: "100%",
+            height: "100%",
+            pointerEvents: "none",
+            overflow: "visible",
+          }}
+        >
+          <path
+            d="M 0,50 A 50,50 0 1,1 100,50 A 50,50 0 1,1 0,50 Z M 14,50 A 36,36 0 1,0 86,50 A 36,36 0 1,0 14,50 Z"
+            fillRule="evenodd"
+            fill={hover ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0)"}
+            onPointerDown={onRingDown}
+            onPointerMove={onRingMove}
+            style={{ pointerEvents: "all", cursor: ringCursor }}
+          />
+        </svg>
 
         {recActive && (
           <div
