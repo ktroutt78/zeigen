@@ -101,24 +101,28 @@ async function openCountdown(
   const existing = await WebviewWindow.getByLabel(COUNTDOWN_LABEL);
   if (existing) await existing.close().catch(() => {});
 
-  // Construct with the recorded display's exact frame in logical pixels —
-  // no post-creation setSize/setPosition. The previous pattern raced with
-  // initial paint on macOS, leaving a 100x100 window with the digit clipped.
-  // Tauri's constructor accepts logical pixels; convert from the monitor's
-  // physical frame using its scaleFactor.
-  const scale = displayFrame.scale || 1;
-  const wLogical = displayFrame.w / scale;
-  const hLogical = displayFrame.h / scale;
-  const xLogical = displayFrame.x / scale;
-  const yLogical = displayFrame.y / scale;
+  // Plant the countdown window via NSWindow.setFrame (Cocoa points) instead
+  // of Tauri's constructor x/y/width/height. The constructor route landed
+  // the window at half size on macOS; identify overlays already work around
+  // this with set_window_frame_cg.
+  // Engine reports display frame in CG points (origin AND size — what
+  // SCDisplay returns on M-series macs set to a scaled "looks like" mode).
+  // Pass through unchanged.
+  const monitors = await availableMonitors();
+  const primary =
+    monitors.find((m) => m.position.x === 0 && m.position.y === 0) ||
+    monitors[0];
+  const primaryCocoaHeight =
+    primary && primary.scaleFactor
+      ? primary.size.height / primary.scaleFactor
+      : 1080;
 
   const win = new WebviewWindow(COUNTDOWN_LABEL, {
     url: `/#countdown?duration=${durationSec}`,
     title: "Countdown",
-    width: wLogical,
-    height: hLogical,
-    x: xLogical,
-    y: yLogical,
+    // Initial size doesn't matter — set_window_frame_cg resizes post-create.
+    width: 400,
+    height: 400,
     decorations: false,
     transparent: true,
     alwaysOnTop: true,
@@ -129,10 +133,20 @@ async function openCountdown(
     focus: true,
   });
 
-  win.once("tauri://created", () => {
-    invoke("make_capture_invisible", { label: COUNTDOWN_LABEL }).catch((e) => {
-      console.error("make_capture_invisible(countdown) failed", e);
-    });
+  win.once("tauri://created", async () => {
+    try {
+      await invoke("set_window_frame_cg", {
+        label: COUNTDOWN_LABEL,
+        cgX: displayFrame.x,
+        cgY: displayFrame.y,
+        width: displayFrame.w,
+        height: displayFrame.h,
+        primaryCocoaHeight,
+      });
+      await invoke("make_capture_invisible", { label: COUNTDOWN_LABEL });
+    } catch (e) {
+      console.error("countdown setup failed", e);
+    }
   });
   win.once("tauri://error", (e) => {
     console.error("countdown window error", e);
