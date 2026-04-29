@@ -16,10 +16,11 @@
 - `076789d` — c5 fix: `recording_cleanup_local` so engine errors aren't overwritten by INVALID_STATE follow-on
 - `4348ec6` — c5 fix: drop dead webcam Size + Corner controls
 - `4a8aed5` — c7: identify-window button + IdentifyWindowOverlay component (badge ships; outline doesn't render — see open issues)
+- `a049071` — c7 fix: outline + tint render via inner div (root-level paint dropped by WKWebView transparent compositor)
+- `949c688` — fix: countdown spans full screen (SCDisplay returns logical points on M-series scaled mode; the `/scale` was halving width/height)
 
 ## Open Phase 8 items (priority order)
 
-- **c7 outline rendering bug** — badge appears at correct position but the surrounding blue tint and 4px outline don't render visually. Tried `border` → `inset box-shadow`, cranked tint to 0.25 alpha, dropped `make_capture_invisible` — none worked. Suspect transparent NSWindow / WKWebView compositor interaction. Console.log of cg coords + size was added during debugging — re-add to confirm Tauri actually receives the window's correct dimensions; then dig from there.
 - **Composite bubble size match** — live bubble is drag-resizable, but composite always renders 240px (Medium default). Add `diameter` field to bubble position log entries; bubble JS reads its own outerSize at each poll; composite uses `bubble_position_log[0].diameter`. Removes the residual disconnect from killing Size/Corner controls.
 - **c6 focus-aware sort** — window picker is alpha-by-app + alpha-by-title. User refinement was: focused-app windows on top, then most-recently-non-Zeigen activated. Needs NSWorkspace `didActivateApplicationNotification` observer in the Rust main process (Tauri has NSApplication context, engine doesn't), MRU deque, new Tauri command returning recent bundle IDs, UI consumes for sort.
 - **Tray window-mode fix** — `tray::build_menu` Start enabled check is `state.selected_display.is_some()` only. In Window mode it's greyed out even when a window is selected. Add `selected_window: Option<u32>` to `UiState`, push it from App.tsx's tray-state effect, expand the enable check.
@@ -41,3 +42,4 @@
 - **Stale Cargo build artifacts** bit twice this session (serde, cssparser). Targeted `cargo clean -p <crate>` recovers without a full rebuild.
 - **Long-running dev**: use `nohup npm run tauri dev > /tmp/zeigen-dev.log 2>&1 & disown` so the wrapper bash exit doesn't take Tauri/Vite down with it. Read `/tmp/zeigen-dev.log` for engine stderr (look for `[engine]` lines).
 - **Webcam Size/Corner controls were removed**, but `webcam_size`/`webcam_corner` params are still accepted by `engine_start` (Rust falls through to Medium/BottomRight defaults). Safe to leave; revisit when the composite-size-match work lands.
+- **SCDisplay width/height return logical points, not physical pixels, on M-series macs in a scaled "looks like" display mode.** Apple's docs say "in pixels" but you'll get e.g. 1470/956 on a 14" MBP set to "More Space" (= the looks-like resolution at 1x), not the 2940/1912 panel pixel count. Treat `DisplayInfo` from the engine as points across the board. The bubble-position-log fraction math (`x_frac = (x_physical - fx) / fw` in `lib.rs`) currently mixes Tauri physical px with engine points — fractions come out 2x off on retina; latent bug, surfaces if anyone tunes the composite to physical-precise placement.
