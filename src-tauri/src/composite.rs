@@ -1,14 +1,71 @@
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::edit::BubblePositionEntry;
 
 pub(crate) const FFMPEG_PATH: &str = "/opt/homebrew/bin/ffmpeg";
 pub(crate) const FFPROBE_PATH: &str = "/opt/homebrew/bin/ffprobe";
 
-// Above this many position-log entries, the inline `if(lt(t,...))` chain
-// becomes long enough that the chained-split strategy is preferable.
-const POSITION_LOG_MAX_INLINE: usize = 20;
+// The inline `if(lt(t,...))` chain handles arbitrary log sizes — ffmpeg
+// parses the expression once and walks it per-frame, which is cheap.
+// The chained-split alternative was catastrophically slow: `split=N`
+// forces N parallel buffer copies per frame and the chained overlay
+// pipeline does N enable-checks per frame, so a 3-min clip with ~500
+// samples could take longer than the recording itself. Set the threshold
+// high enough that the split path is effectively dead while still serving
+// as a safety net for absurd logs.
+const POSITION_LOG_MAX_INLINE: usize = 100_000;
+
+// ffmpeg's expression parser hits a hard recursion limit on nested `if()`
+// calls — measured empirically at ~94 entries on the bundled ffmpeg.
+// "Missing ')' or too many args" fires before evaluation. Cap simplified
+// logs at 80 with margin. Most static recordings collapse below this via
+// run-length encoding; only continuous-drag clips hit the thinning path
+// and lose some intermediate-frame fidelity.
+const POSITION_LOG_MAX_SIMPLIFIED: usize = 80;
+
+// Drop interior samples in static runs (positions that match both neighbors)
+// then thin uniformly to fit ffmpeg's expression-depth budget. Preserves
+// motion fidelity since boundary samples of every static run are kept.
+fn simplify_position_log(log: &[BubblePositionEntry]) -> Vec<BubblePositionEntry> {
+    if log.len() <= 2 {
+        return log.to_vec();
+    }
+    let eps = 0.001;
+    let mut compacted: Vec<BubblePositionEntry> = Vec::with_capacity(log.len());
+    compacted.push(log[0].clone());
+    for i in 1..log.len() - 1 {
+        let prev = &log[i - 1];
+        let curr = &log[i];
+        let next = &log[i + 1];
+        let same_as_prev = (curr.x - prev.x).abs() < eps && (curr.y - prev.y).abs() < eps;
+        let same_as_next = (curr.x - next.x).abs() < eps && (curr.y - next.y).abs() < eps;
+        if !(same_as_prev && same_as_next) {
+            compacted.push(curr.clone());
+        }
+    }
+    compacted.push(log[log.len() - 1].clone());
+
+    if compacted.len() > POSITION_LOG_MAX_SIMPLIFIED {
+        // Stride keeps endpoints and roughly-evenly samples between them.
+        let stride =
+            (compacted.len() as f64 / POSITION_LOG_MAX_SIMPLIFIED as f64).ceil() as usize;
+        let mut thinned: Vec<BubblePositionEntry> = compacted
+            .iter()
+            .step_by(stride.max(1))
+            .cloned()
+            .collect();
+        // Always keep the final sample so the post-end static segment lines
+        // up with where the bubble actually was at end-of-recording.
+        if thinned.last().map(|e| e.t) != compacted.last().map(|e| e.t) {
+            thinned.push(compacted.last().unwrap().clone());
+        }
+        thinned
+    } else {
+        compacted
+    }
+}
 
 fn probe_duration_seconds(path: &Path) -> Result<f64, String> {
     let output = Command::new(FFPROBE_PATH)
@@ -142,6 +199,27 @@ fn build_inline_position_expr(log: &[BubblePositionEntry]) -> (String, String) {
     (x_expr, y_expr)
 }
 
+// Render a circular alpha mask to disk for use as an ffmpeg input. The PNG
+// has a white opaque circle on a transparent background; ffmpeg's `format=gray`
+// filter then yields a luma-only stream where 255 = inside circle, 0 = outside.
+// Doing this once per recording costs ~1ms vs the per-pixel-per-frame cost of
+// the previous inline `geq` expression, which dominated composite time on
+// multi-minute clips.
+fn render_alpha_mask(diameter: u32, out_path: &Path) -> Result<(), String> {
+    use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Transform};
+    let mut pixmap = Pixmap::new(diameter, diameter)
+        .ok_or_else(|| format!("alloc mask pixmap {diameter}x{diameter}"))?;
+    let r = diameter as f32 / 2.0;
+    let path = PathBuilder::from_circle(r, r, r).ok_or("invalid mask radius")?;
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(255, 255, 255, 255);
+    paint.anti_alias = true;
+    pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+    let png = pixmap.encode_png().map_err(|e| format!("encode mask png: {e}"))?;
+    std::fs::write(out_path, png).map_err(|e| format!("write mask png: {e}"))?;
+    Ok(())
+}
+
 pub fn composite(
     screen_path: &Path,
     webcam_segments: &[PathBuf],
@@ -149,6 +227,7 @@ pub fn composite(
     size: WebcamSize,
     corner: Corner,
     bubble_position_log: &[BubblePositionEntry],
+    on_progress: impl Fn(f64) + Send + 'static,
 ) -> Result<(), String> {
     if webcam_segments.is_empty() {
         return Err("no webcam segments to composite".into());
@@ -187,9 +266,20 @@ pub fn composite(
         .sum::<Result<f64, _>>()?;
     let lead_in = (screen_dur - webcam_total).max(0.0);
 
+    // Pre-render the circular alpha mask alongside the output so it lives in
+    // the same scratch dir and gets cleaned up with the recording.
+    let mask_path = output_path
+        .parent()
+        .ok_or("output path has no parent")?
+        .join(format!("mask-{target}.png"));
+    render_alpha_mask(target, &mask_path)?;
+
     let mut args: Vec<String> = vec![
         "-y".into(),
         "-hide_banner".into(),
+        "-nostats".into(),
+        "-progress".into(),
+        "pipe:1".into(),
         "-i".into(),
         screen_path.to_string_lossy().into_owned(),
     ];
@@ -197,6 +287,21 @@ pub fn composite(
         args.push("-i".into());
         args.push(seg.to_string_lossy().into_owned());
     }
+    // Mask input: loop a single PNG frame at 30fps so alphamerge has matching
+    // PTS for the duration of the webcam stream. `-t` bounds the loop —
+    // without it the demuxer pumps frames indefinitely and ffmpeg never
+    // shuts down cleanly even after the screen track ends. The mask is only
+    // consumed by alphamerge with the (already-padded) webcam stream, so
+    // capping at screen_dur is always >= the longest mapped output.
+    args.push("-loop".into());
+    args.push("1".into());
+    args.push("-framerate".into());
+    args.push("30".into());
+    args.push("-t".into());
+    args.push(format!("{:.3}", screen_dur));
+    args.push("-i".into());
+    args.push(mask_path.to_string_lossy().into_owned());
+    let mask_idx = webcam_segments.len() + 1;
 
     // Build filter_complex.
     // Input 0 is screen (video + audio). Inputs 1..N are webcam segments (video-only).
@@ -232,27 +337,37 @@ pub fn composite(
     // The invariant is preview-matches-recording; absolute orientation then
     // depends on whether the camera pre-mirrors (Continuity does, FaceTime HD
     // does not). See DECISIONS.md 2026-04-25.
+    //
+    // alphamerge replaces the previous inline `geq` circular-mask expression.
+    // geq evaluates per-pixel-per-frame in software and was the dominant cost
+    // in composite — for a 5-min clip it added tens of seconds. The mask PNG
+    // is rendered once via tiny_skia and pulled in as a looping still input.
     filter.push_str(&format!(
         "[wc_full]hflip,crop='min(iw\\,ih)':'min(iw\\,ih)',\
 scale={target}:{target},\
-format=yuva420p,\
-geq='lum=p(X\\,Y):a=255*lt(hypot(X-W/2\\,Y-H/2)\\,W/2)'[wc];\
+format=yuva420p[wc_rgba];\
+[{mask_idx}:v]format=gray[mask_g];\
+[wc_rgba][mask_g]alphamerge[wc];\
 [0:v]fps=30[screen30];"
     ));
 
-    // Position the overlay. Three strategies:
-    //  - empty log → static corner (existing behavior).
-    //  - 1..=20 entries → single overlay with nested if(lt(t,...)) x/y expressions.
-    //  - >20 entries → split [wc] N ways and chain N overlays, each with `enable=between(t,...)`.
-    let log_n = bubble_position_log.len();
+    // Position the overlay. Empty log → static corner. Otherwise a single
+    // overlay with nested if(lt(t,...)) x/y expressions; the split-and-chain
+    // path is retained only as a safety net (see POSITION_LOG_MAX_INLINE).
+    //
+    // Simplified log feeds the expression builders so ffmpeg's expression
+    // parser doesn't blow its recursion limit. The original log still goes
+    // to the sidecar via lib.rs for re-composite during edit.
+    let simplified_log = simplify_position_log(bubble_position_log);
+    let log_n = simplified_log.len();
     if log_n == 0 {
         let overlay_xy = corner.overlay_xy(PADDING_PX);
         filter.push_str(&format!(
             "[screen30][wc]overlay={overlay_xy}:eof_action=pass[outv]"
         ));
     } else if log_n <= POSITION_LOG_MAX_INLINE {
-        let (x_expr, y_expr) = build_inline_position_expr(bubble_position_log);
-        let enable_expr = build_inline_enable_expr(bubble_position_log);
+        let (x_expr, y_expr) = build_inline_position_expr(&simplified_log);
+        let enable_expr = build_inline_enable_expr(&simplified_log);
         filter.push_str(&format!(
             "[screen30][wc]overlay=x={x_expr}:y={y_expr}:enable={enable_expr}:eof_action=pass[outv]"
         ));
@@ -263,15 +378,15 @@ geq='lum=p(X\\,Y):a=255*lt(hypot(X-W/2\\,Y-H/2)\\,W/2)'[wc];\
         }
         filter.push(';');
         for i in 0..log_n {
-            let entry = &bubble_position_log[i];
+            let entry = &simplified_log[i];
             let prev = if i == 0 {
                 "screen30".to_string()
             } else {
                 format!("v_{}", i - 1)
             };
-            let in_bounds = segment_in_bounds(bubble_position_log, i);
+            let in_bounds = segment_in_bounds(&simplified_log, i);
             let (enable, x_expr, y_expr) = if i + 1 < log_n {
-                let b = &bubble_position_log[i + 1];
+                let b = &simplified_log[i + 1];
                 let dt = (b.t - entry.t).max(0.001);
                 let enable = if in_bounds {
                     format!("between(t\\,{:.3}\\,{:.3})", entry.t, b.t)
@@ -334,17 +449,67 @@ geq='lum=p(X\\,Y):a=255*lt(hypot(X-W/2\\,Y-H/2)\\,W/2)'[wc];\
 
     args.push(output_path.to_string_lossy().into_owned());
 
-    let output = Command::new(FFMPEG_PATH)
+    let mut child = Command::new(FFMPEG_PATH)
         .args(&args)
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("failed to spawn ffmpeg composite: {e}"))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    // ffmpeg `-progress pipe:1` writes blocks of `key=value` lines roughly
+    // every second. Parse out_time_us so the UI can show actual progress
+    // instead of a frozen-looking idle screen.
+    let stdout = child.stdout.take().ok_or("ffmpeg stdout missing")?;
+    let stderr = child.stderr.take().ok_or("ffmpeg stderr missing")?;
+    let total_us = (screen_dur * 1_000_000.0).max(1.0) as u64;
+    let progress_thread = std::thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines().map_while(Result::ok) {
+            if let Some(rest) = line.strip_prefix("out_time_us=") {
+                if let Ok(us) = rest.trim().parse::<u64>() {
+                    let frac = (us as f64 / total_us as f64).clamp(0.0, 1.0);
+                    on_progress(frac);
+                }
+            }
+        }
+    });
+    let stderr_thread = std::thread::spawn(move || {
+        let mut buf = String::new();
+        let reader = BufReader::new(stderr);
+        for line in reader.lines().map_while(Result::ok) {
+            buf.push_str(&line);
+            buf.push('\n');
+        }
+        buf
+    });
+
+    let status = child
+        .wait()
+        .map_err(|e| format!("failed to wait on ffmpeg composite: {e}"))?;
+    let _ = progress_thread.join();
+    let stderr_text = stderr_thread.join().unwrap_or_default();
+
+    if !status.success() {
+        let tail = stderr_text
+            .lines()
+            .rev()
+            .take(40)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n");
+        eprintln!(
+            "[composite] ffmpeg failed (exit {:?}); position_log entries={}\n{}",
+            status.code(),
+            bubble_position_log.len(),
+            tail
+        );
         return Err(format!(
             "ffmpeg composite failed (exit {:?}):\n{}",
-            output.status.code(),
-            stderr.lines().rev().take(40).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n")
+            status.code(),
+            tail
         ));
     }
 

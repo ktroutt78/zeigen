@@ -502,6 +502,10 @@ function App() {
   const [reviewActivity, setReviewActivity] = useState(0);
   const incReview = () => setReviewActivity((n) => n + 1);
   const decReview = () => setReviewActivity((n) => Math.max(0, n - 1));
+  // Fraction in [0,1] while ffmpeg composite is running. null when idle or done.
+  // The main window stays visible while this is non-null so the user sees a
+  // progress bar instead of staring at nothing during a multi-minute composite.
+  const [compositeProgress, setCompositeProgress] = useState<number | null>(null);
 
   useEffect(() => {
     let unlistenFn: (() => void) | null = null;
@@ -557,6 +561,7 @@ function App() {
             incReview();
             setLastSaved(ev.output_path);
             setProgress({ frames: ev.frames, dropped: ev.dropped, elapsed_s: ev.duration_s });
+            setCompositeProgress(0);
             invoke<FinalizedRecording>("recording_finalize")
               .then(async (info) => {
                 setFinalizeInfo(info);
@@ -565,6 +570,9 @@ function App() {
               .catch((err) => {
                 setError(String(err));
                 decReview();
+              })
+              .finally(() => {
+                setCompositeProgress(null);
               });
             break;
           case "error":
@@ -602,6 +610,17 @@ function App() {
     // `recording-discarded` clears the toast since the file is gone.
     let unlistenCommitted: (() => void) | null = null;
     let unlistenDiscarded: (() => void) | null = null;
+    let unlistenComposite: (() => void) | null = null;
+    listen<number>("composite-progress", (e) => {
+      // If we've already cleared (finalize resolved → review window opened),
+      // drop the event. Tauri delivers events asynchronously, so a tail
+      // progress sample can arrive after the .finally cleanup and would
+      // otherwise resurrect the modal over the main window.
+      setCompositeProgress((prev) => (prev === null ? null : e.payload));
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlistenComposite = fn;
+    });
     listen<{ final_path: string }>("recording-committed", (e) => {
       const finalPath = e.payload.final_path;
       setLastSaved(finalPath);
@@ -627,6 +646,7 @@ function App() {
       unlistenFn?.();
       unlistenCommitted?.();
       unlistenDiscarded?.();
+      unlistenComposite?.();
     };
   }, []);
 
@@ -825,14 +845,20 @@ function App() {
   // Hide the main window during recording so it doesn't appear in the capture,
   // and keep it hidden across the recording → finalize → review handoff.
   // Main reshows once every open review window has been closed.
+  //
+  // Exception: while ffmpeg composite is running we surface the main window
+  // anyway so the user sees the progress bar — otherwise the screen looks
+  // frozen for the duration of the composite (tens of seconds on multi-min
+  // recordings).
   useEffect(() => {
     const win = getCurrentWebviewWindow();
-    if (state === "idle" && reviewActivity === 0) {
+    const compositing = compositeProgress !== null;
+    if ((state === "idle" && reviewActivity === 0) || compositing) {
       win.show().catch(() => {});
     } else {
       win.hide().catch(() => {});
     }
-  }, [state, reviewActivity]);
+  }, [state, reviewActivity, compositeProgress]);
 
   // Listen for tray clicks and global hotkey toggles.
   useEffect(() => {
@@ -978,6 +1004,10 @@ function App() {
         elapsed={progress.elapsed_s}
         onRefresh={refresh}
       />
+
+      {compositeProgress !== null && (
+        <CompositeProgressOverlay value={compositeProgress} />
+      )}
 
       <SettingsPanel
         hotkey={hotkey}
@@ -1127,6 +1157,81 @@ function App() {
         onStop={stop}
       />
     </main>
+  );
+}
+
+function CompositeProgressOverlay({ value }: { value: number }) {
+  const pct = Math.round(value * 100);
+  return (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 50,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        background: "rgba(0, 0, 0, 0.55)",
+        backdropFilter: "blur(6px)",
+        WebkitBackdropFilter: "blur(6px)",
+      }}
+    >
+      <div
+        style={{
+          minWidth: 320,
+          padding: "20px 22px",
+          borderRadius: 14,
+          background: "var(--bg-window)",
+          border: "1px solid var(--border-faint)",
+          boxShadow: "0 18px 48px rgba(0,0,0,0.45)",
+          display: "flex",
+          flexDirection: "column",
+          gap: 10,
+        }}
+      >
+        <div
+          style={{
+            fontSize: 13,
+            fontWeight: 600,
+            color: "var(--fg-primary)",
+          }}
+        >
+          Compositing recording…
+        </div>
+        <div
+          style={{
+            position: "relative",
+            height: 6,
+            borderRadius: 99,
+            background: "var(--border-faint)",
+            overflow: "hidden",
+          }}
+        >
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              right: "auto",
+              width: `${pct}%`,
+              background: "oklch(0.66 0.18 252)",
+              transition: "width 200ms ease-out",
+            }}
+          />
+        </div>
+        <div
+          style={{
+            fontFamily: "var(--font-mono)",
+            fontSize: 11,
+            color: "var(--fg-secondary)",
+            display: "flex",
+            justifyContent: "space-between",
+          }}
+        >
+          <span>{pct}%</span>
+          <span>{value < 0.99 ? "merging webcam + screen" : "finishing up"}</span>
+        </div>
+      </div>
+    </div>
   );
 }
 

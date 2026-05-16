@@ -15,7 +15,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use chrono::Local;
-use tauri::{AppHandle, Listener, Manager, State};
+use tauri::{AppHandle, Emitter, Listener, Manager, State};
 
 use composite::{Corner, WebcamSize};
 use devices::DeviceList;
@@ -299,7 +299,10 @@ fn bubble_position_event(
 }
 
 #[tauri::command]
-fn recording_finalize(recording: RecordingState<'_>) -> Result<FinalizedRecording, String> {
+fn recording_finalize(
+    app: AppHandle,
+    recording: RecordingState<'_>,
+) -> Result<FinalizedRecording, String> {
     let rec = recording
         .lock()
         .map_err(|e| e.to_string())?
@@ -319,6 +322,12 @@ fn recording_finalize(recording: RecordingState<'_>) -> Result<FinalizedRecordin
         let sources_dir = webcam.sources_dir().to_path_buf();
         let screen_path = sources_dir.join("screen.mp4");
 
+        // Don't bookend with explicit 0.0/1.0 emits — Tauri IPC delivers
+        // events out-of-order with command returns, and a 1.0 arriving after
+        // the frontend's .finally cleared state would resurrect the modal.
+        // The frontend seeds compositeProgress=0 on the `stopped` event and
+        // clears it in .finally; ffmpeg's streamed progress fills the middle.
+        let progress_app = app.clone();
         composite::composite(
             &screen_path,
             &segments,
@@ -326,6 +335,9 @@ fn recording_finalize(recording: RecordingState<'_>) -> Result<FinalizedRecordin
             webcam_size,
             webcam_corner,
             &bubble_position_log,
+            move |frac| {
+                let _ = progress_app.emit("composite-progress", frac);
+            },
         )?;
         (Some(sources_dir), segments)
     } else {
