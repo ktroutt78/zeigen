@@ -91,6 +91,33 @@ fn probe_duration_seconds(path: &Path) -> Result<f64, String> {
     s.parse::<f64>().map_err(|e| format!("parse duration {s:?}: {e}"))
 }
 
+// Audio stream start_time from the engine's screen.mp4. SCK's microphone
+// pipeline takes ~50-70ms to deliver its first sample after the session
+// starts, so the audio track in the source mp4 begins at a positive offset
+// relative to video. Composite needs this to compensate for A/V drift.
+fn probe_audio_start_time(path: &Path) -> Result<f64, String> {
+    let output = Command::new(FFPROBE_PATH)
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=start_time",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(path)
+        .output()
+        .map_err(|e| format!("ffprobe failed: {e}"))?;
+    let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if s.is_empty() || s == "N/A" {
+        return Ok(0.0);
+    }
+    s.parse::<f64>()
+        .map_err(|e| format!("parse audio start_time {s:?}: {e}"))
+}
+
 #[derive(Clone, Copy)]
 pub enum WebcamSize {
     Small,
@@ -266,6 +293,35 @@ pub fn composite(
         .sum::<Result<f64, _>>()?;
     let lead_in = (screen_dur - webcam_total).max(0.0);
 
+    // A/V sync compensation. ffmpeg webcam (AVCaptureSession) and SCK
+    // screen+mic run on independent pipelines with independent startup
+    // latencies — without correction, the composite has audio playing tens
+    // to hundreds of ms behind visual events (mouth movement, claps).
+    //
+    // Heuristic that fits empirically across most recordings:
+    //   audio_shift = max(0, webcam_dur - screen_dur) + audio_offset
+    //
+    // where audio_offset is the start_time of the audio stream in screen.mp4
+    // (SCK's mic init latency, typically 50-70ms), and the webcam-vs-screen
+    // duration delta approximates how much earlier the ffmpeg webcam pipeline
+    // started capturing than SCK did.
+    //
+    // Applied via `-itsoffset` on a second copy of screen.mp4 used only as
+    // the audio source — keeps the original screen.mp4 for video so the
+    // filter graph stays clean. The mp4 muxer normalizes the resulting
+    // negative PTS to zero, effectively dropping the first <audio_shift>
+    // seconds of audio. This is intentional: that early audio corresponds
+    // to wall-clock before the webcam was reliably capturing.
+    //
+    // Known limitation: file-duration deltas can't distinguish webcam-started-
+    // late from webcam-stopped-early. Recordings where webcam stops early
+    // (rare, ~10% in testing) get under-compensated and still feel slightly
+    // out of sync. Proper fix requires the engine to record wall-clock
+    // timestamps for each pipeline's first sample and write them to a
+    // sidecar that composite can read.
+    let audio_offset = probe_audio_start_time(screen_path).unwrap_or(0.0);
+    let audio_shift = (webcam_total - screen_dur).max(0.0) + audio_offset;
+
     // Pre-render the circular alpha mask alongside the output so it lives in
     // the same scratch dir and gets cleaned up with the recording.
     let mask_path = output_path
@@ -280,6 +336,14 @@ pub fn composite(
         "-nostats".into(),
         "-progress".into(),
         "pipe:1".into(),
+        // Input 0: screen.mp4 — used for video only.
+        "-i".into(),
+        screen_path.to_string_lossy().into_owned(),
+        // Input 1: screen.mp4 again, shifted earlier by audio_shift — used
+        // for audio only. The duplicate decode is cheap relative to the
+        // composite's video encode.
+        "-itsoffset".into(),
+        format!("-{audio_shift:.3}"),
         "-i".into(),
         screen_path.to_string_lossy().into_owned(),
     ];
@@ -301,15 +365,21 @@ pub fn composite(
     args.push(format!("{:.3}", screen_dur));
     args.push("-i".into());
     args.push(mask_path.to_string_lossy().into_owned());
-    let mask_idx = webcam_segments.len() + 1;
+    // Webcam segments occupy inputs 2..(2+N). Mask is the input after the
+    // last segment.
+    let wc_input_base = 2usize;
+    let mask_idx = wc_input_base + webcam_segments.len();
 
     // Build filter_complex.
-    // Input 0 is screen (video + audio). Inputs 1..N are webcam segments (video-only).
-    // - Concat webcam segments into [wc_full] (if N>1; otherwise rename input 1's video).
-    // - Crop to centered square (smaller dimension), scale to target, convert to yuva420p.
-    // - Build a circular alpha mask via geq (255 inside the inscribed circle, 0 outside).
-    // - Overlay onto screen with eof_action=pass so the screen continues uncovered after
-    //   the webcam track ends (Continuity drop / shorter webcam case).
+    // Input 0 is screen (video — audio dropped). Input 1 is screen with the
+    // audio-shift `-itsoffset` applied; we map its audio stream. Inputs 2..2+N
+    // are webcam segments. Last input is the mask PNG.
+    // - Concat webcam segments into [wc_full] (if N>1; otherwise rename the
+    //   single segment).
+    // - Crop to centered square (smaller dimension), scale to target, convert
+    //   to yuva420p; alphamerge with the pre-rendered circle mask.
+    // - Overlay onto screen with eof_action=pass so the screen continues
+    //   uncovered after the webcam track ends.
     let n = webcam_segments.len();
     let mut filter = String::new();
     // Pad the head of the webcam track so the bubble is visible from t=0
@@ -321,17 +391,20 @@ pub fn composite(
     } else {
         String::new()
     };
+    let wc0 = wc_input_base; // first webcam segment input index
     if n > 1 {
         for i in 0..n {
-            filter.push_str(&format!("[{}:v]", i + 1));
+            filter.push_str(&format!("[{}:v]", wc0 + i));
         }
         filter.push_str(&format!("concat=n={n}:v=1:a=0{head_pad}[wc_full];"));
     } else if head_pad.is_empty() {
-        filter.push_str("[1:v]copy[wc_full];");
+        filter.push_str(&format!("[{wc0}:v]copy[wc_full];"));
     } else {
-        // tpad sits inline on input 1 — copy is unnecessary when we're
-        // applying any filter at all.
-        filter.push_str(&format!("[1:v]tpad=start_duration={lead_in:.3}:start_mode=clone[wc_full];"));
+        // tpad sits inline on the segment input — copy is unnecessary when
+        // we're applying any filter at all.
+        filter.push_str(&format!(
+            "[{wc0}:v]tpad=start_duration={lead_in:.3}:start_mode=clone[wc_full];"
+        ));
     }
     // hflip matches the preview's CSS `transform: scaleX(-1)` (WebcamBubble.tsx).
     // The invariant is preview-matches-recording; absolute orientation then
@@ -342,13 +415,17 @@ pub fn composite(
     // geq evaluates per-pixel-per-frame in software and was the dominant cost
     // in composite — for a 5-min clip it added tens of seconds. The mask PNG
     // is rendered once via tiny_skia and pulled in as a looping still input.
+    // Note: fps=30 was previously applied here to conform the VFR screen
+    // video to CFR before overlay. Dropped per A/B testing — user perception
+    // of A/V sync was consistently better without it. The overlay filter
+    // copes with VFR main input fine; bubble position expressions interpolate
+    // off `t` (PTS) which is correct either way.
     filter.push_str(&format!(
         "[wc_full]hflip,crop='min(iw\\,ih)':'min(iw\\,ih)',\
 scale={target}:{target},\
 format=yuva420p[wc_rgba];\
 [{mask_idx}:v]format=gray[mask_g];\
-[wc_rgba][mask_g]alphamerge[wc];\
-[0:v]fps=30[screen30];"
+[wc_rgba][mask_g]alphamerge[wc];"
     ));
 
     // Position the overlay. Empty log → static corner. Otherwise a single
@@ -363,13 +440,13 @@ format=yuva420p[wc_rgba];\
     if log_n == 0 {
         let overlay_xy = corner.overlay_xy(PADDING_PX);
         filter.push_str(&format!(
-            "[screen30][wc]overlay={overlay_xy}:eof_action=pass[outv]"
+            "[0:v][wc]overlay={overlay_xy}:eof_action=pass[outv]"
         ));
     } else if log_n <= POSITION_LOG_MAX_INLINE {
         let (x_expr, y_expr) = build_inline_position_expr(&simplified_log);
         let enable_expr = build_inline_enable_expr(&simplified_log);
         filter.push_str(&format!(
-            "[screen30][wc]overlay=x={x_expr}:y={y_expr}:enable={enable_expr}:eof_action=pass[outv]"
+            "[0:v][wc]overlay=x={x_expr}:y={y_expr}:enable={enable_expr}:eof_action=pass[outv]"
         ));
     } else {
         filter.push_str(&format!("[wc]split={log_n}"));
@@ -380,7 +457,7 @@ format=yuva420p[wc_rgba];\
         for i in 0..log_n {
             let entry = &simplified_log[i];
             let prev = if i == 0 {
-                "screen30".to_string()
+                "0:v".to_string()
             } else {
                 format!("v_{}", i - 1)
             };
@@ -437,8 +514,10 @@ format=yuva420p[wc_rgba];\
 
     args.push("-map".into());
     args.push("[outv]".into());
+    // Audio comes from input 1 (screen.mp4 with `-itsoffset` applied), not
+    // input 0 — input 0 is the un-shifted copy used only for video.
     args.push("-map".into());
-    args.push("0:a?".into());
+    args.push("1:a?".into());
 
     args.push("-c:v".into());
     args.push("h264_videotoolbox".into());
