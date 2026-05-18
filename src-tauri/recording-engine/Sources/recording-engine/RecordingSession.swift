@@ -40,6 +40,8 @@ final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendable {
     enum Source {
         case display(UInt32)
         case window(UInt32)
+        // rect is in logical points, relative to the display's top-left.
+        case area(displayID: UInt32, rect: CGRect)
     }
 
     init(source: Source, microphoneUID: String?, outputPath: String, maxFPS: Int) async throws {
@@ -57,6 +59,9 @@ final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendable {
         let width: Int
         let height: Int
         let resolvedWindowID: UInt32?
+        // SCK default: CGRect.zero on sourceRect means "capture the full source".
+        // For .area we override with a display-relative point rect.
+        var sourceRect: CGRect = .zero
         switch source {
         case .display(let displayID):
             guard let display = shareable.displays.first(where: { $0.displayID == displayID }) else {
@@ -85,6 +90,21 @@ final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendable {
             // (CGS_REQUIRE_INIT — the CLI binary has no NSApplication).
             // Move this to the Rust/Tauri main process where NSApplication
             // is set up, or skip it.
+        case .area(let displayID, let pointRect):
+            guard let display = shareable.displays.first(where: { $0.displayID == displayID }) else {
+                throw EngineError(code: "DISPLAY_NOT_FOUND", message: "display_id \(displayID) not present")
+            }
+            filter = SCContentFilter(display: display, excludingWindows: [])
+            // pointRect is in points relative to the display origin.
+            // Scale to pixels for the output config (matches what the
+            // window path does for Retina-correct dimensions).
+            let scale = display.frame.width > 0
+                ? CGFloat(display.width) / display.frame.width
+                : 1.0
+            width = max(2, Int((pointRect.width * scale).rounded()))
+            height = max(2, Int((pointRect.height * scale).rounded()))
+            resolvedWindowID = nil
+            sourceRect = pointRect
         }
         self.capturedWindowID = resolvedWindowID
 
@@ -125,6 +145,7 @@ final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendable {
         let config = SCStreamConfiguration()
         config.width = width
         config.height = height
+        config.sourceRect = sourceRect
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(maxFPS))
         config.queueDepth = 6
         config.showsCursor = true

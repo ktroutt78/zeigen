@@ -164,7 +164,16 @@ actor Engine {
         }
         let source: RecordingSession.Source
         switch (cmd.display_id, cmd.window_id) {
-        case let (id?, nil): source = .display(id)
+        case let (id?, nil):
+            if let ax = cmd.area_x, let ay = cmd.area_y,
+               let aw = cmd.area_width, let ah = cmd.area_height {
+                source = .area(
+                    displayID: id,
+                    rect: CGRect(x: ax, y: ay, width: aw, height: ah)
+                )
+            } else {
+                source = .display(id)
+            }
         case let (nil, id?): source = .window(id)
         case (nil, nil):
             emit(.error(code: "INVALID_COMMAND", message: "start requires display_id or window_id"))

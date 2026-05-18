@@ -9,6 +9,13 @@ struct Command: Decodable {
     let microphone_uid: String?
     let output_path: String?
     let max_fps: Int?
+    // Phase 9 area capture. When all four are present alongside display_id
+    // (and no window_id), the engine captures a sub-region of the display.
+    // Units: logical points relative to the display's top-left origin.
+    let area_x: Double?
+    let area_y: Double?
+    let area_width: Double?
+    let area_height: Double?
 }
 
 // MARK: Events
