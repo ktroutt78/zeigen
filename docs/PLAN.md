@@ -164,6 +164,22 @@ Three deliverables shipped this pass. The original phase scope listed seven item
 
 **Done when:** Capture window fits its content without scrolling at any state combination; clicking Identify flashes a number on each physical display in dropdown order; the Zeigen mark replaces the placeholder icon on Dock and tray. ✓
 
+## Phase 9: Selected Area recording
+
+Third capture mode alongside Display (Phase 2) and Window (Phase 8). User drags a marquee selection over the screen; that rectangle becomes the recorded region. Intended for short clips where the recording surface is much smaller than the full display — bubble is off by default in this mode.
+
+**Deliverables**
+- New `CaptureMode::Area` variant in the engine, sibling to `Display` and `Window`. Region passed as `{display_id, x, y, width, height}` in logical points (matches the Phase 8 fix that standardized coordinate units at the JS→Rust boundary).
+- Marquee selection UI — full-screen always-on-top transparent overlay window with dimmed mask + draggable selection rectangle. Esc cancels. Enter / double-click confirms. Single click on the dim mask cancels.
+- Selection rectangle shows live dimensions (`WxH` in points) inside or adjacent to the rect during drag. Snap to display edges when dragged within a few points of the boundary.
+- Source picker in the capture window gains a third option: Display / Window / **Area**. Choosing Area opens the marquee overlay immediately; the picker shows the resulting rect as `Area 1280x720 @ Display 1` until cleared or re-selected.
+- SCK capture uses `SCContentFilter(display:excludingWindows:)` cropped via `SCStreamConfiguration.sourceRect` (region of the display) and `destinationRect` (output frame). Output mp4 dimensions match the selection — no letterboxing.
+- **Bubble disabled by default in Area mode.** Picking Area hides the floating bubble window and clears the webcam selection from the engine call. Once hidden, the bubble stays off across mode switches until the user explicitly re-enables a webcam via the device picker — no auto-restore.
+- Identify-display (Phase 7) and countdown overlay (Phase 3.5) continue to render on the host display; countdown spans the selected region only (not the full screen) so the user sees what will actually be captured.
+- Tray "Start" gate (Phase 4 / Phase 8 `source_kind`) extends to require a non-empty Area selection before enabling.
+
+**Done when:** A user can drag a marquee over any portion of any display, start a recording, and produce a final mp4 whose dimensions match the selection. Picking Area auto-hides the bubble; explicitly re-enabling a webcam in Area mode brings the bubble back, positioned relative to the selected region. Switching between Display / Window / Area in the picker works without restarting the app.
+
 ## Backlog
 
 Items that were considered but didn't earn a phase. Pull from here when a real need surfaces.
@@ -172,9 +188,9 @@ Items that were considered but didn't earn a phase. Pull from here when a real n
 - **Error surface for common failures** — device disappeared mid-record, disk full, permission revoked. Existing StatusStrip handles engine errors but coverage hasn't been audited end-to-end. Survey gaps when a real failure surprises a recording.
 - **Recording preset picker (16:9 / 1:1 / 9:16)** — would require composite + export pipeline changes. YAGNI for the current use case (analytics demos are 16:9); reconsider only if a non-16:9 demand appears.
 
-## Post-Phase-9 ship prep
+## Post-Phase-10 ship prep
 
-- **DMG installer via `tauri build`** — run after Phase 8 (window capture) and Phase 9 (drawing tools) ship so the first packaged build reflects the full feature set. **Will ship unsigned** — Gatekeeper warning on first launch is acceptable for a personal tool; users can right-click → Open to bypass.
+- **DMG installer via `tauri build`** — run after Phase 8 (window capture), Phase 9 (selected area), and Phase 10 (drawing tools) ship so the first packaged build reflects the full feature set. **Will ship unsigned** — Gatekeeper warning on first launch is acceptable for a personal tool; users can right-click → Open to bypass.
 
 ## Deferred / out of scope
 
