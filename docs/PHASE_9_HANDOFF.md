@@ -15,8 +15,8 @@ See `docs/PLAN.md` Phase 9: Selected Area recording. Read that first — it's th
 Sequenced to put the technical risk first. SCK unit semantics bit Phase 8 (logical vs physical points at the JS→Rust boundary) — proving the engine layer works before any UI exists keeps that pain contained.
 
 1. **Engine spike** — Add `CaptureMode::Area` variant in the Swift helper (`src-tauri/recording-engine/`). Wire `SCStreamConfiguration.sourceRect` (region of source display) and `destinationRect` (output frame). Hardcode a test rect like `{display_id: <primary>, x: 100, y: 100, w: 800, h: 600}` and verify the output mp4 is exactly 800×600 and shows the right region. One commit. **This step catches all the unit-system pain.**
-2. **Rust + IPC** — Extend `engine_start` and IPC schema (`docs/IPC-SPEC.md`) to accept area params `{display_id, x, y, w, h}`. Plumb through `UiState` (new `source_kind = "area"` and `selected_area` field, mirroring Phase 8's `selected_window`).
-3. **Marquee overlay UI** — Full-screen always-on-top transparent Tauri window per display. Dim mask with a draggable selection rectangle. Live `WxH` indicator. Esc cancels, Enter/double-click confirms, click on dim mask cancels. Must call `makeCaptureInvisible(window)` from Phase 3.5 so the overlay itself doesn't bleed into the recording.
+2. **Rust + IPC** — Extend `engine_start` and IPC schema (`docs/IPC-SPEC.md`) to accept area params `{display_id, x, y, w, h}`. Plumb through `UiState` (new `source_kind = "area"` and `selected_area` field, mirroring Phase 8's `selected_window`). When `source_kind = "area"` but `selected_area` is null, the tray Start gate stays disabled and the picker shows a "Select Area" affordance (button or hint text) instead of the post-selection label.
+3. **Marquee overlay UI** — Full-screen always-on-top transparent Tauri window per display. Dim mask with a draggable selection rectangle. Live `WxH` indicator. Esc cancels, Enter/double-click confirms, click on dim mask cancels. Must call `makeCaptureInvisible(window)` from Phase 3.5 so the overlay itself doesn't bleed into the recording. Snap to display edges when dragged within a few points of the boundary (per PLAN.md:174).
 4. **Source picker integration** — Add **Area** to the Display/Window picker. Choosing it routes to the marquee. Hide the bubble window + clear webcam selection from the engine call. Picker shows `Area 1280x720 @ Display 1` once a selection exists.
 5. **Polish** — Countdown overlay (Phase 3.5) clamped to selected region. Tray Start gate extended to require a non-empty Area selection. Any UAT items that surface during testing.
 
@@ -43,7 +43,7 @@ These are gotchas already documented in `docs/PHASE_8_HANDOFF.md` but they bear 
 - The bubble framing model (resize-as-zoom vs resize-as-viewport) was explored at length this session. Conclusion: **leave it as-is** (object-fit: cover, scale-to-bubble). The viewport model requires either a separate zoom control or a much larger default bubble — neither is worth doing now. **Do not revisit unless the user asks.**
 - A draft `crop=target:target` change to `src-tauri/src/composite.rs` was applied and then reverted within the session. Working tree is clean on that file.
 - `WebcamBubble.tsx` was likewise edited and reverted. Working tree is clean.
-- Only `docs/PLAN.md` has uncommitted changes — the Phase 9 entry and the Post-Phase-10 renumber.
+- PLAN.md Phase 9 entry + Post-Phase-10 renumber landed in 9893287 alongside this handoff.
 
 ## Long-running dev
 
@@ -56,13 +56,17 @@ Engine stderr lands in `/tmp/zeigen-dev.log` with `[engine]` prefix.
 ## Open Phase 8 items, deferred to after Phase 9
 
 Per `docs/PHASE_8_HANDOFF.md`, these are still open:
-- Composite bubble size match (the user accepted current behavior — closed as WONTFIX unless reopened)
 - c6 focus-aware sort for window picker
 - Tray Window submenu
 - c8 edge cases (window closed mid-record, on_screen false handling)
 - Visual window picker (deferred, YAGNI)
 
 None block Phase 9. Revisit after Phase 9 ships.
+
+## Closed Phase 8 items
+
+Preserved here so the rationale survives:
+- **Composite bubble size match** — WONTFIX. User accepted current composite behavior; reopen only if it becomes a real annoyance.
 
 ## First action on next session
 
