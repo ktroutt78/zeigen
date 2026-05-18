@@ -38,13 +38,16 @@ Begin a recording.
 }
 ```
 Fields:
-- `display_id` (uint) — `CGDirectDisplayID`, returned by `enumerated`. Mutually exclusive with `window_id`; exactly one is required.
+- `display_id` (uint) — `CGDirectDisplayID`, returned by `enumerated`. Mutually exclusive with `window_id`; exactly one is required. Required (alongside `area_*`) for area capture.
 - `window_id` (uint) — `CGWindowID`, returned by `enumerated`. Captures only that window's content (occluding windows are invisible in the recording). Mutually exclusive with `display_id`.
 - `microphone_uid` (string) — CoreAudio device UID, returned by `enumerated`. Pass `null` to record silent video (no mic).
 - `output_path` (string) — absolute path; parent directory must already exist.
 - `max_fps` (uint, optional) — frame rate ceiling. Default 30. SCK delivers VFR; this is the max, not the guaranteed rate.
+- `area_x`, `area_y`, `area_width`, `area_height` (float, optional) — sub-region of the display to capture. All four must be present together alongside `display_id`; partial sets are rejected. Units are logical points relative to the display's top-left origin. When present, SCK is configured via `SCStreamConfiguration.sourceRect` and the output mp4's pixel dimensions are `area_width × scale` by `area_height × scale` where `scale = SCDisplay.width / SCDisplay.frame.width` for the chosen display. Forbidden with `window_id`.
 
 For window captures the engine sizes the output to native pixels (window's point size × the containing display's scale factor) and fixes that resolution for the lifetime of the recording. Resizing the window mid-record is allowed but the resized content gets letterboxed/padded inside the original frame.
+
+For area captures the recorded region is fixed at start; the captured sub-region cannot be moved or resized mid-record. Output dimensions match the requested area in logical points scaled to display pixels (same scale factor used for window mode).
 
 Response: `started` event, then periodic `progress` events, then `stopped` (after `stop`) or `error`.
 

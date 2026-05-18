@@ -43,12 +43,16 @@ struct ActiveRecording {
 // can't move). Window mode tracks the captured window's live bounds via the
 // engine's 5Hz window_frame events; frame is None until the first event
 // arrives, so the very first bubble samples may no-op while we wait for the
-// initial frame. Both frames are physical pixels in screen space.
+// initial frame. Area mode pins the captured region's screen-space rect
+// (display origin + area offset, area size) at recording start. All three
+// frames are in logical points in screen space (Phase 8 standardized this
+// at the JS->Rust boundary).
 enum CaptureMode {
     Display { frame: (i32, i32, u32, u32) },
     // `id` consumed by c8 edge cases (e.g. correlate window-closed errors
     // with the captured window).
     Window { #[allow(dead_code)] id: u32, frame: Option<(i32, i32, u32, u32)> },
+    Area { #[allow(dead_code)] display_id: u32, frame: (i32, i32, u32, u32) },
 }
 
 #[tauri::command]
@@ -65,6 +69,7 @@ fn engine_enumerate(state: EngineState<'_>) -> Result<(), String> {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn engine_start(
     engine: EngineState<'_>,
     recording: RecordingState<'_>,
@@ -79,9 +84,32 @@ fn engine_start(
     recorded_display_y: Option<i32>,
     recorded_display_w: Option<u32>,
     recorded_display_h: Option<u32>,
+    // Phase 9 area capture: display-relative points for the engine.
+    // recorded_display_* must hold the SCREEN-SPACE rect of the selected
+    // region (display origin + area offset, area size) so the existing
+    // bubble_position_event math works unchanged.
+    area_x: Option<f64>,
+    area_y: Option<f64>,
+    area_width: Option<f64>,
+    area_height: Option<f64>,
 ) -> Result<String, String> {
-    let mode = match (display_id, window_id) {
-        (Some(_), None) => CaptureMode::Display {
+    let area = match (area_x, area_y, area_width, area_height) {
+        (Some(x), Some(y), Some(w), Some(h)) => Some((x, y, w, h)),
+        (None, None, None, None) => None,
+        _ => return Err("area params must all be present or all absent".into()),
+    };
+
+    let mode = match (display_id, window_id, area.is_some()) {
+        (Some(id), None, true) => CaptureMode::Area {
+            display_id: id,
+            frame: (
+                recorded_display_x.ok_or("recorded_display_x required for area capture")?,
+                recorded_display_y.ok_or("recorded_display_y required for area capture")?,
+                recorded_display_w.ok_or("recorded_display_w required for area capture")?,
+                recorded_display_h.ok_or("recorded_display_h required for area capture")?,
+            ),
+        },
+        (Some(_), None, false) => CaptureMode::Display {
             frame: (
                 recorded_display_x.ok_or("recorded_display_x required for display capture")?,
                 recorded_display_y.ok_or("recorded_display_y required for display capture")?,
@@ -89,11 +117,12 @@ fn engine_start(
                 recorded_display_h.ok_or("recorded_display_h required for display capture")?,
             ),
         },
-        (None, Some(id)) => CaptureMode::Window { id, frame: None },
-        (None, None) => return Err("must provide display_id or window_id".into()),
-        (Some(_), Some(_)) => {
+        (None, Some(id), false) => CaptureMode::Window { id, frame: None },
+        (None, None, _) => return Err("must provide display_id or window_id".into()),
+        (Some(_), Some(_), _) => {
             return Err("provide exactly one of display_id or window_id".into())
         }
+        (None, Some(_), true) => return Err("area capture requires display_id, not window_id".into()),
     };
 
     let mut active = recording.lock().map_err(|e| e.to_string())?;
@@ -119,6 +148,11 @@ fn engine_start(
         (scratch_mp4_path.clone(), None)
     };
 
+    let (area_x_send, area_y_send, area_w_send, area_h_send) = match area {
+        Some((x, y, w, h)) => (Some(x), Some(y), Some(w), Some(h)),
+        None => (None, None, None, None),
+    };
+
     engine
         .lock()
         .map_err(|e| e.to_string())?
@@ -128,6 +162,10 @@ fn engine_start(
             microphone_uid,
             output_path: screen_output.to_string_lossy().into_owned(),
             max_fps,
+            area_x: area_x_send,
+            area_y: area_y_send,
+            area_width: area_w_send,
+            area_height: area_h_send,
         })?;
 
     *active = Some(ActiveRecording {
@@ -263,6 +301,7 @@ fn bubble_position_event(
     let frame = match &rec.mode {
         CaptureMode::Display { frame } => Some(*frame),
         CaptureMode::Window { frame, .. } => *frame,
+        CaptureMode::Area { frame, .. } => Some(*frame),
     };
     let Some((fx, fy, fw, fh)) = frame else { return Ok(()); };
     if fw == 0 || fh == 0 {

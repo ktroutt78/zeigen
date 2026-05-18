@@ -23,6 +23,17 @@ pub enum EngineCommand {
         microphone_uid: Option<String>,
         output_path: String,
         max_fps: Option<u32>,
+        // Phase 9 area capture: all four must be present together
+        // alongside display_id. Units are logical points relative to
+        // the display's top-left origin.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        area_x: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        area_y: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        area_width: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        area_height: Option<f64>,
     },
     Pause,
     Resume,

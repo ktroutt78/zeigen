@@ -33,7 +33,23 @@ pub struct UiState {
     #[serde(default)]
     pub selected_window: Option<u32>,
     #[serde(default)]
+    pub selected_area: Option<AreaSelection>,
+    #[serde(default)]
     pub elapsed_s: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AreaSelection {
+    #[allow(dead_code)]
+    pub display_id: u32,
+    #[allow(dead_code)]
+    pub x: f64,
+    #[allow(dead_code)]
+    pub y: f64,
+    #[allow(dead_code)]
+    pub width: f64,
+    #[allow(dead_code)]
+    pub height: f64,
 }
 
 fn fmt_mmss(elapsed_s: f64) -> String {
@@ -138,6 +154,7 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, state: &UiState) -> tauri::Result<
 
     let has_source = match state.source_kind.as_str() {
         "window" => state.selected_window.is_some(),
+        "area" => state.selected_area.is_some(),
         _ => state.selected_display.is_some(),
     };
     let start = MenuItemBuilder::with_id("start", "Start Recording")
