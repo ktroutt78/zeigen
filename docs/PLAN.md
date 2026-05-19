@@ -180,6 +180,28 @@ Third capture mode alongside Display (Phase 2) and Window (Phase 8). User drags 
 
 **Done when:** A user can drag a marquee over any portion of any display, start a recording, and produce a final mp4 whose dimensions match the selection. Picking Area auto-hides the bubble; explicitly re-enabling a webcam in Area mode brings the bubble back, positioned relative to the selected region. Switching between Display / Window / Area in the picker works without restarting the app.
 
+## Phase 10: Review window — GIF export + timeline waveform
+
+Two deliverables landing in the review window (`src/Review.tsx`), tied together by the same surface and the same edit pipeline. The Phase 10 slot was originally scoped as "drawing tools" — that work (text + arrow annotations) shipped in earlier phases, so the slot is reused for the review-window items surfaced at Phase 9 close-out (see `docs/PHASE_9_HANDOFF.md`).
+
+**10.1 — GIF quick export**
+- Replaces the "Coming Later" placeholder in the QUICK EXPORT row.
+- No audio — GIF doesn't carry audio, and dropping it simplifies the pipeline.
+- Honors existing sidecar edits: trim window, text annotations, arrow annotations all apply to the GIF output.
+- ffmpeg `palettegen` + `paletteuse` pipeline for color-quantized output (single-pass low-fps as a fallback option to evaluate).
+- Caps output dimensions and frame rate so file size stays sane — Loom-style defaults to be researched during planning.
+- Respects the current trim window only — exports the trimmed range, not the full source.
+- UX parity with the mp4 path: progress feedback + save dialog, no silent multi-minute waits.
+
+**10.2 — Timeline waveform**
+- Replaces the decorative gradient Timeline track (search `TIMELINE` in `src/Review.tsx`) with a functional audio waveform.
+- Renders the recording's audio amplitude across the timeline so the user can see where speech / sound lands — useful for trimming around content.
+- Open implementation question to resolve in planning: ffmpeg `showwavespic` (still image) vs. pre-decode AAC at low resolution into raw samples and draw on `<canvas>`. The canvas path is the leading candidate for crisper visual + scrubbing affordances.
+- Lazy-render after first paint of the review window so waveform extraction doesn't block playback.
+- Edge case: recordings with no microphone — render a flat/neutral track rather than failing.
+
+**Done when:** Clicking GIF in the QUICK EXPORT row produces a `.gif` that honors the current trim + text + arrow edits, with progress + save-dialog feedback matching the mp4 path. The Timeline track in the review window shows an actual audio waveform for the current recording (flat track for mic-less recordings), and remains responsive while it extracts.
+
 ## Backlog
 
 Items that were considered but didn't earn a phase. Pull from here when a real need surfaces.
@@ -190,7 +212,7 @@ Items that were considered but didn't earn a phase. Pull from here when a real n
 
 ## Post-Phase-10 ship prep
 
-- **DMG installer via `tauri build`** — run after Phase 8 (window capture), Phase 9 (selected area), and Phase 10 (drawing tools) ship so the first packaged build reflects the full feature set. **Will ship unsigned** — Gatekeeper warning on first launch is acceptable for a personal tool; users can right-click → Open to bypass.
+- **DMG installer via `tauri build`** — run after Phase 8 (window capture), Phase 9 (selected area), and Phase 10 (GIF export + timeline waveform) ship so the first packaged build reflects the full feature set. **Will ship unsigned** — Gatekeeper warning on first launch is acceptable for a personal tool; users can right-click → Open to bypass.
 
 ## Deferred / out of scope
 
