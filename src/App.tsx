@@ -561,7 +561,7 @@ type WindowSource = {
 type Mic = { uid: string; name: string };
 type Device = { index: number; name: string };
 type DeviceList = { video: Device[]; audio: Device[]; screens: Device[] };
-type SourceKind = "display" | "window";
+type SourceKind = "display" | "window" | "area";
 type EngineState = "idle" | "countdown" | "recording" | "paused";
 type CountdownDuration = 0 | 3 | 5;
 type LengthCapMode = "off" | "target";
@@ -606,6 +606,7 @@ function App() {
   const [sourceKind, setSourceKind] = useState<SourceKind>("display");
   const [selectedDisplay, setSelectedDisplay] = useState<number | null>(null);
   const [selectedWindow, setSelectedWindow] = useState<number | null>(null);
+  const [selectedArea, setSelectedArea] = useState<AreaSelection | null>(null);
   const [selectedMic, setSelectedMic] = useState<string | null>(null);
   const [selectedCamera, setSelectedCamera] = useState<number | null>(null);
   const [countdownDuration, setCountdownDuration] =
@@ -775,22 +776,26 @@ function App() {
   const start = async () => {
     if (sourceKind === "display" && selectedDisplay == null) return;
     if (sourceKind === "window" && selectedWindow == null) return;
+    if (sourceKind === "area" && selectedArea == null) return;
     try {
       setError(null);
       setFinalizeInfo(null);
       setLastSaved(null);
 
-      // Resolve the screen the countdown should land on. Display mode uses
-      // the chosen display directly; window mode picks whichever display
-      // contains the captured window's center (falls back to primary).
-      // engine_start additionally needs recorded_display_* in display mode
-      // for bubble-position-log fraction conversion — window mode skips
-      // those and the engine drives bubble fractions off its 5Hz
-      // window_frame events instead.
+      // Resolve the screen the countdown should land on. Display + area
+      // modes use the chosen display directly; window mode picks whichever
+      // display contains the captured window's center (falls back to
+      // primary). Window mode passes null for recordedDisplay_* — the
+      // engine drives bubble fractions off its 5Hz window_frame events
+      // instead. Display + area modes pass a screen-space rect: display
+      // mode uses the full display; area mode uses the selected sub-region
+      // (display origin + area offset, area size).
       const monitors = await availableMonitors();
       let countdownDisplay: Display | undefined;
       if (sourceKind === "display") {
         countdownDisplay = displays.find((d) => d.id === selectedDisplay);
+      } else if (sourceKind === "area" && selectedArea) {
+        countdownDisplay = displays.find((d) => d.id === selectedArea.display_id);
       } else {
         const win = windows.find((w) => w.id === selectedWindow);
         if (win) {
@@ -808,17 +813,40 @@ function App() {
               m.position.y === countdownDisplay!.y,
           ) || monitors[0]
         : monitors[0];
-      const recordedFrame: DisplayFrame = {
+      // countdownFrame spans the host display — the countdown overlay
+      // itself currently fills the screen. Clamping it to the selected
+      // region is c5 polish.
+      const countdownFrame: DisplayFrame = {
         x: countdownDisplay?.x ?? monitor?.position.x ?? 0,
         y: countdownDisplay?.y ?? monitor?.position.y ?? 0,
         w: countdownDisplay?.width ?? monitor?.size.width ?? 0,
         h: countdownDisplay?.height ?? monitor?.size.height ?? 0,
         scale: monitor?.scaleFactor ?? 1,
       };
+      // recordedRect is the screen-space rect of what's actually being
+      // captured — full display for display mode, sub-region for area mode.
+      let recordedRect: { x: number; y: number; w: number; h: number } | null = null;
+      if (sourceKind === "display" && countdownDisplay) {
+        recordedRect = {
+          x: countdownDisplay.x,
+          y: countdownDisplay.y,
+          w: countdownDisplay.width,
+          h: countdownDisplay.height,
+        };
+      } else if (sourceKind === "area" && selectedArea && countdownDisplay) {
+        // Rust recordedDisplay_* is i32/u32 — round here so fractional
+        // marquee points don't fail Tauri's argument validation.
+        recordedRect = {
+          x: Math.round(countdownDisplay.x + selectedArea.x),
+          y: Math.round(countdownDisplay.y + selectedArea.y),
+          w: Math.round(selectedArea.width),
+          h: Math.round(selectedArea.height),
+        };
+      }
 
       if (countdownDuration > 0) {
         setState("countdown");
-        const result = await awaitCountdown(countdownDuration, recordedFrame);
+        const result = await awaitCountdown(countdownDuration, countdownFrame);
         if (result === "cancelled") {
           setState("idle");
           return;
@@ -827,15 +855,24 @@ function App() {
       }
 
       await invoke<string>("engine_start", {
-        displayId: sourceKind === "display" ? selectedDisplay : null,
+        displayId:
+          sourceKind === "display"
+            ? selectedDisplay
+            : sourceKind === "area"
+            ? selectedArea?.display_id ?? null
+            : null,
         windowId: sourceKind === "window" ? selectedWindow : null,
         microphoneUid: selectedMic,
         cameraIndex: selectedCamera,
         maxFps: 30,
-        recordedDisplayX: sourceKind === "display" ? recordedFrame.x : null,
-        recordedDisplayY: sourceKind === "display" ? recordedFrame.y : null,
-        recordedDisplayW: sourceKind === "display" ? recordedFrame.w : null,
-        recordedDisplayH: sourceKind === "display" ? recordedFrame.h : null,
+        recordedDisplayX: recordedRect?.x ?? null,
+        recordedDisplayY: recordedRect?.y ?? null,
+        recordedDisplayW: recordedRect?.w ?? null,
+        recordedDisplayH: recordedRect?.h ?? null,
+        areaX: sourceKind === "area" ? selectedArea?.x ?? null : null,
+        areaY: sourceKind === "area" ? selectedArea?.y ?? null : null,
+        areaWidth: sourceKind === "area" ? selectedArea?.width ?? null : null,
+        areaHeight: sourceKind === "area" ? selectedArea?.height ?? null : null,
       });
     } catch (err) {
       setState("idle");
@@ -860,7 +897,11 @@ function App() {
   };
 
   const canStartNow =
-    sourceKind === "display" ? selectedDisplay != null : selectedWindow != null;
+    sourceKind === "display"
+      ? selectedDisplay != null
+      : sourceKind === "window"
+      ? selectedWindow != null
+      : selectedArea != null;
   const ctrlRef = useRef({
     state,
     canStartNow,
@@ -880,33 +921,39 @@ function App() {
     setSelectedDisplay,
   };
 
-  // c3-only debug hook for visually testing the marquee overlay before c4
-  // wires it to the picker. Cmd+Shift+M opens marquee windows on all known
-  // displays; result is logged. Remove (or replace with the picker trigger)
-  // when c4 lands.
-  useEffect(() => {
-    const debugOpen = async () => {
-      const shapes: DisplayShape[] = displays.map((d) => ({
-        x: d.x,
-        y: d.y,
-        width: d.width,
-        height: d.height,
-      }));
-      const ids = displays.map((d) => d.id);
-      const result = await openMarqueeOverlays(shapes, ids);
-      console.log("[marquee debug] result:", result);
-    };
-    (window as unknown as { __zeigenOpenMarquee: () => Promise<void> })
-      .__zeigenOpenMarquee = debugOpen;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.metaKey && e.shiftKey && (e.key === "m" || e.key === "M")) {
-        e.preventDefault();
-        void debugOpen();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [displays]);
+  const openAreaPicker = async () => {
+    const shapes: DisplayShape[] = displays.map((d) => ({
+      x: d.x,
+      y: d.y,
+      width: d.width,
+      height: d.height,
+    }));
+    const ids = displays.map((d) => d.id);
+    const result = await openMarqueeOverlays(shapes, ids, selectedArea);
+    if (result) setSelectedArea(result);
+    // On cancel (result null) the prior selection (if any) is preserved
+    // per the "selection persists across mode-switches" locked decision.
+  };
+
+  // Click handler for the Selected Area picker tile. Routes:
+  //  - From display/window -> enter area mode + auto-hide bubble. Open
+  //    marquee only when no selection exists (selectionspersists across
+  //    mode-switches; switching back doesn't force a redraw).
+  //  - Already in area mode -> open marquee (user wants to redraw).
+  // The "Bubble auto-hide in Area mode" locked decision: clear camera only
+  // on the first entry, not on every re-click. Once the user explicitly
+  // re-enables a camera while in area mode, subsequent re-clicks of the
+  // tile leave it intact.
+  const handleAreaTileClick = () => {
+    const wasArea = sourceKind === "area";
+    if (!wasArea) {
+      setSourceKind("area");
+      setSelectedCamera(null);
+    }
+    if (selectedArea == null || wasArea) {
+      void openAreaPicker();
+    }
+  };
 
   // Push UI state to Rust so the tray menu reflects current selections + state.
   // Elapsed time is pushed via a separate, lightweight command (update_tray_elapsed)
@@ -924,6 +971,7 @@ function App() {
         selected_camera: selectedCamera,
         source_kind: sourceKind,
         selected_window: selectedWindow,
+        selected_area: selectedArea,
       },
     }).catch(() => {});
   }, [
@@ -936,6 +984,7 @@ function App() {
     selectedCamera,
     sourceKind,
     selectedWindow,
+    selectedArea,
   ]);
 
   const trayElapsed =
@@ -1180,6 +1229,9 @@ function App() {
       <SourceTiles
         sourceKind={sourceKind}
         onSourceKind={setSourceKind}
+        onAreaClick={handleAreaTileClick}
+        selectedArea={selectedArea}
+        displays={displays}
         disabled={recording}
       />
 
@@ -1264,7 +1316,7 @@ function App() {
               </button>
             </div>
           </>
-        ) : (
+        ) : sourceKind === "window" ? (
           <>
             <RowLabel icon={I.window} label="Window" />
             <WindowRow
@@ -1276,6 +1328,46 @@ function App() {
               }
               disabled={recording}
             />
+          </>
+        ) : (
+          <>
+            <RowLabel icon={I.area} label="Area" />
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div
+                style={{
+                  flex: 1,
+                  fontSize: 12.5,
+                  color: selectedArea ? "var(--fg-primary)" : "var(--fg-tertiary)",
+                  fontFamily: "var(--font-system)",
+                }}
+              >
+                {selectedArea
+                  ? (() => {
+                      const d = displays.find((x) => x.id === selectedArea.display_id);
+                      const name = d?.name ?? `Display ${selectedArea.display_id}`;
+                      return `${Math.round(selectedArea.width)} × ${Math.round(selectedArea.height)} on ${name}`;
+                    })()
+                  : "No area selected"}
+              </div>
+              <button
+                className="btn-ghost"
+                onClick={openAreaPicker}
+                disabled={recording || displays.length === 0}
+                style={{
+                  padding: "5px 10px",
+                  fontSize: 12,
+                  color: "var(--fg-secondary)",
+                  flexShrink: 0,
+                  opacity: recording || displays.length === 0 ? 0.4 : 1,
+                  cursor:
+                    recording || displays.length === 0
+                      ? "not-allowed"
+                      : "pointer",
+                }}
+              >
+                {selectedArea ? "Redraw" : "Select"}
+              </button>
+            </div>
           </>
         )}
       </div>
@@ -1297,12 +1389,7 @@ function App() {
         recording={recording}
         state={state}
         elapsed={progress.elapsed_s}
-        canStart={
-          state === "idle" &&
-          (sourceKind === "display"
-            ? selectedDisplay != null
-            : selectedWindow != null)
-        }
+        canStart={state === "idle" && canStartNow}
         onStart={start}
         onStop={stop}
       />
@@ -1466,25 +1553,38 @@ function BrandBar({
 function SourceTiles({
   sourceKind,
   onSourceKind,
+  onAreaClick,
+  selectedArea,
+  displays,
   disabled,
 }: {
   sourceKind: SourceKind;
   onSourceKind: (k: SourceKind) => void;
+  onAreaClick: () => void;
+  selectedArea: AreaSelection | null;
+  displays: Display[];
   disabled: boolean;
 }) {
-  // Display + Window are wired source kinds. Selected Area and Webcam Only
-  // remain visual placeholders for now — the design intentionally shows the
-  // full grid so the destinations look planned, not absent.
+  // Display + Window + Selected Area are wired source kinds. Webcam Only
+  // remains a visual placeholder.
+  const areaSub = (() => {
+    if (sourceKind !== "area") return "Drag a region to record";
+    if (!selectedArea) return "Drag to select";
+    const display = displays.find((d) => d.id === selectedArea.display_id);
+    const dLabel = display?.name ?? `Display ${selectedArea.display_id}`;
+    return `${Math.round(selectedArea.width)} × ${Math.round(selectedArea.height)} on ${dLabel}`;
+  })();
   const tiles: Array<{
     id: string;
     label: string;
     sub: string;
     icon: React.ReactNode;
     kind?: SourceKind;
+    customClick?: () => void;
   }> = [
     { id: "display", label: "Entire Display", sub: "Pick a screen", icon: I.monitor, kind: "display" },
     { id: "window", label: "Window", sub: "Pick an app window", icon: I.window, kind: "window" },
-    { id: "area", label: "Selected Area", sub: "Coming soon", icon: I.area },
+    { id: "area", label: "Selected Area", sub: areaSub, icon: I.area, kind: "area", customClick: onAreaClick },
     { id: "webcam", label: "Webcam Only", sub: "Coming soon", icon: I.webcam },
   ];
 
@@ -1500,7 +1600,9 @@ function SourceTiles({
             key={s.id}
             type="button"
             onClick={() => {
-              if (interactive && s.kind) onSourceKind(s.kind);
+              if (!interactive) return;
+              if (s.customClick) s.customClick();
+              else if (s.kind) onSourceKind(s.kind);
             }}
             disabled={!interactive}
             style={{
