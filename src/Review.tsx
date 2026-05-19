@@ -2273,8 +2273,9 @@ function ExportPanel({
       return;
     }
     if (duration != null && duration > 600) {
-      const ok = window.confirm(
+      const ok = await ask(
         "LinkedIn caps videos at 10 minutes. Export anyway?",
+        { kind: "warning", okLabel: "Export anyway", cancelLabel: "Cancel" },
       );
       if (!ok) return;
     }
