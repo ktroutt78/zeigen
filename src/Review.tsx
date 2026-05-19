@@ -5,6 +5,7 @@ import { emit } from "@tauri-apps/api/event";
 import { revealItemInDir, openUrl } from "@tauri-apps/plugin-opener";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { Icon, I, P } from "./components/icons";
+import Waveform from "./Waveform";
 
 // Review window. Layout mirrors docs/design/surfaces/review.jsx — left
 // column is player + timeline + action footer, right column is the Phase
@@ -778,6 +779,7 @@ function LeftColumn(props: LeftColumnProps) {
         editor={props.editor}
       />
       <Timeline
+        assetUrl={props.assetUrl}
         duration={props.duration}
         currentTime={props.currentTime}
         trim={props.trim}
@@ -1608,6 +1610,7 @@ function PlayerOverlay({
 }
 
 type TimelineProps = {
+  assetUrl: string | null;
   duration: number | null;
   currentTime: number;
   trim: Trim | null;
@@ -1730,13 +1733,10 @@ function Timeline(props: TimelineProps) {
             borderRadius: 5,
             border: "1px solid var(--border-faint)",
             overflow: "hidden",
-            background:
-              "repeating-linear-gradient(90deg," +
-              "#3a2e36 0 8%, #4a3c44 8% 16%, #3f3138 16% 24%, #4d3f47 24% 32%," +
-              "#37292f 32% 40%, #443840 40% 48%, #3c2e34 48% 56%, #50404a 56% 64%," +
-              "#3d2f37 64% 72%, #463842 72% 80%, #392c33 80% 88%, #4a3c46 88% 100%)",
+            background: "rgba(255,255,255,0.02)",
           }}
         >
+          <Waveform assetUrl={props.assetUrl} />
           {/* Dimmed regions outside trim */}
           {props.trim && props.duration != null && (
             <>

@@ -1,0 +1,175 @@
+import { useEffect, useRef, useState } from "react";
+
+// Canvas-based audio waveform for the review-window Timeline. Decodes the
+// recording's audio track via Web Audio, buckets to a fixed-size peak cache,
+// and draws mirrored peaks. The decoded PCM is dropped immediately after
+// bucketing so the only durable allocation is the ~16KB peak cache.
+
+const PEAK_CACHE_SIZE = 4096;
+const SILENCE_THRESHOLD = 0.001;
+const BAR_COLOR = "#6f6f74"; // var(--fg-tertiary)
+const CENTERLINE_COLOR = "#4a4a4f"; // var(--fg-quaternary)
+const LABEL_FONT =
+  '500 11px -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif';
+
+type Props = {
+  assetUrl: string | null;
+};
+
+type State =
+  | { kind: "loading" }
+  | { kind: "ready"; peaks: Float32Array; maxPeak: number }
+  | { kind: "empty" };
+
+export default function Waveform({ assetUrl }: Props) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [state, setState] = useState<State>({ kind: "loading" });
+
+  useEffect(() => {
+    if (!assetUrl) {
+      setState({ kind: "loading" });
+      return;
+    }
+
+    let cancelled = false;
+    setState({ kind: "loading" });
+
+    const run = async () => {
+      let audioBuffer: AudioBuffer | null = null;
+      try {
+        const res = await fetch(assetUrl);
+        const arr = await res.arrayBuffer();
+        const ctx = new AudioContext();
+        try {
+          audioBuffer = await ctx.decodeAudioData(arr);
+        } finally {
+          ctx.close().catch(() => {});
+        }
+      } catch {
+        if (!cancelled) setState({ kind: "empty" });
+        return;
+      }
+
+      if (cancelled) return;
+      if (!audioBuffer || audioBuffer.numberOfChannels === 0) {
+        setState({ kind: "empty" });
+        return;
+      }
+
+      const channel = audioBuffer.getChannelData(0);
+      const peaks = new Float32Array(PEAK_CACHE_SIZE);
+      const samplesPerBucket = channel.length / PEAK_CACHE_SIZE;
+      let max = 0;
+      for (let i = 0; i < PEAK_CACHE_SIZE; i++) {
+        const start = Math.floor(i * samplesPerBucket);
+        const end = Math.floor((i + 1) * samplesPerBucket);
+        let m = 0;
+        for (let j = start; j < end; j++) {
+          const v = channel[j];
+          const a = v < 0 ? -v : v;
+          if (a > m) m = a;
+        }
+        peaks[i] = m;
+        if (m > max) max = m;
+      }
+      // Release the decoded PCM (~10MB/min) — only the 16KB cache survives.
+      audioBuffer = null;
+
+      if (cancelled) return;
+      setState(
+        max < SILENCE_THRESHOLD
+          ? { kind: "empty" }
+          : { kind: "ready", peaks, maxPeak: max },
+      );
+    };
+
+    const idle =
+      typeof window !== "undefined" &&
+      (window as unknown as { requestIdleCallback?: (cb: () => void) => number })
+        .requestIdleCallback;
+    if (idle) idle(() => { if (!cancelled) run(); });
+    else setTimeout(() => { if (!cancelled) run(); }, 0);
+
+    return () => { cancelled = true; };
+  }, [assetUrl]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const container = containerRef.current;
+    if (!canvas || !container) return;
+
+    const draw = () => {
+      const rect = container.getBoundingClientRect();
+      const w = Math.max(1, Math.floor(rect.width));
+      const h = Math.max(1, Math.floor(rect.height));
+      const dpr = window.devicePixelRatio || 1;
+      if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
+        canvas.width = w * dpr;
+        canvas.height = h * dpr;
+      }
+      canvas.style.width = `${w}px`;
+      canvas.style.height = `${h}px`;
+
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+
+      const mid = Math.floor(h / 2);
+
+      if (state.kind === "loading") {
+        ctx.fillStyle = CENTERLINE_COLOR;
+        ctx.fillRect(0, mid, w, 1);
+        return;
+      }
+
+      if (state.kind === "empty") {
+        ctx.fillStyle = CENTERLINE_COLOR;
+        ctx.fillRect(0, mid, w, 1);
+        ctx.fillStyle = BAR_COLOR;
+        ctx.font = LABEL_FONT;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText("No microphone", w / 2, mid);
+        return;
+      }
+
+      const peaks = state.peaks;
+      const norm = 1 / state.maxPeak;
+      const half = h / 2;
+      ctx.fillStyle = BAR_COLOR;
+      for (let x = 0; x < w; x++) {
+        const startB = Math.floor((x / w) * PEAK_CACHE_SIZE);
+        const endB = Math.max(
+          startB + 1,
+          Math.floor(((x + 1) / w) * PEAK_CACHE_SIZE),
+        );
+        let amp = 0;
+        for (let b = startB; b < endB; b++) {
+          const v = peaks[b];
+          if (v > amp) amp = v;
+        }
+        const barH = Math.max(1, Math.round(amp * norm * half));
+        ctx.fillRect(x, mid - barH, 1, barH * 2);
+      }
+    };
+
+    draw();
+    const ro = new ResizeObserver(() => draw());
+    ro.observe(container);
+    return () => ro.disconnect();
+  }, [state]);
+
+  return (
+    <div
+      ref={containerRef}
+      style={{ position: "absolute", inset: 0, pointerEvents: "none" }}
+    >
+      <canvas
+        ref={canvasRef}
+        style={{ display: "block", pointerEvents: "none" }}
+      />
+    </div>
+  );
+}
