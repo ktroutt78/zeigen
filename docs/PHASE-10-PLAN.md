@@ -49,17 +49,17 @@ Refactor `run_edit_pipeline` (`edit.rs:421`) to take `mode: PipelineMode`. Branc
 
 ### c1 — Done-when (regression-proof refactor)
 
-Hash equivalence on MP4 path. Steps:
+Frame-metadata equivalence on the MP4 path. Steps:
 
-1. On `main` (before c1), select a representative recording from `~/Movies/Zeigen/` and stage a sidecar containing trim + at least one text annotation + at least one arrow. Run a Save edit through the review window. Capture `shasum -a 256 <output>` and save the hash.
+1. On `main` (before c1), select a representative recording from `~/Movies/Zeigen/` and stage a sidecar containing trim + at least one text annotation + at least one arrow. Run a Save edit through the review window. Capture `ffprobe -v error -select_streams v:0 -show_entries frame=pkt_pts_time,pict_type,pkt_size -of csv <output>` to a baseline CSV.
 2. Land c1.
-3. Repeat the same Save against the same source + same sidecar. Compare hashes.
+3. Repeat the same Save against the same source + same sidecar. Extract the same CSV. Diff against the baseline.
 
-**Hash mismatch fails c1.** If hashes differ, decode both with `ffprobe -show_frames -show_entries frame=pkt_pts_time,pict_type,pkt_size` and compare frame metadata to locate the divergence. Do not paper over with a "visually identical" rationalization — `run_edit_pipeline` is a pure function of (source, sidecar, mode) and any byte drift on MP4 means the refactor introduced a side effect.
+**Frame-metadata mismatch fails c1.** If the CSVs differ, the divergence is right there in the diff — locate which frame and whether PTS, picture type, or packet size drifted. `run_edit_pipeline` is a pure function of (source, sidecar, mode) and any frame-metadata change on MP4 means the refactor introduced a side effect.
 
-`h264_videotoolbox` is deterministic on fixed hardware with fixed args, so byte-equality is the correct bar.
+**Why frame metadata and not SHA-256.** Originally this section asked for byte equivalence. That bar is unachievable on this hardware: `h264_videotoolbox` is not bit-deterministic. Five independent runs of the same source + same sidecar (two pre-c1, three post-c1) on the c1 verification produced five different SHA-256s, all the same file size, with the diff always a single byte deep in the H.264 NAL payload. Frame metadata was byte-identical across all five. The 1-byte drift is encoder-internal entropy; the functional output (PTS, picture type, packet size, audio stream params) is stable. Frame-metadata equivalence is therefore the right and only attainable functional bar for the MP4 path.
 
-> **Footnote — when "deterministic" isn't.** VideoToolbox determinism assumes the underlying hardware encoder firmware is unchanged between the before/after captures. Apple has shipped macOS updates that nudge VideoToolbox behavior (rare, but it happens). If hashes mismatch and the code diff looks clean, the first thing to check is whether macOS or the system firmware updated between captures. Re-capture the baseline hash on the same OS build as the c1 build and retry before chasing the diff.
+> **Footnote — when even frame metadata isn't.** The encoder is metadata-deterministic on a fixed OS/firmware build. Apple has shipped macOS updates that nudge VideoToolbox behavior (rare, but it happens). If frame metadata mismatches and the code diff looks clean, first check whether macOS or the system firmware updated between captures. Re-capture the baseline CSV on the same OS build as the c1 build and retry before chasing the diff.
 
 ### c2: New command `gif_export` (lives in `edit.rs`)
 
