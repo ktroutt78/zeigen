@@ -9,6 +9,7 @@ import TimerChipWindow from "./TimerChipWindow";
 import IdentifyOverlay from "./IdentifyOverlay";
 import IdentifyWindowOverlay from "./IdentifyWindowOverlay";
 import MarqueeOverlay from "./MarqueeOverlay";
+import AreaIndicator from "./AreaIndicator";
 
 const hash = window.location.hash;
 const root = hash.startsWith("#bubble")
@@ -25,12 +26,14 @@ const root = hash.startsWith("#bubble")
   ? <IdentifyOverlay />
   : hash.startsWith("#marquee")
   ? <MarqueeOverlay />
+  : hash.startsWith("#area-indicator")
+  ? <AreaIndicator />
   : <App />;
 
 // Routes that render in transparent windows must not paint the global dark
 // body background — otherwise the dark fill leaks through the transparent
 // NSWindow and the user sees a solid backdrop instead of their screen.
-const TRANSPARENT_ROUTES = ["#bubble", "#countdown", "#timer-chip", "#identify", "#marquee"];
+const TRANSPARENT_ROUTES = ["#bubble", "#countdown", "#timer-chip", "#identify", "#marquee", "#area-indicator"];
 if (TRANSPARENT_ROUTES.some((r) => hash.startsWith(r))) {
   document.documentElement.style.background = "transparent";
   document.body.style.background = "transparent";

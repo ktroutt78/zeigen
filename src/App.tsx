@@ -302,11 +302,13 @@ async function openIdentifyWindowOverlay(window: WindowSource) {
 }
 
 const TIMER_CHIP_LABEL = "timer-chip";
-const TIMER_CHIP_W = 140;
-const TIMER_CHIP_H = 36;
+// Sized to fit the RecordingControlPill (timer + pause + stop). Chrome
+// around the pill is transparent and draggable.
+const TIMER_CHIP_W = 200;
+const TIMER_CHIP_H = 44;
 const TIMER_CHIP_MARGIN = 24;
 
-async function openTimerChip() {
+async function openTimerChip(anchor: BubbleAnchor | null = null) {
   const existing = await WebviewWindow.getByLabel(TIMER_CHIP_LABEL);
   if (existing) {
     await existing.show().catch(() => {});
@@ -333,18 +335,50 @@ async function openTimerChip() {
       console.error("make_capture_invisible(timer-chip) failed", e);
     });
     try {
+      // Position via set_window_frame_cg (CG points, top-left origin).
+      // Tauri's PhysicalPosition setPosition path mis-routes across
+      // mixed-scale multi-monitor setups because availableMonitors
+      // positions are chained in PHYSICAL pixels, not logical points —
+      // dividing each monitor's position by its OWN scale doesn't yield
+      // a consistent global logical coord space. set_window_frame_cg
+      // accepts CG points directly and handles the Cocoa Y-flip in Rust.
       const monitors = await availableMonitors();
-      const m = monitors[0];
-      if (!m) return;
-      const scale = m.scaleFactor;
-      const xPhys =
-        m.position.x + m.size.width - (TIMER_CHIP_W + TIMER_CHIP_MARGIN) * scale;
-      const yPhys =
-        m.position.y + m.size.height - (TIMER_CHIP_H + TIMER_CHIP_MARGIN) * scale;
-      const { PhysicalPosition } = await import("@tauri-apps/api/dpi");
-      await win.setPosition(new PhysicalPosition(xPhys, yPhys));
-    } catch {
-      // best effort — the window will land at default if positioning fails
+      const primary =
+        monitors.find((m) => m.position.x === 0 && m.position.y === 0) ||
+        monitors[0];
+      const primaryCocoaHeight =
+        primary && primary.scaleFactor
+          ? primary.size.height / primary.scaleFactor
+          : 1080;
+      let cgX: number;
+      let cgY: number;
+      if (anchor) {
+        // Just below the anchor's bottom edge, horizontally centered.
+        cgX = anchor.x + anchor.w / 2 - TIMER_CHIP_W / 2;
+        cgY = anchor.y + anchor.h + TIMER_CHIP_MARGIN;
+      } else {
+        // Default: primary display's bottom-right corner. Primary's
+        // logical dimensions = physical / scale (safe because primary is
+        // always at the (0,0) origin in both coord spaces).
+        const primaryW = primary
+          ? primary.size.width / primary.scaleFactor
+          : 1920;
+        const primaryH = primary
+          ? primary.size.height / primary.scaleFactor
+          : 1080;
+        cgX = primaryW - TIMER_CHIP_W - TIMER_CHIP_MARGIN;
+        cgY = primaryH - TIMER_CHIP_H - TIMER_CHIP_MARGIN;
+      }
+      await invoke("set_window_frame_cg", {
+        label: TIMER_CHIP_LABEL,
+        cgX,
+        cgY,
+        width: TIMER_CHIP_W,
+        height: TIMER_CHIP_H,
+        primaryCocoaHeight,
+      });
+    } catch (e) {
+      console.error("timer-chip positioning failed", e);
     }
   });
   win.once("tauri://error", (e) => {
@@ -401,6 +435,78 @@ function playGoSound() {
   } catch {
     // best effort — silence is acceptable
   }
+}
+
+const AREA_INDICATOR_LABEL = "area-indicator";
+
+// Transparent always-on-top dashed-border window sized to the area's
+// screen-space rect. Click-through and hidden from SCK so it never blocks
+// interaction or appears in the recording. Shown for the duration of an
+// area-mode recording so the user can always see what's being captured.
+async function openAreaIndicator(rect: {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}) {
+  const existing = await WebviewWindow.getByLabel(AREA_INDICATOR_LABEL);
+  if (existing) await existing.close().catch(() => {});
+
+  const monitors = await availableMonitors();
+  const primary =
+    monitors.find((m) => m.position.x === 0 && m.position.y === 0) ||
+    monitors[0];
+  const primaryCocoaHeight =
+    primary && primary.scaleFactor
+      ? primary.size.height / primary.scaleFactor
+      : 1080;
+
+  new WebviewWindow(AREA_INDICATOR_LABEL, {
+    url: `/#area-indicator`,
+    title: "Recording area",
+    // Initial size doesn't matter — set_window_frame_cg resizes after
+    // creation (same pattern as identify/countdown).
+    width: 400,
+    height: 400,
+    decorations: false,
+    transparent: true,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    resizable: false,
+    visibleOnAllWorkspaces: true,
+    shadow: false,
+    focus: false,
+  });
+
+  void (async () => {
+    for (let attempt = 0; attempt < 50; attempt++) {
+      const win = await WebviewWindow.getByLabel(AREA_INDICATOR_LABEL);
+      if (win) {
+        try {
+          await invoke("set_window_frame_cg", {
+            label: AREA_INDICATOR_LABEL,
+            cgX: rect.x,
+            cgY: rect.y,
+            width: rect.w,
+            height: rect.h,
+            primaryCocoaHeight,
+          });
+          await invoke("make_capture_invisible", { label: AREA_INDICATOR_LABEL });
+          await win.setIgnoreCursorEvents(true);
+        } catch (e) {
+          console.error("[area-indicator] setup failed", e);
+        }
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    console.error("[area-indicator] window never registered");
+  })();
+}
+
+async function closeAreaIndicator() {
+  const existing = await WebviewWindow.getByLabel(AREA_INDICATOR_LABEL);
+  if (existing) await existing.close().catch(() => {});
 }
 
 const MARQUEE_LABEL_PREFIX = "marquee-";
@@ -699,6 +805,18 @@ function App() {
             setLastSaved(ev.output_path);
             setProgress({ frames: ev.frames, dropped: ev.dropped, elapsed_s: ev.duration_s });
             setCompositeProgress(0);
+            // After an area-mode recording: stash the selection and clear
+            // it so the persistent dashed border + Start chip go away.
+            // The review window's "Record another" can restore it via
+            // lastUsedAreaRef; Save/Discard leave it consumed (user
+            // redraws next time).
+            {
+              const c = ctrlRef.current;
+              if (c.sourceKind === "area" && c.selectedArea) {
+                lastUsedAreaRef.current = c.selectedArea;
+                c.setSelectedArea(null);
+              }
+            }
             invoke<FinalizedRecording>("recording_finalize")
               .then(async (info) => {
                 setFinalizeInfo(info);
@@ -893,6 +1011,10 @@ function App() {
         areaWidth: sourceKind === "area" ? selectedArea?.width ?? null : null,
         areaHeight: sourceKind === "area" ? selectedArea?.height ?? null : null,
       });
+
+      // Area indicator + chip lifecycle is driven by useEffects on
+      // sourceKind/selectedArea (so the dashed border persists from
+      // marquee-confirm through recording-end), not by start() itself.
     } catch (err) {
       setState("idle");
       setError(String(err));
@@ -929,6 +1051,9 @@ function App() {
     setSelectedCamera,
     setSelectedMic,
     setSelectedDisplay,
+    sourceKind,
+    selectedArea,
+    setSelectedArea,
   });
   ctrlRef.current = {
     state,
@@ -938,7 +1063,17 @@ function App() {
     setSelectedCamera,
     setSelectedMic,
     setSelectedDisplay,
+    sourceKind,
+    selectedArea,
+    setSelectedArea,
   };
+  // Last area selection used by a recording. Persisted across the
+  // stop-clears-selection cycle so "Record another" in the review window
+  // can restore it without making the user redraw.
+  const lastUsedAreaRef = useRef<AreaSelection | null>(null);
+  // Set true after restoring lastUsedAreaRef; an effect on selectedArea
+  // kicks off start() once React commits the restored value.
+  const [pendingAreaStart, setPendingAreaStart] = useState(false);
 
   const openAreaPicker = async () => {
     const shapes: DisplayShape[] = displays.map((d) => ({
@@ -1119,8 +1254,21 @@ function App() {
       // resolves any pending Save/Discard. Capture window reshows via
       // the existing reviewActivity → 0 effect; here we kick off the
       // next recording so the user lands directly in countdown.
+      // Area mode: if the last recording cleared selectedArea on stop,
+      // restore it from lastUsedAreaRef before starting. The
+      // pendingAreaStart effect picks up the restored value and calls
+      // start() after React commits the state update.
       const r = await listen<{}>("record-another", () => {
         const c = ctrlRef.current;
+        if (
+          c.sourceKind === "area" &&
+          c.selectedArea == null &&
+          lastUsedAreaRef.current
+        ) {
+          c.setSelectedArea(lastUsedAreaRef.current);
+          setPendingAreaStart(true);
+          return;
+        }
         if (c.state === "idle" && c.canStartNow) c.start();
       });
       if (cancelled) {
@@ -1193,15 +1341,97 @@ function App() {
     }
   }, [cameraName, sourceKind, selectedArea, displays]);
 
+  // Dashed-border area indicator persists from marquee-confirm through
+  // recording-end. Driven purely by selection state — not by recording
+  // state — so the user always sees "this is what will be / is being
+  // captured" once they've picked a region. Closes when they leave area
+  // mode or clear the selection.
   useEffect(() => {
+    if (sourceKind === "area" && selectedArea) {
+      const d = displays.find((x) => x.id === selectedArea.display_id);
+      if (d) {
+        openAreaIndicator({
+          x: Math.round(d.x + selectedArea.x),
+          y: Math.round(d.y + selectedArea.y),
+          w: Math.round(selectedArea.width),
+          h: Math.round(selectedArea.height),
+        }).catch((e) => console.error("openAreaIndicator failed", e));
+      }
+    } else {
+      closeAreaIndicator().catch(() => {});
+    }
+  }, [sourceKind, selectedArea, displays]);
+
+  // Timer/control chip lifecycle. Shown:
+  //  - in area mode (idle/recording/paused) whenever the bubble isn't
+  //    holding the pause/stop controls — chip shows Start when idle and
+  //    pause/stop when recording.
+  //  - in display/window mode during recording only when there's no
+  //    camera (existing pre-Phase-9 behavior — bubble pill takes over
+  //    when a camera is selected).
+  // Bubble pill only renders during active recording, so an idle area
+  // mode with a camera still needs the chip for the Start button.
+  useEffect(() => {
+    const recActive = state === "recording" || state === "paused";
+    const bubbleHasControls = recActive && cameraState !== "none";
+    const inAreaWithSel = sourceKind === "area" && selectedArea != null;
     const showChip =
-      (state === "recording" || state === "paused") && cameraState === "none";
+      !bubbleHasControls &&
+      (inAreaWithSel || (recActive && cameraState === "none"));
     if (showChip) {
-      openTimerChip().catch(() => {});
+      let anchor: BubbleAnchor | null = null;
+      if (inAreaWithSel && selectedArea) {
+        const d = displays.find((x) => x.id === selectedArea.display_id);
+        if (d) {
+          anchor = {
+            x: d.x + selectedArea.x,
+            y: d.y + selectedArea.y,
+            w: selectedArea.width,
+            h: selectedArea.height,
+          };
+        }
+      }
+      openTimerChip(anchor).catch(() => {});
     } else {
       closeTimerChip().catch(() => {});
     }
-  }, [state, cameraState]);
+  }, [state, cameraState, sourceKind, selectedArea, displays]);
+
+  // The chip window's "Start Recording" button (idle state) emits this
+  // event since it lives in a separate window and can't call start()
+  // directly. Use ctrlRef to dodge stale closures on canStartNow/state.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    (async () => {
+      const fn = await listen("request-area-start", () => {
+        const c = ctrlRef.current;
+        if (c.state === "idle" && c.canStartNow) {
+          c.start();
+        }
+      });
+      if (cancelled) {
+        fn();
+        return;
+      }
+      unlisten = fn;
+    })();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  // Bridge for "Record another" in area mode: setSelectedArea above is
+  // async (React commits on next render), so start() needs to wait for
+  // the restore to land. This effect fires once selectedArea is back
+  // and clears the pending flag.
+  useEffect(() => {
+    if (pendingAreaStart && selectedArea && state === "idle") {
+      setPendingAreaStart(false);
+      void start();
+    }
+  }, [pendingAreaStart, selectedArea, state]);
 
   useEffect(() => {
     // The tray icon keeps the process alive after the main window closes, so
