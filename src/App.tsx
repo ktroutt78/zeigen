@@ -17,7 +17,12 @@ const BUBBLE_H = BUBBLE_W + PILL_STRIP_CSS;
 const BUBBLE_MIN = 120;
 const BUBBLE_MARGIN = 24;
 
-async function openBubble(deviceName: string) {
+// Anchor rect for placing the bubble. Coords + size are in logical
+// points in screen space (matches Display.x/y/width/height from the
+// engine and selectedArea screen-space math).
+type BubbleAnchor = { x: number; y: number; w: number; h: number };
+
+async function openBubble(deviceName: string, anchor: BubbleAnchor | null = null) {
   if (bubbleDeviceName === deviceName) {
     const existing = await WebviewWindow.getByLabel(BUBBLE_LABEL);
     if (existing) {
@@ -31,20 +36,29 @@ async function openBubble(deviceName: string) {
 
   bubbleDeviceName = deviceName;
 
-  // Default position: bottom-right of the primary display, computed in
-  // logical pixels so the constructor places the window correctly without
-  // a post-creation setPosition race.
+  // Default position: bottom-right of the anchor rect (selected region in
+  // area mode), or the primary display when no anchor is given. Coords
+  // computed in logical pixels so the constructor places the window
+  // correctly without a post-creation setPosition race.
   let x: number | undefined;
   let y: number | undefined;
   try {
     const monitors = await availableMonitors();
-    const m = monitors[0];
-    if (m) {
-      const scale = m.scaleFactor || 1;
-      const rightLogical = (m.position.x + m.size.width) / scale;
-      const bottomLogical = (m.position.y + m.size.height) / scale;
-      x = rightLogical - BUBBLE_W - BUBBLE_MARGIN;
-      y = bottomLogical - BUBBLE_H - BUBBLE_MARGIN;
+    if (anchor) {
+      // Anchor is in logical points (same units as engine display.x/y and
+      // selectedArea). Tauri's WebviewWindow constructor x/y also takes
+      // logical pixels, so no scale division is needed.
+      x = anchor.x + anchor.w - BUBBLE_W - BUBBLE_MARGIN;
+      y = anchor.y + anchor.h - BUBBLE_H - BUBBLE_MARGIN;
+    } else {
+      const m = monitors[0];
+      if (m) {
+        const scale = m.scaleFactor || 1;
+        const rightLogical = (m.position.x + m.size.width) / scale;
+        const bottomLogical = (m.position.y + m.size.height) / scale;
+        x = rightLogical - BUBBLE_W - BUBBLE_MARGIN;
+        y = bottomLogical - BUBBLE_H - BUBBLE_MARGIN;
+      }
     }
   } catch {
     // Fall back to Tauri default position
@@ -813,10 +827,7 @@ function App() {
               m.position.y === countdownDisplay!.y,
           ) || monitors[0]
         : monitors[0];
-      // countdownFrame spans the host display — the countdown overlay
-      // itself currently fills the screen. Clamping it to the selected
-      // region is c5 polish.
-      const countdownFrame: DisplayFrame = {
+      const fullDisplayFrame: DisplayFrame = {
         x: countdownDisplay?.x ?? monitor?.position.x ?? 0,
         y: countdownDisplay?.y ?? monitor?.position.y ?? 0,
         w: countdownDisplay?.width ?? monitor?.size.width ?? 0,
@@ -843,6 +854,14 @@ function App() {
           h: Math.round(selectedArea.height),
         };
       }
+
+      // Countdown clamps to the selected region in area mode (so the user
+      // sees what's actually being captured). Display/window modes show
+      // the countdown on the host display.
+      const countdownFrame: DisplayFrame =
+        sourceKind === "area" && recordedRect
+          ? { ...recordedRect, scale: fullDisplayFrame.scale }
+          : fullDisplayFrame;
 
       if (countdownDuration > 0) {
         setState("countdown");
@@ -1149,14 +1168,30 @@ function App() {
   // paused alike); close only when camera is deselected. The timer chip
   // and control pill inside the bubble are gated on recording state — see
   // WebcamBubble.tsx — but the window itself persists as long as the user
-  // wants a webcam in the loop.
+  // wants a webcam in the loop. In area mode anchor the bubble to the
+  // selected region's bottom-right corner so an explicitly-re-enabled
+  // camera lands INSIDE the recorded rect (otherwise the default primary-
+  // display corner may fall outside the area and not appear in the
+  // recording).
   useEffect(() => {
     if (cameraName) {
-      openBubble(cameraName).catch((err) => setError(String(err)));
+      let anchor: BubbleAnchor | null = null;
+      if (sourceKind === "area" && selectedArea) {
+        const d = displays.find((x) => x.id === selectedArea.display_id);
+        if (d) {
+          anchor = {
+            x: d.x + selectedArea.x,
+            y: d.y + selectedArea.y,
+            w: selectedArea.width,
+            h: selectedArea.height,
+          };
+        }
+      }
+      openBubble(cameraName, anchor).catch((err) => setError(String(err)));
     } else {
       closeBubble().catch(() => {});
     }
-  }, [cameraName]);
+  }, [cameraName, sourceKind, selectedArea, displays]);
 
   useEffect(() => {
     const showChip =
