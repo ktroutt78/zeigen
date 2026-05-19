@@ -21,6 +21,7 @@
     "core:window:allow-set-visible-on-all-workspaces",
     "core:window:allow-set-ignore-cursor-events",
     "core:window:allow-start-dragging",
-    "global-shortcut:default"
+    "global-shortcut:default",
+    "dialog:allow-ask"
   ]
 }

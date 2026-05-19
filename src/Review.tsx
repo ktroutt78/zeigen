@@ -3,6 +3,7 @@ import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { emit } from "@tauri-apps/api/event";
 import { revealItemInDir, openUrl } from "@tauri-apps/plugin-opener";
+import { ask } from "@tauri-apps/plugin-dialog";
 import { Icon, I, P } from "./components/icons";
 
 // Review window. Layout mirrors docs/design/surfaces/review.jsx — left
@@ -666,6 +667,7 @@ export default function Review() {
           sourcePath={sourcePath}
           committedPath={committedPath}
           duration={duration}
+          trim={trim}
           busy={busy}
           setError={setError}
         />
@@ -2208,12 +2210,14 @@ function ExportPanel({
   sourcePath,
   committedPath,
   duration,
+  trim,
   busy,
   setError,
 }: {
   sourcePath: string | null;
   committedPath: string | null;
   duration: number | null;
+  trim: Trim | null;
   busy: boolean;
   setError: (msg: string | null) => void;
 }) {
@@ -2299,6 +2303,60 @@ function ExportPanel({
       setLinkedinExporting(false);
     }
   }, [effectiveSource, duration, linkedinExporting, setError]);
+
+  // GIF export: transcode to ~/Movies/Zeigen/recording-<stamp>.gif via
+  // gif_export, reveal in Finder, flash an "Exported" badge. Preset state
+  // (resolution + fps) lives here; resets on app restart (settings
+  // persistence is a separate backlog item).
+  const [gifResolution, setGifResolution] = useState<"480p" | "720p" | "source">("720p");
+  const [gifFps, setGifFps] = useState<10 | 15 | 20>(15);
+  const [gifExporting, setGifExporting] = useState(false);
+  const [gifExportedAt, setGifExportedAt] = useState(0);
+  const gifExported = gifExportedAt > 0;
+  useEffect(() => {
+    if (gifExportedAt === 0) return;
+    const t = window.setTimeout(() => setGifExportedAt(0), 1500);
+    return () => window.clearTimeout(t);
+  }, [gifExportedAt]);
+
+  const onGifExport = useCallback(async () => {
+    if (!effectiveSource || gifExporting) return;
+    const stamp = parseStampFromPath(effectiveSource);
+    if (!stamp) {
+      setError(`gif export: cannot parse stamp from ${effectiveSource}`);
+      return;
+    }
+    // Effective length honors the sidecar trim (mirrors Toolbar at the
+    // top of LeftColumn) — the GIF pipeline applies the same trim, so
+    // the warning should reflect post-trim duration, not source duration.
+    const effectiveLength =
+      trim && duration != null
+        ? Math.max(0, trim.out - trim.in)
+        : duration;
+    if (effectiveLength != null && effectiveLength > 30) {
+      const secs = Math.round(effectiveLength);
+      const ok = await ask(
+        `This GIF will be ~${secs}s long and may be large. Continue?`,
+        { kind: "warning", okLabel: "Continue", cancelLabel: "Cancel" },
+      );
+      if (!ok) return;
+    }
+    setGifExporting(true);
+    try {
+      const outPath = await invoke<string>("gif_export", {
+        stamp,
+        sourcePath: effectiveSource,
+        resolution: gifResolution,
+        fps: gifFps,
+      });
+      await revealItemInDir(outPath).catch(() => {});
+      setGifExportedAt(Date.now());
+    } catch (err) {
+      setError(`gif export: ${err}`);
+    } finally {
+      setGifExporting(false);
+    }
+  }, [effectiveSource, gifExporting, trim, duration, gifResolution, gifFps, setError]);
 
   // ⌘C shortcut mirrors the row click. Skip when the user has a
   // selection or is focused on an editable element so the system's
@@ -2399,23 +2457,8 @@ function ExportPanel({
 
       <div className="hairline" style={{ margin: "6px 14px" }} />
 
-      <div
-        aria-hidden="true"
-        style={{
-          opacity: 0.4,
-          pointerEvents: "none",
-          padding: "6px 14px 10px",
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            alignItems: "baseline",
-            justifyContent: "space-between",
-            gap: 8,
-            marginBottom: 8,
-          }}
-        >
+      <div style={{ padding: "6px 14px 10px" }}>
+        <div style={{ marginBottom: 8 }}>
           <span
             style={{
               fontSize: 10.5,
@@ -2427,28 +2470,128 @@ function ExportPanel({
           >
             Quick export
           </span>
-          <span
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 8,
+            marginBottom: 6,
+          }}
+        >
+          <span style={{ fontSize: 11.5, color: "var(--fg-secondary)" }}>Resolution</span>
+          <div className="segmented">
+            {(["480p", "720p", "source"] as const).map((r) => (
+              <button
+                key={r}
+                className={gifResolution === r ? "on" : ""}
+                onClick={() => setGifResolution(r)}
+                disabled={gifExporting}
+              >
+                {r === "source" ? "Source" : r}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 8,
+            marginBottom: 10,
+          }}
+        >
+          <span style={{ fontSize: 11.5, color: "var(--fg-secondary)" }}>FPS</span>
+          <div className="segmented">
+            {([10, 15, 20] as const).map((f) => (
+              <button
+                key={f}
+                className={gifFps === f ? "on" : ""}
+                onClick={() => setGifFps(f)}
+                disabled={gifExporting}
+              >
+                {f}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ display: "flex", gap: 6 }}>
+          <button
+            disabled
+            className="btn-secondary"
             style={{
-              fontSize: 10,
-              color: "var(--fg-quaternary)",
-              letterSpacing: "0.04em",
-              textTransform: "uppercase",
-              fontWeight: 600,
+              flex: 1,
+              fontSize: 12,
+              padding: "6px 0",
+              height: 28,
+              cursor: "default",
+              opacity: 1,
+              color: "var(--fg-secondary)",
             }}
           >
-            Coming later
-          </span>
+            MP4
+          </button>
+          <button
+            onClick={onGifExport}
+            disabled={!effectiveSource || busy || gifExporting}
+            className="btn-primary"
+            style={{
+              flex: 1,
+              fontSize: 12,
+              padding: "6px 0",
+              height: 28,
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 4,
+            }}
+          >
+            {gifExported ? (
+              <>
+                <Icon d={P.check} size={12} stroke={1.8} />
+                <span>Exported</span>
+              </>
+            ) : gifExporting ? (
+              "Exporting…"
+            ) : (
+              "GIF"
+            )}
+          </button>
+          <button
+            disabled
+            className="btn-secondary"
+            style={{
+              flex: 1,
+              fontSize: 12,
+              padding: "6px 0",
+              height: 28,
+              cursor: "default",
+              opacity: 1,
+              color: "var(--fg-secondary)",
+            }}
+          >
+            ProRes
+          </button>
         </div>
-        <div style={{ display: "flex", gap: 6 }}>
-          {["MP4", "GIF", "ProRes"].map((f) => (
-            <button
-              key={f}
-              className="btn-secondary"
-              style={{ flex: 1, fontSize: 12, padding: "6px 0", height: 28 }}
-            >
-              {f}
-            </button>
-          ))}
+
+        <div
+          style={{
+            display: "flex",
+            gap: 6,
+            marginTop: 4,
+            fontSize: 10,
+            fontStyle: "italic",
+            color: "var(--fg-tertiary)",
+          }}
+        >
+          <span style={{ flex: 1, textAlign: "center" }}>Coming later</span>
+          <span style={{ flex: 1 }} />
+          <span style={{ flex: 1, textAlign: "center" }}>Coming later</span>
         </div>
       </div>
 
