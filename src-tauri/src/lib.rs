@@ -630,6 +630,7 @@ pub fn run() {
             edit::read_sidecar,
             edit::write_sidecar,
             edit::delete_sidecar,
+            edit::gif_export,
             commit_recording,
             discard_recording,
             clipboard::clipboard_copy_recording,
