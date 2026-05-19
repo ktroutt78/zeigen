@@ -413,16 +413,41 @@ pub(crate) fn is_edit_pipeline_noop(sidecar: &SidecarState, duration: f64) -> bo
     !trim_real && !any_text && !any_arrow
 }
 
+// Output resolution for GIF export. Source caps at 1080p per phase 10
+// context D-01 to keep palette generation tractable.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum GifResolution {
+    P480,
+    P720,
+    Source,
+}
+
+// Selects which tail the edit pipeline emits. Same trim + overlay graph
+// either way; Mp4 ends in h264_videotoolbox+aac, Gif ends in a
+// palettegen/paletteuse chain feeding the GIF muxer.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PipelineMode {
+    Mp4,
+    Gif { resolution: GifResolution, fps: u32 },
+}
+
 // Single-pass edit pipeline. Trim via -ss/-to before -i; text and arrow
 // annotations rasterized to PNGs and composited via overlay filters with
-// `enable=between(t,start,end)`. Output via h264_videotoolbox. Caller
-// supplies both source and output paths — `commit_recording` reads the
-// scratch mp4 and writes directly to the final ~/Movies/Zeigen/ location.
+// `enable=between(t,start,end)`. Output via h264_videotoolbox (Mp4) or
+// palettegen/paletteuse → GIF muxer (Gif). Caller supplies both source
+// and output paths — `commit_recording` reads the scratch mp4 and writes
+// directly to the final ~/Movies/Zeigen/ location.
 pub(crate) fn run_edit_pipeline(
     source: &Path,
     output: &Path,
     sidecar: &SidecarState,
+    mode: PipelineMode,
 ) -> Result<(), String> {
+    let gif_params: Option<(GifResolution, u32)> = match mode {
+        PipelineMode::Mp4 => None,
+        PipelineMode::Gif { resolution, fps } => Some((resolution, fps)),
+    };
+    let gif_mode = gif_params.is_some();
     if !source.exists() {
         return Err(format!("source missing: {}", source.display()));
     }
@@ -510,7 +535,9 @@ pub(crate) fn run_edit_pipeline(
         args.push(path.to_string_lossy().into_owned());
     }
 
-    let needs_filter = !text_paths.is_empty() || !arrow_paths.is_empty();
+    // Force-build the filter graph in Gif mode even with no overlays so
+    // the palettegen/paletteuse tail can chain off [0:v].
+    let needs_filter = !text_paths.is_empty() || !arrow_paths.is_empty() || gif_mode;
     if needs_filter {
         let mut filter = String::new();
         let mut prev_label = String::from("0:v");
@@ -536,7 +563,7 @@ pub(crate) fn run_edit_pipeline(
                 end = end,
                 next_label = next_label,
             ));
-            if i + 1 < text_paths.len() || !arrow_paths.is_empty() {
+            if i + 1 < text_paths.len() || !arrow_paths.is_empty() || gif_mode {
                 filter.push(';');
             }
             prev_label = next_label;
@@ -557,29 +584,54 @@ pub(crate) fn run_edit_pipeline(
                 end = end,
                 next_label = next_label,
             ));
-            if i + 1 < arrow_paths.len() {
+            if i + 1 < arrow_paths.len() || gif_mode {
                 filter.push(';');
             }
             prev_label = next_label;
             input_idx += 1;
         }
 
+        // GIF tail. stats_mode=diff weights moving pixels (better for
+        // screencasts where most of the frame is static); bayer dither
+        // preserves UI gradients without sierra2_4a's noise floor.
+        if let Some((resolution, fps)) = gif_params {
+            let scale_arg = match resolution {
+                GifResolution::P480 => "-2:480".to_string(),
+                GifResolution::P720 => "-2:720".to_string(),
+                GifResolution::Source => "'min(iw,1920)':-2".to_string(),
+            };
+            filter.push_str(&format!(
+                "[{prev_label}]fps={fps},scale={scale_arg}:flags=lanczos,split[gA][gB];[gA]palettegen=stats_mode=diff[gP];[gB][gP]paletteuse=dither=bayer:bayer_scale=5[gout]"
+            ));
+            prev_label = String::from("gout");
+        }
+
         args.push("-filter_complex".into());
         args.push(filter);
         args.push("-map".into());
         args.push(format!("[{prev_label}]"));
-        args.push("-map".into());
-        args.push("0:a?".into());
+        if !gif_mode {
+            args.push("-map".into());
+            args.push("0:a?".into());
+        }
     }
 
-    args.push("-c:v".into());
-    args.push("h264_videotoolbox".into());
-    args.push("-b:v".into());
-    args.push("8M".into());
-    args.push("-c:a".into());
-    args.push("aac".into());
-    args.push("-b:a".into());
-    args.push("192k".into());
+    match mode {
+        PipelineMode::Mp4 => {
+            args.push("-c:v".into());
+            args.push("h264_videotoolbox".into());
+            args.push("-b:v".into());
+            args.push("8M".into());
+            args.push("-c:a".into());
+            args.push("aac".into());
+            args.push("-b:a".into());
+            args.push("192k".into());
+        }
+        PipelineMode::Gif { .. } => {
+            args.push("-loop".into());
+            args.push("0".into());
+        }
+    }
 
     args.push(output.to_string_lossy().into_owned());
 

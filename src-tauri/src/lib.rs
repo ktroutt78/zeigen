@@ -484,7 +484,7 @@ fn commit_recording(
             )
         })?;
     } else {
-        edit::run_edit_pipeline(&scratch_mp4, &final_path, &sidecar)?;
+        edit::run_edit_pipeline(&scratch_mp4, &final_path, &sidecar, edit::PipelineMode::Mp4)?;
     }
 
     std::fs::remove_dir_all(&scratch_dir)
