@@ -389,6 +389,128 @@ function playGoSound() {
   }
 }
 
+const MARQUEE_LABEL_PREFIX = "marquee-";
+
+export type AreaSelection = {
+  display_id: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+// One transparent always-on-top window per display. Marquee draws within;
+// the user picks on whichever display they drag on. Returns the chosen
+// rect (display-relative points + display_id) or null on cancel/Esc.
+// `existing` prefills the rect on its origin display so flipping
+// modes doesn't blow away a prior selection.
+async function openMarqueeOverlays(
+  displays: DisplayShape[],
+  displayIds: number[],
+  existing: AreaSelection | null = null,
+): Promise<AreaSelection | null> {
+  if (displays.length === 0) return null;
+
+  const monitors = await availableMonitors();
+  const primary =
+    monitors.find((m) => m.position.x === 0 && m.position.y === 0) ||
+    monitors[0];
+  const primaryCocoaHeight =
+    primary && primary.scaleFactor
+      ? primary.size.height / primary.scaleFactor
+      : 1080;
+
+  const labels: string[] = [];
+
+  for (let i = 0; i < displays.length; i++) {
+    const d = displays[i];
+    const displayId = displayIds[i];
+    const label = `${MARQUEE_LABEL_PREFIX}${i}`;
+    labels.push(label);
+    const existingForThis =
+      existing && existing.display_id === displayId ? existing : null;
+    const params = new URLSearchParams({
+      display_id: String(displayId),
+      display_index: String(i + 1),
+      display_width: String(d.width),
+      display_height: String(d.height),
+    });
+    if (existingForThis) {
+      params.set("x", String(existingForThis.x));
+      params.set("y", String(existingForThis.y));
+      params.set("w", String(existingForThis.width));
+      params.set("h", String(existingForThis.height));
+    }
+
+    const old = await WebviewWindow.getByLabel(label);
+    if (old) await old.close().catch(() => {});
+
+    new WebviewWindow(label, {
+      url: `/#marquee?${params.toString()}`,
+      title: "Select Area",
+      width: 400,
+      height: 400,
+      decorations: false,
+      transparent: true,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      resizable: false,
+      visibleOnAllWorkspaces: true,
+      shadow: false,
+      focus: i === 0,
+    });
+
+    void (async () => {
+      for (let attempt = 0; attempt < 50; attempt++) {
+        const win = await WebviewWindow.getByLabel(label);
+        if (win) {
+          try {
+            await invoke("set_window_frame_cg", {
+              label,
+              cgX: d.x,
+              cgY: d.y,
+              width: d.width,
+              height: d.height,
+              primaryCocoaHeight,
+            });
+            await invoke("make_capture_invisible", { label });
+          } catch (e) {
+            console.error(`[marquee] ${label} setup failed`, e);
+          }
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      console.error(`[marquee] ${label} window never registered`);
+    })();
+  }
+
+  return new Promise(async (resolve) => {
+    const closeAll = async () => {
+      for (const label of labels) {
+        const w = await WebviewWindow.getByLabel(label);
+        if (w) await w.close().catch(() => {});
+      }
+    };
+    const unlistens: Array<() => void> = [];
+    const finish = async (result: AreaSelection | null) => {
+      unlistens.forEach((u) => u());
+      await closeAll();
+      resolve(result);
+    };
+    unlistens.push(
+      await listen<AreaSelection>("marquee-confirmed", (e) => {
+        finish(e.payload);
+      }),
+    );
+    unlistens.push(
+      await listen("marquee-cancelled", () => {
+        finish(null);
+      }),
+    );
+  });
+}
+
 async function openReview(
   label: string,
   finalPath: string,
@@ -757,6 +879,34 @@ function App() {
     setSelectedMic,
     setSelectedDisplay,
   };
+
+  // c3-only debug hook for visually testing the marquee overlay before c4
+  // wires it to the picker. Cmd+Shift+M opens marquee windows on all known
+  // displays; result is logged. Remove (or replace with the picker trigger)
+  // when c4 lands.
+  useEffect(() => {
+    const debugOpen = async () => {
+      const shapes: DisplayShape[] = displays.map((d) => ({
+        x: d.x,
+        y: d.y,
+        width: d.width,
+        height: d.height,
+      }));
+      const ids = displays.map((d) => d.id);
+      const result = await openMarqueeOverlays(shapes, ids);
+      console.log("[marquee debug] result:", result);
+    };
+    (window as unknown as { __zeigenOpenMarquee: () => Promise<void> })
+      .__zeigenOpenMarquee = debugOpen;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.metaKey && e.shiftKey && (e.key === "m" || e.key === "M")) {
+        e.preventDefault();
+        void debugOpen();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [displays]);
 
   // Push UI state to Rust so the tray menu reflects current selections + state.
   // Elapsed time is pushed via a separate, lightweight command (update_tray_elapsed)
