@@ -707,10 +707,118 @@ pub(crate) fn run_edit_pipeline(
     Ok(())
 }
 
+// Resolve the next available per-format slot in ~/Movies/Zeigen for a
+// given stamp + extension. First call returns `recording-<stamp>.<ext>`;
+// subsequent calls with the same stamp+ext return `-2`, `-3`, ... per
+// PHASE-11 D-11. Per-format scope: gif and mp4 don't collide because the
+// extension differs.
+fn next_per_format_slot(movies: &Path, stamp: &str, ext: &str) -> PathBuf {
+    let first = movies.join(format!("recording-{stamp}.{ext}"));
+    if !first.exists() {
+        return first;
+    }
+    let mut n = 2u32;
+    loop {
+        let candidate = movies.join(format!("recording-{stamp}-{n}.{ext}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+#[derive(Serialize, Debug)]
+pub struct SaveResult {
+    pub output_path: String,
+}
+
+// Phase 11 unified save. Every save re-reads the raw scratch mp4 + current
+// sidecar and produces a file in ~/Movies/Zeigen/. The scratch dir is not
+// touched — it survives until the review window closes, so subsequent
+// saves can re-read raw + live sidecar and write a new collision slot.
+//
+// noop MP4-Source short-circuits to hard_link (with copy fallback) and
+// skips ffmpeg entirely. All other combinations are exactly one ffmpeg
+// pass through run_edit_pipeline.
+#[tauri::command]
+pub fn save_recording(
+    stamp: String,
+    source_path: String,
+    format: String,
+    resolution: String,
+    fps: Option<u32>,
+) -> Result<SaveResult, String> {
+    let source = Path::new(&source_path);
+    if !source.is_file() {
+        return Err(format!("source missing: {}", source.display()));
+    }
+
+    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+    let movies = PathBuf::from(home).join("Movies/Zeigen");
+    std::fs::create_dir_all(&movies)
+        .map_err(|e| format!("create {}: {e}", movies.display()))?;
+
+    let sidecar = read_sidecar_path(source)?.unwrap_or_default();
+
+    let output = match format.as_str() {
+        "mp4" => {
+            let res = match resolution.as_str() {
+                "480p" => Mp4Resolution::P480,
+                "720p" => Mp4Resolution::P720,
+                "1080p" => Mp4Resolution::P1080,
+                "source" => Mp4Resolution::Source,
+                other => return Err(format!("unknown mp4 resolution: {other}")),
+            };
+            let output = next_per_format_slot(&movies, &stamp, "mp4");
+            let duration = probe_duration_seconds(source)?;
+            if res == Mp4Resolution::Source && is_edit_pipeline_noop(&sidecar, duration) {
+                if std::fs::hard_link(source, &output).is_err() {
+                    std::fs::copy(source, &output).map_err(|e| {
+                        format!("copy {} -> {}: {e}", source.display(), output.display())
+                    })?;
+                }
+            } else {
+                run_edit_pipeline(
+                    source,
+                    &output,
+                    &sidecar,
+                    PipelineMode::Mp4 { resolution: res },
+                )?;
+            }
+            output
+        }
+        "gif" => {
+            let res = match resolution.as_str() {
+                "480p" => GifResolution::P480,
+                "720p" => GifResolution::P720,
+                "source" => GifResolution::Source,
+                other => return Err(format!("unknown gif resolution: {other}")),
+            };
+            let fps = fps.ok_or_else(|| "fps required for gif format".to_string())?;
+            let output = next_per_format_slot(&movies, &stamp, "gif");
+            run_edit_pipeline(
+                source,
+                &output,
+                &sidecar,
+                PipelineMode::Gif { resolution: res, fps },
+            )?;
+            output
+        }
+        other => return Err(format!("unknown format: {other}")),
+    };
+
+    Ok(SaveResult {
+        output_path: output.to_string_lossy().into_owned(),
+    })
+}
+
 // Quick GIF export. Reuses the trim + annotation graph from
 // run_edit_pipeline with a palettegen/paletteuse tail. Output lives in
 // ~/Movies/Zeigen/recording-<stamp>.gif and persists across discard /
 // cleanup (mirrors linkedin_export).
+//
+// Superseded by `save_recording` (Phase 11 c2). Kept alive until the
+// frontend rewrite (Phase 11 c4) stops invoking it.
 #[tauri::command]
 pub fn gif_export(
     stamp: String,
@@ -895,5 +1003,146 @@ mod tests {
         let (_, h720) = probe_dimensions(Path::new(&p720_out_str)).expect("probe p720 dims");
         assert_eq!(h720, 720, "P720 output height should be 720, got {h720}");
         println!("p720: {p720_out_str} ({h720} tall)");
+    }
+
+    // Phase 11 c2 smoke. Covers the four done-when bullets from the plan:
+    //   - noop sidecar + MP4-Source → hard-link, 0 ffmpeg
+    //   - sidecar w/ edits + MP4-P720 → 1 pass, 720 tall
+    //   - sidecar w/ edits + GIF-P720@15 → 1 pass, valid GIF
+    //   - per-format collision: second MP4-Source call lands at -2.mp4
+    // Run explicitly:
+    //   cargo test --lib save_recording_baseline -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn save_recording_baseline() {
+        let home = std::env::var("HOME").unwrap();
+        let source_str = format!(
+            "{home}/Movies/Zeigen/.scratch-baseline-c1/recording-2026-05-19-114549/recording-2026-05-19-114549.mp4"
+        );
+        let sidecar_path = format!(
+            "{home}/Movies/Zeigen/.scratch-baseline-c1/recording-2026-05-19-114549/.recording-2026-05-19-114549.annotations.json"
+        );
+        assert!(Path::new(&source_str).exists(), "baseline source missing");
+        assert!(Path::new(&sidecar_path).exists(), "baseline sidecar missing");
+
+        // --- noop + MP4-Source: hard-link path. We point at the source mp4
+        // but feed in a stamp pointing at an empty-sidecar fixture so the
+        // baseline's real sidecar (which has edits) is bypassed. To keep the
+        // test self-contained, we copy the source mp4 to a tmp dir with no
+        // adjacent sidecar; read_sidecar_path then returns None and the noop
+        // branch fires.
+        let tmp_dir = std::env::temp_dir().join("zeigen-save-recording-test");
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(&tmp_dir).expect("create tmp dir");
+        let noop_src = tmp_dir.join("recording-test-noop-c2.mp4");
+        std::fs::copy(&source_str, &noop_src).expect("copy noop source");
+
+        let movies = PathBuf::from(&home).join("Movies/Zeigen");
+        let noop_out_first = movies.join("recording-test-noop-c2.mp4");
+        let noop_out_second = movies.join("recording-test-noop-c2-2.mp4");
+        let _ = std::fs::remove_file(&noop_out_first);
+        let _ = std::fs::remove_file(&noop_out_second);
+
+        let result = save_recording(
+            "test-noop-c2".to_string(),
+            noop_src.to_string_lossy().into_owned(),
+            "mp4".to_string(),
+            "source".to_string(),
+            None,
+        )
+        .expect("save_recording noop");
+        assert_eq!(result.output_path, noop_out_first.to_string_lossy());
+        assert!(noop_out_first.exists(), "noop output missing");
+        // hard_link: same inode as source (verifies we didn't fall through
+        // to the pipeline branch — copy fallback would also produce a real
+        // file but with a different inode).
+        let src_meta = std::fs::metadata(&noop_src).expect("stat noop src");
+        let out_meta = std::fs::metadata(&noop_out_first).expect("stat noop out");
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(
+            src_meta.ino(),
+            out_meta.ino(),
+            "noop save should hard-link (same inode)"
+        );
+
+        // --- per-format collision: second call lands at -2.mp4 ---
+        let result2 = save_recording(
+            "test-noop-c2".to_string(),
+            noop_src.to_string_lossy().into_owned(),
+            "mp4".to_string(),
+            "source".to_string(),
+            None,
+        )
+        .expect("save_recording second");
+        assert_eq!(result2.output_path, noop_out_second.to_string_lossy());
+        assert!(noop_out_second.exists(), "second output missing");
+
+        // --- edits + MP4-P720: pipeline pass, 720 tall ---
+        // Drop the baseline sidecar next to a fresh source copy so the
+        // edits feed through run_edit_pipeline.
+        let edited_src = tmp_dir.join("recording-test-edits-c2.mp4");
+        std::fs::copy(&source_str, &edited_src).expect("copy edited source");
+        std::fs::copy(
+            &sidecar_path,
+            tmp_dir.join(".recording-test-edits-c2.annotations.json"),
+        )
+        .expect("copy edited sidecar");
+
+        let p720_out = movies.join("recording-test-edits-c2.mp4");
+        let _ = std::fs::remove_file(&p720_out);
+
+        let result3 = save_recording(
+            "test-edits-c2".to_string(),
+            edited_src.to_string_lossy().into_owned(),
+            "mp4".to_string(),
+            "720p".to_string(),
+            None,
+        )
+        .expect("save_recording p720");
+        assert_eq!(result3.output_path, p720_out.to_string_lossy());
+        let (_, h720) = probe_dimensions(&p720_out).expect("probe p720");
+        assert_eq!(h720, 720, "edited mp4 should be 720 tall, got {h720}");
+
+        // --- edits + GIF-720p@15: pipeline pass, valid GIF ---
+        let gif_out = movies.join("recording-test-edits-c2.gif");
+        let _ = std::fs::remove_file(&gif_out);
+
+        let result4 = save_recording(
+            "test-edits-c2".to_string(),
+            edited_src.to_string_lossy().into_owned(),
+            "gif".to_string(),
+            "720p".to_string(),
+            Some(15),
+        )
+        .expect("save_recording gif");
+        assert_eq!(result4.output_path, gif_out.to_string_lossy());
+        let bytes = std::fs::read(&gif_out).expect("read gif");
+        assert!(bytes.len() > 100, "gif too small");
+        let header = &bytes[..6];
+        assert!(
+            header == b"GIF89a" || header == b"GIF87a",
+            "not a GIF: {header:?}"
+        );
+
+        // --- fps required for gif format ---
+        let err = save_recording(
+            "test-edits-c2".to_string(),
+            edited_src.to_string_lossy().into_owned(),
+            "gif".to_string(),
+            "720p".to_string(),
+            None,
+        )
+        .expect_err("gif without fps should fail");
+        assert!(err.contains("fps"), "expected fps error, got: {err}");
+
+        println!(
+            "ok: noop={}, collision={}, p720={} ({} tall), gif={} ({} bytes)",
+            noop_out_first.display(),
+            noop_out_second.display(),
+            p720_out.display(),
+            h720,
+            gif_out.display(),
+            bytes.len(),
+        );
     }
 }

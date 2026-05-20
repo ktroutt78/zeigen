@@ -4,6 +4,7 @@ use objc2::runtime::AnyObject;
 use std::ffi::CString;
 use std::path::Path;
 
+use crate::edit;
 use crate::exports;
 
 // Write a single fileURL to the macOS general pasteboard. NSURL conforms
@@ -100,6 +101,9 @@ pub fn clipboard_copy_text(text: String) -> Result<(), String> {
     Ok(())
 }
 
+// Phase 11 c2: runs the edit pipeline so the copied mp4 reflects the
+// current sidecar (trim + annotations). Source resolution, no GIF tail
+// — Copy stays ephemeral (D-15) and doesn't touch ~/Movies/Zeigen.
 #[tauri::command]
 pub fn clipboard_copy_recording(stamp: String, source_path: String) -> Result<(), String> {
     let source = Path::new(&source_path);
@@ -111,7 +115,14 @@ pub fn clipboard_copy_recording(stamp: String, source_path: String) -> Result<()
         .file_name()
         .ok_or_else(|| format!("source has no filename: {}", source.display()))?;
     let temp_file = temp_dir.join(file_name);
-    std::fs::copy(source, &temp_file)
-        .map_err(|e| format!("copy {} → {}: {e}", source.display(), temp_file.display()))?;
+    let sidecar = edit::read_sidecar_path(source)?.unwrap_or_default();
+    edit::run_edit_pipeline(
+        source,
+        &temp_file,
+        &sidecar,
+        edit::PipelineMode::Mp4 {
+            resolution: edit::Mp4Resolution::Source,
+        },
+    )?;
     write_url_to_pasteboard(&temp_file)
 }
