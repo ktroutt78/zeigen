@@ -282,6 +282,7 @@ final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendable {
             append(sampleBuffer, to: videoInput, isVideo: true)
         case .microphone:
             guard let audioInput else { return }
+            applyLimiterInPlace(sampleBuffer)
             append(sampleBuffer, to: audioInput, isVideo: false)
         default:
             break
@@ -356,6 +357,63 @@ final class RecordingSession: NSObject, SCStreamOutput, @unchecked Sendable {
             return 1.0
         }
         return CGFloat(display.width) / display.frame.width
+    }
+
+    // Per-sample soft-knee limiter at -1 dBFS. Below threshold, samples pass
+    // through unchanged. Above threshold, magnitude follows
+    // y = t + k * tanh((|x| - t) / k) which asymptotically approaches 1.0
+    // without ever crossing it. Sign of x is preserved.
+    private static let limiterThreshold: Float = 0.8913  // 10^(-1/20)
+    private static let limiterKnee: Float = 1.0 - limiterThreshold
+
+    private func applyLimiter(_ samples: UnsafeMutablePointer<Float>, count: Int) {
+        let t = Self.limiterThreshold
+        let k = Self.limiterKnee
+        for i in 0..<count {
+            let x = samples[i]
+            let mag = x < 0 ? -x : x
+            if mag <= t { continue }
+            let over = mag - t
+            let limited = t + k * tanh(over / k)
+            samples[i] = x < 0 ? -limited : limited
+        }
+    }
+
+    private func applyLimiterInPlace(_ buffer: CMSampleBuffer) {
+        var ablSize = 0
+        var status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            buffer,
+            bufferListSizeNeededOut: &ablSize,
+            bufferListOut: nil,
+            bufferListSize: 0,
+            blockBufferAllocator: nil,
+            blockBufferMemoryAllocator: nil,
+            flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+            blockBufferOut: nil
+        )
+        guard status == noErr, ablSize > 0 else { return }
+        let raw = UnsafeMutableRawPointer.allocate(byteCount: ablSize, alignment: 16)
+        defer { raw.deallocate() }
+        let abl = raw.bindMemory(to: AudioBufferList.self, capacity: 1)
+        var blockBuffer: CMBlockBuffer?
+        status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            buffer,
+            bufferListSizeNeededOut: nil,
+            bufferListOut: abl,
+            bufferListSize: ablSize,
+            blockBufferAllocator: nil,
+            blockBufferMemoryAllocator: nil,
+            flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+            blockBufferOut: &blockBuffer
+        )
+        guard status == noErr else { return }
+        let buffers = UnsafeMutableAudioBufferListPointer(abl)
+        for ab in buffers {
+            guard let data = ab.mData else { continue }
+            let count = Int(ab.mDataByteSize) / MemoryLayout<Float>.size
+            let p = data.bindMemory(to: Float.self, capacity: count)
+            applyLimiter(p, count: count)
+        }
     }
 
     private func adjustTiming(_ buffer: CMSampleBuffer, offset: CMTime) -> CMSampleBuffer? {
