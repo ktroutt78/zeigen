@@ -210,6 +210,14 @@ Items that were considered but didn't earn a phase. Pull from here when a real n
 - **Error surface for common failures** — device disappeared mid-record, disk full, permission revoked. Existing StatusStrip handles engine errors but coverage hasn't been audited end-to-end. Survey gaps when a real failure surprises a recording.
 - **Recording preset picker (16:9 / 1:1 / 9:16)** — would require composite + export pipeline changes. YAGNI for the current use case (analytics demos are 16:9); reconsider only if a non-16:9 demand appears.
 
+### Phase 12 (proposed): Audio quality
+
+Background noise was clearly audible in real recordings during Phase 11 testing (2026-05-20). Solve as a coherent phase rather than piecemeal — the three items below share the audio pipeline and the review-window waveform surface.
+
+- **Noise reduction (export-side)** — add an ffmpeg `arnndn` filter pass using the stock RNNoise model. Export-side keeps the raw capture unmodified so re-saves with different settings are possible. Open questions: model file location (bundled vs downloaded once on first run); on/off toggle vs always-on; whether `arnndn` runs before or after the existing edit graph (likely before, so trim/annotation timing is unaffected).
+- **Clipping detection + waveform indicator** — extend `Waveform.tsx` to flag buckets whose peak exceeds a clipping threshold (e.g. `>= 0.98`) with a colored band or marker. Surfaces over-driven input post-record so the user knows whether to re-record. No capture-side change in this slice.
+- **Capture-side compression / limiter** — add a real-time compressor or limiter on the mic input in the Swift recording engine (likely an `AVAudioUnitEffect` chain feeding `AVAssetWriter`). Prevents the clipping that the indicator above merely surfaces. Open questions: hard limiter vs soft-knee compressor; fixed thresholds vs a "mic level" UI slice; how this interacts with the single-audio-source A/V sync rule.
+
 ### Phase 11 (proposed): Review window UX overhaul
 
 Two review-window UX items that share implementation surface (Timeline component, ExportPanel layout, scrub event handling). Worth planning together rather than as two independent passes.
