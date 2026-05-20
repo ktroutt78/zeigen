@@ -202,6 +202,27 @@ Two deliverables landing in the review window (`src/Review.tsx`), tied together 
 
 **Done when:** Clicking GIF in the QUICK EXPORT row produces a `.gif` that honors the current trim + text + arrow edits, with progress + save-dialog feedback matching the mp4 path. The Timeline track in the review window shows an actual audio waveform for the current recording (flat track for mic-less recordings), and remains responsive while it extracts.
 
+## Phase 12 — Audio quality
+
+Background noise was clearly audible in real recordings during Phase 11 testing (2026-05-20). The three deliverables share the audio pipeline + the review-window waveform surface, so they ship together rather than piecemeal.
+
+**12.1 — Noise reduction (export-side)**
+- ffmpeg `arnndn` filter pass using the stock RNNoise model.
+- Export-side only — the raw scratch capture stays clean so re-saves with different settings remain possible.
+- Open questions for planning: RNNoise model file location (bundled vs downloaded once on first run); on/off toggle vs always-on; whether `arnndn` runs before or after the existing edit graph (likely before, so trim/annotation timing is unaffected).
+
+**12.2 — Clipping detection + waveform indicator**
+- Extend `src/Waveform.tsx` to mark buckets whose peak exceeds a clipping threshold (e.g. `>= 0.98`) with a colored band or marker.
+- Surfaces over-driven input post-record so the user knows whether to re-record.
+- No capture-side change in this slice — purely a review-window read.
+
+**12.3 — Capture-side compression / limiter**
+- Real-time compressor or limiter on the mic input in the Swift recording engine — likely an `AVAudioUnitEffect` chain feeding `AVAssetWriter`.
+- Prevents the clipping that 12.2 merely surfaces.
+- Open questions for planning: hard limiter vs soft-knee compressor; fixed thresholds vs a "mic level" UI slice; how this interacts with the single-audio-source A/V sync rule.
+
+**Done when:** A recording made in a noisy room exports with audible background noise suppressed. The review-window waveform marks any clipped buckets with a clear visual indicator. A loud capture that would have clipped without the limiter exports clean.
+
 ## Backlog
 
 Items that were considered but didn't earn a phase. Pull from here when a real need surfaces.
@@ -209,14 +230,6 @@ Items that were considered but didn't earn a phase. Pull from here when a real n
 - **Settings persistence across app restarts** — hotkey, countdown duration, length cap, bubble size/corner all reset to defaults on launch. Tauri store plugin or localStorage if/when this becomes annoying.
 - **Error surface for common failures** — device disappeared mid-record, disk full, permission revoked. Existing StatusStrip handles engine errors but coverage hasn't been audited end-to-end. Survey gaps when a real failure surprises a recording.
 - **Recording preset picker (16:9 / 1:1 / 9:16)** — would require composite + export pipeline changes. YAGNI for the current use case (analytics demos are 16:9); reconsider only if a non-16:9 demand appears.
-
-### Phase 12 (proposed): Audio quality
-
-Background noise was clearly audible in real recordings during Phase 11 testing (2026-05-20). Solve as a coherent phase rather than piecemeal — the three items below share the audio pipeline and the review-window waveform surface.
-
-- **Noise reduction (export-side)** — add an ffmpeg `arnndn` filter pass using the stock RNNoise model. Export-side keeps the raw capture unmodified so re-saves with different settings are possible. Open questions: model file location (bundled vs downloaded once on first run); on/off toggle vs always-on; whether `arnndn` runs before or after the existing edit graph (likely before, so trim/annotation timing is unaffected).
-- **Clipping detection + waveform indicator** — extend `Waveform.tsx` to flag buckets whose peak exceeds a clipping threshold (e.g. `>= 0.98`) with a colored band or marker. Surfaces over-driven input post-record so the user knows whether to re-record. No capture-side change in this slice.
-- **Capture-side compression / limiter** — add a real-time compressor or limiter on the mic input in the Swift recording engine (likely an `AVAudioUnitEffect` chain feeding `AVAssetWriter`). Prevents the clipping that the indicator above merely surfaces. Open questions: hard limiter vs soft-knee compressor; fixed thresholds vs a "mic level" UI slice; how this interacts with the single-audio-source A/V sync rule.
 
 ### Phase 11 (proposed): Review window UX overhaul
 
