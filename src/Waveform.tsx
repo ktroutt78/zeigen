@@ -7,10 +7,23 @@ import { useEffect, useRef, useState } from "react";
 
 const PEAK_CACHE_SIZE = 4096;
 const SILENCE_THRESHOLD = 0.001;
+const CLIPPING_THRESHOLD = 0.98;
 const BAR_COLOR = "#6f6f74"; // var(--fg-tertiary)
 const CENTERLINE_COLOR = "#4a4a4f"; // var(--fg-quaternary)
 const LABEL_FONT =
   '500 11px -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif';
+
+// Resolved on first draw and cached; --warning-tint is the existing amber
+// token used by TimerChip / RecordingControlPill.
+let cachedClipColor: string | null = null;
+function getClipColor(): string {
+  if (cachedClipColor !== null) return cachedClipColor;
+  const v = getComputedStyle(document.documentElement)
+    .getPropertyValue("--warning-tint")
+    .trim();
+  cachedClipColor = v || "#d4a76a";
+  return cachedClipColor;
+}
 
 type Props = {
   assetUrl: string | null;
@@ -18,7 +31,7 @@ type Props = {
 
 type State =
   | { kind: "loading" }
-  | { kind: "ready"; peaks: Float32Array; maxPeak: number }
+  | { kind: "ready"; peaks: Float32Array; clipped: Uint8Array; maxPeak: number }
   | { kind: "empty" };
 
 export default function Waveform({ assetUrl }: Props) {
@@ -59,6 +72,7 @@ export default function Waveform({ assetUrl }: Props) {
 
       const channel = audioBuffer.getChannelData(0);
       const peaks = new Float32Array(PEAK_CACHE_SIZE);
+      const clipped = new Uint8Array(PEAK_CACHE_SIZE);
       const samplesPerBucket = channel.length / PEAK_CACHE_SIZE;
       let max = 0;
       for (let i = 0; i < PEAK_CACHE_SIZE; i++) {
@@ -71,6 +85,7 @@ export default function Waveform({ assetUrl }: Props) {
           if (a > m) m = a;
         }
         peaks[i] = m;
+        if (m >= CLIPPING_THRESHOLD) clipped[i] = 1;
         if (m > max) max = m;
       }
       // Release the decoded PCM (~10MB/min) — only the 16KB cache survives.
@@ -80,7 +95,7 @@ export default function Waveform({ assetUrl }: Props) {
       setState(
         max < SILENCE_THRESHOLD
           ? { kind: "empty" }
-          : { kind: "ready", peaks, maxPeak: max },
+          : { kind: "ready", peaks, clipped, maxPeak: max },
       );
     };
 
@@ -136,9 +151,10 @@ export default function Waveform({ assetUrl }: Props) {
       }
 
       const peaks = state.peaks;
+      const clipped = state.clipped;
       const norm = 1 / state.maxPeak;
       const half = h / 2;
-      ctx.fillStyle = BAR_COLOR;
+      const clipColor = getClipColor();
       for (let x = 0; x < w; x++) {
         const startB = Math.floor((x / w) * PEAK_CACHE_SIZE);
         const endB = Math.max(
@@ -146,10 +162,13 @@ export default function Waveform({ assetUrl }: Props) {
           Math.floor(((x + 1) / w) * PEAK_CACHE_SIZE),
         );
         let amp = 0;
+        let clip = 0;
         for (let b = startB; b < endB; b++) {
           const v = peaks[b];
           if (v > amp) amp = v;
+          if (clipped[b]) clip = 1;
         }
+        ctx.fillStyle = clip ? clipColor : BAR_COLOR;
         const barH = Math.max(1, Math.round(amp * norm * half));
         ctx.fillRect(x, mid - barH, 1, barH * 2);
       }
