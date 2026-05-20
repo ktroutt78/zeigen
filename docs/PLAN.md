@@ -230,6 +230,7 @@ Items that were considered but didn't earn a phase. Pull from here when a real n
 - **Settings persistence across app restarts** — hotkey, countdown duration, length cap, bubble size/corner all reset to defaults on launch. Tauri store plugin or localStorage if/when this becomes annoying.
 - **Error surface for common failures** — device disappeared mid-record, disk full, permission revoked. Existing StatusStrip handles engine errors but coverage hasn't been audited end-to-end. Survey gaps when a real failure surprises a recording.
 - **Recording preset picker (16:9 / 1:1 / 9:16)** — would require composite + export pipeline changes. YAGNI for the current use case (analytics demos are 16:9); reconsider only if a non-16:9 demand appears.
+- **Timeline visibility at large window sizes** — Phase 11 regression surfaced during Phase 12 c1 verification (2026-05-20). At full-screen / tall window states the timeline waveform is pushed below the viewport entirely; the video pane occupies the full window height. Visible normally in smaller windows. Workaround: shrink the review window. Investigate the Timeline container's vertical positioning in the Review layout — likely a missing `flex-shrink: 0` / `min-height` on the timeline row, or an unconstrained `flex: 1` on the video pane that lets it eat the timeline's space at tall heights. Suspect surfaces: the footer removal + sidebar restructure from Phase 11 c4 (commit 65dc026).
 
 ### Phase 11 (proposed): Review window UX overhaul
 
