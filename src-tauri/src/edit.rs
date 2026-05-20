@@ -415,10 +415,21 @@ pub(crate) fn is_edit_pipeline_noop(sidecar: &SidecarState, duration: f64) -> bo
 
 // Output resolution for GIF export. Source caps at 1080p per phase 10
 // context D-01 to keep palette generation tractable.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GifResolution {
     P480,
     P720,
+    Source,
+}
+
+// Output resolution for MP4 export. `Source` skips the scale node and
+// keeps the pipeline byte-identical to the pre-phase-11 behavior; the
+// other variants append a lanczos scale after the overlay chain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Mp4Resolution {
+    P480,
+    P720,
+    P1080,
     Source,
 }
 
@@ -427,7 +438,7 @@ pub(crate) enum GifResolution {
 // palettegen/paletteuse chain feeding the GIF muxer.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum PipelineMode {
-    Mp4,
+    Mp4 { resolution: Mp4Resolution },
     Gif { resolution: GifResolution, fps: u32 },
 }
 
@@ -444,10 +455,17 @@ pub(crate) fn run_edit_pipeline(
     mode: PipelineMode,
 ) -> Result<(), String> {
     let gif_params: Option<(GifResolution, u32)> = match mode {
-        PipelineMode::Mp4 => None,
+        PipelineMode::Mp4 { .. } => None,
         PipelineMode::Gif { resolution, fps } => Some((resolution, fps)),
     };
     let gif_mode = gif_params.is_some();
+    // None on Source (pipeline stays byte-identical to pre-phase-11); Some
+    // on P480/P720/P1080 forces a scale node onto the tail of the overlay
+    // chain and forces the filter graph to be built even with no overlays.
+    let mp4_scale: Option<Mp4Resolution> = match mode {
+        PipelineMode::Mp4 { resolution } if resolution != Mp4Resolution::Source => Some(resolution),
+        _ => None,
+    };
     if !source.exists() {
         return Err(format!("source missing: {}", source.display()));
     }
@@ -535,9 +553,10 @@ pub(crate) fn run_edit_pipeline(
         args.push(path.to_string_lossy().into_owned());
     }
 
-    // Force-build the filter graph in Gif mode even with no overlays so
-    // the palettegen/paletteuse tail can chain off [0:v].
-    let needs_filter = !text_paths.is_empty() || !arrow_paths.is_empty() || gif_mode;
+    // Force-build the filter graph in Gif mode (so the palettegen/paletteuse
+    // tail can chain off [0:v]) or whenever an MP4 scale is requested.
+    let needs_filter =
+        !text_paths.is_empty() || !arrow_paths.is_empty() || gif_mode || mp4_scale.is_some();
     if needs_filter {
         let mut filter = String::new();
         let mut prev_label = String::from("0:v");
@@ -563,7 +582,11 @@ pub(crate) fn run_edit_pipeline(
                 end = end,
                 next_label = next_label,
             ));
-            if i + 1 < text_paths.len() || !arrow_paths.is_empty() || gif_mode {
+            if i + 1 < text_paths.len()
+                || !arrow_paths.is_empty()
+                || gif_mode
+                || mp4_scale.is_some()
+            {
                 filter.push(';');
             }
             prev_label = next_label;
@@ -584,11 +607,30 @@ pub(crate) fn run_edit_pipeline(
                 end = end,
                 next_label = next_label,
             ));
-            if i + 1 < arrow_paths.len() || gif_mode {
+            if i + 1 < arrow_paths.len() || gif_mode || mp4_scale.is_some() {
                 filter.push(';');
             }
             prev_label = next_label;
             input_idx += 1;
+        }
+
+        // MP4 scale tail — only fires when resolution != Source. Mutually
+        // exclusive with the GIF tail below. Terminal node, so no trailing ;.
+        if let Some(res) = mp4_scale {
+            // Terminal node — no further nodes consume `step`, so it isn't
+            // incremented here. If a downstream node is ever appended, bump
+            // `step` first.
+            let next_label = format!("v{step}");
+            let scale_arg = match res {
+                Mp4Resolution::P480 => "-2:480",
+                Mp4Resolution::P720 => "-2:720",
+                Mp4Resolution::P1080 => "'min(iw,1920)':-2",
+                Mp4Resolution::Source => unreachable!("mp4_scale is None on Source"),
+            };
+            filter.push_str(&format!(
+                "[{prev_label}]scale={scale_arg}:flags=lanczos[{next_label}]"
+            ));
+            prev_label = next_label;
         }
 
         // GIF tail. stats_mode=diff weights moving pixels (better for
@@ -617,7 +659,7 @@ pub(crate) fn run_edit_pipeline(
     }
 
     match mode {
-        PipelineMode::Mp4 => {
+        PipelineMode::Mp4 { .. } => {
             args.push("-c:v".into());
             args.push("h264_videotoolbox".into());
             args.push("-b:v".into());
@@ -769,5 +811,89 @@ mod tests {
         );
 
         println!("ok: {out} ({} bytes, {dur:.2}s)", bytes.len());
+    }
+
+    // End-to-end check against the Phase 10 c1 scratch baseline. Verifies
+    // that the MP4 path through run_edit_pipeline honors source + sidecar
+    // on Source resolution and produces a 720-tall output on P720. Mirrors
+    // gif_export_baseline. Run explicitly:
+    //   cargo test --lib mp4_save_baseline -- --ignored --nocapture
+    //
+    // Source-path output also gets a frame-metadata CSV dumped next to it
+    // for manual regression diffs against a pre-refactor capture (Phase 10
+    // c1 method — see PHASE-10-PLAN.md §c1 Done-when).
+    #[test]
+    #[ignore]
+    fn mp4_save_baseline() {
+        let home = std::env::var("HOME").unwrap();
+        let source_str = format!(
+            "{home}/Movies/Zeigen/.scratch-baseline-c1/recording-2026-05-19-114549/recording-2026-05-19-114549.mp4"
+        );
+        let source = Path::new(&source_str);
+        assert!(source.exists(), "baseline source missing");
+        let sidecar = read_sidecar_path(source)
+            .expect("read sidecar")
+            .expect("baseline sidecar present");
+        assert!(sidecar.trim.is_some(), "baseline sidecar missing trim");
+        assert!(
+            sidecar.annotations.iter().any(|a| a.kind == "text"),
+            "baseline sidecar missing text annotation"
+        );
+        assert!(
+            sidecar.annotations.iter().any(|a| a.kind == "arrow"),
+            "baseline sidecar missing arrow annotation"
+        );
+
+        // --- Source resolution: regression-proof path ---
+        let src_out_str = format!("{home}/Movies/Zeigen/test-mp4-c1-source.mp4");
+        let src_csv_str = format!("{home}/Movies/Zeigen/test-mp4-c1-source.csv");
+        let _ = std::fs::remove_file(&src_out_str);
+        let _ = std::fs::remove_file(&src_csv_str);
+
+        run_edit_pipeline(
+            source,
+            Path::new(&src_out_str),
+            &sidecar,
+            PipelineMode::Mp4 { resolution: Mp4Resolution::Source },
+        )
+        .expect("source pipeline");
+
+        let (src_w_in, src_h_in) = probe_dimensions(source).expect("probe source input dims");
+        let (sw, sh) = probe_dimensions(Path::new(&src_out_str)).expect("probe source dims");
+        // Source path skips the scale node entirely, so output dimensions
+        // match the input mp4.
+        assert_eq!(
+            (sw, sh), (src_w_in, src_h_in),
+            "Source output dims {sw}x{sh} should match input {src_w_in}x{src_h_in}"
+        );
+
+        let probe = Command::new(FFPROBE_PATH)
+            .args([
+                "-v", "error", "-select_streams", "v:0", "-show_entries",
+                "frame=pkt_pts_time,pict_type,pkt_size", "-of", "csv",
+            ])
+            .arg(&src_out_str)
+            .output()
+            .expect("ffprobe frames");
+        assert!(probe.status.success(), "ffprobe non-zero");
+        std::fs::write(&src_csv_str, &probe.stdout).expect("write source csv");
+        println!(
+            "source: {} ({}x{}) — csv {} bytes at {}",
+            src_out_str, sw, sh, probe.stdout.len(), src_csv_str
+        );
+
+        // --- P720 resolution: smoke ---
+        let p720_out_str = format!("{home}/Movies/Zeigen/test-mp4-c1-p720.mp4");
+        let _ = std::fs::remove_file(&p720_out_str);
+        run_edit_pipeline(
+            source,
+            Path::new(&p720_out_str),
+            &sidecar,
+            PipelineMode::Mp4 { resolution: Mp4Resolution::P720 },
+        )
+        .expect("p720 pipeline");
+        let (_, h720) = probe_dimensions(Path::new(&p720_out_str)).expect("probe p720 dims");
+        assert_eq!(h720, 720, "P720 output height should be 720, got {h720}");
+        println!("p720: {p720_out_str} ({h720} tall)");
     }
 }
