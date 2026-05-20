@@ -802,6 +802,7 @@ function LeftColumn(props: LeftColumnProps) {
       />
       <Timeline
         assetUrl={props.assetUrl}
+        videoRef={props.videoRef}
         duration={props.duration}
         currentTime={props.currentTime}
         trim={props.trim}
@@ -1624,6 +1625,7 @@ function PlayerOverlay({
 
 type TimelineProps = {
   assetUrl: string | null;
+  videoRef: React.MutableRefObject<HTMLVideoElement | null>;
   duration: number | null;
   currentTime: number;
   trim: Trim | null;
@@ -1647,6 +1649,7 @@ function Timeline(props: TimelineProps) {
   const startHandleDrag = useCallback(
     (side: "in" | "out") => (e: React.PointerEvent) => {
       e.preventDefault();
+      e.stopPropagation();
       const track = trackRef.current;
       if (!track || props.duration == null) return;
       const rect = track.getBoundingClientRect();
@@ -1674,13 +1677,34 @@ function Timeline(props: TimelineProps) {
     [props],
   );
 
-  const onTrackClick = (e: React.MouseEvent) => {
+  const onTrackPointerDown = (e: React.PointerEvent) => {
     if (props.duration == null) return;
     const track = trackRef.current;
     if (!track) return;
     const rect = track.getBoundingClientRect();
-    const t = ((e.clientX - rect.left) / rect.width) * props.duration;
-    props.seek(t);
+    const startX = e.clientX;
+    const duration = props.duration;
+    const wasPlaying = !props.videoRef.current?.paused;
+    let movedPastThreshold = false;
+    const seekAt = (clientX: number) => {
+      const t = ((clientX - rect.left) / rect.width) * duration;
+      props.seek(t);
+    };
+    const onMove = (ev: PointerEvent) => {
+      if (!movedPastThreshold && Math.abs(ev.clientX - startX) > 3) {
+        movedPastThreshold = true;
+        if (wasPlaying) props.videoRef.current?.pause();
+      }
+      if (movedPastThreshold) seekAt(ev.clientX);
+    };
+    const onUp = (ev: PointerEvent) => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      if (!movedPastThreshold) seekAt(ev.clientX);
+      else if (wasPlaying) props.videoRef.current?.play().catch(() => {});
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
   };
 
   const trimLen =
@@ -1733,8 +1757,8 @@ function Timeline(props: TimelineProps) {
 
       <div
         ref={trackRef}
-        onClick={onTrackClick}
-        style={{ position: "relative", height: 44, marginTop: 6, cursor: "pointer" }}
+        onPointerDown={onTrackPointerDown}
+        style={{ position: "relative", height: 44, marginTop: 6, cursor: "pointer", touchAction: "none" }}
       >
         <div
           style={{
