@@ -6,6 +6,7 @@ import { revealItemInDir, openUrl } from "@tauri-apps/plugin-opener";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { Icon, I, P } from "./components/icons";
 import Waveform from "./Waveform";
+import ScrubPreview from "./ScrubPreview";
 
 // Review window. Layout mirrors docs/design/surfaces/review.jsx — left
 // column is player + timeline + action footer, right column is the Phase
@@ -652,6 +653,7 @@ export default function Review() {
       >
         <LeftColumn
           assetUrl={assetUrl}
+          sourcePath={sourcePath}
           videoRef={videoRef}
           onLoadedMetadata={onLoadedMetadata}
           onTimeUpdate={onTimeUpdate}
@@ -761,6 +763,7 @@ function Header({ sourceName, dirty }: { sourceName: string; dirty: boolean }) {
 
 type LeftColumnProps = {
   assetUrl: string | null;
+  sourcePath: string | null;
   videoRef: React.MutableRefObject<HTMLVideoElement | null>;
   onLoadedMetadata: () => void;
   onTimeUpdate: () => void;
@@ -802,6 +805,7 @@ function LeftColumn(props: LeftColumnProps) {
       />
       <Timeline
         assetUrl={props.assetUrl}
+        sourcePath={props.sourcePath}
         videoRef={props.videoRef}
         duration={props.duration}
         currentTime={props.currentTime}
@@ -1625,6 +1629,7 @@ function PlayerOverlay({
 
 type TimelineProps = {
   assetUrl: string | null;
+  sourcePath: string | null;
   videoRef: React.MutableRefObject<HTMLVideoElement | null>;
   duration: number | null;
   currentTime: number;
@@ -1636,6 +1641,8 @@ type TimelineProps = {
 
 function Timeline(props: TimelineProps) {
   const trackRef = useRef<HTMLDivElement | null>(null);
+  const [hover, setHover] = useState<{ time: number; rect: DOMRect } | null>(null);
+  const stamp = props.sourcePath ? parseStampFromPath(props.sourcePath) : null;
 
   const inPct =
     props.duration != null && props.trim != null ? (props.trim.in / props.duration) * 100 : 0;
@@ -1677,6 +1684,11 @@ function Timeline(props: TimelineProps) {
     [props],
   );
 
+  const timeAt = (clientX: number, rect: DOMRect, duration: number) => {
+    const frac = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    return frac * duration;
+  };
+
   const onTrackPointerDown = (e: React.PointerEvent) => {
     if (props.duration == null) return;
     const track = trackRef.current;
@@ -1687,8 +1699,7 @@ function Timeline(props: TimelineProps) {
     const wasPlaying = !props.videoRef.current?.paused;
     let movedPastThreshold = false;
     const seekAt = (clientX: number) => {
-      const t = ((clientX - rect.left) / rect.width) * duration;
-      props.seek(t);
+      props.seek(timeAt(clientX, rect, duration));
     };
     const onMove = (ev: PointerEvent) => {
       if (!movedPastThreshold && Math.abs(ev.clientX - startX) > 3) {
@@ -1696,16 +1707,33 @@ function Timeline(props: TimelineProps) {
         if (wasPlaying) props.videoRef.current?.pause();
       }
       if (movedPastThreshold) seekAt(ev.clientX);
+      setHover({ time: timeAt(ev.clientX, rect, duration), rect });
     };
     const onUp = (ev: PointerEvent) => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       if (!movedPastThreshold) seekAt(ev.clientX);
       else if (wasPlaying) props.videoRef.current?.play().catch(() => {});
+      const overTrack =
+        ev.clientX >= rect.left &&
+        ev.clientX <= rect.right &&
+        ev.clientY >= rect.top &&
+        ev.clientY <= rect.bottom;
+      if (!overTrack) setHover(null);
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
   };
+
+  const onTrackPointerMove = (e: React.PointerEvent) => {
+    if (props.duration == null) return;
+    const track = trackRef.current;
+    if (!track) return;
+    const rect = track.getBoundingClientRect();
+    setHover({ time: timeAt(e.clientX, rect, props.duration), rect });
+  };
+
+  const onTrackPointerLeave = () => setHover(null);
 
   const trimLen =
     props.trim && props.duration != null ? Math.max(0, props.trim.out - props.trim.in) : null;
@@ -1758,6 +1786,8 @@ function Timeline(props: TimelineProps) {
       <div
         ref={trackRef}
         onPointerDown={onTrackPointerDown}
+        onPointerMove={onTrackPointerMove}
+        onPointerLeave={onTrackPointerLeave}
         style={{ position: "relative", height: 44, marginTop: 6, cursor: "pointer", touchAction: "none" }}
       >
         <div
@@ -1909,6 +1939,15 @@ function Timeline(props: TimelineProps) {
           />
         </div>
       </div>
+
+      <ScrubPreview
+        assetUrl={props.assetUrl}
+        recordingId={stamp}
+        sourcePath={props.sourcePath}
+        duration={props.duration}
+        hoverTime={hover?.time ?? null}
+        trackRect={hover?.rect ?? null}
+      />
     </div>
   );
 }
