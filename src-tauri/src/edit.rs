@@ -144,7 +144,7 @@ const DEFAULT_ARROW_STROKE_PX: f64 = 8.0;
 // plain TTF that ships with macOS and renders correctly.
 const FONT_FILE: &str = "/System/Library/Fonts/Geneva.ttf";
 
-fn probe_dimensions(path: &Path) -> Result<(u32, u32), String> {
+pub(crate) fn probe_dimensions(path: &Path) -> Result<(u32, u32), String> {
     let output = Command::new(FFPROBE_PATH)
         .args([
             "-v",

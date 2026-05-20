@@ -7,6 +7,7 @@ mod exports;
 mod hotkey;
 mod linkedin;
 mod macos;
+mod thumbs;
 mod tray;
 mod webcam;
 
@@ -417,6 +418,21 @@ fn movies_dir() -> Result<PathBuf, String> {
     Ok(PathBuf::from(home).join("Movies/Zeigen"))
 }
 
+// App-launch safety net for scratch dirs orphaned by a crash or force-quit
+// mid-session. Phase 11 keeps the scratch alive across saves until the
+// review window closes, so a clean exit always sweeps its own dir — this
+// just covers the unclean case. Best-effort; failures are silent.
+fn sweep_stale_scratch() {
+    let root = match movies_dir().map(|d| d.join(".scratch")) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    if !root.exists() {
+        return;
+    }
+    thumbs::sweep_dir_older_than(&root, std::time::Duration::from_secs(24 * 60 * 60));
+}
+
 // Scratch root: ~/Movies/Zeigen/.scratch. Each recording gets its own
 // subdirectory containing the composited mp4, sidecar, and raw source
 // files. Discard removes the whole subdirectory; commit moves the mp4 out
@@ -584,6 +600,8 @@ pub fn run() {
             // Sweep stale per-recording exports left over from prior runs
             // that crashed or force-quit before per-session cleanup ran.
             exports::sweep_stale_exports();
+            thumbs::sweep_stale_thumbs();
+            sweep_stale_scratch();
 
             // Tap engine-event window_frame messages into the active
             // recording's CaptureMode so bubble_position_event can convert
@@ -640,6 +658,7 @@ pub fn run() {
             edit::delete_sidecar,
             edit::gif_export,
             edit::save_recording,
+            thumbs::extract_thumb_sprite,
             commit_recording,
             discard_recording,
             clipboard::clipboard_copy_recording,
