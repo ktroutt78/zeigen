@@ -139,3 +139,107 @@ pub(crate) fn sweep_dir_older_than(root: &Path, threshold: Duration) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command as StdCommand;
+
+    // Smoke against a live scratch recording. Run explicitly:
+    //   cargo test --lib sprite_smoke -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn sprite_smoke() {
+        let home = std::env::var("HOME").unwrap();
+        let stamp = "smoke-c3";
+        let source = format!(
+            "{home}/Movies/Zeigen/.scratch/recording-2026-05-19-225852/recording-2026-05-19-225852.mp4"
+        );
+        assert!(Path::new(&source).exists(), "scratch source missing");
+
+        let expected_out = format!("{home}/Library/Caches/com.zeigen.app/thumbs/{stamp}.png");
+        let _ = std::fs::remove_file(&expected_out);
+
+        let info = extract_thumb_sprite(source, stamp.to_string()).expect("sprite extract");
+
+        assert_eq!(info.sprite_path, expected_out);
+        assert_eq!(info.cols, 20);
+        assert_eq!(info.rows, 10);
+        assert_eq!(info.thumb_w, 160);
+        assert!(info.thumb_h > 0, "thumb_h must be positive");
+        assert!(info.count > 0, "count must be positive");
+        assert!(info.count <= 200, "count must fit grid");
+        assert!(Path::new(&info.sprite_path).exists(), "sprite PNG missing");
+
+        // ffprobe the PNG to confirm dimensions match the grid math.
+        let probe = StdCommand::new(crate::composite::FFPROBE_PATH)
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height",
+                "-of",
+                "csv=p=0:s=x",
+            ])
+            .arg(&info.sprite_path)
+            .output()
+            .expect("ffprobe sprite");
+        let dims = String::from_utf8_lossy(&probe.stdout).trim().to_string();
+        let expected_w = info.thumb_w * info.cols;
+        let expected_h = info.thumb_h * info.rows;
+        assert_eq!(
+            dims,
+            format!("{expected_w}x{expected_h}"),
+            "sprite dims mismatch"
+        );
+
+        println!(
+            "ok: {} ({}x{} grid of {}x{}, count={})",
+            info.sprite_path, info.cols, info.rows, info.thumb_w, info.thumb_h, info.count
+        );
+    }
+
+    // Verifies the shared sweep helper actually removes old entries and
+    // leaves fresh ones alone. Uses a temp dir so we don't touch live caches.
+    #[test]
+    fn sweep_helper_removes_old_keeps_new() {
+        let tmp = std::env::temp_dir().join(format!(
+            "zeigen-thumbs-sweep-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let old_file = tmp.join("old.png");
+        let new_file = tmp.join("new.png");
+        let old_dir = tmp.join("old-dir");
+        let new_dir = tmp.join("new-dir");
+        std::fs::write(&old_file, b"x").unwrap();
+        std::fs::write(&new_file, b"x").unwrap();
+        std::fs::create_dir(&old_dir).unwrap();
+        std::fs::create_dir(&new_dir).unwrap();
+
+        // Backdate old entries to 48h ago via `touch -t` (macOS-friendly).
+        StdCommand::new("touch")
+            .args(["-t", "202401010000"])
+            .arg(&old_file)
+            .status()
+            .unwrap();
+        StdCommand::new("touch")
+            .args(["-t", "202401010000"])
+            .arg(&old_dir)
+            .status()
+            .unwrap();
+
+        sweep_dir_older_than(&tmp, Duration::from_secs(24 * 60 * 60));
+
+        assert!(!old_file.exists(), "old file should be swept");
+        assert!(!old_dir.exists(), "old dir should be swept");
+        assert!(new_file.exists(), "new file should remain");
+        assert!(new_dir.exists(), "new dir should remain");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
