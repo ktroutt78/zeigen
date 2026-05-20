@@ -144,19 +144,23 @@ export default function Review() {
   const [showCloseModal, setShowCloseModal] = useState(false);
   const busy = saving || discarding;
 
-  // Tracks the post-commit final path. Mirrored as a ref so saveRecording
-  // can short-circuit synchronously without re-running the commit pipeline.
-  // Phase 6 export rows read this state to decide whether they're enabled.
-  const [committedPath, setCommittedPath] = useState<string | null>(null);
-  const committedPathRef = useRef<string | null>(null);
+  // Save-state: lastSavedPath drives Reveal target, Discard-disabled, and
+  // the close-window modal gate (modal fires only when null). committedMp4Path
+  // tracks the most recent MP4 specifically so the LinkedIn chain can reuse
+  // an existing baseline instead of always producing a fresh commit. After a
+  // GIF save these two diverge — lastSavedPath points at the .gif, but
+  // committedMp4Path keeps the prior MP4 path so LinkedIn still targets MP4.
+  const [lastSavedPath, setLastSavedPath] = useState<string | null>(null);
+  const [committedMp4Path, setCommittedMp4Path] = useState<string | null>(null);
+  const [lastSavedAt, setLastSavedAt] = useState(0);
 
-  // In-flight promise for an active commit_recording call. Concurrent
-  // saveRecording invocations (e.g., footer Save clicked twice before the
-  // disabled state propagates through React render) share this promise so
-  // commit_recording runs exactly once per scratch. Without this, the first
-  // call moves scratch → final and the second hits canonicalize on the
-  // now-missing scratch path.
-  const saveInFlightRef = useRef<Promise<string | null> | null>(null);
+  // Format/resolution/fps live here (not in ExportPanel) so the close-window
+  // modal's Save button can commit with the user's current ExportPanel
+  // selection instead of guessing defaults.
+  const [format, setFormat] = useState<"mp4" | "gif">("mp4");
+  const [mp4Res, setMp4Res] = useState<"480p" | "720p" | "1080p" | "source">("1080p");
+  const [gifRes, setGifRes] = useState<"480p" | "720p" | "source">("720p");
+  const [gifFps, setGifFps] = useState<10 | 15 | 20>(15);
 
   // Annotation editing state.
   const [tool, setTool] = useState<Tool>(null);
@@ -276,7 +280,10 @@ export default function Review() {
   );
 
   // Debounced sidecar persistence on edit. Empty states are deleted to keep
-  // the sources area tidy; non-empty states are written.
+  // the sources area tidy; non-empty states are written. Any sidecar change
+  // also invalidates committedMp4Path — the cached LinkedIn baseline is now
+  // stale, so the next LinkedIn click chains a fresh save instead of
+  // shipping the old bake.
   useEffect(() => {
     if (!sourcePath || duration == null) return;
     const empty = isLogicallyEmpty(currentState, duration);
@@ -285,6 +292,7 @@ export default function Review() {
         trim: normalizeTrim(currentState.trim, duration),
         annotations: currentState.annotations,
       };
+      setCommittedMp4Path(null);
       if (empty) {
         invoke("delete_sidecar", { sourcePath }).catch((err) =>
           setError(`delete sidecar: ${err}`),
@@ -298,62 +306,65 @@ export default function Review() {
     return () => window.clearTimeout(handle);
   }, [sourcePath, currentState, duration]);
 
-  // Commit the scratch recording to ~/Movies/Zeigen/. Edits in the current
-  // sidecar (trim + annotations) are baked at move time via the same ffmpeg
-  // pass that used to live behind "Save edits"; if there are no edits, the
-  // backend skips ffmpeg and renames the scratch mp4 to its final home.
-  // Either way the scratch directory is removed on success. Returns the
-  // final path on success, null on failure. Sets committedPath state which
-  // gates the Phase 6 export rows.
-  const saveRecording = useCallback((): Promise<string | null> => {
-    // Idempotent: once committed, every subsequent call returns the cached
-    // final path. Guards against re-invoking commit_recording on the
-    // now-stale scratch path (would fail canonicalize ENOENT).
-    if (committedPathRef.current) return Promise.resolve(committedPathRef.current);
-    if (saveInFlightRef.current) return saveInFlightRef.current;
-    if (!sourcePath) return Promise.resolve(null);
-    const promise = (async () => {
+  // Single save entrypoint. Every call re-reads raw scratch + the live
+  // sidecar (the backend reads the sidecar adjacent to sourcePath) and
+  // produces one file in ~/Movies/Zeigen/. The scratch dir survives the
+  // session so subsequent saves can re-bake against edited sidecars.
+  //
+  // Returns the output path on success, null on failure. Called by the
+  // ExportPanel Save button, ⌘S, the close-window modal Save button, and
+  // the LinkedIn chain. Updates lastSavedPath unconditionally; updates
+  // committedMp4Path only for mp4 saves (LinkedIn baseline reuse).
+  const onSave = useCallback(
+    async (spec: {
+      format: "mp4" | "gif";
+      resolution: "480p" | "720p" | "1080p" | "source";
+      fps?: number;
+    }): Promise<string | null> => {
+      if (!sourcePath) return null;
+      const stamp = parseStampFromPath(sourcePath);
+      if (!stamp) {
+        setError(`save: cannot parse stamp from ${sourcePath}`);
+        return null;
+      }
       setSaving(true);
       try {
-        const norm: SidecarState = {
-          trim: normalizeTrim(currentState.trim, duration),
-          annotations: currentState.annotations,
-        };
-        const outPath = await invoke<string>("commit_recording", {
-          scratchMp4Path: sourcePath,
-          sidecar: norm,
+        const result = await invoke<{ output_path: string }>("save_recording", {
+          stamp,
+          sourcePath,
+          format: spec.format,
+          resolution: spec.resolution,
+          fps: spec.format === "gif" ? spec.fps : undefined,
         });
-        // Notify main so its post-finalize toast updates from the now-stale
-        // scratch path to the actual final ~/Movies/Zeigen/recording-….mp4.
-        await emit("recording-committed", { final_path: outPath }).catch(() => {});
-        committedPathRef.current = outPath;
-        setCommittedPath(outPath);
-        return outPath;
+        setLastSavedPath(result.output_path);
+        setLastSavedAt(Date.now());
+        if (spec.format === "mp4") setCommittedMp4Path(result.output_path);
+        // Notify main so its post-finalize toast updates from the scratch
+        // path to whatever was just written under ~/Movies/Zeigen/.
+        await emit("recording-committed", { final_path: result.output_path }).catch(
+          () => {},
+        );
+        return result.output_path;
       } catch (err) {
-        setError(`save recording: ${err}`);
+        setError(`save: ${err}`);
         return null;
       } finally {
         setSaving(false);
-        saveInFlightRef.current = null;
       }
-    })();
-    saveInFlightRef.current = promise;
-    return promise;
-  }, [sourcePath, currentState, duration]);
+    },
+    [sourcePath],
+  );
 
   // proceedingRef gates the close-requested handler so an in-flight
   // close (which we drive explicitly via destroy()) doesn't re-enter.
   const proceedingRef = useRef(false);
 
   // iPhone-screenshot semantics: every "this recording is going away"
-  // event — footer Discard, close window, "Record another" — runs the
-  // same cleanup. discard_recording on the Rust side is idempotent:
-  // skips scratch removal if the dir is already gone (post-Save) and
-  // always cleans the matching exports temp dir.
+  // event — Discard, close window, "Record another" — runs the same
+  // cleanup. discard_recording on the Rust side is idempotent: skips
+  // scratch removal if the dir is already gone and always cleans the
+  // matching exports temp dir.
   const cleanupScratchAndExports = useCallback(async () => {
-    if (saveInFlightRef.current) {
-      try { await saveInFlightRef.current; } catch {}
-    }
     if (!sourcePath) return;
     try {
       await invoke("discard_recording", { scratchMp4Path: sourcePath });
@@ -364,6 +375,13 @@ export default function Review() {
     }
   }, [sourcePath]);
 
+  // Mirror lastSavedPath into a ref so the long-lived close-requested
+  // handler can read the current value without re-registering on each save.
+  const lastSavedPathRef = useRef<string | null>(null);
+  useEffect(() => {
+    lastSavedPathRef.current = lastSavedPath;
+  }, [lastSavedPath]);
+
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     let cancelled = false;
@@ -372,9 +390,9 @@ export default function Review() {
       const fn = await win.onCloseRequested(async (event) => {
         if (proceedingRef.current) return; // already greenlit
         event.preventDefault();
-        // Already saved → silent close. The cache temp dir still needs
-        // cleanup but the user has nothing to lose.
-        if (committedPathRef.current) {
+        // Any save already happened → silent close. The cache temp dir
+        // still needs cleanup but the user has nothing to lose.
+        if (lastSavedPathRef.current) {
           proceedingRef.current = true;
           await cleanupScratchAndExports();
           await win.destroy().catch((err) => {
@@ -383,8 +401,8 @@ export default function Review() {
           });
           return;
         }
-        // Uncommitted → red X is an ambiguous gesture. Prompt for an
-        // explicit choice. Footer Discard remains direct (no modal)
+        // No save yet → red X is an ambiguous gesture. Prompt for an
+        // explicit choice. Sidebar Discard remains direct (no modal)
         // because that click is itself the explicit choice.
         setShowCloseModal(true);
       });
@@ -457,9 +475,11 @@ export default function Review() {
     return () => window.removeEventListener("keydown", onKey);
   }, [showCloseModal, tool, selectedIndex, editingIndex, deleteAnnotation]);
 
-  // Footer Discard: instant cleanup + close. iPhone-screenshot semantics
-  // — no confirm modal. The user explicitly chose discard; they meant it.
-  const onFooterDiscard = useCallback(async () => {
+  // Discard: instant cleanup + close. iPhone-screenshot semantics — no
+  // confirm modal. The user explicitly chose discard; they meant it.
+  // Disabled in the sidebar post-save so users can't accidentally delete
+  // the scratch out from under future saves in the same session.
+  const onDiscard = useCallback(async () => {
     setDiscarding(true);
     try {
       await cleanupScratchAndExports();
@@ -469,26 +489,20 @@ export default function Review() {
     }
   }, [cleanupScratchAndExports, closeWindow]);
 
-  // Footer Save commits the scratch but does NOT close the window. The
-  // user can now reach the export rows (Copy, LinkedIn) on the final
-  // file, plus the inline Reveal affordance next to the "Saved" button.
-  const onFooterSave = useCallback(async () => {
-    await saveRecording();
-  }, [saveRecording]);
-
-  // Footer Reveal — only shown post-Save. Reveals the final mp4 in Finder.
-  const onFooterReveal = useCallback(async () => {
-    if (!committedPath) return;
+  // Reveal — only shown post-save. Points at the most recent save in any
+  // format (per D-13 — chronological, not format-prioritized).
+  const onReveal = useCallback(async () => {
+    if (!lastSavedPath) return;
     try {
-      await revealItemInDir(committedPath);
+      await revealItemInDir(lastSavedPath);
     } catch (err) {
       setError(`reveal in Finder: ${err}`);
     }
-  }, [committedPath]);
+  }, [lastSavedPath]);
 
   // Record another: same cleanup as Discard, then emit so main kicks
   // off a fresh capture, then close.
-  const onFooterRecordAnother = useCallback(async () => {
+  const onRecordAnother = useCallback(async () => {
     setDiscarding(true);
     try {
       await cleanupScratchAndExports();
@@ -499,22 +513,28 @@ export default function Review() {
     }
   }, [cleanupScratchAndExports, fireRecordAnother, closeWindow]);
 
-  // Close-modal handlers (red X on uncommitted recording). Mirror the
-  // footer buttons but each path also closes the window on success.
+  // Close-modal Save: commits with the current ExportPanel selection
+  // (format/resolution/fps lifted to Review for exactly this reason),
+  // then cleans + closes on success.
   const onModalSave = useCallback(async () => {
-    const out = await saveRecording();
+    const spec: {
+      format: "mp4" | "gif";
+      resolution: "480p" | "720p" | "1080p" | "source";
+      fps?: number;
+    } =
+      format === "mp4"
+        ? { format: "mp4", resolution: mp4Res }
+        : { format: "gif", resolution: gifRes, fps: gifFps };
+    const out = await onSave(spec);
     if (out) {
       setShowCloseModal(false);
-      // Save commits the scratch; cleanupScratchAndExports then runs an
-      // idempotent discard_recording (no-op for scratch, cleans the
-      // exports cache dir).
       await cleanupScratchAndExports();
       await closeWindow();
     } else {
       // Save failed; surface the error and let the user retry/discard.
       setShowCloseModal(false);
     }
-  }, [saveRecording, cleanupScratchAndExports, closeWindow]);
+  }, [onSave, format, mp4Res, gifRes, gifFps, cleanupScratchAndExports, closeWindow]);
 
   const onModalDiscard = useCallback(async () => {
     setShowCloseModal(false);
@@ -612,7 +632,8 @@ export default function Review() {
     <main
       className="accent-blue"
       style={{
-        minHeight: "100vh",
+        height: "100vh",
+        overflow: "hidden",
         display: "flex",
         flexDirection: "column",
         background: "var(--bg-window)",
@@ -643,13 +664,6 @@ export default function Review() {
           seek={seek}
           trim={trim}
           setTrim={setTrim}
-          onFooterDiscard={onFooterDiscard}
-          onFooterSave={onFooterSave}
-          onFooterRecordAnother={onFooterRecordAnother}
-          onFooterReveal={onFooterReveal}
-          saving={saving}
-          busy={busy}
-          committed={committedPath != null}
           editor={{
             tool,
             setTool,
@@ -666,10 +680,25 @@ export default function Review() {
         />
         <ExportPanel
           sourcePath={sourcePath}
-          committedPath={committedPath}
+          lastSavedPath={lastSavedPath}
+          committedMp4Path={committedMp4Path}
+          lastSavedAt={lastSavedAt}
           duration={duration}
           trim={trim}
           busy={busy}
+          saving={saving}
+          format={format}
+          setFormat={setFormat}
+          mp4Res={mp4Res}
+          setMp4Res={setMp4Res}
+          gifRes={gifRes}
+          setGifRes={setGifRes}
+          gifFps={gifFps}
+          setGifFps={setGifFps}
+          onSave={onSave}
+          onReveal={onReveal}
+          onDiscard={onDiscard}
+          onRecordAnother={onRecordAnother}
           setError={setError}
         />
       </div>
@@ -744,13 +773,6 @@ type LeftColumnProps = {
   seek: (t: number) => void;
   trim: Trim | null;
   setTrim: React.Dispatch<React.SetStateAction<Trim | null>>;
-  onFooterDiscard: () => void;
-  onFooterSave: () => Promise<void> | void;
-  onFooterRecordAnother: () => Promise<void> | void;
-  onFooterReveal: () => Promise<void> | void;
-  saving: boolean;
-  busy: boolean;
-  committed: boolean;
   editor: Editor;
 };
 
@@ -786,15 +808,6 @@ function LeftColumn(props: LeftColumnProps) {
         setTrim={props.setTrim}
         seek={props.seek}
         editor={props.editor}
-      />
-      <ActionFooter
-        onDiscard={props.onFooterDiscard}
-        onSave={props.onFooterSave}
-        onRecordAnother={props.onFooterRecordAnother}
-        onReveal={props.onFooterReveal}
-        saving={props.saving}
-        busy={props.busy}
-        committed={props.committed}
       />
     </div>
   );
@@ -1913,152 +1926,6 @@ function TrimHandle({
   );
 }
 
-function ActionFooter({
-  onDiscard,
-  onSave,
-  onRecordAnother,
-  onReveal,
-  saving,
-  busy,
-  committed,
-}: {
-  onDiscard: () => Promise<void> | void;
-  onSave: () => Promise<void> | void;
-  onRecordAnother: () => Promise<void> | void;
-  onReveal: () => Promise<void> | void;
-  saving: boolean;
-  busy: boolean;
-  committed: boolean;
-}) {
-  // Save bakes & moves the scratch out; Discard destroys it. After commit
-  // both targets are gone — disable both. Record another always works.
-  // Post-commit the right side splits into a "Saved" status pseudo-button
-  // and a Reveal-in-Finder action button.
-  const recordAnotherEnabled = !busy;
-  const scratchOpsEnabled = !busy && !committed;
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        padding: "10px 16px",
-        borderTop: "1px solid var(--border-faint)",
-        background: "rgba(255,255,255,0.012)",
-      }}
-    >
-      <div style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-        <button
-          onClick={() => onRecordAnother()}
-          disabled={!recordAnotherEnabled}
-          className="btn-secondary"
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 6,
-            padding: "6px 12px",
-            borderRadius: 6,
-            height: 30,
-            fontFamily: "var(--font-system)",
-            fontSize: 12.5,
-            fontWeight: 500,
-            cursor: recordAnotherEnabled ? "pointer" : "not-allowed",
-            opacity: recordAnotherEnabled ? 1 : 0.5,
-          }}
-        >
-          <Icon d={P.play} size={11} stroke={0} fill="currentColor" />
-          <span>Record another</span>
-        </button>
-        <button
-          onClick={() => onDiscard()}
-          disabled={!scratchOpsEnabled}
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 6,
-            background: "transparent",
-            border: "1px solid transparent",
-            color: "var(--recording-tint)",
-            padding: "6px 12px",
-            borderRadius: 6,
-            height: 30,
-            cursor: scratchOpsEnabled ? "pointer" : "not-allowed",
-            fontFamily: "var(--font-system)",
-            fontSize: 12.5,
-            fontWeight: 500,
-            opacity: scratchOpsEnabled ? 1 : 0.5,
-          }}
-        >
-          {I.trash}
-          <span>Discard recording</span>
-        </button>
-      </div>
-      {committed ? (
-        <div style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-          <span
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 6,
-              padding: "6px 12px",
-              height: 30,
-              borderRadius: 6,
-              fontSize: 12.5,
-              fontWeight: 500,
-              color: "var(--success-tint)",
-            }}
-          >
-            <Icon d={P.check} size={13} stroke={1.8} />
-            <span>Saved</span>
-          </span>
-          <button
-            onClick={() => onReveal()}
-            disabled={busy}
-            className="btn-secondary"
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 6,
-              padding: "6px 12px",
-              borderRadius: 6,
-              height: 30,
-              fontSize: 12.5,
-              fontWeight: 500,
-              cursor: busy ? "not-allowed" : "pointer",
-              opacity: busy ? 0.5 : 1,
-            }}
-          >
-            {I.finder}
-            <span>Reveal</span>
-          </button>
-        </div>
-      ) : (
-        <button
-          onClick={() => onSave()}
-          disabled={!scratchOpsEnabled}
-          className="btn-primary"
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 6,
-            padding: "6px 14px",
-            borderRadius: 6,
-            height: 30,
-            fontSize: 12.5,
-            fontWeight: 600,
-            letterSpacing: "-0.005em",
-            opacity: scratchOpsEnabled ? 1 : 0.6,
-            cursor: scratchOpsEnabled ? "pointer" : "not-allowed",
-          }}
-        >
-          <Icon d={P.check} size={13} stroke={1.6} />
-          <span>{saving ? "Saving…" : "Save recording"}</span>
-        </button>
-      )}
-    </div>
-  );
-}
-
 function CloseModal({
   onSave,
   onDiscard,
@@ -2107,8 +1974,8 @@ function CloseModal({
           Save your recording?
         </div>
         <div style={{ fontSize: 12.5, color: "var(--fg-secondary)", lineHeight: 1.4 }}>
-          This recording hasn't been saved yet. Saving moves it to ~/Movies/Zeigen.
-          Discarding deletes it.
+          You haven't saved this recording yet. Save to put a copy in ~/Movies/Zeigen.
+          Discarding deletes the recording.
         </div>
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
           <button
@@ -2206,25 +2073,101 @@ function ErrorStrip({ error, onDismiss }: { error: string; onDismiss: () => void
   );
 }
 
+type SaveSpec = {
+  format: "mp4" | "gif";
+  resolution: "480p" | "720p" | "1080p" | "source";
+  fps?: number;
+};
+
 function ExportPanel({
   sourcePath,
-  committedPath,
+  lastSavedPath,
+  committedMp4Path,
+  lastSavedAt,
   duration,
   trim,
   busy,
+  saving,
+  format,
+  setFormat,
+  mp4Res,
+  setMp4Res,
+  gifRes,
+  setGifRes,
+  gifFps,
+  setGifFps,
+  onSave,
+  onReveal,
+  onDiscard,
+  onRecordAnother,
   setError,
 }: {
   sourcePath: string | null;
-  committedPath: string | null;
+  lastSavedPath: string | null;
+  committedMp4Path: string | null;
+  lastSavedAt: number;
   duration: number | null;
   trim: Trim | null;
   busy: boolean;
+  saving: boolean;
+  format: "mp4" | "gif";
+  setFormat: (f: "mp4" | "gif") => void;
+  mp4Res: "480p" | "720p" | "1080p" | "source";
+  setMp4Res: (r: "480p" | "720p" | "1080p" | "source") => void;
+  gifRes: "480p" | "720p" | "source";
+  setGifRes: (r: "480p" | "720p" | "source") => void;
+  gifFps: 10 | 15 | 20;
+  setGifFps: (f: 10 | 15 | 20) => void;
+  onSave: (spec: SaveSpec) => Promise<string | null>;
+  onReveal: () => Promise<void> | void;
+  onDiscard: () => Promise<void> | void;
+  onRecordAnother: () => Promise<void> | void;
   setError: (msg: string | null) => void;
 }) {
-  // Effective source is the committed final path when it exists, else
-  // the scratch path. Copy and LinkedIn read whichever is current — they
-  // don't care about save state under the new architecture.
-  const effectiveSource = committedPath || sourcePath;
+  // Transient post-save flash. Driven off lastSavedAt (parent state) so
+  // the LinkedIn chain's implicit save also flashes the button. Reset to
+  // 0 by a 1.5s timer; same shape as the legacy linkedinExportedAt badge.
+  const [savedFlashAt, setSavedFlashAt] = useState(0);
+  useEffect(() => {
+    if (lastSavedAt === 0) return;
+    setSavedFlashAt(lastSavedAt);
+  }, [lastSavedAt]);
+  const justSaved = savedFlashAt > 0;
+  useEffect(() => {
+    if (savedFlashAt === 0) return;
+    const t = window.setTimeout(() => setSavedFlashAt(0), 1500);
+    return () => window.clearTimeout(t);
+  }, [savedFlashAt]);
+
+  const buildSpec = useCallback(
+    (): SaveSpec =>
+      format === "mp4"
+        ? { format: "mp4", resolution: mp4Res }
+        : { format: "gif", resolution: gifRes, fps: gifFps },
+    [format, mp4Res, gifRes, gifFps],
+  );
+
+  const onSaveClick = useCallback(async () => {
+    if (saving || !sourcePath) return;
+    // GIF >30s confirm (Phase 10 D-04). Effective length honors the
+    // sidecar trim — the pipeline trims before encoding, so the warning
+    // should reflect post-trim duration.
+    if (format === "gif") {
+      const effectiveLength =
+        trim && duration != null
+          ? Math.max(0, trim.out - trim.in)
+          : duration;
+      if (effectiveLength != null && effectiveLength > 30) {
+        const secs = Math.round(effectiveLength);
+        const ok = await ask(
+          `This GIF will be ~${secs}s long and may be large. Continue?`,
+          { kind: "warning", okLabel: "Continue", cancelLabel: "Cancel" },
+        );
+        if (!ok) return;
+      }
+    }
+    await onSave(buildSpec());
+  }, [saving, sourcePath, format, trim, duration, onSave, buildSpec]);
 
   // Transient post-copy confirmation: NSPasteboard returns silently on
   // success and the row visual otherwise gives no feedback. Flip a flag
@@ -2238,24 +2181,30 @@ function ExportPanel({
   }, [copiedAt]);
 
   const onCopyClipboard = useCallback(async () => {
-    if (!effectiveSource) return;
-    const stamp = parseStampFromPath(effectiveSource);
+    if (!sourcePath) return;
+    const stamp = parseStampFromPath(sourcePath);
     if (!stamp) {
-      setError(`copy to clipboard: cannot parse stamp from ${effectiveSource}`);
+      setError(`copy to clipboard: cannot parse stamp from ${sourcePath}`);
       return;
     }
     try {
-      await invoke("clipboard_copy_recording", { stamp, sourcePath: effectiveSource });
+      // clipboard_copy_recording reads sidecar adjacent to the source
+      // and runs the pipeline (Phase 11 c2), so the pasted mp4 reflects
+      // the user's current edits without committing anything to Movies.
+      await invoke("clipboard_copy_recording", { stamp, sourcePath });
       setCopiedAt(Date.now());
     } catch (err) {
       setError(`copy to clipboard: ${err}`);
     }
-  }, [effectiveSource, setError]);
+  }, [sourcePath, setError]);
 
-  // LinkedIn export: transcode to a separate recording-<stamp>-linkedin.mp4
-  // in ~/Movies/Zeigen (does NOT commit the original), drop the caption
-  // template on the pasteboard, reveal in Finder, and open the LinkedIn
-  // share composer. The user drags the file in, then ⌘V pastes the caption.
+  // LinkedIn export: ensure an MP4 baseline exists in ~/Movies/Zeigen/
+  // (commits a fresh MP4-Source save if none yet this session — reuses
+  // committedMp4Path otherwise per D-16), transcode that baseline to a
+  // recording-<stamp>-linkedin.mp4, drop the caption template on the
+  // pasteboard, open Safari to the share composer, and reveal the file
+  // in Finder for the user to drag in. LinkedIn has no upload API for
+  // personal profiles, so the manual drag is the design.
   const [linkedinExporting, setLinkedinExporting] = useState(false);
   const [linkedinExportedAt, setLinkedinExportedAt] = useState(0);
   const linkedinExported = linkedinExportedAt > 0;
@@ -2266,10 +2215,10 @@ function ExportPanel({
   }, [linkedinExportedAt]);
 
   const onLinkedinExport = useCallback(async () => {
-    if (!effectiveSource || linkedinExporting) return;
-    const stamp = parseStampFromPath(effectiveSource);
+    if (!sourcePath || linkedinExporting) return;
+    const stamp = parseStampFromPath(sourcePath);
     if (!stamp) {
-      setError(`linkedin export: cannot parse stamp from ${effectiveSource}`);
+      setError(`linkedin export: cannot parse stamp from ${sourcePath}`);
       return;
     }
     if (duration != null && duration > 600) {
@@ -2281,9 +2230,14 @@ function ExportPanel({
     }
     setLinkedinExporting(true);
     try {
+      let mp4Path = committedMp4Path;
+      if (!mp4Path) {
+        mp4Path = await onSave({ format: "mp4", resolution: "source" });
+        if (!mp4Path) return; // onSave already surfaced an error
+      }
       const outPath = await invoke<string>("linkedin_export", {
         stamp,
-        sourcePath: effectiveSource,
+        sourcePath: mp4Path,
       });
       // Caption first so the user's clipboard has it ready when they
       // ⌘V into the LinkedIn post composer.
@@ -2293,8 +2247,6 @@ function ExportPanel({
       // Open Safari first so its activate-on-launch fires, then reveal
       // in Finder — Finder ends up on top with the file selected, ready
       // for the user to drag it into the now-cued-up LinkedIn composer.
-      // LinkedIn has no upload API for personal profiles, so the manual
-      // drag is the design (CLAUDE.md gotchas).
       await openUrl("https://www.linkedin.com/feed/?shareActive=true").catch(() => {});
       await revealItemInDir(outPath).catch(() => {});
       setLinkedinExportedAt(Date.now());
@@ -2303,84 +2255,49 @@ function ExportPanel({
     } finally {
       setLinkedinExporting(false);
     }
-  }, [effectiveSource, duration, linkedinExporting, setError]);
+  }, [sourcePath, duration, linkedinExporting, committedMp4Path, onSave, setError]);
 
-  // GIF export: transcode to ~/Movies/Zeigen/recording-<stamp>.gif via
-  // gif_export, reveal in Finder, flash an "Exported" badge. Preset state
-  // (resolution + fps) lives here; resets on app restart (settings
-  // persistence is a separate backlog item).
-  const [gifResolution, setGifResolution] = useState<"480p" | "720p" | "source">("720p");
-  const [gifFps, setGifFps] = useState<10 | 15 | 20>(15);
-  const [gifExporting, setGifExporting] = useState(false);
-  const [gifExportedAt, setGifExportedAt] = useState(0);
-  const gifExported = gifExportedAt > 0;
+  // ⌘C copy + ⌘S save. Skip when the user has a selection or is focused
+  // on an editable element so the system's default text-copy behavior wins.
   useEffect(() => {
-    if (gifExportedAt === 0) return;
-    const t = window.setTimeout(() => setGifExportedAt(0), 1500);
-    return () => window.clearTimeout(t);
-  }, [gifExportedAt]);
-
-  const onGifExport = useCallback(async () => {
-    if (!effectiveSource || gifExporting) return;
-    const stamp = parseStampFromPath(effectiveSource);
-    if (!stamp) {
-      setError(`gif export: cannot parse stamp from ${effectiveSource}`);
-      return;
-    }
-    // Effective length honors the sidecar trim (mirrors Toolbar at the
-    // top of LeftColumn) — the GIF pipeline applies the same trim, so
-    // the warning should reflect post-trim duration, not source duration.
-    const effectiveLength =
-      trim && duration != null
-        ? Math.max(0, trim.out - trim.in)
-        : duration;
-    if (effectiveLength != null && effectiveLength > 30) {
-      const secs = Math.round(effectiveLength);
-      const ok = await ask(
-        `This GIF will be ~${secs}s long and may be large. Continue?`,
-        { kind: "warning", okLabel: "Continue", cancelLabel: "Cancel" },
-      );
-      if (!ok) return;
-    }
-    setGifExporting(true);
-    try {
-      const outPath = await invoke<string>("gif_export", {
-        stamp,
-        sourcePath: effectiveSource,
-        resolution: gifResolution,
-        fps: gifFps,
-      });
-      await revealItemInDir(outPath).catch(() => {});
-      setGifExportedAt(Date.now());
-    } catch (err) {
-      setError(`gif export: ${err}`);
-    } finally {
-      setGifExporting(false);
-    }
-  }, [effectiveSource, gifExporting, trim, duration, gifResolution, gifFps, setError]);
-
-  // ⌘C shortcut mirrors the row click. Skip when the user has a
-  // selection or is focused on an editable element so the system's
-  // default text-copy behavior wins.
-  useEffect(() => {
-    if (!effectiveSource || busy) return;
+    if (!sourcePath || busy) return;
     const onKey = (e: KeyboardEvent) => {
       if (!e.metaKey || e.shiftKey || e.altKey || e.ctrlKey) return;
-      if (e.key.toLowerCase() !== "c") return;
+      const key = e.key.toLowerCase();
+      if (key !== "c" && key !== "s") return;
       const target = e.target as HTMLElement | null;
       if (target?.isContentEditable) return;
       if (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA") return;
-      const sel = window.getSelection();
-      if (sel && sel.toString().length > 0) return;
-      e.preventDefault();
-      onCopyClipboard();
+      if (key === "c") {
+        const sel = window.getSelection();
+        if (sel && sel.toString().length > 0) return;
+        e.preventDefault();
+        onCopyClipboard();
+      } else {
+        e.preventDefault();
+        onSaveClick();
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [effectiveSource, busy, onCopyClipboard]);
+  }, [sourcePath, busy, onCopyClipboard, onSaveClick]);
+
+  const mp4ResOptions = ["480p", "720p", "1080p", "source"] as const;
+  const gifResOptions = ["480p", "720p", "source"] as const;
+  const saveDisabled = !sourcePath || saving;
+  const formatLabel = format === "mp4" ? "MP4" : "GIF";
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", background: "var(--bg-sidebar)" }}>
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        background: "var(--bg-sidebar)",
+        minHeight: 0,
+        overflowY: "auto",
+      }}
+    >
+      {/* SAVE block */}
       <div style={{ padding: "12px 14px 8px" }}>
         <span
           style={{
@@ -2391,11 +2308,129 @@ function ExportPanel({
             fontWeight: 600,
           }}
         >
-          Export
+          Save
         </span>
       </div>
 
-      <div style={{ padding: "0 12px 8px", display: "flex", flexDirection: "column", gap: 6 }}>
+      <div style={{ padding: "0 14px 12px" }}>
+        <ChipsRow label="Format">
+          <div className="segmented">
+            {(["mp4", "gif"] as const).map((f) => (
+              <button
+                key={f}
+                className={format === f ? "on" : ""}
+                onClick={() => setFormat(f)}
+                disabled={saving}
+              >
+                {f === "mp4" ? "MP4" : "GIF"}
+              </button>
+            ))}
+          </div>
+        </ChipsRow>
+
+        {format === "mp4" ? (
+          <ChipsRow label="Resolution">
+            <div className="segmented">
+              {mp4ResOptions.map((r) => (
+                <button
+                  key={r}
+                  className={mp4Res === r ? "on" : ""}
+                  onClick={() => setMp4Res(r)}
+                  disabled={saving}
+                >
+                  {r === "source" ? "Source" : r}
+                </button>
+              ))}
+            </div>
+          </ChipsRow>
+        ) : (
+          <ChipsRow label="Resolution">
+            <div className="segmented">
+              {gifResOptions.map((r) => (
+                <button
+                  key={r}
+                  className={gifRes === r ? "on" : ""}
+                  onClick={() => setGifRes(r)}
+                  disabled={saving}
+                >
+                  {r === "source" ? "Source" : r}
+                </button>
+              ))}
+            </div>
+          </ChipsRow>
+        )}
+
+        {format === "gif" && (
+          <ChipsRow label="FPS">
+            <div className="segmented">
+              {([10, 15, 20] as const).map((f) => (
+                <button
+                  key={f}
+                  className={gifFps === f ? "on" : ""}
+                  onClick={() => setGifFps(f)}
+                  disabled={saving}
+                >
+                  {f}
+                </button>
+              ))}
+            </div>
+          </ChipsRow>
+        )}
+
+        <button
+          onClick={onSaveClick}
+          disabled={saveDisabled}
+          className="btn-primary"
+          style={{
+            marginTop: 8,
+            width: "100%",
+            padding: "8px 0",
+            height: 32,
+            fontSize: 12.5,
+            fontWeight: 600,
+            letterSpacing: "-0.005em",
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 6,
+            opacity: saveDisabled ? 0.6 : 1,
+            cursor: saveDisabled ? "not-allowed" : "pointer",
+          }}
+        >
+          {justSaved ? (
+            <>
+              <Icon d={P.check} size={13} stroke={1.8} />
+              <span>Saved</span>
+            </>
+          ) : saving ? (
+            <span>Saving…</span>
+          ) : (
+            <>
+              <Icon d={P.check} size={13} stroke={1.6} />
+              <span>Save as {formatLabel}</span>
+            </>
+          )}
+        </button>
+      </div>
+
+      <div className="hairline" style={{ margin: "0 14px" }} />
+
+      {/* OR EXPORT TO… block */}
+      <div style={{ padding: "10px 14px 6px" }}>
+        <span
+          style={{
+            fontSize: 10.5,
+            color: "var(--fg-tertiary)",
+            letterSpacing: "0.06em",
+            textTransform: "uppercase",
+            fontWeight: 600,
+          }}
+        >
+          Or export to…
+        </span>
+      </div>
+
+      <div style={{ padding: "0 12px 10px", display: "flex", flexDirection: "column", gap: 6 }}>
         <DestRow
           icon={<Icon d="M5 2h6v3M5 2v9a1 1 0 001 1h7a1 1 0 001-1V6L11 2M3 6h6v8" size={14} stroke={1.4} />}
           title="Copy to Clipboard"
@@ -2425,7 +2460,7 @@ function ExportPanel({
             )
           }
           onClick={onCopyClipboard}
-          disabled={!effectiveSource || busy}
+          disabled={!sourcePath || busy}
         />
         <DestRow
           icon={<Icon d="M2.5 5h11v9h-11zM5 8.5v3M5 6.5h.01M7.5 11.5v-3c0-.8.7-1.5 1.5-1.5s1.5.7 1.5 1.5v3M10.5 11.5v-3" size={13} stroke={1.4} />}
@@ -2452,151 +2487,99 @@ function ExportPanel({
             ) : undefined
           }
           onClick={onLinkedinExport}
-          disabled={!effectiveSource || busy || linkedinExporting}
+          disabled={!sourcePath || busy || linkedinExporting}
         />
+        {lastSavedPath && (
+          <DestRow
+            icon={I.finder}
+            title="Reveal in Finder"
+            sub={basename(lastSavedPath)}
+            onClick={() => onReveal()}
+            disabled={busy}
+          />
+        )}
       </div>
 
-      <div className="hairline" style={{ margin: "6px 14px" }} />
+      <div className="hairline" style={{ margin: "0 14px" }} />
 
-      <div style={{ padding: "6px 14px 10px" }}>
-        <div style={{ marginBottom: 8 }}>
-          <span
-            style={{
-              fontSize: 10.5,
-              color: "var(--fg-tertiary)",
-              letterSpacing: "0.06em",
-              textTransform: "uppercase",
-              fontWeight: 600,
-            }}
-          >
-            Quick export
-          </span>
-        </div>
-
-        <div
+      {/* Lifecycle block */}
+      <div
+        style={{
+          padding: "10px 14px 14px",
+          display: "flex",
+          flexDirection: "column",
+          gap: 8,
+        }}
+      >
+        {/* D-04 exception: Record another disables during an active save
+            so the discard branch can't race ffmpeg reading the scratch.
+            `busy` already covers `saving || discarding`; spelled out for
+            grep-ability. See DECISIONS.md 2026-05-20. */}
+        <button
+          onClick={() => onRecordAnother()}
+          disabled={saving || busy}
+          className="btn-secondary"
           style={{
-            display: "flex",
+            width: "100%",
+            padding: "7px 0",
+            height: 30,
+            fontSize: 12.5,
+            fontWeight: 500,
+            display: "inline-flex",
             alignItems: "center",
-            justifyContent: "space-between",
-            gap: 8,
-            marginBottom: 6,
-          }}
-        >
-          <span style={{ fontSize: 11.5, color: "var(--fg-secondary)" }}>Resolution</span>
-          <div className="segmented">
-            {(["480p", "720p", "source"] as const).map((r) => (
-              <button
-                key={r}
-                className={gifResolution === r ? "on" : ""}
-                onClick={() => setGifResolution(r)}
-                disabled={gifExporting}
-              >
-                {r === "source" ? "Source" : r}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 8,
-            marginBottom: 10,
-          }}
-        >
-          <span style={{ fontSize: 11.5, color: "var(--fg-secondary)" }}>FPS</span>
-          <div className="segmented">
-            {([10, 15, 20] as const).map((f) => (
-              <button
-                key={f}
-                className={gifFps === f ? "on" : ""}
-                onClick={() => setGifFps(f)}
-                disabled={gifExporting}
-              >
-                {f}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div style={{ display: "flex", gap: 6 }}>
-          <button
-            disabled
-            className="btn-secondary"
-            style={{
-              flex: 1,
-              fontSize: 12,
-              padding: "6px 0",
-              height: 28,
-              cursor: "default",
-              opacity: 1,
-              color: "var(--fg-secondary)",
-            }}
-          >
-            MP4
-          </button>
-          <button
-            onClick={onGifExport}
-            disabled={!effectiveSource || busy || gifExporting}
-            className="btn-primary"
-            style={{
-              flex: 1,
-              fontSize: 12,
-              padding: "6px 0",
-              height: 28,
-              display: "inline-flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: 4,
-            }}
-          >
-            {gifExported ? (
-              <>
-                <Icon d={P.check} size={12} stroke={1.8} />
-                <span>Exported</span>
-              </>
-            ) : gifExporting ? (
-              "Exporting…"
-            ) : (
-              "GIF"
-            )}
-          </button>
-          <button
-            disabled
-            className="btn-secondary"
-            style={{
-              flex: 1,
-              fontSize: 12,
-              padding: "6px 0",
-              height: 28,
-              cursor: "default",
-              opacity: 1,
-              color: "var(--fg-secondary)",
-            }}
-          >
-            ProRes
-          </button>
-        </div>
-
-        <div
-          style={{
-            display: "flex",
+            justifyContent: "center",
             gap: 6,
-            marginTop: 4,
-            fontSize: 10,
-            fontStyle: "italic",
-            color: "var(--fg-tertiary)",
+            cursor: saving || busy ? "not-allowed" : "pointer",
+            opacity: saving || busy ? 0.5 : 1,
           }}
         >
-          <span style={{ flex: 1, textAlign: "center" }}>Coming later</span>
-          <span style={{ flex: 1 }} />
-          <span style={{ flex: 1, textAlign: "center" }}>Coming later</span>
-        </div>
+          <Icon d={P.play} size={11} stroke={0} fill="currentColor" />
+          <span>Record another</span>
+        </button>
+        <button
+          onClick={() => onDiscard()}
+          disabled={busy || lastSavedPath != null}
+          style={{
+            width: "100%",
+            padding: "6px 0",
+            height: 28,
+            background: "transparent",
+            border: "1px solid transparent",
+            color: "var(--recording-tint)",
+            fontSize: 12,
+            fontWeight: 500,
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 6,
+            cursor: busy || lastSavedPath != null ? "not-allowed" : "pointer",
+            opacity: busy || lastSavedPath != null ? 0.4 : 1,
+            fontFamily: "var(--font-system)",
+          }}
+        >
+          {I.trash}
+          <span>Discard recording</span>
+        </button>
       </div>
 
       <div style={{ flex: 1 }} />
+    </div>
+  );
+}
+
+function ChipsRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        gap: 8,
+        marginBottom: 6,
+      }}
+    >
+      <span style={{ fontSize: 11.5, color: "var(--fg-secondary)" }}>{label}</span>
+      {children}
     </div>
   );
 }

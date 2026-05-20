@@ -460,68 +460,12 @@ fn validate_scratch_path(p: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-// Bake any pending edits and move the result to ~/Movies/Zeigen/recording-….mp4,
-// then remove the entire scratch directory (mp4 + sidecar + raw sources).
-// When the sidecar has no real edits, skip ffmpeg entirely and just rename
-// the scratch mp4 to its final home — far cheaper for the common case of a
-// clean recording with no trim/annotations.
-#[tauri::command]
-fn commit_recording(
-    scratch_mp4_path: String,
-    sidecar: edit::SidecarState,
-) -> Result<String, String> {
-    let scratch_mp4 = PathBuf::from(&scratch_mp4_path);
-    validate_scratch_path(&scratch_mp4)?;
-    if !scratch_mp4.is_file() {
-        return Err(format!("scratch mp4 missing: {}", scratch_mp4.display()));
-    }
-
-    let scratch_dir = scratch_mp4
-        .parent()
-        .ok_or_else(|| format!("scratch mp4 has no parent: {}", scratch_mp4.display()))?
-        .to_path_buf();
-    validate_scratch_path(&scratch_dir)?;
-
-    let file_name = scratch_mp4
-        .file_name()
-        .ok_or_else(|| format!("scratch mp4 has no filename: {}", scratch_mp4.display()))?;
-    let movies = movies_dir()?;
-    std::fs::create_dir_all(&movies)
-        .map_err(|e| format!("create {}: {}", movies.display(), e))?;
-    let final_path = movies.join(file_name);
-
-    let duration = edit::probe_duration_seconds(&scratch_mp4)?;
-    if edit::is_edit_pipeline_noop(&sidecar, duration) {
-        std::fs::rename(&scratch_mp4, &final_path).map_err(|e| {
-            format!(
-                "rename {} -> {}: {e}",
-                scratch_mp4.display(),
-                final_path.display()
-            )
-        })?;
-    } else {
-        edit::run_edit_pipeline(
-            &scratch_mp4,
-            &final_path,
-            &sidecar,
-            edit::PipelineMode::Mp4 {
-                resolution: edit::Mp4Resolution::Source,
-            },
-        )?;
-    }
-
-    std::fs::remove_dir_all(&scratch_dir)
-        .map_err(|e| format!("remove scratch {}: {e}", scratch_dir.display()))?;
-
-    Ok(final_path.to_string_lossy().into_owned())
-}
-
 // Destructive: removes the entire scratch directory (mp4 + sidecar + raw
 // sources) plus the matching exports temp dir under ~/Library/Caches.
-// Idempotent: callable repeatedly and after a successful commit_recording
-// (scratch already gone). Phase 6's iPhone-screenshot semantics route
-// every "this recording is going away" event through here — footer
-// Discard, close window, "Record another."
+// Idempotent: callable repeatedly while the scratch is gone (e.g. after the
+// review window already closed). Phase 6's iPhone-screenshot semantics route
+// every "this recording is going away" event through here — Discard, close
+// window, "Record another."
 #[tauri::command]
 fn discard_recording(scratch_mp4_path: String) -> Result<(), String> {
     let scratch_mp4 = PathBuf::from(&scratch_mp4_path);
@@ -656,10 +600,8 @@ pub fn run() {
             edit::read_sidecar,
             edit::write_sidecar,
             edit::delete_sidecar,
-            edit::gif_export,
             edit::save_recording,
             thumbs::extract_thumb_sprite,
-            commit_recording,
             discard_recording,
             clipboard::clipboard_copy_recording,
             clipboard::clipboard_copy_text,
