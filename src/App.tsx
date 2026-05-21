@@ -22,55 +22,70 @@ const BUBBLE_MARGIN = 24;
 // engine and selectedArea screen-space math).
 type BubbleAnchor = { x: number; y: number; w: number; h: number };
 
-async function openBubble(deviceName: string, anchor: BubbleAnchor | null = null) {
-  if (bubbleDeviceName === deviceName) {
-    const existing = await WebviewWindow.getByLabel(BUBBLE_LABEL);
-    if (existing) {
-      await existing.show().catch(() => {});
-      return;
-    }
-  }
+async function openBubble(deviceName: string, anchor: BubbleAnchor) {
+  // Primary display Cocoa height for the CG -> Cocoa flip in
+  // set_window_frame_cg. Same lookup the countdown overlay uses.
+  const monitors = await availableMonitors();
+  const primary =
+    monitors.find((m) => m.position.x === 0 && m.position.y === 0) ||
+    monitors[0];
+  const primaryCocoaHeight =
+    primary && primary.scaleFactor
+      ? primary.size.height / primary.scaleFactor
+      : 1080;
 
   const existing = await WebviewWindow.getByLabel(BUBBLE_LABEL);
-  if (existing) await existing.close().catch(() => {});
 
+  if (existing && bubbleDeviceName === deviceName) {
+    // Same camera, picker may have switched recording target. Leave the
+    // bubble where the user dragged it if it still overlaps the new
+    // anchor; re-place to the anchor's bottom-right only if zero overlap.
+    // Uses the current size (not BUBBLE_W/H) so manual ring-resize sticks.
+    const scale = await existing.scaleFactor();
+    const pos = await existing.outerPosition();
+    const size = await existing.outerSize();
+    const cur = {
+      x: pos.x / scale,
+      y: pos.y / scale,
+      w: size.width / scale,
+      h: size.height / scale,
+    };
+    const intersects =
+      cur.x + cur.w > anchor.x &&
+      cur.x < anchor.x + anchor.w &&
+      cur.y + cur.h > anchor.y &&
+      cur.y < anchor.y + anchor.h;
+    if (!intersects) {
+      const targetX = anchor.x + anchor.w - cur.w - BUBBLE_MARGIN;
+      const targetY = anchor.y + anchor.h - cur.h - BUBBLE_MARGIN;
+      await invoke("set_window_frame_cg", {
+        label: BUBBLE_LABEL,
+        cgX: targetX,
+        cgY: targetY,
+        width: cur.w,
+        height: cur.h,
+        primaryCocoaHeight,
+      }).catch((e) => console.error("bubble re-anchor failed", e));
+    }
+    await existing.show().catch(() => {});
+    return;
+  }
+
+  if (existing) await existing.close().catch(() => {});
   bubbleDeviceName = deviceName;
 
-  // Default position: bottom-right of the anchor rect (selected region in
-  // area mode), or the primary display when no anchor is given. Coords
-  // computed in logical pixels so the constructor places the window
-  // correctly without a post-creation setPosition race.
-  let x: number | undefined;
-  let y: number | undefined;
-  try {
-    const monitors = await availableMonitors();
-    if (anchor) {
-      // Anchor is in logical points (same units as engine display.x/y and
-      // selectedArea). Tauri's WebviewWindow constructor x/y also takes
-      // logical pixels, so no scale division is needed.
-      x = anchor.x + anchor.w - BUBBLE_W - BUBBLE_MARGIN;
-      y = anchor.y + anchor.h - BUBBLE_H - BUBBLE_MARGIN;
-    } else {
-      const m = monitors[0];
-      if (m) {
-        const scale = m.scaleFactor || 1;
-        const rightLogical = (m.position.x + m.size.width) / scale;
-        const bottomLogical = (m.position.y + m.size.height) / scale;
-        x = rightLogical - BUBBLE_W - BUBBLE_MARGIN;
-        y = bottomLogical - BUBBLE_H - BUBBLE_MARGIN;
-      }
-    }
-  } catch {
-    // Fall back to Tauri default position
-  }
+  // Plant via set_window_frame_cg on tauri://created. Tauri's constructor
+  // x/y drops negative coords for screens left of primary and can land
+  // half-size on non-primary displays (countdown precedent at
+  // App.tsx:118-121, macos.rs:70-72).
+  const targetX = anchor.x + anchor.w - BUBBLE_W - BUBBLE_MARGIN;
+  const targetY = anchor.y + anchor.h - BUBBLE_H - BUBBLE_MARGIN;
 
   const win = new WebviewWindow(BUBBLE_LABEL, {
     url: `/#bubble?name=${encodeURIComponent(deviceName)}`,
     title: "Webcam",
     width: BUBBLE_W,
     height: BUBBLE_H,
-    x,
-    y,
     minWidth: BUBBLE_MIN,
     minHeight: BUBBLE_MIN + PILL_STRIP_CSS,
     decorations: false,
@@ -82,10 +97,20 @@ async function openBubble(deviceName: string, anchor: BubbleAnchor | null = null
     shadow: false,
   });
 
-  win.once("tauri://created", () => {
-    invoke("make_capture_invisible", { label: BUBBLE_LABEL }).catch((e) => {
-      console.error("make_capture_invisible(bubble) failed", e);
-    });
+  win.once("tauri://created", async () => {
+    try {
+      await invoke("set_window_frame_cg", {
+        label: BUBBLE_LABEL,
+        cgX: targetX,
+        cgY: targetY,
+        width: BUBBLE_W,
+        height: BUBBLE_H,
+        primaryCocoaHeight,
+      });
+      await invoke("make_capture_invisible", { label: BUBBLE_LABEL });
+    } catch (e) {
+      console.error("bubble setup failed", e);
+    }
   });
   win.once("tauri://error", (e) => {
     console.error("bubble window error", e);
@@ -1322,24 +1347,43 @@ function App() {
   // display corner may fall outside the area and not appear in the
   // recording).
   useEffect(() => {
-    if (cameraName) {
-      let anchor: BubbleAnchor | null = null;
-      if (sourceKind === "area" && selectedArea) {
-        const d = displays.find((x) => x.id === selectedArea.display_id);
-        if (d) {
-          anchor = {
-            x: d.x + selectedArea.x,
-            y: d.y + selectedArea.y,
-            w: selectedArea.width,
-            h: selectedArea.height,
-          };
-        }
-      }
-      openBubble(cameraName, anchor).catch((err) => setError(String(err)));
-    } else {
+    if (!cameraName) {
       closeBubble().catch(() => {});
+      return;
     }
-  }, [cameraName, sourceKind, selectedArea, displays]);
+    let anchor: BubbleAnchor | null = null;
+    if (sourceKind === "area" && selectedArea) {
+      const d = displays.find((x) => x.id === selectedArea.display_id);
+      if (d) {
+        anchor = {
+          x: d.x + selectedArea.x,
+          y: d.y + selectedArea.y,
+          w: selectedArea.width,
+          h: selectedArea.height,
+        };
+      }
+    } else if (sourceKind === "display" && selectedDisplay != null) {
+      const d = displays.find((x) => x.id === selectedDisplay);
+      if (d) {
+        anchor = { x: d.x, y: d.y, w: d.width, h: d.height };
+      }
+    } else if (sourceKind === "window" && selectedWindow != null) {
+      const w = windows.find((wn) => wn.id === selectedWindow);
+      if (w) {
+        anchor = { x: w.x, y: w.y, w: w.width, h: w.height };
+      }
+    }
+    // No source picked yet or lookup miss — fall back to the primary
+    // display. The deps below re-fire this effect as soon as the picker
+    // resolves, and openBubble's re-anchor logic corrects placement.
+    if (!anchor) {
+      const m = displays[0];
+      if (m) anchor = { x: m.x, y: m.y, w: m.width, h: m.height };
+    }
+    if (anchor) {
+      openBubble(cameraName, anchor).catch((err) => setError(String(err)));
+    }
+  }, [cameraName, sourceKind, selectedArea, selectedDisplay, selectedWindow, displays, windows]);
 
   // Dashed-border area indicator persists from marquee-confirm through
   // recording-end. Driven purely by selection state — not by recording
