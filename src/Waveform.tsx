@@ -27,14 +27,32 @@ function getClipColor(): string {
 
 type Props = {
   assetUrl: string | null;
+  // V — videoElement.duration in seconds. Used with audioStart to map canvas
+  // pixels into audio-time so peaks line up with the playhead. Null until the
+  // <video> emits loadedmetadata; render falls back to a/A mapping (the
+  // pre-Phase-13 behavior) while null.
+  videoDuration: number | null;
+  // S — audio-stream start_time in seconds (mic-startup gap before the first
+  // CMSampleBuffer reaches the writer; 30–650ms in practice). Null until the
+  // probe_audio_track command resolves; render falls back to a/A mapping.
+  audioStart: number | null;
 };
 
 type State =
   | { kind: "loading" }
-  | { kind: "ready"; peaks: Float32Array; clipped: Uint8Array; maxPeak: number }
+  | {
+      kind: "ready";
+      peaks: Float32Array;
+      clipped: Uint8Array;
+      maxPeak: number;
+      // A — decoded audio-track duration in seconds. Captured at decode time
+      // because the per-pixel mapping needs it and the AudioBuffer is dropped
+      // immediately after bucketing.
+      audioDuration: number;
+    }
   | { kind: "empty" };
 
-export default function Waveform({ assetUrl }: Props) {
+export default function Waveform({ assetUrl, videoDuration, audioStart }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [state, setState] = useState<State>({ kind: "loading" });
@@ -71,6 +89,7 @@ export default function Waveform({ assetUrl }: Props) {
       }
 
       const channel = audioBuffer.getChannelData(0);
+      const audioDuration = audioBuffer.duration;
       const peaks = new Float32Array(PEAK_CACHE_SIZE);
       const clipped = new Uint8Array(PEAK_CACHE_SIZE);
       const samplesPerBucket = channel.length / PEAK_CACHE_SIZE;
@@ -95,7 +114,7 @@ export default function Waveform({ assetUrl }: Props) {
       setState(
         max < SILENCE_THRESHOLD
           ? { kind: "empty" }
-          : { kind: "ready", peaks, clipped, maxPeak: max },
+          : { kind: "ready", peaks, clipped, maxPeak: max, audioDuration },
       );
     };
 
@@ -155,12 +174,9 @@ export default function Waveform({ assetUrl }: Props) {
       const norm = 1 / state.maxPeak;
       const half = h / 2;
       const clipColor = getClipColor();
-      for (let x = 0; x < w; x++) {
-        const startB = Math.floor((x / w) * PEAK_CACHE_SIZE);
-        const endB = Math.max(
-          startB + 1,
-          Math.floor(((x + 1) / w) * PEAK_CACHE_SIZE),
-        );
+      const A = state.audioDuration;
+
+      const drawBar = (x: number, startB: number, endB: number) => {
         let amp = 0;
         let clip = 0;
         for (let b = startB; b < endB; b++) {
@@ -171,6 +187,35 @@ export default function Waveform({ assetUrl }: Props) {
         ctx.fillStyle = clip ? clipColor : BAR_COLOR;
         const barH = Math.max(1, Math.round(amp * norm * half));
         ctx.fillRect(x, mid - barH, 1, barH * 2);
+      };
+
+      // V/S-aware mapping: pixel x represents video-time vt = (x/w) * V; the
+      // audio sample at vt lives at audio-time at = vt − S. Pixels outside
+      // [S, S+A] have no audio and stay blank. Falls back to the old
+      // pre-Phase-13 mapping ([0,A] → [0,W]) while props are still null or
+      // when S is outside a sane range — fallback matches the original drift
+      // bug, which is preferable to a flicker as props resolve.
+      const V = videoDuration;
+      const S = audioStart;
+      if (V != null && S != null && S >= 0 && S < V) {
+        const xStart = Math.max(0, Math.ceil((S / V) * w));
+        const xEnd = Math.min(w, Math.floor(((S + A) / V) * w));
+        for (let x = xStart; x < xEnd; x++) {
+          const at = (x / w) * V - S;
+          const atNext = ((x + 1) / w) * V - S;
+          const startB = Math.floor((at / A) * PEAK_CACHE_SIZE);
+          const endB = Math.max(startB + 1, Math.floor((atNext / A) * PEAK_CACHE_SIZE));
+          drawBar(x, startB, endB);
+        }
+      } else {
+        for (let x = 0; x < w; x++) {
+          const startB = Math.floor((x / w) * PEAK_CACHE_SIZE);
+          const endB = Math.max(
+            startB + 1,
+            Math.floor(((x + 1) / w) * PEAK_CACHE_SIZE),
+          );
+          drawBar(x, startB, endB);
+        }
       }
     };
 
@@ -178,7 +223,7 @@ export default function Waveform({ assetUrl }: Props) {
     const ro = new ResizeObserver(() => draw());
     ro.observe(container);
     return () => ro.disconnect();
-  }, [state]);
+  }, [state, videoDuration, audioStart]);
 
   return (
     <div

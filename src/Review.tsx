@@ -134,6 +134,11 @@ export default function Review() {
   const [currentTime, setCurrentTime] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // S — audio-stream start_time in seconds, fetched once at review-open.
+  // Threaded into Waveform alongside the video duration so peaks map onto the
+  // video-time timeline instead of audio-time. Null until probe_audio_track
+  // resolves; Waveform falls back to the pre-Phase-13 a/A mapping while null.
+  const [audioStart, setAudioStart] = useState<number | null>(null);
 
   // Edit state.
   const [trim, setTrim] = useState<Trim | null>(null);
@@ -259,6 +264,31 @@ export default function Review() {
         }
       })
       .catch((err) => setError(`read sidecar: ${err}`));
+    return () => {
+      cancelled = true;
+    };
+  }, [sourcePath]);
+
+  // Fetch audio-track start_time once per review-open. Best-effort: failures
+  // and no-audio sources fall through to 0, which gives the pre-Phase-13 a/A
+  // mapping (the original drift bug) — acceptable as a fallback because the
+  // probe is purely a render-alignment input.
+  useEffect(() => {
+    if (!sourcePath) {
+      setAudioStart(null);
+      return;
+    }
+    let cancelled = false;
+    invoke<{ start: number; duration: number } | null>("probe_audio_track", {
+      sourcePath,
+    })
+      .then((meta) => {
+        if (cancelled) return;
+        setAudioStart(meta?.start ?? 0);
+      })
+      .catch(() => {
+        if (!cancelled) setAudioStart(0);
+      });
     return () => {
       cancelled = true;
     };
@@ -666,6 +696,7 @@ export default function Review() {
           seek={seek}
           trim={trim}
           setTrim={setTrim}
+          audioStart={audioStart}
           editor={{
             tool,
             setTool,
@@ -776,6 +807,7 @@ type LeftColumnProps = {
   seek: (t: number) => void;
   trim: Trim | null;
   setTrim: React.Dispatch<React.SetStateAction<Trim | null>>;
+  audioStart: number | null;
   editor: Editor;
 };
 
@@ -814,6 +846,7 @@ function LeftColumn(props: LeftColumnProps) {
         trim={props.trim}
         setTrim={props.setTrim}
         seek={props.seek}
+        audioStart={props.audioStart}
         editor={props.editor}
       />
     </div>
@@ -1651,6 +1684,7 @@ type TimelineProps = {
   trim: Trim | null;
   setTrim: React.Dispatch<React.SetStateAction<Trim | null>>;
   seek: (t: number) => void;
+  audioStart: number | null;
   editor: Editor;
 };
 
@@ -1818,7 +1852,11 @@ function Timeline(props: TimelineProps) {
             background: "rgba(255,255,255,0.02)",
           }}
         >
-          <Waveform assetUrl={props.assetUrl} />
+          <Waveform
+            assetUrl={props.assetUrl}
+            videoDuration={props.duration}
+            audioStart={props.audioStart}
+          />
           {/* Dimmed regions outside trim */}
           {props.trim && props.duration != null && (
             <>
