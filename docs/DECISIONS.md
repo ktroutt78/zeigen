@@ -4,6 +4,50 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-05-20 — Always-on arnndn on MP4 export; noop saves keep source video via `-c:v copy`
+
+Phase 12 makes ffmpeg's `arnndn` noise reduction always-on for every MP4 save (`-af arnndn=m=<bundled-rnnoise>.rnnn`, applied between demuxer trim and AAC encode). The RNNoise model (`cb.rnnn` from GregorR/rnnoise-models, ~300 KB) ships under `Contents/Resources/resources/audio/` via `tauri.conf.json` bundle.resources.
+
+The framing is narrower than the original c3 sketch: **audio always re-encodes (for arnndn). Video re-encodes only when there's actual video work** — trim, overlays, or scale. When the sidecar is a noop and the user picks MP4 Source resolution, the pipeline uses `-c:v copy` and runs only the audio side. The pre-Phase-12 `is_edit_pipeline_noop` hard-link short-circuit is removed (always-on NR requires a real audio pass), but the spirit — don't do work that doesn't need doing — is preserved on the video side.
+
+### Trade-off
+
+Background noise (HVAC, fan, room hum) was clearly audible in Phase 11 recordings. The "always-on, no UI" choice avoids a per-recording toggle whose state wouldn't persist anyway (settings reset on restart) and surfaces a configuration decision users shouldn't have to make for every recording. Capture-side NR would touch raw scratch and break the Phase 5.5/11 "scratch stays reversible" invariant, so NR lives on the export side.
+
+### Save-speed regression (measured during c3 verification)
+
+Three concat-loop fixtures (built from the 21.8s Phase 10 baseline-c1 recording at 1920x1080), three runs each, averaged. Apple M-series hardware (h264_videotoolbox HW-accelerated). MP4 Source, empty sidecar.
+
+| Recording length | Pre-c3 (hard-link) | Full-re-encode variant (rejected) | Shipped: video-copy + audio-only re-encode | Delta vs pre-c3 |
+|---|---|---|---|---|
+| ~30s (43.7s) | 0.05s | 5.88s | 0.85s | +0.80s |
+| ~2min (131s) | 0.05s | 16.94s | 2.48s | +2.43s |
+| ~5min (305.6s) | 0.05s | 39.28s | 5.68s | +5.63s |
+
+The initial implementation ran `-c:v h264_videotoolbox` on every MP4 save and hit 39s on a 5-min recording — well past the plan's "more than ~10s → flag" threshold. Component breakdown showed the video re-encode was the entire cost (arnndn alone is ~6s on a 5-min). The refined shape `-c:v copy + arnndn + AAC` brought 5-min down to 5.7s while keeping the source video stream byte-exact (verified by stream md5 in `save_recording_baseline`).
+
+Side effect of the refinement: the noop save also preserves source file size. The full-re-encode variant inflated a 208 MB source to 231 MB (+11%) because `-b:v 8M` overshot the source's native bitrate; the video-copy path keeps it at 208 MB.
+
+### Scope
+
+- MP4 saves only — GIF is silent (`-af` not added on GIF mode).
+- LinkedIn export chains `save_recording(mp4, source)` (Phase 11 c4), so LinkedIn output inherits the noise reduction automatically.
+- Copy-to-Clipboard runs the same pipeline (Phase 11 c2) — also inherits.
+- Recordings with no audio stream: `-af` is a clean no-op, no special handling needed.
+
+### Implementation notes
+
+- The model path resolves from `AppHandle::path().resource_dir().join("resources/audio/rnnoise.rnnn")` and is cached in a module-level `OnceLock<PathBuf>` in `edit.rs`. Missing model surfaces as a clear ffmpeg error at first save, not a silent skip.
+- `mp4_video_can_copy` inside `run_edit_pipeline` is true iff `trim.is_none()` AND `!needs_filter` (no overlays, no scale). Same condition the deleted `is_edit_pipeline_noop` helper computed at the call site; now inlined where the rest of the pipeline state already lives.
+
+### Known edge case: quiet-input speech suppression
+
+RNNoise has an effective speech-detection floor around RMS -40 dB. At normal recording levels (-25 to -33 dB RMS) the model correctly identifies speech and only attenuates the non-speech regions (verified: peak/RMS shift under 1 dB). On unusually quiet captures (around -44 dB RMS in one observed case), the model can't reliably distinguish speech from noise and suppresses both — the saved file came out 24 dB quieter than source. All five GregorR models (cb, bd, mp, lq, sh) showed the same behavior on that recording; pre-gain into the filter chain didn't recover the speech either.
+
+Surfaced once during c3 verification (2026-05-20). Not reproducible after a fresh dev/engine restart — same physical setup produced a normal-level recording. Suspected causes (none confirmed): stale engine subprocess state, transient macOS audio routing, mic positioning drift. If a future user reports "voice disappeared from a saved recording," check the source scratch's RMS first — if below -40 dB the input itself was the problem, not the pipeline.
+
+---
+
 ## 2026-05-20 — Record another disables during active save (D-04 exception)
 
 PHASE-11-CONTEXT D-04 said Record another stays active in all states (pre-commit, mid-save, post-commit). In practice "all states" assumed a normal flow, not an in-flight save. Clicking Record another mid-save fires `discard_recording` against the scratch directory while ffmpeg is still reading it — same shape as the bugs that produced the 119 GB orphan-cleanup incident.

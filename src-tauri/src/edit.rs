@@ -7,6 +7,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::composite::{FFMPEG_PATH, FFPROBE_PATH};
 
+// Resolved at startup from AppHandle::path().resource_dir(). Read by
+// run_edit_pipeline when building the MP4 audio filter.
+static AUDIO_MODEL_PATH: OnceLock<PathBuf> = OnceLock::new();
+
+pub fn set_audio_model_path(path: PathBuf) {
+    let _ = AUDIO_MODEL_PATH.set(path);
+}
+
+fn audio_model_path() -> &'static Path {
+    AUDIO_MODEL_PATH
+        .get()
+        .expect("audio model not initialized — call set_audio_model_path() in lib.rs::run setup")
+        .as_path()
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct SidecarState {
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -394,25 +409,6 @@ fn temp_dir_for(source: &Path) -> PathBuf {
     parent.join(".sources").join(format!("edit-{stem}"))
 }
 
-// True when the sidecar would produce a byte-identical re-encode: no real
-// trim and no renderable annotations. Callers (e.g. commit_recording) can
-// skip the ffmpeg pipeline entirely and rename the source file instead.
-pub(crate) fn is_edit_pipeline_noop(sidecar: &SidecarState, duration: f64) -> bool {
-    let trim_real = match &sidecar.trim {
-        Some(t) => t.start > TRIM_EPS || t.out < duration - TRIM_EPS,
-        None => false,
-    };
-    let any_text = sidecar
-        .annotations
-        .iter()
-        .any(|a| a.kind == "text" && !a.content.is_empty());
-    let any_arrow = sidecar
-        .annotations
-        .iter()
-        .any(|a| a.kind == "arrow" && a.endpoint.is_some());
-    !trim_real && !any_text && !any_arrow
-}
-
 // Output resolution for GIF export. Source caps at 1080p per phase 10
 // context D-01 to keep palette generation tractable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -658,12 +654,32 @@ pub(crate) fn run_edit_pipeline(
         }
     }
 
+    // When there's no video work to do — no trim, no overlays, no scale —
+    // the MP4 path copies the video bitstream and only re-encodes audio
+    // (so arnndn still applies). Preserves the source video stream byte-
+    // for-byte and bounds the noop-save cost to the audio-only pipeline.
+    // Bigger picture: audio always re-encodes for noise reduction; video
+    // re-encodes only when something actually changed for the viewer.
+    let mp4_video_can_copy =
+        matches!(mode, PipelineMode::Mp4 { .. }) && trim.is_none() && !needs_filter;
+
     match mode {
         PipelineMode::Mp4 { .. } => {
-            args.push("-c:v".into());
-            args.push("h264_videotoolbox".into());
-            args.push("-b:v".into());
-            args.push("8M".into());
+            // Always-on RNNoise on the audio output. ffmpeg routes -af after
+            // the demuxer-level -ss/-to trim and before the -c:a encoder, so
+            // no explicit ordering is needed. The flag is a clean no-op when
+            // the source has no audio stream.
+            args.push("-af".into());
+            args.push(format!("arnndn=m={}", audio_model_path().display()));
+            if mp4_video_can_copy {
+                args.push("-c:v".into());
+                args.push("copy".into());
+            } else {
+                args.push("-c:v".into());
+                args.push("h264_videotoolbox".into());
+                args.push("-b:v".into());
+                args.push("8M".into());
+            }
             args.push("-c:a".into());
             args.push("aac".into());
             args.push("-b:a".into());
@@ -770,21 +786,16 @@ pub fn save_recording(
                 other => return Err(format!("unknown mp4 resolution: {other}")),
             };
             let output = next_per_format_slot(&movies, &stamp, "mp4");
-            let duration = probe_duration_seconds(source)?;
-            if res == Mp4Resolution::Source && is_edit_pipeline_noop(&sidecar, duration) {
-                if std::fs::hard_link(source, &output).is_err() {
-                    std::fs::copy(source, &output).map_err(|e| {
-                        format!("copy {} -> {}: {e}", source.display(), output.display())
-                    })?;
-                }
-            } else {
-                run_edit_pipeline(
-                    source,
-                    &output,
-                    &sidecar,
-                    PipelineMode::Mp4 { resolution: res },
-                )?;
-            }
+            // Phase 12 c3: every MP4 save runs the pipeline so always-on
+            // arnndn applies. The pipeline picks -c:v copy internally when
+            // there's no trim/overlay/scale, so noop Source saves stay
+            // ~audio-only cost.
+            run_edit_pipeline(
+                source,
+                &output,
+                &sidecar,
+                PipelineMode::Mp4 { resolution: res },
+            )?;
             output
         }
         "gif" => {
@@ -816,6 +827,17 @@ pub fn save_recording(
 mod tests {
     use super::*;
 
+    // The OnceLock set in lib.rs::run setup doesn't fire under cargo test,
+    // so any test that hits the MP4 branch (where arnndn is wired) must
+    // initialize the model path itself. Idempotent — OnceLock::set is a
+    // no-op after the first call.
+    fn ensure_audio_model_for_tests() {
+        let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources/audio/rnnoise.rnnn");
+        assert!(p.exists(), "test fixture missing: {}", p.display());
+        set_audio_model_path(p);
+    }
+
     // End-to-end check against the Phase 10 c1 scratch baseline. Verifies
     // that the MP4 path through run_edit_pipeline honors source + sidecar
     // on Source resolution and produces a 720-tall output on P720. Mirrors
@@ -828,6 +850,7 @@ mod tests {
     #[test]
     #[ignore]
     fn mp4_save_baseline() {
+        ensure_audio_model_for_tests();
         let home = std::env::var("HOME").unwrap();
         let source_str = format!(
             "{home}/Movies/Zeigen/.scratch-baseline-c1/recording-2026-05-19-114549/recording-2026-05-19-114549.mp4"
@@ -900,16 +923,33 @@ mod tests {
         println!("p720: {p720_out_str} ({h720} tall)");
     }
 
-    // Phase 11 c2 smoke. Covers the four done-when bullets from the plan:
-    //   - noop sidecar + MP4-Source → hard-link, 0 ffmpeg
-    //   - sidecar w/ edits + MP4-P720 → 1 pass, 720 tall
+    // Phase 11 c2 smoke (updated in Phase 12 c3). Covers:
+    //   - noop sidecar + MP4-Source → audio-only re-encode (arnndn + AAC)
+    //     with -c:v copy. Output is a fresh file (not a hard-link); the
+    //     video stream md5 matches the source's video stream; the audio
+    //     stream md5 differs (arnndn applied).
+    //   - sidecar w/ edits + MP4-P720 → full pipeline, 720 tall, video
+    //     stream md5 differs from source.
     //   - sidecar w/ edits + GIF-P720@15 → 1 pass, valid GIF
     //   - per-format collision: second MP4-Source call lands at -2.mp4
     // Run explicitly:
     //   cargo test --lib save_recording_baseline -- --ignored --nocapture
+    fn stream_md5(path: &str, stream: &str) -> String {
+        let out = Command::new(FFMPEG_PATH)
+            .args([
+                "-v", "error", "-i", path, "-map", stream, "-c", "copy",
+                "-f", "md5", "-",
+            ])
+            .output()
+            .expect("ffmpeg md5");
+        assert!(out.status.success(), "ffmpeg md5 failed for {path} {stream}");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
     #[test]
     #[ignore]
     fn save_recording_baseline() {
+        ensure_audio_model_for_tests();
         let home = std::env::var("HOME").unwrap();
         let source_str = format!(
             "{home}/Movies/Zeigen/.scratch-baseline-c1/recording-2026-05-19-114549/recording-2026-05-19-114549.mp4"
@@ -948,17 +988,31 @@ mod tests {
         .expect("save_recording noop");
         assert_eq!(result.output_path, noop_out_first.to_string_lossy());
         assert!(noop_out_first.exists(), "noop output missing");
-        // hard_link: same inode as source (verifies we didn't fall through
-        // to the pipeline branch — copy fallback would also produce a real
-        // file but with a different inode).
-        let src_meta = std::fs::metadata(&noop_src).expect("stat noop src");
         let out_meta = std::fs::metadata(&noop_out_first).expect("stat noop out");
+        assert!(
+            out_meta.is_file() && out_meta.len() > 0,
+            "noop output should be a non-empty regular file"
+        );
+        // Phase 12 c3 inverts the Phase 11 invariant: noop MP4-Source no
+        // longer hard-links. Same inode means the short-circuit got
+        // accidentally revived.
+        let src_meta = std::fs::metadata(&noop_src).expect("stat noop src");
         use std::os::unix::fs::MetadataExt;
-        assert_eq!(
+        assert_ne!(
             src_meta.ino(),
             out_meta.ino(),
-            "noop save should hard-link (same inode)"
+            "noop save should run the pipeline (different inode), not hard-link"
         );
+        // Video stream is bit-exact (-c:v copy), audio is re-encoded
+        // (arnndn + AAC). Equal video-md5 means the video pipeline didn't
+        // accidentally fall through to h264_videotoolbox; differing audio-
+        // md5 means arnndn + AAC actually ran.
+        let src_v = stream_md5(noop_src.to_str().unwrap(), "0:v");
+        let out_v = stream_md5(noop_out_first.to_str().unwrap(), "0:v");
+        assert_eq!(src_v, out_v, "noop video stream should be copied bit-exact");
+        let src_a = stream_md5(noop_src.to_str().unwrap(), "0:a");
+        let out_a = stream_md5(noop_out_first.to_str().unwrap(), "0:a");
+        assert_ne!(src_a, out_a, "noop audio stream should differ (arnndn + AAC ran)");
 
         // --- per-format collision: second call lands at -2.mp4 ---
         let result2 = save_recording(
@@ -997,6 +1051,13 @@ mod tests {
         assert_eq!(result3.output_path, p720_out.to_string_lossy());
         let (_, h720) = probe_dimensions(&p720_out).expect("probe p720");
         assert_eq!(h720, 720, "edited mp4 should be 720 tall, got {h720}");
+        // Non-noop save: video stream md5 must differ (full re-encode).
+        let p720_src_v = stream_md5(edited_src.to_str().unwrap(), "0:v");
+        let p720_out_v = stream_md5(p720_out.to_str().unwrap(), "0:v");
+        assert_ne!(
+            p720_src_v, p720_out_v,
+            "edited p720 video stream should differ from source (full re-encode)"
+        );
 
         // --- edits + GIF-720p@15: pipeline pass, valid GIF ---
         let gif_out = movies.join("recording-test-edits-c2.gif");

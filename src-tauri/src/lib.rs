@@ -538,6 +538,23 @@ pub fn run() {
             app.manage(Mutex::new(client));
             app.manage(Mutex::new(None::<ActiveRecording>));
             tray::setup(&handle)?;
+
+            // Resolve the bundled RNNoise model and hand its path to the
+            // edit module. arnndn fires on every MP4 save; missing model
+            // surfaces as a clear ffmpeg error rather than silent skip.
+            match handle.path().resource_dir() {
+                Ok(resource_dir) => {
+                    let model_path = resource_dir.join("resources/audio/rnnoise.rnnn");
+                    if !model_path.exists() {
+                        eprintln!(
+                            "audio model missing at {} — MP4 saves will fail",
+                            model_path.display()
+                        );
+                    }
+                    edit::set_audio_model_path(model_path);
+                }
+                Err(e) => eprintln!("resource_dir lookup failed: {e}"),
+            }
             if let Err(e) = hotkey::register_default(&handle) {
                 eprintln!("hotkey register failed: {e}");
             }
