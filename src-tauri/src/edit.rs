@@ -196,6 +196,64 @@ pub(crate) fn probe_dimensions(path: &Path) -> Result<(u32, u32), String> {
     Ok((w, h))
 }
 
+#[derive(Serialize, Debug)]
+pub struct AudioTrackMeta {
+    // start_time of the audio stream in seconds. 0.0 when the recording has
+    // no leading audio gap; typically 30-650ms on Zeigen recordings (mic
+    // startup latency before the first CMSampleBuffer reaches AVAssetWriter).
+    pub start: f64,
+    // Duration of the audio stream in seconds. Strictly <= the video duration
+    // because the last mic CMSampleBuffer reaches the writer before the last
+    // video frame.
+    pub duration: f64,
+}
+
+#[tauri::command]
+pub fn probe_audio_track(source_path: String) -> Result<Option<AudioTrackMeta>, String> {
+    probe_audio_track_path(Path::new(&source_path))
+}
+
+pub(crate) fn probe_audio_track_path(path: &Path) -> Result<Option<AudioTrackMeta>, String> {
+    let output = Command::new(FFPROBE_PATH)
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=start_time,duration",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(path)
+        .output()
+        .map_err(|e| format!("ffprobe audio-track failed: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "ffprobe audio-track non-zero for {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if s.is_empty() {
+        // No audio stream in source.
+        return Ok(None);
+    }
+    let mut parts = s.split(',');
+    let start: f64 = parts
+        .next()
+        .ok_or_else(|| format!("ffprobe audio-track malformed: {s}"))?
+        .parse()
+        .map_err(|e| format!("parse start_time {s:?}: {e}"))?;
+    let duration: f64 = parts
+        .next()
+        .ok_or_else(|| format!("ffprobe audio-track malformed: {s}"))?
+        .parse()
+        .map_err(|e| format!("parse duration {s:?}: {e}"))?;
+    Ok(Some(AudioTrackMeta { start, duration }))
+}
+
 // Cached font bytes — read SFNS.ttf once per process. The font shipped on
 // macOS at /System/Library/Fonts/SFNS.ttf is a static-instance-readable
 // variable font; ab_glyph reads the default instance.
@@ -836,6 +894,47 @@ mod tests {
             .join("resources/audio/rnnoise.rnnn");
         assert!(p.exists(), "test fixture missing: {}", p.display());
         set_audio_model_path(p);
+    }
+
+    // Verifies the ffprobe audio-track probe returns a valid start_time +
+    // duration for a known recording with a mic-startup gap, and that the
+    // audio duration is strictly less than the video duration (the V−A
+    // bug premise). Run explicitly:
+    //   cargo test --lib probe_audio_track_baseline -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn probe_audio_track_baseline() {
+        let home = std::env::var("HOME").unwrap();
+        let source_str = format!(
+            "{home}/Movies/Zeigen/.scratch-baseline-c1/recording-2026-05-19-114549/recording-2026-05-19-114549.mp4"
+        );
+        let source = Path::new(&source_str);
+        assert!(source.exists(), "baseline source missing");
+
+        let meta = probe_audio_track_path(source)
+            .expect("probe")
+            .expect("audio track present");
+        let video_duration = probe_duration_seconds(source).expect("video duration");
+
+        println!(
+            "baseline: start={:.3}s duration={:.3}s (video={:.3}s, V-A={:.3}s)",
+            meta.start,
+            meta.duration,
+            video_duration,
+            video_duration - meta.duration
+        );
+        assert!(
+            meta.start >= 0.0 && meta.start < 1.0,
+            "start out of range: {}",
+            meta.start
+        );
+        assert!(meta.duration > 0.0, "duration must be > 0");
+        assert!(
+            meta.duration < video_duration,
+            "audio duration {} should be < video {}",
+            meta.duration,
+            video_duration
+        );
     }
 
     // End-to-end check against the Phase 10 c1 scratch baseline. Verifies

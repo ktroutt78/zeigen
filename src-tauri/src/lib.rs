@@ -618,6 +618,7 @@ pub fn run() {
             edit::write_sidecar,
             edit::delete_sidecar,
             edit::save_recording,
+            edit::probe_audio_track,
             thumbs::extract_thumb_sprite,
             discard_recording,
             clipboard::clipboard_copy_recording,
