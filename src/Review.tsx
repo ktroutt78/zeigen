@@ -787,6 +787,8 @@ function LeftColumn(props: LeftColumnProps) {
         flexDirection: "column",
         borderRight: "1px solid var(--border-faint)",
         minWidth: 0,
+        minHeight: 0,
+        overflow: "hidden",
       }}
     >
       <Toolbar duration={props.duration} trim={props.trim} editor={props.editor} />
@@ -1002,7 +1004,18 @@ function VideoStage(props: VideoStageProps) {
     props.editor.tool === "text" || props.editor.tool === "arrow" ? "crosshair" : "default";
 
   return (
-    <div style={{ position: "relative", padding: 16, background: "#0c0d10", flex: 1 }}>
+    <div
+      style={{
+        position: "relative",
+        padding: 16,
+        background: "#0c0d10",
+        flex: 1,
+        minHeight: 0,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+    >
       <div
         ref={stageRef}
         onClick={onStageClick}
@@ -1011,6 +1024,8 @@ function VideoStage(props: VideoStageProps) {
         style={{
           position: "relative",
           aspectRatio: "16 / 9",
+          maxWidth: "100%",
+          maxHeight: "100%",
           width: "100%",
           borderRadius: 8,
           overflow: "hidden",
