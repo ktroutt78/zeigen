@@ -23,6 +23,12 @@ Severity scale:
 
 **Fallback.** If the unified path doesn't exist: stop V2. Document the falsification in SPIKE-REPORT.md and back out to v1.0 with a different drift mitigation approach (silence-pad on save, or thread S into the file). The fallback is *not* "build a halfway version of V2."
 
+**Realized (2026-05-21, V2.1 spike).** **GO via Track B.** Outcome (a) materialized — `AVCaptureScreenInput`'s removal has no successor `AVCaptureDevice.DeviceType` on macOS 26.4.1 / SDK 26.2. The spike's `AVCaptureDevice.DiscoverySession` + `AVCaptureDevice.devices(for: .video)` probe enumerated only camera-shaped types (BuiltInWideAngleCamera, DeskViewCamera×2, External), no screen device. Charter's literal hypothesis (AVCaptureSession-native screen) is foreclosed on this SDK family.
+
+The unified-*clock* premise was preserved through the fallback shape: SCStream screen + AVCaptureSession mic, both producing PTS in host time, muxed into one AVAssetWriter. `end_time_drift_ms` median 62ms (primary) / 70ms (external), spread 45ms / 4ms — well inside the 80ms GO bar. V2.2 productionizes this shape. See `spikes/v2-unified-capture/SPIKE-REPORT.md` for full data.
+
+Methodology note for V2.2: clock parity is at the **time-base** level, not at the CMClock-**object-reference** level. `AVCaptureSession.synchronizationClock !== CMClockGetHostTimeClock()` by identity, yet both produce PTS in the same host-time range. Do not verify the clock contract with `===` reference equality — use time-base agreement on produced PTS values.
+
 ---
 
 ## R2. AAC priming residual may persist if encoder unchanged
@@ -34,6 +40,15 @@ Severity scale:
 **Spike coverage.** V2.1 partially — the spike produces MP4s we can `ffprobe` for audio `start_time`. Full characterization lands in V2.4.
 
 **Fallback.** If priming persists: document it as a known v2 limitation matching v1.0 behavior. No production change. If a future phase wants to fix it, options are (a) audio-track edit list / `priming_info` atom written via the muxer, (b) silence-trim post-encode, (c) different encoder. If priming is fixed in v2 (residual disappears), that's the v2 win — note it in the v2.0 release notes.
+
+**Update (2026-05-21, V2.1 spike).** **Cannot yet cleanly measure.** The spike's `audio_start_time` ranged 80–243ms across 10 takes, but this is dominated by `startup_gap_ms` (pipeline writer-start asymmetry — V2.2-fixable), not AAC encoder priming. `audio_start_s × 1000` and `startup_gap_ms` track each other to within rounding error per take, leaving no headroom to read the priming residual separately. Two structural contributors are tangled in the V2.1 measurement:
+
+1. Writer-start asymmetry: 80–243ms per take, dominant.
+2. AAC encoder priming proper: masked; magnitude unknown until V2.2 writer-start alignment lands.
+
+After V2.2 lands writer-start alignment (`startSession(atSourceTime: max(first_video_pts, first_audio_pts))`), the residual `audio_start_time` reads cleanly as priming proper. V2.4 measures it then and decides on muxer-level fix vs documented-as-known-limitation per the existing fallback options.
+
+Related: `end_time_drift_ms` (~62–70ms median across takes, well bounded) is **not** AAC tail — it is dominated by teardown order (`stream.stopCapture` awaits in-flight callbacks while AVCaptureSession keeps producing audio). V2.2 closes this with symmetric teardown. Severity unchanged.
 
 ---
 
@@ -71,6 +86,10 @@ Severity scale:
 
 **Fallback.** UI placements (bubble, countdown, identify) already use `set_window_frame_cg` per Phase 7 / Phase 14 c1 — they don't depend on the capture engine, so they're invariant under v2. The risk is purely about whether the *recording* (the SCK-equivalent path) handles all displays the same way. If it doesn't, V2.4 catches it and we either fix or roll back.
 
+**Update (2026-05-21, V2.1 spike).** **No multi-display regression in the recording path.** The spike's 5×30s × 2-display matrix (primary BenQ id=3 + built-in MacBook Air id=1) ran 10/10 takes to exit 0 on Track B. Per-display `end_time_drift_ms` variance *favors* the external/built-in display (4.4ms spread across 5 takes vs 45.4ms on primary). Direction is the opposite of the usual multi-display story.
+
+Likely an artifact of less compositor activity on the less-cluttered screen rather than a fundamental property of Track B's screen-handling — not load-bearing for V2.2 design, but worth not relying on if a future test uses two equally-busy displays. Third available display (secondary BenQ id=14) was not exercised; not load-bearing for the V2.1 criterion ("primary + at least one external"). Severity unchanged.
+
 ---
 
 ## R6. Permission flow differences (screen + mic at session creation)
@@ -82,6 +101,10 @@ Severity scale:
 **Spike coverage.** V2.1 does not — the spike runs on a machine with permissions already granted. First-run flow surfaces in V2.4.
 
 **Fallback.** If the unified session prompts differently, two options. (1) Match the prompt UX to v1.0 by pre-requesting permissions via the existing utilities before constructing the session. (2) Document the new flow as a minor v2 difference; this falls under the charter's "v1.0 surface parity" criterion, so a deliberate UX change here is technically a charter violation — escalate before accepting.
+
+**Update (2026-05-21, V2.1 spike).** **Partial data — no regression on this dev machine.** The spike's first c1 run prompted Screen Recording first (granted), then Microphone (granted) — one dialog each, sequential, matching v1.0's order. Subsequent runs prompted nothing (cached). The spike pre-requests both permissions via `CGRequestScreenCaptureAccess()` and `AVCaptureDevice.requestAccess(for: .audio)` before AVCaptureSession construction (CONTEXT D-07), so this finding is partly an artifact of the spike's chosen pre-request pattern, not the unified-session shape per se.
+
+**Caveat.** This dev machine had v1.0 microphone permission already cached from prior `recording-engine` runs, so V2.1 does not characterize a fresh-install flow. The first-real-prompt sequence and copy under the unified path still need a clean-machine test. V2.4 carries this; severity unchanged.
 
 ---
 
