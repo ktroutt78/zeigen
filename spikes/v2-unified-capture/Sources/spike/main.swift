@@ -3,6 +3,7 @@ import AVFoundation
 import CoreGraphics
 import CoreMedia
 import Foundation
+import ScreenCaptureKit
 
 // CG init — same pattern as src-tauri/recording-engine/Sources/recording-engine/main.swift:11.
 // AVCaptureSession + CGDisplay enumeration touch CoreGraphics; without
@@ -17,7 +18,7 @@ enum Exit: Int32 {
     case micNotFound = 72
     case trackAUnavailable = 80
     case trackAClockMissing = 81
-    case trackBNotImplemented = 82
+    case trackBSetupFailed = 83
     case sessionSetupFailed = 90
     case recordingFailed = 91
 }
@@ -290,14 +291,266 @@ clock === host: \(isHost)
     exit(Exit.ok.rawValue)
 }
 
+// MARK: Track B — SCK screen + AVCaptureSession mic, shared host clock
+//
+// SCStream's CMSampleBuffers carry timestamps in CMClockGetHostTimeClock()'s
+// time base on macOS (v1.0 RecordingSession.swift:197/280 relies on this).
+// AVCaptureSession's synchronizationClock is also host time by default.
+// Track B's job is to verify both share that clock and then mux their
+// CMSampleBuffers into one AVAssetWriter whose session start uses a single
+// PTS from whichever stream arrives first.
+
+struct SpikeError: Error, CustomStringConvertible {
+    let message: String
+    init(_ message: String) { self.message = message }
+    var description: String { message }
+}
+
+final class TrackBRunner: NSObject, @unchecked Sendable, SCStreamOutput, AVCaptureAudioDataOutputSampleBufferDelegate {
+    private let stream: SCStream
+    private let session: AVCaptureSession
+    private let writer: AVAssetWriter
+    private let videoInput: AVAssetWriterInput
+    private let audioInput: AVAssetWriterInput
+
+    private let lock = NSLock()
+    private var started = false
+    private var firstVideoPTS: CMTime = .invalid
+    private var firstAudioPTS: CMTime = .invalid
+    private var videoSamples = 0
+    private var audioSamples = 0
+
+    init(display: SCDisplay, micDevice: AVCaptureDevice, outURL: URL) throws {
+        let width = Int(display.width)
+        let height = Int(display.height)
+
+        // Writer settings match v1.0 RecordingSession.swift:111-143 so SPIKE-REPORT
+        // measurements are apples-to-apples vs the v1.0 baseline.
+        let writer = try AVAssetWriter(outputURL: outURL, fileType: .mp4)
+        let videoSettings: [String: Any] = [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: width,
+            AVVideoHeightKey: height,
+            AVVideoCompressionPropertiesKey: [
+                AVVideoAverageBitRateKey: 8_000_000,
+                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
+            ],
+        ]
+        let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
+        videoInput.expectsMediaDataInRealTime = true
+        guard writer.canAdd(videoInput) else { throw SpikeError("cannot add video input to writer") }
+        writer.add(videoInput)
+
+        let audioSettings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVSampleRateKey: 48_000,
+            AVNumberOfChannelsKey: 1,
+            AVEncoderBitRateKey: 128_000,
+        ]
+        let audioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
+        audioInput.expectsMediaDataInRealTime = true
+        guard writer.canAdd(audioInput) else { throw SpikeError("cannot add audio input to writer") }
+        writer.add(audioInput)
+
+        // SCStream — screen only. captureMicrophone deliberately NOT set:
+        // Track B's defining choice is routing mic through AVCaptureSession.
+        let filter = SCContentFilter(display: display, excludingWindows: [])
+        let config = SCStreamConfiguration()
+        config.width = width
+        config.height = height
+        config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
+        config.queueDepth = 6
+        config.showsCursor = true
+        config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        let stream = SCStream(filter: filter, configuration: config, delegate: nil)
+
+        // AVCaptureSession — mic via AVCaptureAudioDataOutput so raw CMSampleBuffers
+        // thread into the writer (movie file output can't be muxed with SCK).
+        let session = AVCaptureSession()
+        let micInput = try AVCaptureDeviceInput(device: micDevice)
+        guard session.canAddInput(micInput) else { throw SpikeError("cannot add mic input to session") }
+        session.addInput(micInput)
+
+        let audioOutput = AVCaptureAudioDataOutput()
+        // Force mono float PCM at 48 kHz so the AAC encoder input matches its output
+        // 1:1 (the mic could otherwise be stereo, and writer downmix isn't guaranteed).
+        audioOutput.audioSettings = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVLinearPCMBitDepthKey: 32,
+            AVLinearPCMIsFloatKey: true,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false,
+            AVSampleRateKey: 48_000.0,
+            AVNumberOfChannelsKey: 1,
+        ]
+        guard session.canAddOutput(audioOutput) else { throw SpikeError("cannot add audio output to session") }
+        session.addOutput(audioOutput)
+
+        self.stream = stream
+        self.session = session
+        self.writer = writer
+        self.videoInput = videoInput
+        self.audioInput = audioInput
+        super.init()
+
+        try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: DispatchQueue(label: "spike.video"))
+        audioOutput.setSampleBufferDelegate(self, queue: DispatchQueue(label: "spike.audio"))
+    }
+
+    func clockIdentitySnapshot(label: String) -> String {
+        let sessionClock = session.synchronizationClock
+        let hostClock = CMClockGetHostTimeClock()
+        let sessionID = sessionClock.map { ObjectIdentifier($0).hashValue.description } ?? "nil"
+        let hostID = ObjectIdentifier(hostClock).hashValue.description
+        let sessionIsHost = (sessionClock === hostClock)
+        return """
+        [Track B clock identity — \(label)]
+          AVCaptureSession.synchronizationClock: \(sessionID)
+          host clock:                            \(hostID)
+          session === host:                      \(sessionIsHost)
+          SCStream PTS time base:                host clock (SCK samples carry CMClockGetHostTimeClock() timestamps)
+        """
+    }
+
+    func startCapture() async throws {
+        try await stream.startCapture()
+        session.startRunning()
+    }
+
+    func stopCapture() async throws {
+        try await stream.stopCapture()
+        session.stopRunning()
+        videoInput.markAsFinished()
+        audioInput.markAsFinished()
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            writer.finishWriting { cont.resume() }
+        }
+        if writer.status == .failed {
+            throw writer.error ?? SpikeError("writer finished with status=failed and no error")
+        }
+    }
+
+    func firstSampleSummary() -> String {
+        lock.lock(); defer { lock.unlock() }
+        let v = firstVideoPTS.isValid ? String(format: "%.6f", CMTimeGetSeconds(firstVideoPTS)) : "n/a"
+        let a = firstAudioPTS.isValid ? String(format: "%.6f", CMTimeGetSeconds(firstAudioPTS)) : "n/a"
+        let host = String(format: "%.6f", CMTimeGetSeconds(CMClockGetTime(CMClockGetHostTimeClock())))
+        return "[Track B counters] video samples: \(videoSamples); audio samples: \(audioSamples); first video PTS: \(v)s; first audio PTS: \(a)s; host now: \(host)s"
+    }
+
+    // Sidecar carries the absolute host-time PTS of each pipeline's first
+    // sample buffer as it arrived at the writer. The driver subtracts these
+    // from each stream's ffprobe duration to compute a drift signal that
+    // factors out startup-asymmetry (PLAN c2 measurement matrix amendment).
+    func writePTSSidecar(to url: URL) throws {
+        lock.lock(); defer { lock.unlock() }
+        let v = firstVideoPTS.isValid ? CMTimeGetSeconds(firstVideoPTS) : Double.nan
+        let a = firstAudioPTS.isValid ? CMTimeGetSeconds(firstAudioPTS) : Double.nan
+        let content = "video=\(String(format: "%.6f", v))\naudio=\(String(format: "%.6f", a))\n"
+        try content.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    // MARK: SCStreamOutput
+
+    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard sampleBuffer.isValid, type == .screen else { return }
+        guard let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
+              let status = attachments.first?[.status] as? Int,
+              status == SCFrameStatus.complete.rawValue
+        else { return }
+        append(sampleBuffer, to: videoInput, isVideo: true)
+    }
+
+    // MARK: AVCaptureAudioDataOutputSampleBufferDelegate
+
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        guard sampleBuffer.isValid else { return }
+        append(sampleBuffer, to: audioInput, isVideo: false)
+    }
+
+    private func append(_ buffer: CMSampleBuffer, to input: AVAssetWriterInput, isVideo: Bool) {
+        lock.lock()
+        let pts = CMSampleBufferGetPresentationTimeStamp(buffer)
+        if !started {
+            writer.startWriting()
+            writer.startSession(atSourceTime: pts)
+            started = true
+        }
+        if isVideo {
+            videoSamples += 1
+            if !firstVideoPTS.isValid { firstVideoPTS = pts }
+        } else {
+            audioSamples += 1
+            if !firstAudioPTS.isValid { firstAudioPTS = pts }
+        }
+        let ready = input.isReadyForMoreMediaData
+        lock.unlock()
+        if !ready { return }
+        input.append(buffer)
+    }
+}
+
+@MainActor
+func runTrackB() async -> Never {
+    let shareable: SCShareableContent
+    do {
+        shareable = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+    } catch {
+        die(.trackBSetupFailed, "TRACK_B_SETUP_FAILED: SCShareableContent: \(error)")
+    }
+    guard let display = shareable.displays.first(where: { $0.displayID == displayID }) else {
+        let available = shareable.displays.map { String($0.displayID) }.joined(separator: ",")
+        die(.displayNotFound, "DISPLAY_NOT_FOUND: display \(displayID) not in SCShareableContent (available: \(available))")
+    }
+
+    let runner: TrackBRunner
+    do {
+        runner = try TrackBRunner(display: display, micDevice: micDevice, outURL: outURL)
+    } catch {
+        die(.trackBSetupFailed, "TRACK_B_SETUP_FAILED: runner init: \(error)")
+    }
+
+    FileHandle.standardError.write(Data((runner.clockIdentitySnapshot(label: "pre-start") + "\n").utf8))
+
+    do {
+        try await runner.startCapture()
+    } catch {
+        die(.trackBSetupFailed, "TRACK_B_SETUP_FAILED: startCapture: \(error)")
+    }
+
+    FileHandle.standardError.write(Data((runner.clockIdentitySnapshot(label: "post-start") + "\n").utf8))
+    FileHandle.standardError.write(Data("recording \(args.duration)s → \(outPath)\n".utf8))
+
+    try? await Task.sleep(nanoseconds: UInt64(args.duration * 1_000_000_000))
+
+    do {
+        try await runner.stopCapture()
+    } catch {
+        die(.recordingFailed, "RECORDING_FAILED: \(error)")
+    }
+
+    FileHandle.standardError.write(Data((runner.firstSampleSummary() + "\n").utf8))
+
+    let ptsSidecar = URL(fileURLWithPath: outPath + ".pts")
+    try? runner.writePTSSidecar(to: ptsSidecar)
+
+    try? "B".write(to: trackSidecar, atomically: true, encoding: .utf8)
+    exit(Exit.ok.rawValue)
+}
+
 switch args.track {
 case "A":
     runTrackA()
-case "auto":
-    // c1: auto = try A; no fallback (c2 adds B).
-    runTrackA()
 case "B":
-    die(.trackBNotImplemented, "TRACK_B_NOT_IMPLEMENTED: Track B lands in c2")
+    await runTrackB()
+case "auto":
+    // c2: auto = probe Track A; fall through to B if no screen-shaped device.
+    let (screenDevice, _) = probeScreenAVDevice()
+    if screenDevice != nil {
+        runTrackA()
+    } else {
+        await runTrackB()
+    }
 default:
     die(.usage, "USAGE: --track \(args.track)")
 }
