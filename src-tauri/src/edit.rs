@@ -254,6 +254,76 @@ pub(crate) fn probe_audio_track_path(path: &Path) -> Result<Option<AudioTrackMet
     Ok(Some(AudioTrackMeta { start, duration }))
 }
 
+// Generate a NR-processed sibling MP4 next to the scratch source so the
+// review window can play audio that matches what the save pipeline writes
+// (Phase 14 c2). The pipeline is the narrowest slice of run_edit_pipeline:
+// same arnndn filter (Phase 12 c3), same AAC re-encode, video bitstream
+// copied. No trim, no overlay — preview is audio parity only (D-09).
+#[tauri::command]
+pub fn render_preview_audio(source_path: String) -> Result<String, String> {
+    let source = Path::new(&source_path);
+    if !source.is_file() {
+        return Err(format!("source missing: {}", source.display()));
+    }
+    let preview = preview_path_for(source)
+        .ok_or_else(|| "source has no parent directory".to_string())?;
+    render_preview_audio_path(source, &preview)?;
+    Ok(preview.to_string_lossy().into_owned())
+}
+
+pub(crate) fn preview_path_for(source: &Path) -> Option<PathBuf> {
+    source.parent().map(|p| p.join("preview.mp4"))
+}
+
+pub(crate) fn render_preview_audio_path(source: &Path, output: &Path) -> Result<(), String> {
+    // Drop any stale preview from a prior open. Regenerated fresh each
+    // open — D-07.
+    let _ = std::fs::remove_file(output);
+
+    let args: Vec<String> = vec![
+        "-y".into(),
+        "-i".into(),
+        source.to_string_lossy().into_owned(),
+        "-af".into(),
+        format!("arnndn=m={}", audio_model_path().display()),
+        "-map".into(),
+        "0:v:0".into(),
+        "-map".into(),
+        "0:a:0?".into(),
+        "-c:v".into(),
+        "copy".into(),
+        "-c:a".into(),
+        "aac".into(),
+        "-b:a".into(),
+        "192k".into(),
+        output.to_string_lossy().into_owned(),
+    ];
+
+    let result = Command::new(FFMPEG_PATH)
+        .args(&args)
+        .output()
+        .map_err(|e| format!("failed to spawn ffmpeg for preview: {e}"))?;
+
+    if !result.status.success() {
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        return Err(format!(
+            "ffmpeg preview render failed (exit {:?}):\n{}",
+            result.status.code(),
+            stderr
+                .lines()
+                .rev()
+                .take(40)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+
+    Ok(())
+}
+
 // Cached font bytes — read SFNS.ttf once per process. The font shipped on
 // macOS at /System/Library/Fonts/SFNS.ttf is a static-instance-readable
 // variable font; ab_glyph reads the default instance.
@@ -934,6 +1004,51 @@ mod tests {
             "audio duration {} should be < video {}",
             meta.duration,
             video_duration
+        );
+    }
+
+    // Phase 14 c2 D-08 measurement. Times the arnndn pass against the
+    // c1 scratch baseline. Threshold: <2s → eager (block review video swap),
+    // ≥2s → lazy (raw plays until preview ready). Asserts the preview audio
+    // stream md5 differs from source (arnndn ran) and duration is preserved.
+    //   cargo test --lib render_preview_audio_baseline -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn render_preview_audio_baseline() {
+        ensure_audio_model_for_tests();
+        let home = std::env::var("HOME").unwrap();
+        let source_str = format!(
+            "{home}/Movies/Zeigen/.scratch-baseline-c1/recording-2026-05-19-114549/recording-2026-05-19-114549.mp4"
+        );
+        let source = Path::new(&source_str);
+        assert!(source.exists(), "baseline source missing");
+
+        let preview = source.parent().unwrap().join("preview.mp4");
+        let _ = std::fs::remove_file(&preview);
+
+        let start = std::time::Instant::now();
+        render_preview_audio_path(source, &preview).expect("render preview");
+        let elapsed = start.elapsed();
+        assert!(preview.exists(), "preview file not created");
+
+        let src_dur = probe_duration_seconds(source).expect("source duration");
+        let prev_dur = probe_duration_seconds(&preview).expect("preview duration");
+        println!(
+            "preview render: {:.2}s wall-clock for {:.2}s recording (preview={:.2}s)",
+            elapsed.as_secs_f64(),
+            src_dur,
+            prev_dur,
+        );
+        assert!(
+            (src_dur - prev_dur).abs() < 0.1,
+            "duration mismatch: src={src_dur} prev={prev_dur}"
+        );
+
+        let src_a = stream_md5(&source_str, "0:a:0");
+        let prev_a = stream_md5(&preview.to_string_lossy(), "0:a:0");
+        assert_ne!(
+            src_a, prev_a,
+            "preview audio should differ from source (arnndn applied)"
         );
     }
 

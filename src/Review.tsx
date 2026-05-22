@@ -121,6 +121,17 @@ function isLogicallyEmpty(s: SidecarState, duration: number | null): boolean {
   return normalizeTrim(s.trim, duration) == null && s.annotations.length === 0;
 }
 
+// Phase 14 c2. Tracks the NR-processed preview MP4 the main <video>
+// switches to once arnndn has run over the scratch source — so the user
+// can audibly verify NR before save. "rendering" is the eager wait at
+// review-open (D-08 measured 0.63s for a 22s clip); "ready" carries the
+// converted file URL; "failed" leaves playback on the raw scratch and
+// surfaces a pip (D-10). Saved files unchanged (D-01).
+type PreviewState =
+  | { status: "rendering" }
+  | { status: "ready"; url: string }
+  | { status: "failed" };
+
 export default function Review() {
   const [params] = useState(() => readParams());
   const sourcePath = params.path;
@@ -139,6 +150,12 @@ export default function Review() {
   // video-time timeline instead of audio-time. Null until probe_audio_track
   // resolves; Waveform falls back to the pre-Phase-13 a/A mapping while null.
   const [audioStart, setAudioStart] = useState<number | null>(null);
+
+  const [previewState, setPreviewState] = useState<PreviewState>({ status: "rendering" });
+  // currentTime to restore across the raw→preview src swap. Captured
+  // synchronously when the preview becomes ready (before React commits the
+  // new src) because the browser resets currentTime to 0 on src change.
+  const swapRestoreTimeRef = useRef<number | null>(null);
 
   // Edit state.
   const [trim, setTrim] = useState<Trim | null>(null);
@@ -293,6 +310,50 @@ export default function Review() {
       cancelled = true;
     };
   }, [sourcePath]);
+
+  // Render the NR preview MP4 eagerly at review-open. Same arnndn pipeline
+  // the save path uses (Phase 12 c3), video stream copied, audio re-encoded
+  // — preview lives at .scratch/<id>/preview.mp4 (D-07) and rides the same
+  // scratch lifecycle (discard removes it, save replaces it). On success
+  // the main <video> swaps to the preview URL; on failure D-10 surfaces a
+  // pip and the raw scratch keeps playing.
+  useEffect(() => {
+    if (!sourcePath) {
+      setPreviewState({ status: "rendering" });
+      return;
+    }
+    let cancelled = false;
+    setPreviewState({ status: "rendering" });
+    invoke<string>("render_preview_audio", { sourcePath })
+      .then((previewPath) => {
+        if (cancelled) return;
+        // Capture playback position before the src swap — the browser
+        // resets currentTime when src changes, so we restore on the next
+        // loadedmetadata.
+        const v = videoRef.current;
+        if (v) {
+          swapRestoreTimeRef.current = v.currentTime;
+          v.pause();
+        }
+        setPreviewState({ status: "ready", url: convertFileSrc(previewPath) });
+      })
+      .catch((err) => {
+        console.warn("preview render failed", err);
+        if (!cancelled) setPreviewState({ status: "failed" });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sourcePath]);
+
+  // The main <video> plays the NR preview once ready; falls back to the
+  // raw scratch during the eager render window and on D-10 failure. The
+  // timeline waveform + scrub-preview stay on the raw URL (D-12 — waveform
+  // shows the unprocessed signal for the Phase 12 c1 clipping highlight).
+  const playbackUrl = useMemo(() => {
+    if (previewState.status === "ready") return previewState.url;
+    return assetUrl;
+  }, [previewState, assetUrl]);
 
   // Initialize trim once duration is known and no sidecar trim was present.
   useEffect(() => {
@@ -628,6 +689,14 @@ export default function Review() {
     const v = videoRef.current;
     if (!v) return;
     setDuration(v.duration);
+    // After the raw→preview src swap, restore the playback position the
+    // user was at. Don't auto-play even if they were playing — new audio
+    // under their ear without context is more disorienting than a brief
+    // pause.
+    if (swapRestoreTimeRef.current != null) {
+      v.currentTime = swapRestoreTimeRef.current;
+      swapRestoreTimeRef.current = null;
+    }
     primeFirstFrame();
   };
 
@@ -672,7 +741,11 @@ export default function Review() {
         fontFamily: "var(--font-system)",
       }}
     >
-      <Header sourceName={sourceName} dirty={dirty} />
+      <Header
+        sourceName={sourceName}
+        dirty={dirty}
+        previewFailed={previewState.status === "failed"}
+      />
       <div
         style={{
           display: "grid",
@@ -683,6 +756,7 @@ export default function Review() {
       >
         <LeftColumn
           assetUrl={assetUrl}
+          playbackUrl={playbackUrl}
           sourcePath={sourcePath}
           videoRef={videoRef}
           onLoadedMetadata={onLoadedMetadata}
@@ -748,7 +822,15 @@ export default function Review() {
   );
 }
 
-function Header({ sourceName, dirty }: { sourceName: string; dirty: boolean }) {
+function Header({
+  sourceName,
+  dirty,
+  previewFailed,
+}: {
+  sourceName: string;
+  dirty: boolean;
+  previewFailed: boolean;
+}) {
   return (
     <div
       style={{
@@ -788,12 +870,32 @@ function Header({ sourceName, dirty }: { sourceName: string; dirty: boolean }) {
       </span>
       <span style={{ color: "var(--fg-tertiary)", fontSize: 12 }}>·</span>
       <span style={{ color: "var(--fg-tertiary)", fontSize: 12 }}>just now</span>
+      {previewFailed && (
+        <span
+          style={{
+            marginLeft: "auto",
+            padding: "2px 8px",
+            borderRadius: 999,
+            fontSize: 11,
+            background: "rgba(255, 180, 0, 0.12)",
+            color: "var(--warning, #f5b400)",
+            border: "1px solid rgba(255, 180, 0, 0.3)",
+          }}
+          title="Save still applies noise reduction — only the in-window preview fell back to raw audio."
+        >
+          Preview is raw — save still applies NR
+        </span>
+      )}
     </div>
   );
 }
 
 type LeftColumnProps = {
   assetUrl: string | null;
+  // playbackUrl swaps to the NR-preview MP4 when render_preview_audio
+  // resolves (Phase 14 c2). Distinct from assetUrl, which stays on the raw
+  // scratch URL for the waveform + scrub preview.
+  playbackUrl: string | null;
   sourcePath: string | null;
   videoRef: React.MutableRefObject<HTMLVideoElement | null>;
   onLoadedMetadata: () => void;
@@ -825,7 +927,7 @@ function LeftColumn(props: LeftColumnProps) {
     >
       <Toolbar duration={props.duration} trim={props.trim} editor={props.editor} />
       <VideoStage
-        assetUrl={props.assetUrl}
+        assetUrl={props.playbackUrl}
         videoRef={props.videoRef}
         onLoadedMetadata={props.onLoadedMetadata}
         onTimeUpdate={props.onTimeUpdate}
