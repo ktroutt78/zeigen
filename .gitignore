@@ -29,3 +29,6 @@ dist-ssr
 
 # Claude Code local state
 .claude/
+
+# V2 spike outputs
+spikes/*/output/
