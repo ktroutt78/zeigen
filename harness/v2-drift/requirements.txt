@@ -1,0 +1,2 @@
+# Python stdlib only — no pip install required.
+# External system dependency: ffprobe on PATH (brew install ffmpeg).
