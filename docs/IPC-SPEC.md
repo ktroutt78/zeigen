@@ -175,8 +175,9 @@ Codes:
 - `MIC_NOT_FOUND` — `microphone_uid` not present in current enumeration
 - `OUTPUT_PATH_INVALID` — parent dir missing, not writable, or path exists and can't be overwritten
 - `WRITER_FAILED` — AVAssetWriter failed to start or finalize
+- `MIC_NO_FIRST_SAMPLE` — AVCaptureSession produced no audio sample within 250ms of the first video sample; engine tears down the recording and stays running
 - `INVALID_COMMAND` — malformed JSON or unknown command; engine stays running
-- `INVALID_STATE` — command is not valid from the current state (e.g., `pause` when idle, `resume` when recording, `start` when already recording); engine stays running
+- `INVALID_STATE` — command is not valid from the current state (e.g., `pause` when idle, `resume` when recording, `start` when already recording, `pause` before writer-start has anchored the muxed timeline); engine stays running
 - `INTERNAL` — anything else; engine exits after emitting this
 
 ## State machine

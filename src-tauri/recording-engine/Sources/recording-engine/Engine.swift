@@ -183,11 +183,18 @@ actor Engine {
             return
         }
         do {
+            let onFatal: @Sendable (EngineError) -> Void = { [weak self] err in
+                guard let self else { return }
+                Task {
+                    await self.handleFatalError(err)
+                }
+            }
             let newSession = try await RecordingSession(
                 source: source,
                 microphoneUID: cmd.microphone_uid,
                 outputPath: outputPath,
-                maxFPS: cmd.max_fps ?? 30
+                maxFPS: cmd.max_fps ?? 30,
+                onFatalError: onFatal
             )
             try await newSession.start()
             session = newSession
@@ -210,9 +217,29 @@ actor Engine {
             emit(.error(code: "INVALID_STATE", message: "pause requires recording state"))
             return
         }
+        // V2.2 D-06: pause is rejected before writer-start fires. The
+        // recording is alive (SCStream + AVCaptureSession running) but
+        // the muxed timeline hasn't been anchored yet, so there's no
+        // gapless resume math to apply.
+        guard s.writerStarted else {
+            emit(.error(code: "INVALID_STATE", message: "pause not accepted before writer-start"))
+            return
+        }
         s.pause()
         state = .paused
         emit(.paused(elapsed_s: s.elapsedSeconds))
+    }
+
+    // Mid-recording fatal-error path. RecordingSession invokes the
+    // onFatalError callback (passed into its init) which hops onto this
+    // actor. V2.2 c2 wires MIC_NO_FIRST_SAMPLE through here; c3 will add
+    // MIC_SESSION_FAILED via the AVCaptureSession runtime-error observer.
+    private func handleFatalError(_ err: EngineError) async {
+        guard state != .idle, let s = session else { return }
+        await s.tearDownAfterFatalError()
+        emit(.error(code: err.code, message: err.message))
+        session = nil
+        state = .idle
     }
 
     private func handleResume() {
@@ -295,7 +322,7 @@ actor Engine {
     }
 }
 
-struct EngineError: Error {
+struct EngineError: Error, Sendable {
     let code: String
     let message: String
 }
