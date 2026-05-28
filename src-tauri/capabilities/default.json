@@ -22,6 +22,7 @@
     "core:window:allow-set-ignore-cursor-events",
     "core:window:allow-start-dragging",
     "global-shortcut:default",
-    "dialog:allow-ask"
+    "dialog:allow-ask",
+    "dialog:allow-open"
   ]
 }

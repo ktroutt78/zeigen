@@ -7,6 +7,7 @@ mod exports;
 mod hotkey;
 mod linkedin;
 mod macos;
+mod settings;
 mod thumbs;
 mod tray;
 mod webcam;
@@ -632,6 +633,10 @@ pub fn run() {
             clipboard::clipboard_copy_text,
             exports::cleanup_recording_exports,
             linkedin::linkedin_export,
+            settings::get_settings,
+            settings::set_watermark_logo,
+            settings::set_watermark_corner,
+            settings::clear_watermark_logo,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
