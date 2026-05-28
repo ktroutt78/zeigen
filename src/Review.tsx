@@ -3,7 +3,7 @@ import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { emit } from "@tauri-apps/api/event";
 import { revealItemInDir, openUrl } from "@tauri-apps/plugin-opener";
-import { ask } from "@tauri-apps/plugin-dialog";
+import { ask, open } from "@tauri-apps/plugin-dialog";
 import { Icon, I, P } from "./components/icons";
 import Waveform from "./Waveform";
 import ScrubPreview from "./ScrubPreview";
@@ -64,6 +64,33 @@ type SidecarState = {
 const EMPTY_STATE: SidecarState = { trim: null, annotations: [] };
 const SIDECAR_DEBOUNCE_MS = 350;
 const TRIM_EPS = 0.05;
+
+type WmCorner = "tl" | "tr" | "bl" | "br";
+const WM_CORNERS: WmCorner[] = ["tl", "tr", "bl", "br"];
+
+// Mirrors the Rust settings::Settings shape (settings.json).
+type AppSettings = { watermark: { logo_path: string | null; corner: string } };
+
+// Watermark controls passed to ExportPanel. logoPath/corner persist via
+// settings.json; apply is per-recording (not persisted).
+type WatermarkUI = {
+  logoPath: string | null;
+  corner: WmCorner;
+  apply: boolean;
+  onPick: () => void;
+  onRemove: () => void;
+  onCorner: (c: WmCorner) => void;
+  onToggleApply: () => void;
+};
+
+// Watermark preview passed to VideoStage. src is the convertFileSrc'd logo
+// (or null when nothing should render); videoDims drives the content-box
+// computation so the overlay tracks the letterboxed video, not the stage.
+type WatermarkPreview = {
+  src: string | null;
+  corner: WmCorner;
+  videoDims: { w: number; h: number } | null;
+};
 
 function readParams(): { path: string | null } {
   const hash = window.location.hash || "";
@@ -189,6 +216,65 @@ export default function Review() {
   const [tool, setTool] = useState<Tool>(null);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
+
+  // Watermark (c3). logoPath + corner are the remembered global settings;
+  // apply is per-recording (default on once a logo is set) — turning it off
+  // skips the watermark on this clip without forgetting the logo. videoDims
+  // is captured at metadata so the preview can size against the real frame.
+  const [wmLogoPath, setWmLogoPath] = useState<string | null>(null);
+  const [wmCorner, setWmCorner] = useState<WmCorner>("tr");
+  const [wmApply, setWmApply] = useState(false);
+  const [videoDims, setVideoDims] = useState<{ w: number; h: number } | null>(null);
+
+  useEffect(() => {
+    invoke<AppSettings>("get_settings")
+      .then((s) => {
+        const lp = s.watermark?.logo_path ?? null;
+        const c = (s.watermark?.corner ?? "tr") as WmCorner;
+        setWmLogoPath(lp);
+        setWmCorner(WM_CORNERS.includes(c) ? c : "tr");
+        setWmApply(!!lp);
+      })
+      .catch((err) => console.warn("get_settings failed", err));
+  }, []);
+
+  const onPickLogo = useCallback(async () => {
+    try {
+      const picked = await open({
+        multiple: false,
+        filters: [{ name: "PNG", extensions: ["png"] }],
+      });
+      if (typeof picked !== "string") return; // cancelled
+      const s = await invoke<AppSettings>("set_watermark_logo", { sourcePath: picked });
+      setWmLogoPath(s.watermark?.logo_path ?? null);
+      setWmApply(!!s.watermark?.logo_path);
+    } catch (err) {
+      setError(`watermark: ${err}`);
+    }
+  }, []);
+
+  const onRemoveLogo = useCallback(async () => {
+    try {
+      await invoke("clear_watermark_logo");
+    } catch (err) {
+      console.warn("clear_watermark_logo failed", err);
+    }
+    setWmLogoPath(null);
+    setWmApply(false);
+  }, []);
+
+  const onCornerChange = useCallback((c: WmCorner) => {
+    setWmCorner(c);
+    invoke("set_watermark_corner", { corner: c }).catch((err) =>
+      console.warn("set_watermark_corner failed", err),
+    );
+  }, []);
+
+  const onToggleApply = useCallback(() => setWmApply((a) => !a), []);
+
+  // apply && logo set => the effective logo baked into exports / shown in
+  // the preview. null otherwise (apply off, or no logo).
+  const wmEffectiveLogo = wmApply && wmLogoPath ? wmLogoPath : null;
 
   const updateAnnotation = useCallback(
     (idx: number, patch: Partial<Annotation>) => {
@@ -427,6 +513,8 @@ export default function Review() {
           format: spec.format,
           resolution: spec.resolution,
           fps: spec.format === "gif" ? spec.fps : undefined,
+          watermarkLogo: wmEffectiveLogo,
+          watermarkCorner: wmCorner,
         });
         setLastSavedPath(result.output_path);
         setLastSavedAt(Date.now());
@@ -444,7 +532,7 @@ export default function Review() {
         setSaving(false);
       }
     },
-    [sourcePath],
+    [sourcePath, wmEffectiveLogo, wmCorner],
   );
 
   // proceedingRef gates the close-requested handler so an in-flight
@@ -689,6 +777,9 @@ export default function Review() {
     const v = videoRef.current;
     if (!v) return;
     setDuration(v.duration);
+    if (v.videoWidth && v.videoHeight) {
+      setVideoDims({ w: v.videoWidth, h: v.videoHeight });
+    }
     // After the raw→preview src swap, restore the playback position the
     // user was at. Don't auto-play even if they were playing — new audio
     // under their ear without context is more disorienting than a brief
@@ -771,6 +862,11 @@ export default function Review() {
           trim={trim}
           setTrim={setTrim}
           audioStart={audioStart}
+          watermarkPreview={{
+            src: wmEffectiveLogo ? convertFileSrc(wmEffectiveLogo) : null,
+            corner: wmCorner,
+            videoDims,
+          }}
           editor={{
             tool,
             setTool,
@@ -807,6 +903,15 @@ export default function Review() {
           onDiscard={onDiscard}
           onRecordAnother={onRecordAnother}
           setError={setError}
+          watermark={{
+            logoPath: wmLogoPath,
+            corner: wmCorner,
+            apply: wmApply,
+            onPick: onPickLogo,
+            onRemove: onRemoveLogo,
+            onCorner: onCornerChange,
+            onToggleApply,
+          }}
         />
       </div>
       {error && <ErrorStrip error={error} onDismiss={() => setError(null)} />}
@@ -910,6 +1015,7 @@ type LeftColumnProps = {
   trim: Trim | null;
   setTrim: React.Dispatch<React.SetStateAction<Trim | null>>;
   audioStart: number | null;
+  watermarkPreview: WatermarkPreview;
   editor: Editor;
 };
 
@@ -937,6 +1043,7 @@ function LeftColumn(props: LeftColumnProps) {
         currentTime={props.currentTime}
         playing={props.playing}
         togglePlay={props.togglePlay}
+        watermarkPreview={props.watermarkPreview}
         editor={props.editor}
       />
       <Timeline
@@ -1069,6 +1176,7 @@ type VideoStageProps = {
   currentTime: number;
   playing: boolean;
   togglePlay: () => void;
+  watermarkPreview: WatermarkPreview;
   editor: Editor;
 };
 
@@ -1215,7 +1323,77 @@ function VideoStage(props: VideoStageProps) {
           currentTime={props.currentTime}
           togglePlay={props.togglePlay}
         />
+        <WatermarkPreviewLayer
+          stageRef={stageRef}
+          preview={props.watermarkPreview}
+        />
       </div>
+    </div>
+  );
+}
+
+// Live watermark preview. Mirrors the ffmpeg overlay: the logo sits in the
+// chosen corner of the *video content box* (not the stage box), sized to
+// 10% of the content's shorter dimension with 2% padding. Computing the
+// content box from the video's intrinsic dims + the stage size makes the
+// overlay track the letterboxed frame when the source aspect != 16:9.
+function WatermarkPreviewLayer({
+  stageRef,
+  preview,
+}: {
+  stageRef: React.MutableRefObject<HTMLDivElement | null>;
+  preview: WatermarkPreview;
+}) {
+  const stage = useStageSize(stageRef);
+  if (!preview.src || !preview.videoDims || stage.width === 0 || stage.height === 0) {
+    return null;
+  }
+
+  // Contain-fit the video inside the 16:9 stage box.
+  const { w: vw, h: vh } = preview.videoDims;
+  const videoAspect = vw / vh;
+  const stageAspect = stage.width / stage.height;
+  let cw: number;
+  let ch: number;
+  if (videoAspect > stageAspect) {
+    cw = stage.width;
+    ch = stage.width / videoAspect;
+  } else {
+    ch = stage.height;
+    cw = stage.height * videoAspect;
+  }
+  const cx = (stage.width - cw) / 2;
+  const cy = (stage.height - ch) / 2;
+
+  const shorter = Math.min(cw, ch);
+  const logoH = shorter * 0.1;
+  const pad = shorter * 0.02;
+  const anchor: React.CSSProperties =
+    preview.corner === "tl"
+      ? { top: pad, left: pad }
+      : preview.corner === "tr"
+        ? { top: pad, right: pad }
+        : preview.corner === "bl"
+          ? { bottom: pad, left: pad }
+          : { bottom: pad, right: pad };
+
+  return (
+    <div
+      style={{
+        position: "absolute",
+        left: cx,
+        top: cy,
+        width: cw,
+        height: ch,
+        pointerEvents: "none",
+      }}
+    >
+      <img
+        src={preview.src}
+        alt=""
+        draggable={false}
+        style={{ position: "absolute", height: logoH, width: "auto", ...anchor }}
+      />
     </div>
   );
 }
@@ -2319,6 +2497,7 @@ function ExportPanel({
   onDiscard,
   onRecordAnother,
   setError,
+  watermark,
 }: {
   sourcePath: string | null;
   lastSavedPath: string | null;
@@ -2341,6 +2520,7 @@ function ExportPanel({
   onDiscard: () => Promise<void> | void;
   onRecordAnother: () => Promise<void> | void;
   setError: (msg: string | null) => void;
+  watermark: WatermarkUI;
 }) {
   // Transient post-save flash. Driven off lastSavedAt (parent state) so
   // the LinkedIn chain's implicit save also flashes the button. Reset to
@@ -2409,12 +2589,17 @@ function ExportPanel({
       // clipboard_copy_recording reads sidecar adjacent to the source
       // and runs the pipeline (Phase 11 c2), so the pasted mp4 reflects
       // the user's current edits without committing anything to Movies.
-      await invoke("clipboard_copy_recording", { stamp, sourcePath });
+      await invoke("clipboard_copy_recording", {
+        stamp,
+        sourcePath,
+        watermarkLogo: watermark.apply && watermark.logoPath ? watermark.logoPath : null,
+        watermarkCorner: watermark.corner,
+      });
       setCopiedAt(Date.now());
     } catch (err) {
       setError(`copy to clipboard: ${err}`);
     }
-  }, [sourcePath, setError]);
+  }, [sourcePath, setError, watermark]);
 
   // LinkedIn export: ensure an MP4 baseline exists in ~/Movies/Zeigen/
   // (commits a fresh MP4-Source save if none yet this session — reuses
@@ -2629,6 +2814,104 @@ function ExportPanel({
             </>
           )}
         </button>
+      </div>
+
+      <div className="hairline" style={{ margin: "0 14px" }} />
+
+      {/* WATERMARK block */}
+      <div style={{ padding: "10px 14px 6px" }}>
+        <span
+          style={{
+            fontSize: 10.5,
+            color: "var(--fg-tertiary)",
+            letterSpacing: "0.06em",
+            textTransform: "uppercase",
+            fontWeight: 600,
+          }}
+        >
+          Watermark
+        </span>
+      </div>
+
+      <div style={{ padding: "0 14px 12px", display: "flex", flexDirection: "column", gap: 8 }}>
+        {watermark.logoPath ? (
+          <>
+            <label
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                fontSize: 12.5,
+                color: "var(--fg-primary)",
+                cursor: "pointer",
+              }}
+            >
+              <input
+                type="checkbox"
+                className="accent-blue"
+                checked={watermark.apply}
+                onChange={watermark.onToggleApply}
+              />
+              <span>Apply watermark</span>
+            </label>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span
+                title={watermark.logoPath}
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  fontSize: 11.5,
+                  color: "var(--fg-secondary)",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {basename(watermark.logoPath)}
+              </span>
+              <button
+                className="btn-secondary"
+                style={{ height: 24, padding: "0 8px", fontSize: 11 }}
+                onClick={watermark.onPick}
+              >
+                Change…
+              </button>
+              <button
+                className="btn-secondary"
+                style={{ height: 24, padding: "0 8px", fontSize: 11 }}
+                onClick={watermark.onRemove}
+              >
+                Remove
+              </button>
+            </div>
+            <ChipsRow label="Corner">
+              <div className="segmented">
+                {WM_CORNERS.map((c) => (
+                  <button
+                    key={c}
+                    className={watermark.corner === c ? "on" : ""}
+                    onClick={() => watermark.onCorner(c)}
+                  >
+                    {c.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+            </ChipsRow>
+          </>
+        ) : (
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ flex: 1, fontSize: 11.5, color: "var(--fg-tertiary)" }}>
+              No logo chosen
+            </span>
+            <button
+              className="btn-secondary"
+              style={{ height: 24, padding: "0 10px", fontSize: 11 }}
+              onClick={watermark.onPick}
+            >
+              Choose…
+            </button>
+          </div>
+        )}
       </div>
 
       <div className="hairline" style={{ margin: "0 14px" }} />
