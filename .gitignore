@@ -36,3 +36,4 @@ spikes/*/output/
 # V2 drift harness outputs (keep harness/v2-drift/output/.gitkeep tracked)
 harness/v2-drift/output/*.mp4
 harness/v2-drift/output/*.csv
+harness/v2-drift/__pycache__/

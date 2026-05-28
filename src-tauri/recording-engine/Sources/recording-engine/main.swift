@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import Foundation
 
 // Bring up AppKit/CoreGraphics in this CLI binary without launching a UI.
@@ -9,6 +10,21 @@ import Foundation
 // triggers NSApplication's class load, which initializes CG; we don't
 // call .run() so no run loop or Dock icon.
 _ = NSApplication.shared
+
+// D-08: pre-request both permissions before ready fires so AVCaptureSession
+// never encounters a missing-mic-permission case mid-recording.
+let screenGranted = CGRequestScreenCaptureAccess()
+if !screenGranted {
+    emit(.error(code: "PERMISSION_DENIED", message: "Screen Recording permission not granted"))
+    exit(1)
+}
+let micGranted = await withCheckedContinuation { (c: CheckedContinuation<Bool, Never>) in
+    AVCaptureDevice.requestAccess(for: .audio) { ok in c.resume(returning: ok) }
+}
+if !micGranted {
+    emit(.error(code: "PERMISSION_DENIED", message: "Microphone permission not granted"))
+    exit(1)
+}
 
 let engine = Engine()
 emit(.ready(version: "0.1.0"))

@@ -1,6 +1,7 @@
 import AVFoundation
 import CoreMedia
 import Foundation
+import os
 import ScreenCaptureKit
 
 // V2.2 Track B shape: SCStream owns screen, AVCaptureSession owns mic.
@@ -38,6 +39,9 @@ final class RecordingSession: NSObject,
     private var micTimeoutScheduled = false
     private var fatalErrorFired = false
     private var heartbeatDups = 0
+    private var micDropped = false
+    private var interruptionObserver: (any NSObjectProtocol)?
+    private var runtimeErrorObserver: (any NSObjectProtocol)?
     // V2.2 c2 per-pipeline PTS monotonicity tracker. Closes a cross-queue
     // race specific to the two-source architecture: SCStream's screen
     // delegate queue and the heartbeat timer queue both feed videoInput,
@@ -47,6 +51,10 @@ final class RecordingSession: NSObject,
     // Drop-on-regression preserves writer monotonicity.
     private var lastAppendedRawVideoPTS: CMTime = .invalid
     private var lastAppendedRawAudioPTS: CMTime = .invalid
+    // Host-clock time of the last audio buffer received (D-15c). Drives the
+    // mid-recording sample-cessation watchdog; recorded on receipt so pause
+    // (which still delivers buffers) does not false-trigger it.
+    private var lastAudioArrivalHost: CMTime = .invalid
     private var regressionDropsVideo = 0
     private var regressionDropsAudio = 0
 
@@ -241,11 +249,45 @@ final class RecordingSession: NSObject,
         if let ao = audioOutputToWire, let aq = audioQ {
             ao.setSampleBufferDelegate(self, queue: aq)
         }
+        if let cs = captureSession {
+            interruptionObserver = NotificationCenter.default.addObserver(
+                forName: AVCaptureSession.wasInterruptedNotification, object: cs, queue: nil
+            ) { [weak self] note in self?.handleSessionInterruption(note) }
+            runtimeErrorObserver = NotificationCenter.default.addObserver(
+                forName: AVCaptureSession.runtimeErrorNotification, object: cs, queue: nil
+            ) { [weak self] note in self?.handleSessionRuntimeError(note) }
+        }
     }
 
     func start() async throws {
         try await stream.startCapture()
         captureSession?.startRunning()
+        if captureSession != nil {
+            do {
+                try verifyClockParity()
+            } catch {
+                // Streams are running but writer never started; tear down
+                // before propagating so the engine returns to idle cleanly.
+                removeNotificationObservers()
+                try? await stream.stopCapture()
+                captureSession?.stopRunning()
+                throw error
+            }
+            // Engineering-only fault injection — not in IPC contract (D-12).
+            if ProcessInfo.processInfo.environment["ZEIGEN_FORCE_MIC_SESSION_ERROR"] == "1" {
+                DispatchQueue.global().asyncAfter(deadline: .now() + 0.100) { [weak self] in
+                    guard let self else { return }
+                    let shouldFire: Bool = self.lock.withLock {
+                        guard !self.fatalErrorFired, self.cutoffPTS == nil else { return false }
+                        self.fatalErrorFired = true
+                        return true
+                    }
+                    guard shouldFire else { return }
+                    self.onFatalError(EngineError(code: "MIC_SESSION_FAILED",
+                        message: "synthetic via ZEIGEN_FORCE_MIC_SESSION_ERROR=1"))
+                }
+            }
+        }
         startHeartbeat()
     }
 
@@ -266,6 +308,10 @@ final class RecordingSession: NSObject,
         let lastBuffer = lastVideoBuffer
         let lastArrival = lastVideoArrivalHost
         let lastAudio = lastAppendedRawAudioPTS
+        var dropped = micDropped
+        let lastAudioArrival = lastAudioArrivalHost
+        let stopping = cutoffPTS != nil
+        let fatalFired = fatalErrorFired
         lock.unlock()
 
         guard isStarted, !isPaused, let lastBuffer, lastArrival.isValid else { return }
@@ -274,14 +320,31 @@ final class RecordingSession: NSObject,
         let elapsed = CMTimeGetSeconds(hostNow - lastArrival)
         if elapsed < 0.2 { return }
 
+        // D-15c: mid-recording audio-cessation watchdog. A full Continuity
+        // departure or device removal stops delivering audio buffers
+        // without firing wasInterrupted/runtimeError, so micDropped is
+        // never set and video would freeze (see D-15a). If audio was
+        // flowing and no buffer has arrived for >1s — and we're not paused
+        // (guarded above), stopping, or already torn down — treat it as a
+        // drop, routing to the same action as an interruption.
+        if !dropped, !stopping, !fatalFired, lastAudioArrival.isValid,
+           CMTimeGetSeconds(hostNow - lastAudioArrival) > 1.0 {
+            lock.withLock { markMicDropped(reason: "sample-cessation") }
+            dropped = true
+        }
+
         // Cap dup PTS at audio's last appended PTS so video never runs
         // ahead of audio. AVCaptureAudioDataOutput can buffer up to ~75ms
         // of audio under load; without this cap, a heartbeat firing
         // shortly before stop dups host_now while audio's last sample is
         // tens of ms behind, leaving video_dur > audio_dur (V2.2 drift
         // bar). Audio carries the timeline in V2.2; video tracks it.
+        // D-15a: once the mic has dropped, audio is finished and no longer
+        // carries the timeline — release the cap so video continues
+        // video-only (advancing with hostNow) instead of freezing at the
+        // last audio PTS.
         let dupPTS: CMTime
-        if lastAudio.isValid && CMTimeCompare(hostNow, lastAudio) > 0 {
+        if !dropped && lastAudio.isValid && CMTimeCompare(hostNow, lastAudio) > 0 {
             dupPTS = lastAudio
         } else {
             dupPTS = hostNow
@@ -326,6 +389,7 @@ final class RecordingSession: NSObject,
     func stop() async throws -> RecordingResult {
         heartbeatTimer?.cancel()
         heartbeatTimer = nil
+        removeNotificationObservers()
 
         // Cutoff clamp before teardown — late samples from either pipeline
         // (SCK in-flight callbacks, AVCaptureSession queue drain) get
@@ -388,9 +452,23 @@ final class RecordingSession: NSObject,
                 videoInput.markAsFinished()
                 audioInput?.markAsFinished()
             }
-            let end = (was && lastAppendedRawAudioPTS.isValid)
-                ? lastAppendedRawAudioPTS - totalPausedDuration
-                : CMTime.invalid
+            // D-15a (a2): normally audio bounds the session (clamps video
+            // down to kill drift — D-13 mechanism 3 / the take-9 fix). But
+            // once the mic has dropped, audio finished early and video
+            // legitimately runs longer, so bound at video instead;
+            // otherwise endSession would clamp back to the stale drop-time
+            // audio PTS and truncate the video-only tail. Gated on
+            // micDropped (NOT max(v,a)) so the normal drift clamp is
+            // untouched — in healthy recording video can sit slightly above
+            // audio from buffering, and that must still clamp to audio.
+            let end: CMTime
+            if was && micDropped && lastAppendedRawVideoPTS.isValid {
+                end = lastAppendedRawVideoPTS - totalPausedDuration
+            } else if was && lastAppendedRawAudioPTS.isValid {
+                end = lastAppendedRawAudioPTS - totalPausedDuration
+            } else {
+                end = .invalid
+            }
             return (was, end)
         }
         let didStart = result.didStart
@@ -429,6 +507,7 @@ final class RecordingSession: NSObject,
     func tearDownAfterFatalError() async {
         heartbeatTimer?.cancel()
         heartbeatTimer = nil
+        removeNotificationObservers()
 
         lock.withLock {
             if cutoffPTS == nil {
@@ -436,7 +515,37 @@ final class RecordingSession: NSObject,
             }
         }
 
-        try? await stream.stopCapture()
+        // D-14: a fatal error firing within ~100ms of a Continuity-backed
+        // session can stall stream.stopCapture() indefinitely. Bound it so
+        // the writer finalization below still runs and the error reaches
+        // IPC. Structured concurrency awaits all children even after
+        // cancel, so an uncancellable stalled stop would never return —
+        // hence detached tasks racing a one-shot continuation. Capturing
+        // self is region-clean (RecordingSession is @unchecked Sendable),
+        // and the orphaned stop is harmless: cutoffPTS is set above so any
+        // late buffers clamp, and self.stream is a `let` that is never
+        // reused — the next recording builds a fresh RecordingSession with
+        // its own SCStream (Engine.swift:192). The resume flag lives in an
+        // OSAllocatedUnfairLock (not a bare Bool) so it is Sendable state
+        // the detached closures can carry across region isolation.
+        let stopStart = DispatchTime.now()
+        let resumeState = OSAllocatedUnfairLock(initialState: false)
+        let stoppedCleanly: Bool = await withCheckedContinuation { cont in
+            @Sendable func resumeOnce(_ clean: Bool) {
+                let shouldResume = resumeState.withLock { resumed -> Bool in
+                    if resumed { return false }
+                    resumed = true
+                    return true
+                }
+                if shouldResume { cont.resume(returning: clean) }
+            }
+            Task.detached { try? await self.stream.stopCapture(); resumeOnce(true) }
+            Task.detached { try? await Task.sleep(nanoseconds: 1_000_000_000); resumeOnce(false) }
+        }
+        if !stoppedCleanly {
+            let ms = Int(Double(DispatchTime.now().uptimeNanoseconds - stopStart.uptimeNanoseconds) / 1_000_000)
+            logStderr("TEARDOWN_TIMEOUT after \(ms)ms during fatal-error path")
+        }
         captureSession?.stopRunning()
         audioQueue?.sync { }
 
@@ -479,6 +588,10 @@ final class RecordingSession: NSObject,
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard sampleBuffer.isValid, let audioInput else { return }
+        // D-15c: stamp arrival on receipt — before the limiter and the
+        // pause/cutoff checks in append() — so the cessation watchdog sees
+        // a live mic even while paused (buffers still flow when paused).
+        lock.withLock { lastAudioArrivalHost = CMClockGetTime(CMClockGetHostTimeClock()) }
         // Phase 12 c2 soft-knee limiter (-1 dBFS) — same behavior as v1.0,
         // moved here from the SCStream .microphone branch (D-09).
         applyLimiterInPlace(sampleBuffer)
@@ -529,6 +642,9 @@ final class RecordingSession: NSObject,
             if !firstAudioPTS.isValid {
                 firstAudioPTS = rawPTS
             }
+            // D-07 bucket-1: audio input already finished after interruption;
+            // drop late-arriving samples before they hit a closed input.
+            if micDropped { return }
         }
 
         // Writer-start gate: wait for first sample from each configured
@@ -605,6 +721,78 @@ final class RecordingSession: NSObject,
         } else {
             if isVideo { dropped += 1 } else { audioDropped += 1 }
         }
+    }
+
+    // D-01 clock parity smoke. Called after captureSession.startRunning().
+    // Verifies synchronizationClock is non-nil and host-time sampling is
+    // well-behaved. ZEIGEN_FORCE_CLOCK_MISMATCH=1 unconditionally fails (D-12).
+    private func verifyClockParity() throws {
+        // Engineering-only fault injection — not in IPC contract (D-12).
+        if ProcessInfo.processInfo.environment["ZEIGEN_FORCE_CLOCK_MISMATCH"] == "1" {
+            throw EngineError(code: "CLOCK_MISMATCH", message: "forced via ZEIGEN_FORCE_CLOCK_MISMATCH=1")
+        }
+        guard captureSession?.synchronizationClock != nil else {
+            throw EngineError(code: "CLOCK_MISMATCH",
+                message: "AVCaptureSession.synchronizationClock is nil after startRunning")
+        }
+        let t1 = CMClockGetTime(CMClockGetHostTimeClock())
+        let t2 = CMClockGetTime(CMClockGetHostTimeClock())
+        let delta = CMTimeGetSeconds(t2 - t1)
+        if delta < 0 || delta > 0.001 {
+            throw EngineError(code: "CLOCK_MISMATCH",
+                message: "host-time round-trip \(String(format: "%.6f", delta))s exceeds 1ms tolerance")
+        }
+    }
+
+    // D-07 bucket 1 — AVCaptureSessionWasInterrupted (Continuity drop, etc.).
+    // Marks audio finished; recording continues video-only. No IPC event
+    // (deferred to V2.3 per CONTEXT D-07).
+    private func handleSessionInterruption(_ note: Notification) {
+        lock.withLock { markMicDropped(reason: "interrupted") }
+    }
+
+    // D-07 bucket-1 action, shared by the interruption observer and the
+    // D-15c cessation watchdog. Caller must hold `lock`. Marks audio
+    // finished so recording continues video-only (the heartbeat cap then
+    // releases — D-15a). AVCaptureSessionInterruptionReasonKey is iOS-only,
+    // so the reason is our own categorization, not the OS reason code.
+    private func markMicDropped(reason: String) {
+        guard !micDropped else { return }
+        micDropped = true
+        logStderr("MIC_DROPPED reason=\(reason)")
+        audioInput?.markAsFinished()
+    }
+
+    // D-07 bucket 2 — AVCaptureSessionRuntimeError (genuine session failure).
+    // Routes through onFatalError → handleFatalError so Engine tears down
+    // and returns to idle, same path as MIC_NO_FIRST_SAMPLE.
+    private func handleSessionRuntimeError(_ note: Notification) {
+        let shouldFire: Bool = lock.withLock {
+            guard !fatalErrorFired, cutoffPTS == nil else { return false }
+            fatalErrorFired = true
+            return true
+        }
+        guard shouldFire else { return }
+        let error = note.userInfo?[AVCaptureSessionErrorKey] as? Error
+        onFatalError(EngineError(
+            code: "MIC_SESSION_FAILED",
+            message: error?.localizedDescription ?? "AVCaptureSession runtime error"
+        ))
+    }
+
+    private func removeNotificationObservers() {
+        if let obs = interruptionObserver {
+            NotificationCenter.default.removeObserver(obs)
+            interruptionObserver = nil
+        }
+        if let obs = runtimeErrorObserver {
+            NotificationCenter.default.removeObserver(obs)
+            runtimeErrorObserver = nil
+        }
+    }
+
+    deinit {
+        removeNotificationObservers()
     }
 
     private func checkMicTimeout() {
