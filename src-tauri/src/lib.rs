@@ -357,7 +357,13 @@ fn recording_finalize(
     let webcam_opt = rec.webcam;
     let bubble_position_log = rec.bubble_position_log;
 
-    let (sources_dir, segments) = if let Some(webcam) = webcam_opt {
+    let (sources_dir, segments) = if let Some(mut webcam) = webcam_opt {
+        // Idempotently finalize the live webcam segment before reading it.
+        // On a normal stop, engine_stop already stopped it (take() -> None,
+        // no-op). On the MIC_SESSION_FAILED salvage path the engine never
+        // received Stop, so this is where the partial last segment's mp4 is
+        // finalized — making recording_finalize self-sufficient either way.
+        let _ = webcam.stop_segment();
         let segments = webcam.segments().to_vec();
         let sources_dir = webcam.sources_dir().to_path_buf();
         let screen_path = sources_dir.join("screen.mp4");

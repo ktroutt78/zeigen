@@ -743,6 +743,24 @@ function isContinuity(name: string): boolean {
   return /iphone|continuity/i.test(name);
 }
 
+// Friendly banner copy per engine error code. Unmapped codes fall back to the
+// raw `CODE: message` form; the raw code+message always stay in console.error.
+const ERROR_MESSAGES: Record<string, string> = {
+  PERMISSION_DENIED:
+    "Screen Recording or Microphone permission isn't granted. Grant it in System Settings > Privacy & Security, then try again.",
+  DISPLAY_NOT_FOUND: "That display is no longer available. Re-select a display and try again.",
+  WINDOW_NOT_FOUND: "That window is no longer available. Re-select a window and try again.",
+  MIC_NOT_FOUND: "The selected microphone is no longer available. Pick another mic and try again.",
+  OUTPUT_PATH_INVALID: "Couldn't write the recording to disk. Check the destination folder exists and is writable.",
+  WRITER_FAILED: "The recording couldn't be saved (writer error). Try again.",
+  MIC_NO_FIRST_SAMPLE: "The microphone produced no audio. Check the mic and try recording again.",
+  CLOCK_MISMATCH: "Couldn't sync the audio and video clocks. Try recording again.",
+  MIC_SESSION_FAILED: "The microphone stopped mid-recording. Your recording was saved up to that point.",
+  INVALID_COMMAND: "The recorder received an invalid command. Try again.",
+  INVALID_STATE: "The recorder wasn't ready for that action. Try again.",
+  INTERNAL: "The recorder hit an unexpected error and had to stop.",
+};
+
 function App() {
   const [displays, setDisplays] = useState<Display[]>([]);
   const [windows, setWindows] = useState<WindowSource[]>([]);
@@ -856,14 +874,42 @@ function App() {
               });
             break;
           case "error":
-            setError(`${ev.code}: ${ev.message}`);
-            // Engine self-resets to idle on any error it emits — sending
-            // Stop here would produce a follow-on INVALID_STATE error
-            // that overwrites the original. Use the local-only cleanup.
-            invoke("recording_cleanup_local").catch(() => {});
+            // Keep the raw code+message in logs regardless of banner copy.
+            console.error("[engine] error", ev.code, ev.message);
+            setError(ERROR_MESSAGES[ev.code] ?? `${ev.code}: ${ev.message}`);
+            // The engine self-resets to idle on any error it emits, so the
+            // frontend must NOT send Stop (that would produce a follow-on
+            // INVALID_STATE that overwrites the original error).
             setState("idle");
-            // Engine errors during recording happen before the stop/finalize
-            // pipeline increments — nothing to decrement here.
+            if (ev.code === "MIC_SESSION_FAILED") {
+              // Salvage: the engine finalizes whatever screen was written
+              // before emitting this error, so route the partial through the
+              // same finalize -> review flow as a normal stop instead of
+              // discarding. Do NOT call recording_cleanup_local — it would
+              // .take() the handle recording_finalize needs. recording_finalize
+              // idempotently stops the live webcam segment, so the partial
+              // composites just like a normal stop.
+              incReview();
+              setCompositeProgress(0);
+              invoke<FinalizedRecording>("recording_finalize")
+                .then(async (info) => {
+                  setFinalizeInfo(info);
+                  await openReview(`review-${info.stamp}`, info.scratch_mp4_path, decReview);
+                })
+                .catch((err) => {
+                  setError(String(err));
+                  decReview();
+                })
+                .finally(() => {
+                  setCompositeProgress(null);
+                });
+            } else {
+              // All other codes: nothing useful was captured — discard.
+              // Local-only cleanup (no Stop) drops the Rust-side handle and
+              // webcam child. Errors here happen before the finalize pipeline
+              // increments, so there is no review counter to decrement.
+              invoke("recording_cleanup_local").catch(() => {});
+            }
             break;
         }
       });
