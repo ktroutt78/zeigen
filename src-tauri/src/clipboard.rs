@@ -4,6 +4,7 @@ use objc2::runtime::AnyObject;
 use std::ffi::CString;
 use std::path::Path;
 
+use crate::composite::Watermark;
 use crate::edit;
 use crate::exports;
 
@@ -105,7 +106,12 @@ pub fn clipboard_copy_text(text: String) -> Result<(), String> {
 // current sidecar (trim + annotations). Source resolution, no GIF tail
 // — Copy stays ephemeral (D-15) and doesn't touch ~/Movies/Zeigen.
 #[tauri::command]
-pub fn clipboard_copy_recording(stamp: String, source_path: String) -> Result<(), String> {
+pub fn clipboard_copy_recording(
+    stamp: String,
+    source_path: String,
+    watermark_logo: Option<String>,
+    watermark_corner: Option<String>,
+) -> Result<(), String> {
     let source = Path::new(&source_path);
     if !source.is_file() {
         return Err(format!("source missing: {}", source.display()));
@@ -123,6 +129,7 @@ pub fn clipboard_copy_recording(stamp: String, source_path: String) -> Result<()
         edit::PipelineMode::Mp4 {
             resolution: edit::Mp4Resolution::Source,
         },
+        Watermark::from_args(watermark_logo, watermark_corner),
     )?;
     write_url_to_pasteboard(&temp_file)
 }

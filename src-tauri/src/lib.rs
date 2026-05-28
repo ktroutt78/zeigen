@@ -195,12 +195,7 @@ fn parse_size(s: Option<&str>) -> WebcamSize {
 }
 
 fn parse_corner(s: Option<&str>) -> Corner {
-    match s {
-        Some("tl") => Corner::TopLeft,
-        Some("tr") => Corner::TopRight,
-        Some("bl") => Corner::BottomLeft,
-        _ => Corner::BottomRight,
-    }
+    s.map(Corner::from_code).unwrap_or(Corner::BottomRight)
 }
 
 #[tauri::command]

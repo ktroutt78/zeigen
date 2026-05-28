@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::composite::{FFMPEG_PATH, FFPROBE_PATH};
+use crate::composite::{Watermark, FFMPEG_PATH, FFPROBE_PATH};
 
 // LinkedIn personal-feed video constraints we care about:
 //   - max 10 minutes (we warn in JS pre-flight, don't enforce here)
@@ -60,7 +60,12 @@ fn video_bitrate_bps(duration_s: f64) -> u64 {
 }
 
 #[tauri::command]
-pub fn linkedin_export(stamp: String, source_path: String) -> Result<String, String> {
+pub fn linkedin_export(
+    stamp: String,
+    source_path: String,
+    watermark_logo: Option<String>,
+    watermark_corner: Option<String>,
+) -> Result<String, String> {
     let source = Path::new(&source_path);
     if !source.is_file() {
         return Err(format!("source missing: {}", source.display()));
@@ -74,15 +79,43 @@ pub fn linkedin_export(stamp: String, source_path: String) -> Result<String, Str
         .map_err(|e| format!("create {}: {e}", movies.display()))?;
     let output = movies.join(format!("recording-{stamp}-linkedin.mp4"));
 
-    let args: Vec<String> = vec![
+    // Skip a watermark whose logo file is gone — never fail the export.
+    let watermark = Watermark::from_args(watermark_logo, watermark_corner).filter(|wm| {
+        let ok = wm.logo_path.is_file();
+        if !ok {
+            eprintln!("[watermark] logo missing at {}, skipping", wm.logo_path.display());
+        }
+        ok
+    });
+
+    let mut args: Vec<String> = vec![
         "-y".into(),
         "-hide_banner".into(),
         "-i".into(),
         source.to_string_lossy().into_owned(),
-        "-vf".into(),
-        // Cap to 1080p wide, even-aligned, then convert to yuv420p so
-        // every player plays it back without surprises.
-        "scale='min(1920,iw)':-2,format=yuv420p".into(),
+    ];
+
+    // Cap to 1080p wide, even-aligned, then convert to yuv420p so every
+    // player plays it back without surprises. With a watermark the logo is
+    // overlaid at source res before that scale, so -vf becomes a
+    // -filter_complex with an explicit output map.
+    if let Some(wm) = &watermark {
+        let (sw, sh) = crate::edit::probe_dimensions(source)?;
+        args.push("-i".into());
+        args.push(wm.logo_path.to_string_lossy().into_owned());
+        let frag = wm.filter_fragment(1, "0:v", "ov", sw, sh);
+        args.push("-filter_complex".into());
+        args.push(format!("{frag};[ov]scale='min(1920,iw)':-2,format=yuv420p[outv]"));
+        args.push("-map".into());
+        args.push("[outv]".into());
+        args.push("-map".into());
+        args.push("0:a?".into());
+    } else {
+        args.push("-vf".into());
+        args.push("scale='min(1920,iw)':-2,format=yuv420p".into());
+    }
+
+    args.extend([
         "-c:v".into(),
         "h264_videotoolbox".into(),
         "-profile:v".into(),
@@ -96,7 +129,7 @@ pub fn linkedin_export(stamp: String, source_path: String) -> Result<String, Str
         "-movflags".into(),
         "+faststart".into(),
         output.to_string_lossy().into_owned(),
-    ];
+    ]);
 
     let result = Command::new(FFMPEG_PATH)
         .args(&args)

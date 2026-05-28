@@ -152,6 +152,61 @@ impl Corner {
             Self::BottomRight => format!("main_w-overlay_w-{padding}:main_h-overlay_h-{padding}"),
         }
     }
+
+    pub(crate) fn from_code(s: &str) -> Corner {
+        match s {
+            "tl" => Corner::TopLeft,
+            "tr" => Corner::TopRight,
+            "bl" => Corner::BottomLeft,
+            _ => Corner::BottomRight,
+        }
+    }
+}
+
+// Watermark overlay shared by every export path: edit.rs run_edit_pipeline
+// (Save MP4 / GIF / Copy) and linkedin.rs. The logo is scaled to 10% of the
+// shorter source dimension (height, aspect preserved) and padded 2% off the
+// chosen corner. The PNG's own alpha is respected — no extra dimming.
+#[derive(Clone)]
+pub(crate) struct Watermark {
+    pub logo_path: PathBuf,
+    pub corner: Corner,
+}
+
+impl Watermark {
+    // Build from export-command args. None unless a logo path is given;
+    // corner defaults to top-right.
+    pub(crate) fn from_args(logo: Option<String>, corner: Option<String>) -> Option<Watermark> {
+        let logo = logo?;
+        Some(Watermark {
+            logo_path: PathBuf::from(logo),
+            corner: corner.as_deref().map(Corner::from_code).unwrap_or(Corner::TopRight),
+        })
+    }
+
+    fn metrics(sw: u32, sh: u32) -> (u32, u32) {
+        let short = sw.min(sh) as f64;
+        let height = (short * 0.10).round().max(1.0) as u32;
+        let padding = (short * 0.02).round() as u32;
+        (height, padding)
+    }
+
+    // "[{idx}:v]scale=-2:{h}[wm];[{prev}][wm]overlay={xy}[{next}]"
+    // The caller must have already added `-i logo_path` at input `logo_idx`
+    // and wires `next_label` into its own tail. overlay's default
+    // eof_action=repeat holds the single PNG frame across the whole clip.
+    pub(crate) fn filter_fragment(
+        &self,
+        logo_idx: usize,
+        prev_label: &str,
+        next_label: &str,
+        sw: u32,
+        sh: u32,
+    ) -> String {
+        let (height, padding) = Self::metrics(sw, sh);
+        let xy = self.corner.overlay_xy(padding);
+        format!("[{logo_idx}:v]scale=-2:{height}[wm];[{prev_label}][wm]overlay={xy}[{next_label}]")
+    }
 }
 
 const PADDING_PX: u32 = 24;

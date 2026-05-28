@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 use ab_glyph::{point, Font, FontRef, Glyph, PxScale, ScaleFont};
 use serde::{Deserialize, Serialize};
 
-use crate::composite::{FFMPEG_PATH, FFPROBE_PATH};
+use crate::composite::{Watermark, FFMPEG_PATH, FFPROBE_PATH};
 
 // Resolved at startup from AppHandle::path().resource_dir(). Read by
 // run_edit_pipeline when building the MP4 audio filter.
@@ -577,7 +577,17 @@ pub(crate) fn run_edit_pipeline(
     output: &Path,
     sidecar: &SidecarState,
     mode: PipelineMode,
+    watermark: Option<Watermark>,
 ) -> Result<(), String> {
+    // Skip a watermark whose logo file is gone — never fail an export over a
+    // missing logo; the rest of the pipeline proceeds without it.
+    let watermark = watermark.filter(|wm| {
+        let ok = wm.logo_path.is_file();
+        if !ok {
+            eprintln!("[watermark] logo missing at {}, skipping", wm.logo_path.display());
+        }
+        ok
+    });
     let gif_params: Option<(GifResolution, u32)> = match mode {
         PipelineMode::Mp4 { .. } => None,
         PipelineMode::Gif { resolution, fps } => Some((resolution, fps)),
@@ -636,11 +646,19 @@ pub(crate) fn run_edit_pipeline(
         text_paths.push((*idx, p, ann));
     }
 
+    // Probe source dims once — arrow PNGs are source-sized, and the
+    // watermark scales relative to the shorter source dimension.
+    let src_dims: Option<(u32, u32)> = if !arrow_anns.is_empty() || watermark.is_some() {
+        Some(probe_dimensions(source)?)
+    } else {
+        None
+    };
+
     // Rasterize each arrow into a source-sized transparent PNG. Arrow PNG
     // is source-sized so overlay sits at (0,0).
     let mut arrow_paths: Vec<(usize, PathBuf, &Annotation)> = Vec::new();
     if !arrow_anns.is_empty() {
-        let (sw, sh) = probe_dimensions(source)?;
+        let (sw, sh) = src_dims.expect("src_dims set when arrows present");
         for (idx, ann) in &arrow_anns {
             let endpoint = ann.endpoint.as_ref().expect("filtered above");
             let stroke = ann.stroke.unwrap_or(DEFAULT_ARROW_STROKE_PX);
@@ -676,11 +694,19 @@ pub(crate) fn run_edit_pipeline(
         args.push("-i".into());
         args.push(path.to_string_lossy().into_owned());
     }
+    // Watermark logo is the last input (after source, text PNGs, arrow PNGs).
+    if let Some(wm) = &watermark {
+        args.push("-i".into());
+        args.push(wm.logo_path.to_string_lossy().into_owned());
+    }
 
     // Force-build the filter graph in Gif mode (so the palettegen/paletteuse
     // tail can chain off [0:v]) or whenever an MP4 scale is requested.
-    let needs_filter =
-        !text_paths.is_empty() || !arrow_paths.is_empty() || gif_mode || mp4_scale.is_some();
+    let needs_filter = !text_paths.is_empty()
+        || !arrow_paths.is_empty()
+        || watermark.is_some()
+        || gif_mode
+        || mp4_scale.is_some();
     if needs_filter {
         let mut filter = String::new();
         let mut prev_label = String::from("0:v");
@@ -708,6 +734,7 @@ pub(crate) fn run_edit_pipeline(
             ));
             if i + 1 < text_paths.len()
                 || !arrow_paths.is_empty()
+                || watermark.is_some()
                 || gif_mode
                 || mp4_scale.is_some()
             {
@@ -731,11 +758,27 @@ pub(crate) fn run_edit_pipeline(
                 end = end,
                 next_label = next_label,
             ));
-            if i + 1 < arrow_paths.len() || gif_mode || mp4_scale.is_some() {
+            if i + 1 < arrow_paths.len() || watermark.is_some() || gif_mode || mp4_scale.is_some()
+            {
                 filter.push(';');
             }
             prev_label = next_label;
             input_idx += 1;
+        }
+
+        // Watermark overlay — sits on top of annotations, before the scale/
+        // GIF tail so it scales proportionally with the frame. Logo is the
+        // last input, so input_idx now points at it.
+        if let Some(wm) = &watermark {
+            let (sw, sh) = src_dims.expect("src_dims set when watermark present");
+            let next_label = format!("v{step}");
+            step += 1;
+            filter.push_str(&wm.filter_fragment(input_idx, &prev_label, &next_label, sw, sh));
+            if gif_mode || mp4_scale.is_some() {
+                filter.push(';');
+            }
+            prev_label = next_label;
+            // input_idx not bumped — the logo is the last input.
         }
 
         // MP4 scale tail — only fires when resolution != Source. Mutually
@@ -885,17 +928,21 @@ pub struct SaveResult {
 // skips ffmpeg entirely. All other combinations are exactly one ffmpeg
 // pass through run_edit_pipeline.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn save_recording(
     stamp: String,
     source_path: String,
     format: String,
     resolution: String,
     fps: Option<u32>,
+    watermark_logo: Option<String>,
+    watermark_corner: Option<String>,
 ) -> Result<SaveResult, String> {
     let source = Path::new(&source_path);
     if !source.is_file() {
         return Err(format!("source missing: {}", source.display()));
     }
+    let watermark = Watermark::from_args(watermark_logo, watermark_corner);
 
     let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
     let movies = PathBuf::from(home).join("Movies/Zeigen");
@@ -923,6 +970,7 @@ pub fn save_recording(
                 &output,
                 &sidecar,
                 PipelineMode::Mp4 { resolution: res },
+                watermark,
             )?;
             output
         }
@@ -940,6 +988,7 @@ pub fn save_recording(
                 &output,
                 &sidecar,
                 PipelineMode::Gif { resolution: res, fps },
+                watermark,
             )?;
             output
         }
@@ -1095,6 +1144,7 @@ mod tests {
             Path::new(&src_out_str),
             &sidecar,
             PipelineMode::Mp4 { resolution: Mp4Resolution::Source },
+            None,
         )
         .expect("source pipeline");
 
@@ -1130,6 +1180,7 @@ mod tests {
             Path::new(&p720_out_str),
             &sidecar,
             PipelineMode::Mp4 { resolution: Mp4Resolution::P720 },
+            None,
         )
         .expect("p720 pipeline");
         let (_, h720) = probe_dimensions(Path::new(&p720_out_str)).expect("probe p720 dims");
@@ -1198,6 +1249,8 @@ mod tests {
             "mp4".to_string(),
             "source".to_string(),
             None,
+            None,
+            None,
         )
         .expect("save_recording noop");
         assert_eq!(result.output_path, noop_out_first.to_string_lossy());
@@ -1235,6 +1288,8 @@ mod tests {
             "mp4".to_string(),
             "source".to_string(),
             None,
+            None,
+            None,
         )
         .expect("save_recording second");
         assert_eq!(result2.output_path, noop_out_second.to_string_lossy());
@@ -1260,6 +1315,8 @@ mod tests {
             "mp4".to_string(),
             "720p".to_string(),
             None,
+            None,
+            None,
         )
         .expect("save_recording p720");
         assert_eq!(result3.output_path, p720_out.to_string_lossy());
@@ -1283,6 +1340,8 @@ mod tests {
             "gif".to_string(),
             "720p".to_string(),
             Some(15),
+            None,
+            None,
         )
         .expect("save_recording gif");
         assert_eq!(result4.output_path, gif_out.to_string_lossy());
@@ -1301,6 +1360,8 @@ mod tests {
             "gif".to_string(),
             "720p".to_string(),
             None,
+            None,
+            None,
         )
         .expect_err("gif without fps should fail");
         assert!(err.contains("fps"), "expected fps error, got: {err}");
@@ -1313,6 +1374,101 @@ mod tests {
             h720,
             gif_out.display(),
             bytes.len(),
+        );
+    }
+
+    // c2 watermark verification. Bakes the verification logo into all four
+    // export routes against a real recording, leaves outputs + extracted
+    // frames in /tmp for visual inspection, asserts each is valid, and
+    // re-checks the no-watermark noop-source path still copies video
+    // bit-exact (arnndn-only audio) — the regression the PLAN flags.
+    //   cargo test --lib watermark_export_smoke -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn watermark_export_smoke() {
+        ensure_audio_model_for_tests();
+        let home = std::env::var("HOME").unwrap();
+        let source_str = format!(
+            "{home}/Movies/Zeigen/.scratch/recording-2026-05-28-081925/recording-2026-05-28-081925.mp4"
+        );
+        let source = Path::new(&source_str);
+        let logo_str = format!("{home}/Downloads/Archetype_Logo_Icon_Color.png");
+        let logo = Path::new(&logo_str);
+        if !source.is_file() || !logo.is_file() {
+            eprintln!("skip watermark_export_smoke: source or logo absent");
+            return;
+        }
+        let sidecar = SidecarState::default();
+        let wm_tr = Watermark::from_args(Some(logo_str.clone()), Some("tr".into()));
+        let wm_bl = Watermark::from_args(Some(logo_str.clone()), Some("bl".into()));
+        let (sw, sh) = probe_dimensions(source).expect("probe source");
+
+        let extract_frame = |video: &str, png: &str| {
+            let _ = std::fs::remove_file(png);
+            let st = Command::new(FFMPEG_PATH)
+                .args(["-y", "-i", video, "-frames:v", "1", png])
+                .output()
+                .expect("ffmpeg frame extract");
+            assert!(st.status.success(), "extract frame from {video}");
+        };
+
+        // a) MP4-Source + watermark TR (also the Copy-to-Clipboard path —
+        // clipboard_copy_recording calls run_edit_pipeline Mp4/Source).
+        let out_src = "/tmp/zeigen-wm-mp4-source-tr.mp4";
+        run_edit_pipeline(source, Path::new(out_src), &sidecar,
+            PipelineMode::Mp4 { resolution: Mp4Resolution::Source }, wm_tr.clone())
+            .expect("mp4 source + watermark");
+        assert_eq!(probe_dimensions(Path::new(out_src)).unwrap(), (sw, sh), "source res preserved");
+        extract_frame(out_src, "/tmp/zeigen-wm-frame-pipeline-tr.png");
+
+        // a') BL corner — corner-switch check.
+        let out_bl = "/tmp/zeigen-wm-mp4-source-bl.mp4";
+        run_edit_pipeline(source, Path::new(out_bl), &sidecar,
+            PipelineMode::Mp4 { resolution: Mp4Resolution::Source }, wm_bl)
+            .expect("mp4 source + watermark bl");
+        extract_frame(out_bl, "/tmp/zeigen-wm-frame-pipeline-bl.png");
+
+        // b) MP4-720p + watermark — logo scales with the frame.
+        let out_720 = "/tmp/zeigen-wm-mp4-720.mp4";
+        run_edit_pipeline(source, Path::new(out_720), &sidecar,
+            PipelineMode::Mp4 { resolution: Mp4Resolution::P720 }, wm_tr.clone())
+            .expect("mp4 720 + watermark");
+        assert_eq!(probe_dimensions(Path::new(out_720)).unwrap().1, 720, "720 tall");
+
+        // c) GIF + watermark — valid GIF header.
+        let out_gif = "/tmp/zeigen-wm.gif";
+        run_edit_pipeline(source, Path::new(out_gif), &sidecar,
+            PipelineMode::Gif { resolution: GifResolution::P480, fps: 12 }, wm_tr.clone())
+            .expect("gif + watermark");
+        let gif_bytes = std::fs::read(out_gif).expect("read gif");
+        assert!(
+            gif_bytes.len() > 6 && (&gif_bytes[..6] == b"GIF89a" || &gif_bytes[..6] == b"GIF87a"),
+            "valid GIF"
+        );
+
+        // d) LinkedIn — distinct -filter_complex invocation reusing the helper.
+        let li = crate::linkedin::linkedin_export(
+            "wm-smoke".into(), source_str.clone(), Some(logo_str.clone()), Some("tr".into()),
+        ).expect("linkedin + watermark");
+        assert!(Path::new(&li).is_file(), "linkedin output exists");
+        extract_frame(&li, "/tmp/zeigen-wm-frame-linkedin-tr.png");
+
+        // f) No-watermark noop regression: video copied bit-exact, audio re-encoded.
+        let noop = "/tmp/zeigen-wm-noop.mp4";
+        run_edit_pipeline(source, Path::new(noop), &sidecar,
+            PipelineMode::Mp4 { resolution: Mp4Resolution::Source }, None)
+            .expect("noop");
+        assert_eq!(
+            stream_md5(&source_str, "0:v"), stream_md5(noop, "0:v"),
+            "no-watermark noop-source must copy video bit-exact (no re-encode)"
+        );
+        assert_ne!(
+            stream_md5(&source_str, "0:a"), stream_md5(noop, "0:a"),
+            "noop audio must differ (arnndn ran)"
+        );
+
+        println!(
+            "watermark OK: pipeline TR/BL + 720 + gif + linkedin({li}); frames in /tmp/zeigen-wm-frame-*.png; noop video bit-exact, audio re-encoded"
         );
     }
 }
