@@ -27,6 +27,9 @@ dist-ssr
 .build/
 .swiftpm/
 
+# Engine sidecar staged by build.rs (copied from the swift release build)
+src-tauri/binaries/
+
 # Claude Code local state
 .claude/
 

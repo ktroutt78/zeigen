@@ -106,6 +106,19 @@ impl Drop for EngineClient {
 }
 
 pub fn engine_binary_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("target/recording-engine-build/debug/recording-engine")
+    // Release: the engine is bundled as a sidecar next to the app binary
+    // (Zeigen.app/Contents/MacOS/recording-engine) so the app is standalone.
+    // Debug/dev: resolve the release-built engine from the dev source tree.
+    #[cfg(not(debug_assertions))]
+    {
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join("recording-engine")))
+            .unwrap_or_else(|| PathBuf::from("recording-engine"))
+    }
+    #[cfg(debug_assertions)]
+    {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/recording-engine-build/release/recording-engine")
+    }
 }
