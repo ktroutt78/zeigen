@@ -115,10 +115,10 @@ pub fn sweep_stale_thumbs() {
         Ok(p) => p,
         Err(_) => return,
     };
-    sweep_dir_older_than(&root, STALE_THRESHOLD);
+    sweep_dir_older_than(&root, STALE_THRESHOLD, "thumb-sweep");
 }
 
-pub(crate) fn sweep_dir_older_than(root: &Path, threshold: Duration) {
+pub(crate) fn sweep_dir_older_than(root: &Path, threshold: Duration, label: &str) {
     let entries = match std::fs::read_dir(root) {
         Ok(e) => e,
         Err(_) => return,
@@ -130,6 +130,11 @@ pub(crate) fn sweep_dir_older_than(root: &Path, threshold: Duration) {
         let Ok(mtime) = meta.modified() else { continue };
         if let Ok(age) = now.duration_since(mtime) {
             if age > threshold {
+                eprintln!(
+                    "[{label}] removing stale {} (age {}h)",
+                    path.display(),
+                    age.as_secs() / 3600
+                );
                 if path.is_dir() {
                     let _ = std::fs::remove_dir_all(&path);
                 } else {
@@ -233,7 +238,7 @@ mod tests {
             .status()
             .unwrap();
 
-        sweep_dir_older_than(&tmp, Duration::from_secs(24 * 60 * 60));
+        sweep_dir_older_than(&tmp, Duration::from_secs(24 * 60 * 60), "test-sweep");
 
         assert!(!old_file.exists(), "old file should be swept");
         assert!(!old_dir.exists(), "old dir should be swept");

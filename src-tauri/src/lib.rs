@@ -436,7 +436,7 @@ fn sweep_stale_scratch() {
     if !root.exists() {
         return;
     }
-    thumbs::sweep_dir_older_than(&root, std::time::Duration::from_secs(24 * 60 * 60));
+    thumbs::sweep_dir_older_than(&root, std::time::Duration::from_secs(24 * 60 * 60), "scratch-sweep");
 }
 
 // Scratch root: ~/Movies/Zeigen/.scratch. Each recording gets its own

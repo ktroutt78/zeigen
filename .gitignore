@@ -37,3 +37,5 @@ spikes/*/output/
 harness/v2-drift/output/*.mp4
 harness/v2-drift/output/*.csv
 harness/v2-drift/__pycache__/
+# Acceptance runs: keep the CSV records tracked, drop the big videos
+harness/v2-drift/acceptance/*.mp4

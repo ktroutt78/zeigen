@@ -1,0 +1,23 @@
+# V2.2 c2 acceptance run — RECONSTRUCTED from commit ac5e115 body.
+# The raw per-take CSV is not recoverable: harness/v2-drift/output/ is
+# gitignored and was later overwritten by the endSession-removal control
+# experiment. The ac5e115 commit body is the authoritative source; these rows
+# are transcribed verbatim from docs/V2.2-REPORT.md "Acceptance run (endSession
+# present)". This file is authoritative for V2.4's R2 residual read.
+#
+# Run: 10 takes x 30s, alternating displays, built-in mic (endSession present).
+# audio_start_s = 0.000 on every take (AAC priming residual below ffprobe's
+# start_time granularity post writer-start max-origin alignment).
+# 10/10 takes abs_drift_ms < 100ms. Per-display median: primary 3.7ms,
+# external 16.3ms. Overall max 73.0ms (take 6).
+take,display,audio_start_s,abs_drift_ms
+1,primary,0.000,0.333
+2,external,0.000,20.333
+3,primary,0.000,7.000
+4,external,0.000,16.333
+5,primary,0.000,0.333
+6,external,0.000,73.000
+7,primary,0.000,3.666
+8,external,0.000,0.333
+9,primary,0.000,30.333
+10,external,0.000,0.333

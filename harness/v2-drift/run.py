@@ -33,6 +33,7 @@ REPO = HERE.parent.parent
 ENGINE_DIR = REPO / "src-tauri" / "recording-engine"
 DEFAULT_ENGINE = ENGINE_DIR / ".build" / "release" / "recording-engine"
 OUT_DIR = HERE / "output"
+ACCEPT_DIR = HERE / "acceptance"  # tracked: --acceptance writes CSVs here
 
 READ_TIMEOUT_S = 60.0
 LIVENESS_TIMEOUT_S = 5.0
@@ -203,8 +204,8 @@ def write_meta(meta_csv: Path, mic_uid: str | None,
 
 
 def run_take(io: EngineIO, idx: int, label: str, display: dict,
-             mic_uid: str | None, duration: int) -> tuple:
-    mp4 = OUT_DIR / f"take-{label}-{idx:02d}.mp4"
+             mic_uid: str | None, duration: int, out_dir: Path) -> tuple:
+    mp4 = out_dir / f"take-{label}-{idx:02d}.mp4"
     if mp4.exists():
         mp4.unlink()
     log(f"=== take {idx:02d} ({label}, display {display['id']}) ===")
@@ -281,7 +282,8 @@ def run_take(io: EngineIO, idx: int, label: str, display: dict,
 def run(args: argparse.Namespace) -> int:
     engine = Path(args.engine).resolve()
     build_if_missing(engine)
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    out_dir = ACCEPT_DIR if args.acceptance else OUT_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     log(f"spawning engine: {engine}")
     proc = subprocess.Popen(
@@ -332,7 +334,7 @@ def run(args: argparse.Namespace) -> int:
         for i in range(1, args.takes + 1):
             label, display = rotation[(i - 1) % len(rotation)]
             results.append(run_take(io, i, label, display, mic_uid,
-                                    args.duration))
+                                    args.duration, out_dir))
 
         try:
             io.send({"command": "quit"})
@@ -353,7 +355,7 @@ def run(args: argparse.Namespace) -> int:
                 proc.kill()
                 proc.wait()
 
-    results_csv = OUT_DIR / "results.csv"
+    results_csv = out_dir / "results.csv"
     with open(results_csv, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow([
@@ -365,9 +367,21 @@ def run(args: argparse.Namespace) -> int:
             w.writerow(row)
     log(f"wrote {results_csv} ({len(results)} rows)")
 
-    meta_csv = OUT_DIR / "meta.csv"
+    meta_csv = out_dir / "meta.csv"
     write_meta(meta_csv, mic_uid, rotation)
     log(f"wrote {meta_csv}")
+
+    # D-05b: self-clean the take mp4s this run created. They are measured into
+    # results.csv above; the CSVs are the artifact, the mp4s are not. The Tauri
+    # launch sweeper never runs for harness invocations, so the harness owns its
+    # own cleanup to avoid the dev accumulation that seeded the 187GB incident.
+    removed = 0
+    for row in results:
+        mp4 = Path(row[8])
+        if mp4.exists():
+            mp4.unlink()
+            removed += 1
+    log(f"cleaned up {removed} take mp4(s)")
 
     return 0
 
@@ -385,6 +399,9 @@ def main() -> int:
     parser.add_argument("--mic-uid", default=None,
                         help="explicit mic UID; default skips iPhone "
                              "Continuity UUIDs and prefers built-in/USB")
+    parser.add_argument("--acceptance", action="store_true",
+                        help="write results.csv/meta.csv to the tracked "
+                             "acceptance/ dir instead of the gitignored output/")
     return run(parser.parse_args())
 
 

@@ -433,6 +433,17 @@ def main():
     race_pass = race_stopped_ok and race_no_fault
     all_pass = core_pass and (race_pass or race_start_was_error)
     print(f"\nOVERALL: {'PASS' if all_pass else 'FAIL'}")
+
+    # D-05b: self-clean this run's mp4s (harness bypasses the Tauri launch
+    # sweeper, so it owns its own cleanup — no dev accumulation).
+    removed = 0
+    for name in ("uat4-a1.mp4", "uat4-a2.mp4", "uat4-race.mp4", "uat4-regress.mp4"):
+        mp4 = OUT_DIR / name
+        if mp4.exists():
+            mp4.unlink()
+            removed += 1
+    log(f"cleaned up {removed} take mp4(s)")
+
     return 0 if all_pass else 1
 
 

@@ -9,6 +9,7 @@ pub struct WebcamSegmenter {
     sources_dir: PathBuf,
     segments: Vec<PathBuf>,
     current: Option<Child>,
+    watchdog: Option<Child>,
 }
 
 impl WebcamSegmenter {
@@ -18,6 +19,7 @@ impl WebcamSegmenter {
             sources_dir,
             segments: Vec::new(),
             current: None,
+            watchdog: None,
         }
     }
 
@@ -61,21 +63,63 @@ impl WebcamSegmenter {
             .spawn()
             .map_err(|e| format!("failed to spawn webcam ffmpeg: {e}"))?;
 
+        // D-04: detached parent-death watchdog. The webcam ffmpeg is a direct
+        // child of this Tauri process; Drop and stop_segment kill it on
+        // graceful teardown but NOT on crash/force-quit/SIGKILL — macOS has no
+        // PR_SET_PDEATHSIG, and a Rust supervisor thread dies with the process.
+        // A sibling /bin/sh polls BOTH pids and kills ffmpeg if Tauri dies
+        // first. Both pids are baked in as literals at spawn time: a watchdog
+        // that resolved the parent pid after launch would, by the time the
+        // parent is dead, watch nothing. On Tauri death the watchdog reparents
+        // to launchd, fires the kill, then self-exits; on graceful stop it is
+        // reaped directly (see stop_segment/Drop) before it can fire.
+        let ff_pid = child.id();
+        let tauri_pid = std::process::id();
+        let watchdog = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!(
+                "while kill -0 {ff} 2>/dev/null && kill -0 {tauri} 2>/dev/null; \
+                 do sleep 1; done; kill -9 {ff} 2>/dev/null",
+                ff = ff_pid,
+                tauri = tauri_pid,
+            ))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok(); // best-effort; absence must not block recording
+
         self.current = Some(child);
+        self.watchdog = watchdog;
         self.segments.push(segment_path);
         Ok(())
     }
 
     pub fn stop_segment(&mut self) -> Result<(), String> {
-        let Some(mut child) = self.current.take() else {
-            return Ok(());
+        let result = if let Some(mut child) = self.current.take() {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(b"q\n");
+                let _ = stdin.flush();
+            }
+            child
+                .wait()
+                .map(|_| ())
+                .map_err(|e| format!("webcam ffmpeg wait: {e}"))
+        } else {
+            Ok(())
         };
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(b"q\n");
-            let _ = stdin.flush();
+        // Reap directly once ffmpeg is gone: avoids a zombie on the normal
+        // path and preempts the watchdog's poll from firing kill -9 on a
+        // pid the OS may already have reused.
+        self.reap_watchdog();
+        result
+    }
+
+    fn reap_watchdog(&mut self) {
+        if let Some(mut wd) = self.watchdog.take() {
+            let _ = wd.kill();
+            let _ = wd.wait();
         }
-        let _ = child.wait().map_err(|e| format!("webcam ffmpeg wait: {e}"))?;
-        Ok(())
     }
 
     pub fn segments(&self) -> &[PathBuf] {
@@ -93,5 +137,6 @@ impl Drop for WebcamSegmenter {
             let _ = child.kill();
             let _ = child.wait();
         }
+        self.reap_watchdog();
     }
 }

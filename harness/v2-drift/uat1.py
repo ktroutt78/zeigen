@@ -362,6 +362,17 @@ def main():
     reasons = {t.get("drop_reason") for t in takes if t.get("drop_reason")}
     print(f"\nInterruption reason(s) observed: {reasons or '(none captured)'}")
     print(f"\nOVERALL: {'PASS' if all_pass else 'FAIL'}")
+
+    # D-05b: self-clean this run's take mp4s (the harness bypasses the Tauri
+    # launch sweeper, so it owns its own cleanup — no dev accumulation).
+    removed = 0
+    for t in takes:
+        mp4 = OUT_DIR / f"uat1-take{t['idx']}.mp4"
+        if mp4.exists():
+            mp4.unlink()
+            removed += 1
+    log(f"cleaned up {removed} take mp4(s)")
+
     return 0 if all_pass else 1
 
 
