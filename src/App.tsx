@@ -823,7 +823,15 @@ function App() {
             setMics(mics);
             setWindows(wins);
             setSelectedDisplay((prev) => prev ?? displays[0]?.id ?? null);
-            setSelectedMic((prev) => prev ?? mics[0]?.uid ?? null);
+            // Prefer a built-in / non-Continuity mic by default. iPhone
+            // Continuity audio is flaky (drops when the phone sleeps) and
+            // sorts first alphabetically ("KT iPhone…" < "MacBook…"), so
+            // pick the first non-iPhone mic, falling back to the first mic.
+            setSelectedMic((prev) => {
+              if (prev) return prev;
+              const builtin = mics.find((m) => !/iphone|ipad|continuity/i.test(m.name));
+              return (builtin ?? mics[0])?.uid ?? null;
+            });
             // Don't auto-select a window — empty default forces an explicit
             // pick once the user toggles the Window source.
             break;
