@@ -22,6 +22,13 @@ fn audio_model_path() -> &'static Path {
         .as_path()
 }
 
+// RNNoise audio filter for the current noise-reduction setting, or None when
+// the user turned it off. `mix` scales suppression strength (Low/Med/High).
+fn audio_nr_filter() -> Option<String> {
+    crate::settings::noise_reduction_mix()
+        .map(|mix| format!("arnndn=m={}:mix={mix:.2}", audio_model_path().display()))
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct SidecarState {
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -280,12 +287,16 @@ pub(crate) fn render_preview_audio_path(source: &Path, output: &Path) -> Result<
     // open — D-07.
     let _ = std::fs::remove_file(output);
 
-    let args: Vec<String> = vec![
+    let mut args: Vec<String> = vec![
         "-y".into(),
         "-i".into(),
         source.to_string_lossy().into_owned(),
-        "-af".into(),
-        format!("arnndn=m={}", audio_model_path().display()),
+    ];
+    if let Some(af) = audio_nr_filter() {
+        args.push("-af".into());
+        args.push(af);
+    }
+    args.extend([
         "-map".into(),
         "0:v:0".into(),
         "-map".into(),
@@ -297,7 +308,7 @@ pub(crate) fn render_preview_audio_path(source: &Path, output: &Path) -> Result<
         "-b:a".into(),
         "192k".into(),
         output.to_string_lossy().into_owned(),
-    ];
+    ]);
 
     let result = Command::new(FFMPEG_PATH)
         .args(&args)
@@ -840,8 +851,10 @@ pub(crate) fn run_edit_pipeline(
             // the demuxer-level -ss/-to trim and before the -c:a encoder, so
             // no explicit ordering is needed. The flag is a clean no-op when
             // the source has no audio stream.
-            args.push("-af".into());
-            args.push(format!("arnndn=m={}", audio_model_path().display()));
+            if let Some(af) = audio_nr_filter() {
+                args.push("-af".into());
+                args.push(af);
+            }
             if mp4_video_can_copy {
                 args.push("-c:v".into());
                 args.push("copy".into());

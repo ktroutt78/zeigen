@@ -8,10 +8,26 @@ use tauri::{AppHandle, Manager};
 // settings.json. Holds only the watermark keys for now; the struct is
 // shaped to extend.
 
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Settings {
     #[serde(default)]
     pub watermark: WatermarkSettings,
+    // "off" | "low" | "med" | "high" — RNNoise (arnndn) strength.
+    #[serde(default = "default_noise_reduction")]
+    pub noise_reduction: String,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            watermark: WatermarkSettings::default(),
+            noise_reduction: default_noise_reduction(),
+        }
+    }
+}
+
+fn default_noise_reduction() -> String {
+    "med".to_string()
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -43,6 +59,25 @@ fn config_dir(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_config_dir()
         .map_err(|e| format!("app_config_dir: {e}"))
+}
+
+// HOME-based resolver matching app_config_dir() on macOS — lets non-command
+// code (the edit pipeline) read settings without an AppHandle.
+fn home_config_dir() -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(PathBuf::from(home).join("Library/Application Support/com.zeigen.app"))
+}
+
+// Noise-reduction strength as an arnndn `mix` (0..1), or None when "off".
+// Read fresh each call so a settings change takes effect on the next save.
+pub fn noise_reduction_mix() -> Option<f64> {
+    let dir = home_config_dir()?;
+    match read_settings_from(&dir).noise_reduction.as_str() {
+        "off" => None,
+        "low" => Some(0.5),
+        "high" => Some(1.0),
+        _ => Some(0.75), // "med" (and any unexpected value)
+    }
 }
 
 fn is_png(p: &Path) -> bool {
@@ -138,6 +173,17 @@ pub fn set_watermark_corner(app: AppHandle, corner: String) -> Result<(), String
 pub fn clear_watermark_logo(app: AppHandle) -> Result<(), String> {
     let dir = config_dir(&app)?;
     clear_logo_in(&dir)
+}
+
+#[tauri::command]
+pub fn set_noise_reduction(app: AppHandle, level: String) -> Result<(), String> {
+    if !matches!(level.as_str(), "off" | "low" | "med" | "high") {
+        return Err(format!("invalid noise reduction level: {level}"));
+    }
+    let dir = config_dir(&app)?;
+    let mut settings = read_settings_from(&dir);
+    settings.noise_reduction = level;
+    write_settings_to(&dir, &settings)
 }
 
 #[cfg(test)]

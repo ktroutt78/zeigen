@@ -710,6 +710,7 @@ type SourceKind = "display" | "window" | "area";
 type EngineState = "idle" | "countdown" | "recording" | "paused";
 type CountdownDuration = 0 | 3 | 5;
 type LengthCapMode = "off" | "target";
+type NrLevel = "off" | "low" | "med" | "high";
 
 type FinalizedRecording = {
   stamp: string;
@@ -776,6 +777,7 @@ function App() {
     useState<CountdownDuration>(5);
   const [lengthCapMode, setLengthCapMode] = useState<LengthCapMode>("off");
   const [lengthCapTargetSec, setLengthCapTargetSec] = useState<number>(600);
+  const [noiseReduction, setNoiseReduction] = useState<NrLevel>("med");
   const [state, setState] = useState<EngineState>("idle");
   const [progress, setProgress] = useState({ frames: 0, dropped: 0, elapsed_s: 0 });
   const [lastSaved, setLastSaved] = useState<string | null>(null);
@@ -792,6 +794,18 @@ function App() {
   // The main window stays visible while this is non-null so the user sees a
   // progress bar instead of staring at nothing during a multi-minute composite.
   const [compositeProgress, setCompositeProgress] = useState<number | null>(null);
+
+  // Load persisted noise-reduction level on launch.
+  useEffect(() => {
+    invoke<{ noise_reduction?: string }>("get_settings")
+      .then((s) => {
+        const lvl = s.noise_reduction;
+        if (lvl === "off" || lvl === "low" || lvl === "med" || lvl === "high") {
+          setNoiseReduction(lvl);
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     let unlistenFn: (() => void) | null = null;
@@ -1587,6 +1601,11 @@ function App() {
         onLengthCapMode={setLengthCapMode}
         lengthCapTargetSec={lengthCapTargetSec}
         onLengthCapTargetSec={setLengthCapTargetSec}
+        noiseReduction={noiseReduction}
+        onNoiseReduction={(v) => {
+          setNoiseReduction(v);
+          invoke("set_noise_reduction", { level: v }).catch((e) => setError(String(e)));
+        }}
       />
 
       <SourceTiles
@@ -2437,6 +2456,8 @@ function SettingsPanel({
   onLengthCapMode,
   lengthCapTargetSec,
   onLengthCapTargetSec,
+  noiseReduction,
+  onNoiseReduction,
 }: {
   hotkey: string;
   onHotkey: (combo: string) => void;
@@ -2446,6 +2467,8 @@ function SettingsPanel({
   onLengthCapMode: (v: LengthCapMode) => void;
   lengthCapTargetSec: number;
   onLengthCapTargetSec: (v: number) => void;
+  noiseReduction: NrLevel;
+  onNoiseReduction: (v: NrLevel) => void;
 }) {
   const [draft, setDraft] = useState(hotkey);
   const dirty = draft.trim() !== hotkey && draft.trim().length > 0;
@@ -2593,24 +2616,81 @@ function SettingsPanel({
         {lengthCapMode === "target" && (
           <>
             <input
-              className="select"
               type="number"
               min={1}
               max={120}
+              aria-label="Length cap minutes"
               value={Math.round(lengthCapTargetSec / 60)}
               onChange={(e) => {
                 const m = Math.max(1, Math.min(120, Number(e.target.value) || 1));
                 onLengthCapTargetSec(m * 60);
               }}
               style={{
-                width: 60,
+                width: 56,
+                background: "var(--bg-input)",
+                border: "1px solid var(--border-subtle)",
+                borderRadius: "var(--r-sm)",
+                color: "var(--fg-primary)",
                 fontFamily: "var(--font-mono)",
                 fontSize: 12,
+                padding: "4px 8px",
+                textAlign: "center",
+                // Plain typeable field — no select chevron, no spinner arrows.
+                appearance: "textfield",
+                MozAppearance: "textfield",
+                WebkitAppearance: "textfield",
               }}
             />
             <span style={{ color: "var(--fg-tertiary)", fontSize: 11 }}>min</span>
           </>
         )}
+      </label>
+      <label
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          color: "var(--fg-secondary)",
+        }}
+      >
+        <span style={{ minWidth: 88 }}>Noise reduction</span>
+        <div
+          role="radiogroup"
+          aria-label="Noise reduction"
+          style={{
+            display: "inline-flex",
+            background: "var(--bg-input)",
+            border: "1px solid var(--border-subtle)",
+            borderRadius: "var(--r-sm)",
+            padding: 2,
+          }}
+        >
+          {(["off", "low", "med", "high"] as NrLevel[]).map((v) => {
+            const active = noiseReduction === v;
+            const label =
+              v === "off" ? "Off" : v === "low" ? "Low" : v === "med" ? "Med" : "High";
+            return (
+              <button
+                key={v}
+                role="radio"
+                aria-checked={active}
+                onClick={() => onNoiseReduction(v)}
+                style={{
+                  background: active ? "var(--accent-soft)" : "transparent",
+                  color: active ? "var(--accent-tint)" : "var(--fg-secondary)",
+                  border: "none",
+                  cursor: "pointer",
+                  padding: "4px 10px",
+                  borderRadius: "var(--r-xs)",
+                  fontSize: 12,
+                  fontWeight: active ? 600 : 500,
+                }}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
       </label>
     </div>
   );

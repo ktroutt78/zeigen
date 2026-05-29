@@ -632,6 +632,7 @@ pub fn run() {
             settings::set_watermark_logo,
             settings::set_watermark_corner,
             settings::clear_watermark_logo,
+            settings::set_noise_reduction,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
