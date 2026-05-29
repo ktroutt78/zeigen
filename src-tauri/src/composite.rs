@@ -327,55 +327,34 @@ pub fn composite(
         .map(|d| d.round().max(1.0) as u32)
         .unwrap_or_else(|| size.px());
 
-    // Compensate for webcam start lag relative to screen. ffmpeg's AVCaptureSession
-    // takes longer to deliver its first frame than SCK does, so the webcam file is
-    // typically a few hundred milliseconds shorter than screen.mp4. Without compensation,
-    // composite playback shows the webcam ~Nms ahead of the audio.
+    // Webcam-vs-audio alignment. The webcam (ffmpeg AVCaptureSession) and the
+    // screen+mic (SCK, via the engine) are independent pipelines: the webcam
+    // delivers its first frame a few hundred ms after SCK starts capturing, so
+    // its frames must be delayed to line up with the audio. We pad the webcam
+    // head by `lead_in` (tpad below), keeping the bubble visible from t=0
+    // (frozen first frame for the lag, then animating in sync).
     //
-    // Strategy: pad the webcam track at the start with a clone of its first frame
-    // (via `tpad=start_duration=<lead_in>:start_mode=clone` in the filter graph below).
-    // This keeps the bubble visible from t=0 — frozen for the lag, then animating
-    // normally — while still aligning real webcam frames with the audio timeline.
-    // Replaces the previous `-itsoffset` approach which left the bubble missing
-    // for the lead_in window.
+    // This delay is a FIXED calibrated value, not derived from the screen/webcam
+    // duration delta. The delta is dominated by stop-timing jitter, not start
+    // latency — it swung 50-270ms across otherwise-identical recordings and made
+    // the bubble sync feel random (sometimes aligned, sometimes hundreds of ms
+    // off). The camera's true first-frame latency is consistent, so a fixed lead
+    // aligns every recording the same way. Calibrated against a clap test on the
+    // built-in MacBook camera (~270ms residual at the old delta's lucky value).
     //
-    // Multi-segment recordings (pause/resume) get the pad applied to the head of
-    // the concatenated stream — pause/resume sync drift is a separate concern.
+    // Tunable: raise WEBCAM_LEAD_MS if the bubble still LEADS the audio (mouth
+    // moves before the sound), lower it if the bubble LAGS. The proper auto-fix
+    // would have the engine timestamp each pipeline's first real sample.
+    const WEBCAM_LEAD_MS: f64 = 280.0;
     let screen_dur = probe_duration_seconds(screen_path)?;
-    let webcam_total: f64 = webcam_segments
-        .iter()
-        .map(|p| probe_duration_seconds(p))
-        .sum::<Result<f64, _>>()?;
-    let lead_in = (screen_dur - webcam_total).max(0.0);
+    let lead_in = WEBCAM_LEAD_MS / 1000.0;
 
-    // A/V sync compensation. ffmpeg webcam (AVCaptureSession) and SCK
-    // screen+mic run on independent pipelines with independent startup
-    // latencies — without correction, the composite has audio playing tens
-    // to hundreds of ms behind visual events (mouth movement, claps).
-    //
-    // Heuristic that fits empirically across most recordings:
-    //   audio_shift = max(0, webcam_dur - screen_dur) + audio_offset
-    //
-    // where audio_offset is the start_time of the audio stream in screen.mp4
-    // (SCK's mic init latency, typically 50-70ms), and the webcam-vs-screen
-    // duration delta approximates how much earlier the ffmpeg webcam pipeline
-    // started capturing than SCK did.
-    //
-    // Applied via `-itsoffset` on a second copy of screen.mp4 used only as
-    // the audio source — keeps the original screen.mp4 for video so the
-    // filter graph stays clean. The mp4 muxer normalizes the resulting
-    // negative PTS to zero, effectively dropping the first <audio_shift>
-    // seconds of audio. This is intentional: that early audio corresponds
-    // to wall-clock before the webcam was reliably capturing.
-    //
-    // Known limitation: file-duration deltas can't distinguish webcam-started-
-    // late from webcam-stopped-early. Recordings where webcam stops early
-    // (rare, ~10% in testing) get under-compensated and still feel slightly
-    // out of sync. Proper fix requires the engine to record wall-clock
-    // timestamps for each pipeline's first sample and write them to a
-    // sidecar that composite can read.
+    // Drop the screen.mp4 audio's own leading gap (SCK mic-init latency — the
+    // audio stream's start_time, typically 0-70ms) via `-itsoffset` on the
+    // audio-only input copy, so the audio and screen video share t=0. The mp4
+    // muxer normalizes the resulting negative PTS to zero.
     let audio_offset = probe_audio_start_time(screen_path).unwrap_or(0.0);
-    let audio_shift = (webcam_total - screen_dur).max(0.0) + audio_offset;
+    let audio_shift = audio_offset;
 
     // Pre-render the circular alpha mask alongside the output so it lives in
     // the same scratch dir and gets cleaned up with the recording.
