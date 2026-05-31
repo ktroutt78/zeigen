@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
-pub const DEFAULT_HOTKEY: &str = "CmdOrCtrl+Shift+R";
+pub const DEFAULT_HOTKEY: &str = "CmdOrCtrl+Shift+P";
 
 pub struct HotkeyState(pub Mutex<Option<Shortcut>>);
 

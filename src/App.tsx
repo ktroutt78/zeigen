@@ -7,7 +7,7 @@ import { emit } from "@tauri-apps/api/event";
 import { I, Icon, P } from "./components/icons";
 import { PILL_STRIP_CSS } from "./constants/bubble";
 
-const DEFAULT_HOTKEY = "CmdOrCtrl+Shift+R";
+const DEFAULT_HOTKEY = "CmdOrCtrl+Shift+P";
 
 const BUBBLE_LABEL = "webcam-bubble";
 let bubbleDeviceName: string | null = null;
@@ -2500,7 +2500,7 @@ function SettingsPanel({
           className="select"
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
-          placeholder="CmdOrCtrl+Shift+R"
+          placeholder="CmdOrCtrl+Shift+P"
           style={{
             flex: 1,
             fontFamily: "var(--font-mono)",
@@ -2521,7 +2521,7 @@ function SettingsPanel({
         </button>
       </label>
       <span style={{ color: "var(--fg-tertiary)", fontSize: 11 }}>
-        Examples: CmdOrCtrl+Shift+R, Alt+Shift+5
+        Examples: CmdOrCtrl+Shift+P, Alt+Shift+5
       </span>
       <label
         style={{
