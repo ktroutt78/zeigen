@@ -113,9 +113,10 @@ pub fn clipboard_copy_recording(
     watermark_corner: Option<String>,
 ) -> Result<(), String> {
     let source = Path::new(&source_path);
-    if !source.is_file() {
-        return Err(format!("source missing: {}", source.display()));
-    }
+    // Phase 15 c3: see save_recording. The scratch logical key has no
+    // file at it for webcam recordings; run_edit_pipeline checks
+    // screen_path.is_file() itself and returns a clean error if the
+    // raw screen capture is genuinely missing.
     let temp_dir = exports::recording_exports_dir(&stamp)?;
     let file_name = source
         .file_name()

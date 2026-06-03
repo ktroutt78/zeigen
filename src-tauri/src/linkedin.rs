@@ -67,11 +67,63 @@ pub fn linkedin_export(
     watermark_corner: Option<String>,
 ) -> Result<String, String> {
     let source = Path::new(&source_path);
-    if !source.is_file() {
-        return Err(format!("source missing: {}", source.display()));
+
+    // Phase 15 c3: composite moved to export time. source is the scratch
+    // logical key — no file at it for webcam recordings. Derive the raw
+    // screen + segments via the same helper save/clipboard use; if a
+    // webcam is present, composite to a temp file first, then transcode
+    // the temp with the existing custom linkedin pipeline below. This
+    // mirrors c2's two-pass shape and preserves linkedin's no-trim,
+    // no-annotation, bubble-baked output behavior from Phase 14.
+    let (screen_path, segments) = crate::edit::export_inputs_from_source(source);
+    if !screen_path.is_file() {
+        return Err(format!("screen capture missing: {}", screen_path.display()));
     }
 
-    let duration = probe_duration_seconds(source)?;
+    let sidecar = crate::edit::read_sidecar_path(source)?.unwrap_or_default();
+
+    // composite_tmp populated only for webcam recordings. Lives in
+    // .sources/ sibling of the scratch sources dir so Phase 5.5 sweeps
+    // it via scratch-discard if anything strands it. Cleaned up after
+    // the transcode below (success or failure).
+    let composite_tmp: Option<PathBuf> = if !segments.is_empty() {
+        let stem = screen_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("source");
+        let temp_dir = screen_path
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.join(".sources").join(format!("export-li-{stem}")))
+            .ok_or_else(|| {
+                format!("screen path has no grandparent: {}", screen_path.display())
+            })?;
+        std::fs::create_dir_all(&temp_dir)
+            .map_err(|e| format!("create {}: {e}", temp_dir.display()))?;
+        let tmp = temp_dir.join("composite.mp4");
+        crate::composite::composite(
+            &screen_path,
+            &segments,
+            &tmp,
+            crate::composite::WebcamSize::Medium,
+            crate::composite::Corner::BottomRight,
+            &sidecar.bubble_position_log,
+            |_| {},
+        )?;
+        Some(tmp)
+    } else {
+        None
+    };
+
+    // From here down, transcode runs against `transcode_input` — the
+    // composited temp for webcam recordings, screen.mp4 directly for
+    // screen-only. The existing linkedin custom pipeline below stays
+    // the source of truth for bitrate / profile / faststart / aac.
+    let transcode_input: PathBuf = composite_tmp
+        .clone()
+        .unwrap_or_else(|| screen_path.to_path_buf());
+
+    let duration = probe_duration_seconds(&transcode_input)?;
     let video_bps = video_bitrate_bps(duration);
 
     let movies = movies_dir()?;
@@ -92,7 +144,7 @@ pub fn linkedin_export(
         "-y".into(),
         "-hide_banner".into(),
         "-i".into(),
-        source.to_string_lossy().into_owned(),
+        transcode_input.to_string_lossy().into_owned(),
     ];
 
     // Cap to 1080p wide, even-aligned, then convert to yuv420p so every
@@ -100,7 +152,7 @@ pub fn linkedin_export(
     // overlaid at source res before that scale, so -vf becomes a
     // -filter_complex with an explicit output map.
     if let Some(wm) = &watermark {
-        let (sw, sh) = crate::edit::probe_dimensions(source)?;
+        let (sw, sh) = crate::edit::probe_dimensions(&transcode_input)?;
         args.push("-i".into());
         args.push(wm.logo_path.to_string_lossy().into_owned());
         let frag = wm.filter_fragment(1, "0:v", "ov", sw, sh);
@@ -135,6 +187,16 @@ pub fn linkedin_export(
         .args(&args)
         .output()
         .map_err(|e| format!("failed to spawn ffmpeg: {e}"))?;
+
+    // Cleanup composite temp either way — failure-path inspection isn't
+    // worth the disk cost, and the scratch lifecycle would sweep this
+    // dir on session close anyway.
+    if let Some(tmp) = composite_tmp {
+        let _ = std::fs::remove_file(&tmp);
+        if let Some(d) = tmp.parent() {
+            let _ = std::fs::remove_dir(d);
+        }
+    }
 
     if !result.status.success() {
         let stderr = String::from_utf8_lossy(&result.stderr);

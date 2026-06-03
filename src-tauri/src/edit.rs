@@ -638,6 +638,14 @@ pub(crate) fn run_edit_pipeline(
     webcam_corner: crate::composite::Corner,
     watermark: Option<Watermark>,
 ) -> Result<(), String> {
+    // Phase 15 c3: callers can no longer assume a file exists at the
+    // scratch logical path (composite moved to export). The thing that
+    // MUST exist is the raw screen capture. Clean error before either
+    // composite or single-input ffmpeg gets a chance to mis-report it.
+    if !screen_path.is_file() {
+        return Err(format!("screen capture missing: {}", screen_path.display()));
+    }
+
     if webcam_segments.is_empty() {
         return run_edit_pipeline_single_input(screen_path, output, sidecar, mode, watermark);
     }
@@ -1056,9 +1064,12 @@ pub fn save_recording(
     watermark_corner: Option<String>,
 ) -> Result<SaveResult, String> {
     let source = Path::new(&source_path);
-    if !source.is_file() {
-        return Err(format!("source missing: {}", source.display()));
-    }
+    // Phase 15 c3: don't is_file-check source. It's the scratch logical
+    // key (matches Phase 5.5 lifecycle); for webcam recordings no file
+    // exists at this path because composite moved to export-time. The
+    // check that matters — does the raw screen capture exist? — runs
+    // inside run_edit_pipeline against screen_path, where a genuinely
+    // missing screen.mp4 returns "screen capture missing: <path>".
     let watermark = Watermark::from_args(watermark_logo, watermark_corner);
 
     let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
