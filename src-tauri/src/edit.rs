@@ -539,6 +539,41 @@ fn rasterize_arrow(
     Ok(())
 }
 
+// Derive the raw-input paths the Phase 15 c2 composite-at-export
+// pipeline needs from a scratch source path. For webcam recordings the
+// scratch layout is:
+//   <scratch_dir>/recording-<stamp>.mp4           (composited; ignored by c2)
+//   <scratch_dir>/sources/screen.mp4              (raw screen)
+//   <scratch_dir>/sources/webcam-NN.mp4           (raw webcam segments)
+//   <scratch_dir>/sources/webcam.mp4              (c1 concat; ignored, segments preferred)
+// For screen-only recordings sources/ doesn't exist and the source path
+// IS the raw screen — return it with an empty segments vec.
+pub(crate) fn export_inputs_from_source(source: &Path) -> (PathBuf, Vec<PathBuf>) {
+    let sources_dir = match source.parent().map(|p| p.join("sources")) {
+        Some(d) if d.is_dir() => d,
+        _ => return (source.to_path_buf(), Vec::new()),
+    };
+    let screen = sources_dir.join("screen.mp4");
+    if !screen.is_file() {
+        return (source.to_path_buf(), Vec::new());
+    }
+    let mut segments: Vec<PathBuf> = std::fs::read_dir(&sources_dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with("webcam-") && n.ends_with(".mp4"))
+                .unwrap_or(false)
+        })
+        .collect();
+    segments.sort();
+    (screen, segments)
+}
+
 fn temp_dir_for(source: &Path) -> PathBuf {
     let stem = source
         .file_stem()
@@ -577,13 +612,78 @@ pub(crate) enum PipelineMode {
     Gif { resolution: GifResolution, fps: u32 },
 }
 
+// Phase 15 c2: composite-at-export wrapper. When webcam_segments is
+// non-empty, composite::composite runs first against raw screen.mp4 +
+// segments and writes a temp file; the existing single-input edit
+// pipeline then runs on the temp. Two encodes total, matching Phase 14's
+// finalize+save shape — preserves byte-stability vs Phase 14 outputs.
+//
+// Screen-only recordings (no segments) skip the composite step and call
+// the single-input pipeline directly, identical to Phase 14 behavior.
+//
+// Phase 15 c2 still leaves the Phase 14 finalize composite running as a
+// backstop (the composited scratch mp4 exists but is ignored by this
+// path); c3 removes it.
+pub(crate) fn run_edit_pipeline(
+    screen_path: &Path,
+    webcam_segments: &[std::path::PathBuf],
+    output: &Path,
+    sidecar: &SidecarState,
+    mode: PipelineMode,
+    webcam_size: crate::composite::WebcamSize,
+    webcam_corner: crate::composite::Corner,
+    watermark: Option<Watermark>,
+) -> Result<(), String> {
+    if webcam_segments.is_empty() {
+        return run_edit_pipeline_single_input(screen_path, output, sidecar, mode, watermark);
+    }
+
+    // Temp composite file. Lives under the scratch's .sources sibling
+    // so the existing scratch-lifecycle paths sweep it if anything
+    // strands it. Stem-keyed so concurrent exports of different sources
+    // don't collide; same-source serial exports overwrite the prior
+    // temp (no caching — D-07).
+    let stem = screen_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("source");
+    let temp_dir = screen_path
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.join(".sources").join(format!("export-{stem}")))
+        .ok_or_else(|| format!("screen path has no grandparent: {}", screen_path.display()))?;
+    std::fs::create_dir_all(&temp_dir)
+        .map_err(|e| format!("create {}: {e}", temp_dir.display()))?;
+    let composite_tmp = temp_dir.join("composite.mp4");
+
+    crate::composite::composite(
+        screen_path,
+        webcam_segments,
+        &composite_tmp,
+        webcam_size,
+        webcam_corner,
+        &sidecar.bubble_position_log,
+        |_| {},
+    )?;
+
+    let result =
+        run_edit_pipeline_single_input(&composite_tmp, output, sidecar, mode, watermark);
+
+    // Best-effort cleanup either way — leave the temp for inspection on
+    // failure isn't worth the disk vs. the simpler always-clean rule.
+    let _ = std::fs::remove_file(&composite_tmp);
+    let _ = std::fs::remove_dir(&temp_dir);
+
+    result
+}
+
 // Single-pass edit pipeline. Trim via -ss/-to before -i; text and arrow
 // annotations rasterized to PNGs and composited via overlay filters with
 // `enable=between(t,start,end)`. Output via h264_videotoolbox (Mp4) or
 // palettegen/paletteuse → GIF muxer (Gif). Caller supplies both source
 // and output paths — `commit_recording` reads the scratch mp4 and writes
 // directly to the final ~/Movies/Zeigen/ location.
-pub(crate) fn run_edit_pipeline(
+fn run_edit_pipeline_single_input(
     source: &Path,
     output: &Path,
     sidecar: &SidecarState,
@@ -964,6 +1064,18 @@ pub fn save_recording(
 
     let sidecar = read_sidecar_path(source)?.unwrap_or_default();
 
+    // Phase 15 c2: route through the composite-at-export wrapper. For
+    // webcam recordings this composites screen+segments fresh; for
+    // screen-only recordings the wrapper delegates to the single-input
+    // pipeline against source directly. webcam_size/corner default to
+    // Medium/BottomRight — the values engine_start uses today (UI
+    // controls removed in phase 8). Per-recording settings would land
+    // in the sidecar; c2 doesn't need that since defaults match every
+    // current recording.
+    let (screen_path, segments) = export_inputs_from_source(source);
+    let webcam_size = crate::composite::WebcamSize::Medium;
+    let webcam_corner = crate::composite::Corner::BottomRight;
+
     let output = match format.as_str() {
         "mp4" => {
             let res = match resolution.as_str() {
@@ -974,15 +1086,14 @@ pub fn save_recording(
                 other => return Err(format!("unknown mp4 resolution: {other}")),
             };
             let output = next_per_format_slot(&movies, &stamp, "mp4");
-            // Phase 12 c3: every MP4 save runs the pipeline so always-on
-            // arnndn applies. The pipeline picks -c:v copy internally when
-            // there's no trim/overlay/scale, so noop Source saves stay
-            // ~audio-only cost.
             run_edit_pipeline(
-                source,
+                &screen_path,
+                &segments,
                 &output,
                 &sidecar,
                 PipelineMode::Mp4 { resolution: res },
+                webcam_size,
+                webcam_corner,
                 watermark,
             )?;
             output
@@ -997,10 +1108,13 @@ pub fn save_recording(
             let fps = fps.ok_or_else(|| "fps required for gif format".to_string())?;
             let output = next_per_format_slot(&movies, &stamp, "gif");
             run_edit_pipeline(
-                source,
+                &screen_path,
+                &segments,
                 &output,
                 &sidecar,
                 PipelineMode::Gif { resolution: res, fps },
+                webcam_size,
+                webcam_corner,
                 watermark,
             )?;
             output
@@ -1154,9 +1268,12 @@ mod tests {
 
         run_edit_pipeline(
             source,
+            &[],
             Path::new(&src_out_str),
             &sidecar,
             PipelineMode::Mp4 { resolution: Mp4Resolution::Source },
+            crate::composite::WebcamSize::Medium,
+            crate::composite::Corner::BottomRight,
             None,
         )
         .expect("source pipeline");
@@ -1190,9 +1307,12 @@ mod tests {
         let _ = std::fs::remove_file(&p720_out_str);
         run_edit_pipeline(
             source,
+            &[],
             Path::new(&p720_out_str),
             &sidecar,
             PipelineMode::Mp4 { resolution: Mp4Resolution::P720 },
+            crate::composite::WebcamSize::Medium,
+            crate::composite::Corner::BottomRight,
             None,
         )
         .expect("p720 pipeline");
@@ -1222,6 +1342,227 @@ mod tests {
             .expect("ffmpeg md5");
         assert!(out.status.success(), "ffmpeg md5 failed for {path} {stream}");
         String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    // Decode-then-md5 helpers for the phase 15 c2 byte-stability test.
+    // h264_videotoolbox isn't bit-deterministic at the bitstream level
+    // (internal scheduling makes two encodes of the same input produce
+    // different bytes). Decoded pixels are the right comparison axis.
+    // Uses ffmpeg's md5 muxer over a forced rawvideo/pcm encode so the
+    // hash covers decoded samples, not the source bitstream.
+    fn decoded_video_md5(path: &Path) -> String {
+        let out = Command::new(FFMPEG_PATH)
+            .args([
+                "-v", "error", "-i", &path.to_string_lossy(),
+                "-map", "0:v:0",
+                "-c:v", "rawvideo", "-pix_fmt", "yuv420p",
+                "-f", "md5", "-",
+            ])
+            .output()
+            .expect("ffmpeg decoded video md5");
+        assert!(
+            out.status.success(),
+            "ffmpeg decoded video md5 failed for {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .strip_prefix("MD5=")
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
+
+    fn decoded_audio_md5(path: &Path) -> Option<String> {
+        let out = Command::new(FFMPEG_PATH)
+            .args([
+                "-v", "error", "-i", &path.to_string_lossy(),
+                "-map", "0:a:0?",
+                "-c:a", "pcm_s16le", "-ac", "2", "-ar", "48000",
+                "-f", "md5", "-",
+            ])
+            .output()
+            .expect("ffmpeg decoded audio md5");
+        if !out.status.success() {
+            return None;
+        }
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if s.is_empty() {
+            return None;
+        }
+        Some(
+            s.strip_prefix("MD5=")
+                .map(|s| s.to_string())
+                .unwrap_or(s),
+        )
+    }
+
+    fn psnr_video(reference: &Path, distorted: &Path) -> Result<String, String> {
+        // ffmpeg's psnr filter writes average per-frame PSNR to stats_file
+        // OR a summary on stderr via -loglevel info. Easier: scrape stderr
+        // for the "PSNR y:... u:... v:... average:..." summary line.
+        let out = Command::new(FFMPEG_PATH)
+            .args([
+                "-v", "error",
+                "-i", &reference.to_string_lossy(),
+                "-i", &distorted.to_string_lossy(),
+                "-filter_complex", "[0:v][1:v]psnr",
+                "-f", "null", "-",
+            ])
+            .output()
+            .map_err(|e| format!("psnr spawn: {e}"))?;
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        for line in stderr.lines() {
+            if line.contains("PSNR") {
+                return Ok(line.trim().to_string());
+            }
+        }
+        let mut tail: Vec<&str> = stderr.lines().rev().take(20).collect();
+        tail.reverse();
+        Err(format!("no PSNR line in ffmpeg output:\n{}", tail.join("\n")))
+    }
+
+    // Phase 15 c2 byte-stability test. Runs the new composite-at-export
+    // pipeline against a stashed phase14 fixture and compares output to
+    // expected-phase14-save.mp4. Fixtures stashed at
+    //   ~/Movies/Zeigen/.phase15-baseline/<recording-dir>/
+    // containing:
+    //   sources/screen.mp4
+    //   sources/webcam-NN.mp4
+    //   .recording-<stamp>.annotations.json
+    //   expected-phase14-save.mp4    (Phase 14's Save output for these inputs)
+    //
+    // Test runs against both stashed fixtures: -204330 (static-corner) and
+    // -205517 (keyframe-interp). Prints decoded-video md5 + decoded-audio md5
+    // for each side; if they differ, prints PSNR so the user can judge
+    // whether the divergence is acceptable (one-pass-vs-two-pass quantizer
+    // jitter) or real (regression).
+    //
+    //   cargo test --lib c2_byte_stability -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn c2_byte_stability() {
+        ensure_audio_model_for_tests();
+        let home = std::env::var("HOME").unwrap();
+        let baseline_root = PathBuf::from(&home)
+            .join("Movies/Zeigen/.phase15-baseline");
+        assert!(
+            baseline_root.is_dir(),
+            "baseline root missing: {}",
+            baseline_root.display()
+        );
+
+        // Both fixtures hit the keyframe-interp composite branch (the
+        // "static-corner" branch in composite.rs is effectively dead code
+        // — bubble_position_event auto-samples at ~4Hz even without drag,
+        // so any real recording produces a non-empty log). -205517 has 50
+        // entries with movement; -213321 has 27 entries clustered at the
+        // default position. Together they cover the live + idle keyframe
+        // shapes.
+        //
+        // -204330 is excluded: its sidecar's bubble_position_log was
+        // wiped by the c0 bug before stashing, so Phase 14's expected
+        // file reflects baked-in keyframes that c2 can't reproduce from
+        // the wiped sidecar. Not a c2 regression; a fixture-capture race.
+        let fixtures = [
+            "recording-2026-06-02-205517", // keyframe-interp, w/ drag
+            "recording-2026-06-02-213321", // keyframe-interp, idle
+        ];
+
+        let mut any_diff = false;
+        for fix_name in fixtures {
+            let fix_dir = baseline_root.join(fix_name);
+            let source = fix_dir.join(format!("{fix_name}.mp4"));
+            let expected = fix_dir.join("expected-phase14-save.mp4");
+            assert!(source.is_file(), "fixture source missing: {}", source.display());
+            assert!(expected.is_file(), "fixture expected missing: {}", expected.display());
+
+            let sidecar = read_sidecar_path(&source)
+                .expect("read sidecar")
+                .unwrap_or_default();
+
+            let (screen_path, segments) = export_inputs_from_source(&source);
+            println!("\n=== fixture: {fix_name} ===");
+            println!("  screen: {}", screen_path.display());
+            println!("  segments: {}", segments.len());
+            println!("  bubble_position_log entries: {}", sidecar.bubble_position_log.len());
+
+            // New pipeline output lands in a per-fixture temp file outside
+            // ~/Movies/Zeigen so it doesn't pollute the user's recordings.
+            let out_dir = std::env::temp_dir().join(format!("phase15-c2-test-{fix_name}"));
+            let _ = std::fs::remove_dir_all(&out_dir);
+            std::fs::create_dir_all(&out_dir).expect("create out dir");
+            let actual = out_dir.join("actual.mp4");
+
+            let start = std::time::Instant::now();
+            run_edit_pipeline(
+                &screen_path,
+                &segments,
+                &actual,
+                &sidecar,
+                PipelineMode::Mp4 { resolution: Mp4Resolution::Source },
+                crate::composite::WebcamSize::Medium,
+                crate::composite::Corner::BottomRight,
+                None,
+            )
+            .expect("run new pipeline");
+            let elapsed = start.elapsed();
+            println!("  new pipeline: {:.2}s", elapsed.as_secs_f64());
+
+            let exp_dur = probe_duration_seconds(&expected).expect("expected duration");
+            let act_dur = probe_duration_seconds(&actual).expect("actual duration");
+            let exp_dims = probe_dimensions(&expected).expect("expected dims");
+            let act_dims = probe_dimensions(&actual).expect("actual dims");
+            println!(
+                "  duration: expected={:.3}s actual={:.3}s (Δ={:.3}s)",
+                exp_dur, act_dur, (exp_dur - act_dur).abs()
+            );
+            println!(
+                "  dimensions: expected={}x{} actual={}x{}",
+                exp_dims.0, exp_dims.1, act_dims.0, act_dims.1
+            );
+            assert_eq!(exp_dims, act_dims, "dimensions differ for {fix_name}");
+            assert!(
+                (exp_dur - act_dur).abs() < 0.1,
+                "duration differs by more than frame for {fix_name}"
+            );
+
+            let exp_vid = decoded_video_md5(&expected);
+            let act_vid = decoded_video_md5(&actual);
+            let exp_aud = decoded_audio_md5(&expected);
+            let act_aud = decoded_audio_md5(&actual);
+            println!("  video md5: expected={exp_vid}");
+            println!("             actual=  {act_vid}");
+            println!("  audio md5: expected={:?}", exp_aud);
+            println!("             actual=  {:?}", act_aud);
+
+            let video_matches = exp_vid == act_vid;
+            let audio_matches = exp_aud == act_aud;
+            if !video_matches {
+                any_diff = true;
+                println!("  VIDEO MD5 DIFFERS — computing PSNR…");
+                match psnr_video(&expected, &actual) {
+                    Ok(psnr) => println!("  {psnr}"),
+                    Err(e) => println!("  psnr failed: {e}"),
+                }
+            }
+            if !audio_matches {
+                any_diff = true;
+                println!("  AUDIO MD5 DIFFERS");
+            }
+            if video_matches && audio_matches {
+                println!("  MATCH (decoded md5 stable)");
+            }
+        }
+
+        if any_diff {
+            panic!(
+                "c2 byte-stability: at least one fixture diverged from Phase 14 output. \
+                 See per-fixture output above (video PSNR / audio md5 diffs). Decide \
+                 whether the divergence is acceptable (one-pass-vs-two-pass quantizer \
+                 jitter is expected at high PSNR) or a real regression."
+            );
+        }
     }
 
     #[test]
@@ -1428,30 +1769,38 @@ mod tests {
         // a) MP4-Source + watermark TR (also the Copy-to-Clipboard path —
         // clipboard_copy_recording calls run_edit_pipeline Mp4/Source).
         let out_src = "/tmp/zeigen-wm-mp4-source-tr.mp4";
-        run_edit_pipeline(source, Path::new(out_src), &sidecar,
-            PipelineMode::Mp4 { resolution: Mp4Resolution::Source }, wm_tr.clone())
+        run_edit_pipeline(source, &[], Path::new(out_src), &sidecar,
+            PipelineMode::Mp4 { resolution: Mp4Resolution::Source },
+            crate::composite::WebcamSize::Medium, crate::composite::Corner::BottomRight,
+            wm_tr.clone())
             .expect("mp4 source + watermark");
         assert_eq!(probe_dimensions(Path::new(out_src)).unwrap(), (sw, sh), "source res preserved");
         extract_frame(out_src, "/tmp/zeigen-wm-frame-pipeline-tr.png");
 
         // a') BL corner — corner-switch check.
         let out_bl = "/tmp/zeigen-wm-mp4-source-bl.mp4";
-        run_edit_pipeline(source, Path::new(out_bl), &sidecar,
-            PipelineMode::Mp4 { resolution: Mp4Resolution::Source }, wm_bl)
+        run_edit_pipeline(source, &[], Path::new(out_bl), &sidecar,
+            PipelineMode::Mp4 { resolution: Mp4Resolution::Source },
+            crate::composite::WebcamSize::Medium, crate::composite::Corner::BottomRight,
+            wm_bl)
             .expect("mp4 source + watermark bl");
         extract_frame(out_bl, "/tmp/zeigen-wm-frame-pipeline-bl.png");
 
         // b) MP4-720p + watermark — logo scales with the frame.
         let out_720 = "/tmp/zeigen-wm-mp4-720.mp4";
-        run_edit_pipeline(source, Path::new(out_720), &sidecar,
-            PipelineMode::Mp4 { resolution: Mp4Resolution::P720 }, wm_tr.clone())
+        run_edit_pipeline(source, &[], Path::new(out_720), &sidecar,
+            PipelineMode::Mp4 { resolution: Mp4Resolution::P720 },
+            crate::composite::WebcamSize::Medium, crate::composite::Corner::BottomRight,
+            wm_tr.clone())
             .expect("mp4 720 + watermark");
         assert_eq!(probe_dimensions(Path::new(out_720)).unwrap().1, 720, "720 tall");
 
         // c) GIF + watermark — valid GIF header.
         let out_gif = "/tmp/zeigen-wm.gif";
-        run_edit_pipeline(source, Path::new(out_gif), &sidecar,
-            PipelineMode::Gif { resolution: GifResolution::P480, fps: 12 }, wm_tr.clone())
+        run_edit_pipeline(source, &[], Path::new(out_gif), &sidecar,
+            PipelineMode::Gif { resolution: GifResolution::P480, fps: 12 },
+            crate::composite::WebcamSize::Medium, crate::composite::Corner::BottomRight,
+            wm_tr.clone())
             .expect("gif + watermark");
         let gif_bytes = std::fs::read(out_gif).expect("read gif");
         assert!(
@@ -1468,8 +1817,10 @@ mod tests {
 
         // f) No-watermark noop regression: video copied bit-exact, audio re-encoded.
         let noop = "/tmp/zeigen-wm-noop.mp4";
-        run_edit_pipeline(source, Path::new(noop), &sidecar,
-            PipelineMode::Mp4 { resolution: Mp4Resolution::Source }, None)
+        run_edit_pipeline(source, &[], Path::new(noop), &sidecar,
+            PipelineMode::Mp4 { resolution: Mp4Resolution::Source },
+            crate::composite::WebcamSize::Medium, crate::composite::Corner::BottomRight,
+            None)
             .expect("noop");
         assert_eq!(
             stream_md5(&source_str, "0:v"), stream_md5(noop, "0:v"),

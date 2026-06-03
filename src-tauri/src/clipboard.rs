@@ -122,13 +122,20 @@ pub fn clipboard_copy_recording(
         .ok_or_else(|| format!("source has no filename: {}", source.display()))?;
     let temp_file = temp_dir.join(file_name);
     let sidecar = edit::read_sidecar_path(source)?.unwrap_or_default();
+    // Phase 15 c2: composite-at-export. See edit::run_edit_pipeline
+    // header for the screen-only vs webcam branching; defaults mirror
+    // save_recording (engine_start uses Medium/BottomRight).
+    let (screen_path, segments) = edit::export_inputs_from_source(source);
     edit::run_edit_pipeline(
-        source,
+        &screen_path,
+        &segments,
         &temp_file,
         &sidecar,
         edit::PipelineMode::Mp4 {
             resolution: edit::Mp4Resolution::Source,
         },
+        crate::composite::WebcamSize::Medium,
+        crate::composite::Corner::BottomRight,
         Watermark::from_args(watermark_logo, watermark_corner),
     )?;
     write_url_to_pasteboard(&temp_file)
