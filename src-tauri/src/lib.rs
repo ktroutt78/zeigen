@@ -19,7 +19,7 @@ use std::time::Instant;
 use chrono::Local;
 use tauri::{AppHandle, Emitter, Listener, Manager, State};
 
-use composite::{Corner, WebcamSize};
+use composite::{Corner, WebcamSize, FFMPEG_PATH};
 use devices::DeviceList;
 use edit::BubblePositionEntry;
 use engine::{EngineClient, EngineCommand};
@@ -363,6 +363,46 @@ fn recording_finalize(
         let segments = webcam.segments().to_vec();
         let sources_dir = webcam.sources_dir().to_path_buf();
         let screen_path = sources_dir.join("screen.mp4");
+
+        // Concat the segments into a single playable webcam.mp4 alongside
+        // them. Stream-copy via ffmpeg's concat demuxer — sub-second even
+        // for long recordings and a no-op transcode for the N=1 case.
+        // Phase 15 c3's dual-stream player consumes this; composite still
+        // consumes the per-segment array below, so the concat output is
+        // additive (no behavior change for the existing finalize path).
+        let webcam_concat_path = sources_dir.join("webcam.mp4");
+        {
+            let list_path = sources_dir.join("webcam-segments.txt");
+            let list_body: String = segments
+                .iter()
+                .map(|p| format!("file '{}'\n", p.to_string_lossy().replace('\'', "'\\''")))
+                .collect();
+            std::fs::write(&list_path, list_body)
+                .map_err(|e| format!("write webcam concat list: {e}"))?;
+            let out = std::process::Command::new(FFMPEG_PATH)
+                .args([
+                    "-y",
+                    "-hide_banner",
+                    "-nostats",
+                    "-f", "concat",
+                    "-safe", "0",
+                    "-i", &list_path.to_string_lossy(),
+                    "-c", "copy",
+                    &webcam_concat_path.to_string_lossy(),
+                ])
+                .output()
+                .map_err(|e| format!("spawn webcam concat ffmpeg: {e}"))?;
+            let _ = std::fs::remove_file(&list_path);
+            if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let tail: Vec<&str> = stderr.lines().rev().take(20).collect();
+                let tail_text = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
+                return Err(format!(
+                    "webcam concat failed (exit {:?}):\n{tail_text}",
+                    out.status.code(),
+                ));
+            }
+        }
 
         // Don't bookend with explicit 0.0/1.0 emits — Tauri IPC delivers
         // events out-of-order with command returns, and a 1.0 arriving after
