@@ -1644,12 +1644,24 @@ function BubbleLayer({
       playsInline
       preload="auto"
       style={{
+        // Phase 15 c3 fix: position via transform: translate(...) instead
+        // of left/top so per-frame position updates during dragged-bubble
+        // playback don't trigger layout recalc. left/top changes force
+        // layout passes on the main thread, which stalled the webcam
+        // decoder enough to drop currentTime behind target — visible as
+        // mouth-vs-audio lag that scaled with drag-keyframe density.
+        // transform updates are compositor-only (GPU), no layout cost.
+        //
+        // transform order is right-to-left: scaleX(-1) flips around the
+        // element's center (default transform-origin 50% 50%), then
+        // translate(...) moves the flipped result. Net visual placement
+        // matches the previous left/top + scaleX(-1) form exactly.
         position: "absolute",
-        left: `${centerX - cssDiameter / 2}px`,
-        top: `${centerY - cssDiameter / 2}px`,
+        left: 0,
+        top: 0,
         width: `${cssDiameter}px`,
         height: `${cssDiameter}px`,
-        transform: "scaleX(-1)",
+        transform: `translate(${centerX - cssDiameter / 2}px, ${centerY - cssDiameter / 2}px) scaleX(-1)`,
         borderRadius: "50%",
         objectFit: "cover",
         pointerEvents: "none",
