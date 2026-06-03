@@ -56,12 +56,25 @@ const ARROW_MIN_LENGTH_FRAC = 0.01;
 
 type Trim = { in: number; out: number };
 
+// Mirror of src-tauri/src/edit.rs::BubblePositionEntry. Round-tripped
+// opaquely by the review window — finalize-time keyframes must survive
+// any sidecar rewrite the review triggers (trim/annotation edits, or
+// the empty-state delete path). Phase 15 c3's dual-stream player will
+// read these directly to position the bubble in the preview.
+type BubblePositionEntry = {
+  t: number;
+  x: number;
+  y: number;
+  diameter?: number | null;
+};
+
 type SidecarState = {
   trim?: Trim | null;
   annotations: Annotation[];
+  bubble_position_log?: BubblePositionEntry[];
 };
 
-const EMPTY_STATE: SidecarState = { trim: null, annotations: [] };
+const EMPTY_STATE: SidecarState = { trim: null, annotations: [], bubble_position_log: [] };
 const SIDECAR_DEBOUNCE_MS = 350;
 const TRIM_EPS = 0.05;
 
@@ -145,7 +158,11 @@ function statesEqual(a: SidecarState, b: SidecarState, duration: number | null):
 }
 
 function isLogicallyEmpty(s: SidecarState, duration: number | null): boolean {
-  return normalizeTrim(s.trim, duration) == null && s.annotations.length === 0;
+  // Bubble keyframes are finalize-time data the review must preserve —
+  // even a "no edits yet" sidecar with only bubble_position_log is NOT
+  // empty, or the delete branch below would wipe the keyframes.
+  const noBubble = !s.bubble_position_log || s.bubble_position_log.length === 0;
+  return normalizeTrim(s.trim, duration) == null && s.annotations.length === 0 && noBubble;
 }
 
 // Phase 14 c2. Tracks the NR-processed preview MP4 the main <video>
@@ -187,6 +204,10 @@ export default function Review() {
   // Edit state.
   const [trim, setTrim] = useState<Trim | null>(null);
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
+  // Round-tripped opaquely. The frontend never mutates this; it just
+  // preserves what finalize wrote so sidecar rewrites (trim/annotation
+  // edits, empty-state delete path) don't wipe the bubble keyframes.
+  const [bubblePositionLog, setBubblePositionLog] = useState<BubblePositionEntry[]>([]);
   const [snapshot, setSnapshot] = useState<SidecarState>(EMPTY_STATE);
 
   const [saving, setSaving] = useState(false);
@@ -359,9 +380,14 @@ export default function Review() {
       .then((state) => {
         if (cancelled) return;
         if (state) {
-          setSnapshot({ trim: state.trim ?? null, annotations: state.annotations ?? [] });
+          setSnapshot({
+            trim: state.trim ?? null,
+            annotations: state.annotations ?? [],
+            bubble_position_log: state.bubble_position_log ?? [],
+          });
           if (state.trim) setTrim(state.trim);
           if (state.annotations) setAnnotations(state.annotations);
+          if (state.bubble_position_log) setBubblePositionLog(state.bubble_position_log);
         } else {
           setSnapshot(EMPTY_STATE);
         }
@@ -448,8 +474,8 @@ export default function Review() {
   }, [duration]);
 
   const currentState: SidecarState = useMemo(
-    () => ({ trim: trim ?? null, annotations }),
-    [trim, annotations],
+    () => ({ trim: trim ?? null, annotations, bubble_position_log: bubblePositionLog }),
+    [trim, annotations, bubblePositionLog],
   );
 
   const dirty = useMemo(
@@ -469,6 +495,7 @@ export default function Review() {
       const norm: SidecarState = {
         trim: normalizeTrim(currentState.trim, duration),
         annotations: currentState.annotations,
+        bubble_position_log: currentState.bubble_position_log,
       };
       setCommittedMp4Path(null);
       if (empty) {
