@@ -7,6 +7,20 @@ use crate::edit::BubblePositionEntry;
 pub(crate) const FFMPEG_PATH: &str = "/opt/homebrew/bin/ffmpeg";
 pub(crate) const FFPROBE_PATH: &str = "/opt/homebrew/bin/ffprobe";
 
+// Calibrated camera-start lead — the webcam (ffmpeg AVCaptureSession)
+// delivers its first frame ~280ms after SCK starts capturing. The
+// composite tpads the webcam head by this much so the bubble is visible
+// from t=0 (frozen first frame for the lag, then animating in sync).
+// Phase 15 c3's dual-stream preview applies the same lead in CSS by
+// offsetting webcam.currentTime relative to screen.currentTime; the
+// constant is surfaced via the FinalizedRecording payload so the
+// frontend doesn't drift from this value.
+//
+// Tunable: raise if the bubble still LEADS the audio (mouth moves
+// before the sound), lower if the bubble LAGS. The proper auto-fix
+// would have the engine timestamp each pipeline's first real sample.
+pub(crate) const WEBCAM_LEAD_MS: f64 = 280.0;
+
 // The inline `if(lt(t,...))` chain handles arbitrary log sizes — ffmpeg
 // parses the expression once and walks it per-frame, which is cheap.
 // The chained-split alternative was catastrophically slow: `split=N`
@@ -327,25 +341,10 @@ pub fn composite(
         .map(|d| d.round().max(1.0) as u32)
         .unwrap_or_else(|| size.px());
 
-    // Webcam-vs-audio alignment. The webcam (ffmpeg AVCaptureSession) and the
-    // screen+mic (SCK, via the engine) are independent pipelines: the webcam
-    // delivers its first frame a few hundred ms after SCK starts capturing, so
-    // its frames must be delayed to line up with the audio. We pad the webcam
-    // head by `lead_in` (tpad below), keeping the bubble visible from t=0
-    // (frozen first frame for the lag, then animating in sync).
-    //
-    // This delay is a FIXED calibrated value, not derived from the screen/webcam
-    // duration delta. The delta is dominated by stop-timing jitter, not start
-    // latency — it swung 50-270ms across otherwise-identical recordings and made
-    // the bubble sync feel random (sometimes aligned, sometimes hundreds of ms
-    // off). The camera's true first-frame latency is consistent, so a fixed lead
-    // aligns every recording the same way. Calibrated against a clap test on the
-    // built-in MacBook camera (~270ms residual at the old delta's lucky value).
-    //
-    // Tunable: raise WEBCAM_LEAD_MS if the bubble still LEADS the audio (mouth
-    // moves before the sound), lower it if the bubble LAGS. The proper auto-fix
-    // would have the engine timestamp each pipeline's first real sample.
-    const WEBCAM_LEAD_MS: f64 = 280.0;
+    // Webcam-vs-audio alignment via tpad on the webcam stream — see
+    // module-level WEBCAM_LEAD_MS for the rationale. Fixed calibrated
+    // value, not derived from the screen/webcam duration delta (which
+    // is dominated by stop-timing jitter, not start latency).
     let screen_dur = probe_duration_seconds(screen_path)?;
     let lead_in = WEBCAM_LEAD_MS / 1000.0;
 

@@ -105,12 +105,29 @@ type WatermarkPreview = {
   videoDims: { w: number; h: number } | null;
 };
 
-function readParams(): { path: string | null } {
+type ReviewParams = {
+  // Logical scratch identity — what save/discard/clipboard pin against.
+  path: string | null;
+  // Phase 15 c3 dual-stream inputs. screenPath always set when path is
+  // set (App.tsx sends both). webcamPath null for screen-only.
+  screenPath: string | null;
+  webcamPath: string | null;
+  webcamLeadMs: number;
+};
+
+function readParams(): ReviewParams {
   const hash = window.location.hash || "";
   const q = hash.indexOf("?");
-  if (q < 0) return { path: null };
+  if (q < 0) return { path: null, screenPath: null, webcamPath: null, webcamLeadMs: 280 };
   const params = new URLSearchParams(hash.slice(q + 1));
-  return { path: params.get("path") };
+  const leadStr = params.get("webcamLeadMs");
+  const lead = leadStr ? Number(leadStr) : 280;
+  return {
+    path: params.get("path"),
+    screenPath: params.get("screenPath"),
+    webcamPath: params.get("webcamPath"),
+    webcamLeadMs: Number.isFinite(lead) ? lead : 280,
+  };
 }
 
 function basename(p: string): string {
@@ -157,6 +174,47 @@ function statesEqual(a: SidecarState, b: SidecarState, duration: number | null):
   return true;
 }
 
+// Phase 15 c3 bubble keyframe interpolation. Mirror of composite.rs's
+// inline-expression logic — given the sidecar's bubble_position_log and
+// a current playback time, return where the bubble should sit. x/y are
+// normalized [0..1] within the recorded display frame; diameter is in
+// physical pixels (matched against the screen video's natural width to
+// derive a CSS pixel size). Returns null when there's no log (screen-
+// only or pre-Phase-8 recordings) — caller renders no bubble.
+//
+// Linear interpolation between keyframes is the same shape composite.rs
+// uses via `overlay=x=...:y=...` expressions at export time, so preview
+// and saved file place the bubble at the same fractional coords.
+const DEFAULT_BUBBLE_DIAMETER_PX = 240; // mirrors WebcamSize::Medium
+function bubbleAt(
+  log: BubblePositionEntry[],
+  t: number,
+): { x: number; y: number; diameter: number } | null {
+  if (log.length === 0) return null;
+  const diameter = log[0].diameter ?? DEFAULT_BUBBLE_DIAMETER_PX;
+  if (t <= log[0].t) {
+    return { x: log[0].x, y: log[0].y, diameter };
+  }
+  for (let i = 1; i < log.length; i++) {
+    if (t <= log[i].t) {
+      const a = log[i - 1];
+      const b = log[i];
+      const dt = b.t - a.t;
+      if (dt <= 0) return { x: b.x, y: b.y, diameter };
+      const frac = (t - a.t) / dt;
+      return {
+        x: a.x + (b.x - a.x) * frac,
+        y: a.y + (b.y - a.y) * frac,
+        diameter,
+      };
+    }
+  }
+  // Past last keyframe — hold at the last logged position. Matches
+  // composite.rs's final `gte(t,T)` branch which keeps the bubble fixed.
+  const last = log[log.length - 1];
+  return { x: last.x, y: last.y, diameter };
+}
+
 function isLogicallyEmpty(s: SidecarState, duration: number | null): boolean {
   // Bubble keyframes are finalize-time data the review must preserve —
   // even a "no edits yet" sidecar with only bubble_position_log is NOT
@@ -179,12 +237,29 @@ type PreviewState =
 export default function Review() {
   const [params] = useState(() => readParams());
   const sourcePath = params.path;
+  // Phase 15 c3 dual-stream inputs. screenPath drives the screen <video>
+  // (and the NR preview pipeline); webcamPath drives the bubble <video>;
+  // webcamLeadMs is the camera-start delay applied via currentTime
+  // offset to match composite::WEBCAM_LEAD_MS at export time. For
+  // screen-only recordings webcamPath is null and the bubble renders
+  // nothing — playback is single-stream against screenPath.
+  const screenPath = params.screenPath ?? sourcePath;
+  const webcamPath = params.webcamPath;
+  const webcamLeadSec = params.webcamLeadMs / 1000;
+
   const assetUrl = useMemo(
-    () => (sourcePath ? convertFileSrc(sourcePath) : null),
-    [sourcePath],
+    () => (screenPath ? convertFileSrc(screenPath) : null),
+    [screenPath],
+  );
+  const webcamAssetUrl = useMemo(
+    () => (webcamPath ? convertFileSrc(webcamPath) : null),
+    [webcamPath],
   );
 
+  // Screen <video> is the playback master. webcamVideoRef is slaved via
+  // timeupdate/play/pause/seek/ratechange (see syncWebcamEffect below).
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const webcamVideoRef = useRef<HTMLVideoElement | null>(null);
   const [duration, setDuration] = useState<number | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [playing, setPlaying] = useState(false);
@@ -430,13 +505,16 @@ export default function Review() {
   // the main <video> swaps to the preview URL; on failure D-10 surfaces a
   // pip and the raw scratch keeps playing.
   useEffect(() => {
-    if (!sourcePath) {
+    if (!screenPath) {
       setPreviewState({ status: "rendering" });
       return;
     }
     let cancelled = false;
     setPreviewState({ status: "rendering" });
-    invoke<string>("render_preview_audio", { sourcePath })
+    // Phase 15 c3: NR preview now operates on screenPath (sources/
+    // screen.mp4 for webcam recordings; scratchPath for screen-only).
+    // preview_path_for resolves preview-screen.mp4 in the same dir.
+    invoke<string>("render_preview_audio", { sourcePath: screenPath })
       .then((previewPath) => {
         if (cancelled) return;
         // Capture playback position before the src swap — the browser
@@ -456,7 +534,7 @@ export default function Review() {
     return () => {
       cancelled = true;
     };
-  }, [sourcePath]);
+  }, [screenPath]);
 
   // The main <video> plays the NR preview once ready; falls back to the
   // raw scratch during the eager render window and on D-10 failure. The
@@ -875,7 +953,15 @@ export default function Review() {
         <LeftColumn
           assetUrl={assetUrl}
           playbackUrl={playbackUrl}
-          sourcePath={sourcePath}
+          webcamUrl={webcamAssetUrl}
+          webcamVideoRef={webcamVideoRef}
+          webcamLeadSec={webcamLeadSec}
+          bubblePositionLog={bubblePositionLog}
+          // Sprite extraction / canvas fallback consumes the screen
+          // capture, not the scratch logical path. screenPath always set
+          // (== sourcePath for screen-only recordings, sources/screen.mp4
+          // for webcam recordings).
+          sourcePath={screenPath}
           videoRef={videoRef}
           onLoadedMetadata={onLoadedMetadata}
           onTimeUpdate={onTimeUpdate}
@@ -1028,6 +1114,13 @@ type LeftColumnProps = {
   // resolves (Phase 14 c2). Distinct from assetUrl, which stays on the raw
   // scratch URL for the waveform + scrub preview.
   playbackUrl: string | null;
+  // Phase 15 c3 dual-stream — webcam is rendered as a CSS-positioned
+  // circle slaved to the screen video's currentTime. Null for screen-
+  // only recordings; in that case nothing renders for the bubble.
+  webcamUrl: string | null;
+  webcamVideoRef: React.MutableRefObject<HTMLVideoElement | null>;
+  webcamLeadSec: number;
+  bubblePositionLog: BubblePositionEntry[];
   sourcePath: string | null;
   videoRef: React.MutableRefObject<HTMLVideoElement | null>;
   onLoadedMetadata: () => void;
@@ -1062,6 +1155,10 @@ function LeftColumn(props: LeftColumnProps) {
       <VideoStage
         assetUrl={props.playbackUrl}
         videoRef={props.videoRef}
+        webcamUrl={props.webcamUrl}
+        webcamVideoRef={props.webcamVideoRef}
+        webcamLeadSec={props.webcamLeadSec}
+        bubblePositionLog={props.bubblePositionLog}
         onLoadedMetadata={props.onLoadedMetadata}
         onTimeUpdate={props.onTimeUpdate}
         onPlay={props.onPlay}
@@ -1195,6 +1292,11 @@ function ToolButton({
 type VideoStageProps = {
   assetUrl: string | null;
   videoRef: React.MutableRefObject<HTMLVideoElement | null>;
+  // Phase 15 c3 — webcam <video> slaved to the screen video.
+  webcamUrl: string | null;
+  webcamVideoRef: React.MutableRefObject<HTMLVideoElement | null>;
+  webcamLeadSec: number;
+  bubblePositionLog: BubblePositionEntry[];
   onLoadedMetadata: () => void;
   onTimeUpdate: () => void;
   onPlay: () => void;
@@ -1337,6 +1439,16 @@ function VideoStage(props: VideoStageProps) {
             No source path
           </div>
         )}
+        <BubbleLayer
+          stageRef={stageRef}
+          screenVideoRef={props.videoRef}
+          webcamVideoRef={props.webcamVideoRef}
+          webcamUrl={props.webcamUrl}
+          webcamLeadSec={props.webcamLeadSec}
+          bubblePositionLog={props.bubblePositionLog}
+          currentTime={props.currentTime}
+          videoDims={props.watermarkPreview.videoDims}
+        />
         <AnnotationLayer
           stageRef={stageRef}
           videoRef={props.videoRef}
@@ -1356,6 +1468,169 @@ function VideoStage(props: VideoStageProps) {
         />
       </div>
     </div>
+  );
+}
+
+// Phase 15 c3 dual-stream bubble. Renders the webcam <video> as a CSS-
+// positioned circle over the screen video. Slaved to the screen video
+// via timeupdate/play/pause/seeking/seeked/ratechange — webcam.currentTime
+// stays at max(0, screen.currentTime - LEAD_S) so the first ~280ms of
+// playback shows the webcam's frozen first frame (mirroring composite.rs's
+// tpad=start_mode=clone). Position + diameter come from the sidecar's
+// bubble_position_log via bubbleAt(); fall back to nothing when no log
+// (screen-only recordings or no webcam).
+//
+// CSS treatments mirror composite.rs's filter graph: transform scaleX(-1)
+// for hflip, object-fit cover on a square element for crop='min(iw,ih)',
+// border-radius 50% for the alphamerge mask. Same look as the live
+// recording-time WebcamBubble preview component.
+function BubbleLayer({
+  stageRef,
+  screenVideoRef,
+  webcamVideoRef,
+  webcamUrl,
+  webcamLeadSec,
+  bubblePositionLog,
+  currentTime,
+  videoDims,
+}: {
+  stageRef: React.MutableRefObject<HTMLDivElement | null>;
+  screenVideoRef: React.MutableRefObject<HTMLVideoElement | null>;
+  webcamVideoRef: React.MutableRefObject<HTMLVideoElement | null>;
+  webcamUrl: string | null;
+  webcamLeadSec: number;
+  bubblePositionLog: BubblePositionEntry[];
+  currentTime: number;
+  videoDims: { w: number; h: number } | null;
+}) {
+  const stage = useStageSize(stageRef);
+
+  // Sync layer — screen video drives, webcam follows. 50ms drift window
+  // is one frame at 30fps; correcting on every timeupdate keeps drift
+  // bounded without thrashing the webcam decoder.
+  useEffect(() => {
+    const s = screenVideoRef.current;
+    const w = webcamVideoRef.current;
+    if (!s || !w) return;
+
+    const target = () => Math.max(0, s.currentTime - webcamLeadSec);
+    const align = () => {
+      if (Math.abs(w.currentTime - target()) > 0.05) {
+        try {
+          w.currentTime = target();
+        } catch {
+          // Webcam metadata may not be loaded yet — first timeupdate
+          // after webcam loadedmetadata will retry.
+        }
+      }
+    };
+    const onTimeUpdate = () => align();
+    const onPlay = () => {
+      align();
+      // Don't try to play webcam during the pre-LEAD window — its
+      // currentTime is 0 and ahead-of-screen play would race.
+      if (s.currentTime >= webcamLeadSec) {
+        w.play().catch(() => {});
+      }
+    };
+    const onPause = () => {
+      w.pause();
+    };
+    const onSeeking = () => {
+      w.pause();
+    };
+    const onSeeked = () => {
+      align();
+      if (!s.paused && s.currentTime >= webcamLeadSec) {
+        w.play().catch(() => {});
+      }
+    };
+    const onRateChange = () => {
+      w.playbackRate = s.playbackRate;
+    };
+    // When webcam metadata first loads (and on src change), snap to
+    // current target so playback doesn't start with an unaligned bubble.
+    const onWebcamLoadedMeta = () => align();
+
+    s.addEventListener("timeupdate", onTimeUpdate);
+    s.addEventListener("play", onPlay);
+    s.addEventListener("pause", onPause);
+    s.addEventListener("seeking", onSeeking);
+    s.addEventListener("seeked", onSeeked);
+    s.addEventListener("ratechange", onRateChange);
+    w.addEventListener("loadedmetadata", onWebcamLoadedMeta);
+    return () => {
+      s.removeEventListener("timeupdate", onTimeUpdate);
+      s.removeEventListener("play", onPlay);
+      s.removeEventListener("pause", onPause);
+      s.removeEventListener("seeking", onSeeking);
+      s.removeEventListener("seeked", onSeeked);
+      s.removeEventListener("ratechange", onRateChange);
+      w.removeEventListener("loadedmetadata", onWebcamLoadedMeta);
+    };
+  }, [screenVideoRef, webcamVideoRef, webcamLeadSec, webcamUrl]);
+
+  if (!webcamUrl) return null;
+
+  const bubble = bubbleAt(bubblePositionLog, currentTime);
+  if (!bubble || !videoDims || stage.width === 0 || stage.height === 0) {
+    // Webcam exists but no keyframes / dims unknown — render the
+    // <video> hidden so the sync layer still has an element to drive.
+    return (
+      <video
+        ref={webcamVideoRef}
+        src={webcamUrl}
+        muted
+        playsInline
+        preload="auto"
+        style={{ display: "none" }}
+      />
+    );
+  }
+
+  // Letterbox math identical to WatermarkPreviewLayer — bubble lives
+  // inside the video content box, not the stage box.
+  const { w: vw, h: vh } = videoDims;
+  const videoAspect = vw / vh;
+  const stageAspect = stage.width / stage.height;
+  let cw: number;
+  let ch: number;
+  if (videoAspect > stageAspect) {
+    cw = stage.width;
+    ch = stage.width / videoAspect;
+  } else {
+    ch = stage.height;
+    cw = stage.height * videoAspect;
+  }
+  const cx = (stage.width - cw) / 2;
+  const cy = (stage.height - ch) / 2;
+
+  // Diameter in physical pixels → CSS pixels via the content-box scale.
+  const cssDiameter = (bubble.diameter / vw) * cw;
+  // Bubble center in CSS within the stage box.
+  const centerX = cx + bubble.x * cw;
+  const centerY = cy + bubble.y * ch;
+
+  return (
+    <video
+      ref={webcamVideoRef}
+      src={webcamUrl}
+      muted
+      playsInline
+      preload="auto"
+      style={{
+        position: "absolute",
+        left: `${centerX - cssDiameter / 2}px`,
+        top: `${centerY - cssDiameter / 2}px`,
+        width: `${cssDiameter}px`,
+        height: `${cssDiameter}px`,
+        transform: "scaleX(-1)",
+        borderRadius: "50%",
+        objectFit: "cover",
+        pointerEvents: "none",
+        background: "#000",
+      }}
+    />
   );
 }
 

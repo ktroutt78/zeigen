@@ -279,7 +279,11 @@ pub fn render_preview_audio(source_path: String) -> Result<String, String> {
 }
 
 pub(crate) fn preview_path_for(source: &Path) -> Option<PathBuf> {
-    source.parent().map(|p| p.join("preview.mp4"))
+    // Phase 15 c3: renamed to preview-screen.mp4 since the source the
+    // preview now operates on is sources/screen.mp4 (not a composited
+    // mp4). The file is the NR-processed equivalent of screen.mp4 that
+    // the dual-stream player's screen <video> swaps to once arnndn runs.
+    source.parent().map(|p| p.join("preview-screen.mp4"))
 }
 
 pub(crate) fn render_preview_audio_path(source: &Path, output: &Path) -> Result<(), String> {

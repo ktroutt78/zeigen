@@ -17,7 +17,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use chrono::Local;
-use tauri::{AppHandle, Emitter, Listener, Manager, State};
+use tauri::{AppHandle, Listener, Manager, State};
 
 use composite::{Corner, WebcamSize, FFMPEG_PATH};
 use devices::DeviceList;
@@ -33,7 +33,13 @@ struct ActiveRecording {
     scratch_dir: PathBuf,
     scratch_mp4_path: PathBuf,
     webcam: Option<WebcamSegmenter>,
+    // Phase 15 c3: webcam_size/corner aren't read by finalize anymore
+    // (composite moved to export). Kept on the struct so engine_start
+    // keeps parsing the API contract unchanged — a future settings UI
+    // can read these. dead_code allowed pending that surface.
+    #[allow(dead_code)]
     webcam_size: WebcamSize,
+    #[allow(dead_code)]
     webcam_corner: Corner,
     started_at: Instant,
     mode: CaptureMode,
@@ -336,7 +342,9 @@ fn bubble_position_event(
 
 #[tauri::command]
 fn recording_finalize(
-    app: AppHandle,
+    // AppHandle retained for the IPC contract; composite-progress emits
+    // happened here pre-Phase-15 c3, but the composite moved to export.
+    _app: AppHandle,
     recording: RecordingState<'_>,
 ) -> Result<FinalizedRecording, String> {
     let rec = recording
@@ -348,10 +356,18 @@ fn recording_finalize(
     let stamp = rec.stamp;
     let scratch_dir = rec.scratch_dir;
     let scratch_mp4_path = rec.scratch_mp4_path;
-    let webcam_size = rec.webcam_size;
-    let webcam_corner = rec.webcam_corner;
     let webcam_opt = rec.webcam;
     let bubble_position_log = rec.bubble_position_log;
+    // webcam_size / webcam_corner used to feed composite at finalize.
+    // Phase 15 c3 defers composite to export; export defaults to Medium/
+    // BottomRight (engine_start parses these from None → defaults today,
+    // so dropping them at finalize is a no-op for current recordings).
+
+    // c3 outputs: the dual-stream player needs screen_path + optional
+    // webcam_path. Both None for screen-only recordings (in which case
+    // scratch_mp4_path itself IS the screen capture). Populated below.
+    let mut screen_for_dual: Option<PathBuf> = None;
+    let mut webcam_for_dual: Option<PathBuf> = None;
 
     let (sources_dir, segments) = if let Some(mut webcam) = webcam_opt {
         // Idempotently finalize the live webcam segment before reading it.
@@ -404,28 +420,30 @@ fn recording_finalize(
             }
         }
 
-        // Don't bookend with explicit 0.0/1.0 emits — Tauri IPC delivers
-        // events out-of-order with command returns, and a 1.0 arriving after
-        // the frontend's .finally cleared state would resurrect the modal.
-        // The frontend seeds compositeProgress=0 on the `stopped` event and
-        // clears it in .finally; ffmpeg's streamed progress fills the middle.
-        let progress_app = app.clone();
-        composite::composite(
-            &screen_path,
-            &segments,
-            &scratch_mp4_path,
-            webcam_size,
-            webcam_corner,
-            &bubble_position_log,
-            move |frac| {
-                let _ = progress_app.emit("composite-progress", frac);
-            },
-        )?;
+        // Phase 15 c3: finalize composite removed. The screen + concat'd
+        // webcam.mp4 + sidecar (with bubble keyframes) are the dual-stream
+        // player's inputs; composite now runs at export time per
+        // run_edit_pipeline. Stop -> preview is near-instant regardless of
+        // recording length — the long wait users saw on 10+ min clips was
+        // this composite pass.
+        screen_for_dual = Some(screen_path);
+        let webcam_path = sources_dir.join("webcam.mp4");
+        if webcam_path.is_file() {
+            webcam_for_dual = Some(webcam_path);
+        }
         (Some(sources_dir), segments)
     } else {
+        // Screen-only: no sources/ dir. The "screen path" is
+        // scratch_mp4_path itself (engine wrote screen capture directly
+        // there per engine_start's screen_output branch). webcam absent.
         (None, Vec::new())
     };
 
+    // Sidecar lives adjacent to scratch_mp4_path regardless of whether
+    // a file actually exists there (the path is the logical recording
+    // identity — Phase 5.5 lifecycle key). Frontend's read_sidecar still
+    // takes sourcePath = scratch_mp4_path; backend resolves the adjacent
+    // .annotations.json without needing scratch_mp4_path itself on disk.
     if !bubble_position_log.is_empty() {
         let mut state = edit::read_sidecar_path(&scratch_mp4_path)?.unwrap_or_default();
         state.bubble_position_log = bubble_position_log;
@@ -436,12 +454,23 @@ fn recording_finalize(
         stamp,
         scratch_dir: scratch_dir.to_string_lossy().into_owned(),
         scratch_mp4_path: scratch_mp4_path.to_string_lossy().into_owned(),
+        // Phase 15 c3 dual-stream fields. screen_path is what the review's
+        // <video> source uses (post-NR-preview swap below — see edit.rs
+        // preview_path_for which now resolves preview-screen.mp4 sibling).
+        // webcam_path is the c1 concat'd file. webcam_lead_ms is the
+        // calibrated camera-start delay the CSS player applies via
+        // currentTime offset to mirror composite's tpad behavior.
+        screen_path: screen_for_dual
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| scratch_mp4_path.to_string_lossy().into_owned()),
+        webcam_path: webcam_for_dual.map(|p| p.to_string_lossy().into_owned()),
+        webcam_lead_ms: composite::WEBCAM_LEAD_MS,
         sources_dir: sources_dir.map(|p| p.to_string_lossy().into_owned()),
         webcam_segments: segments
             .into_iter()
             .map(|p| p.to_string_lossy().into_owned())
             .collect(),
-        composited: true,
     })
 }
 
@@ -450,9 +479,12 @@ struct FinalizedRecording {
     stamp: String,
     scratch_dir: String,
     scratch_mp4_path: String,
+    // Phase 15 c3 dual-stream player inputs.
+    screen_path: String,
+    webcam_path: Option<String>,
+    webcam_lead_ms: f64,
     sources_dir: Option<String>,
     webcam_segments: Vec<String>,
-    composited: bool,
 }
 
 fn movies_dir() -> Result<PathBuf, String> {

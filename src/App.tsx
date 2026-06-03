@@ -656,15 +656,39 @@ async function openMarqueeOverlays(
   });
 }
 
+type ReviewOpenArgs = {
+  // Logical scratch identity — what discard/save/clipboard pin against.
+  // Always set; for phase 15 c3 webcam recordings the file at this path
+  // does not exist (no composited mp4 at finalize), but the path string
+  // is still the canonical key.
+  scratchPath: string;
+  // Phase 15 c3 dual-stream inputs. screenPath is the raw screen capture
+  // (sources/screen.mp4 for webcam recordings; scratchPath for screen-
+  // only). webcamPath is the c1 concat'd webcam.mp4 — null if no webcam.
+  // webcamLeadMs is the calibrated camera-start delay the player applies
+  // via currentTime offset.
+  screenPath: string;
+  webcamPath: string | null;
+  webcamLeadMs: number;
+};
+
 async function openReview(
   label: string,
-  finalPath: string,
+  args: ReviewOpenArgs,
   onDestroyed: () => void,
 ): Promise<void> {
   // Each recording gets its own review window via a unique label
   // (review-<stamp>). Existing reviews stay open in the background — see
   // PHASE-5-CONTEXT.md D-15. The capability scope `review-*` covers them.
-  const url = `/#review?path=${encodeURIComponent(finalPath)}`;
+  const params = new URLSearchParams({
+    path: args.scratchPath,
+    screenPath: args.screenPath,
+    webcamLeadMs: String(args.webcamLeadMs),
+  });
+  if (args.webcamPath) {
+    params.set("webcamPath", args.webcamPath);
+  }
+  const url = `/#review?${params.toString()}`;
   const win = new WebviewWindow(label, {
     url,
     title: "Screen Recording",
@@ -715,10 +739,21 @@ type NrLevel = "off" | "low" | "med" | "high";
 type FinalizedRecording = {
   stamp: string;
   scratch_dir: string;
+  // Logical key — survives as the param to discard_recording / save /
+  // clipboard / linkedin even when no actual composited file exists at
+  // this path (phase 15 c3 webcam recordings). save_recording derives
+  // raw inputs from this path's parent/sources dir.
   scratch_mp4_path: string;
+  // Phase 15 c3 dual-stream player inputs. screen_path always present;
+  // webcam_path present iff a webcam was used (concat'd by c1 from
+  // segments). webcam_lead_ms mirrors composite::WEBCAM_LEAD_MS so the
+  // dual-stream player offsets webcam.currentTime to match composite's
+  // tpad behavior at export time.
+  screen_path: string;
+  webcam_path: string | null;
+  webcam_lead_ms: number;
   sources_dir: string | null;
   webcam_segments: string[];
-  composited: boolean;
 };
 
 type EngineEvent =
@@ -885,7 +920,16 @@ function App() {
             invoke<FinalizedRecording>("recording_finalize")
               .then(async (info) => {
                 setFinalizeInfo(info);
-                await openReview(`review-${info.stamp}`, info.scratch_mp4_path, decReview);
+                await openReview(
+                  `review-${info.stamp}`,
+                  {
+                    scratchPath: info.scratch_mp4_path,
+                    screenPath: info.screen_path,
+                    webcamPath: info.webcam_path,
+                    webcamLeadMs: info.webcam_lead_ms,
+                  },
+                  decReview,
+                );
               })
               .catch((err) => {
                 setError(String(err));
@@ -916,7 +960,16 @@ function App() {
               invoke<FinalizedRecording>("recording_finalize")
                 .then(async (info) => {
                   setFinalizeInfo(info);
-                  await openReview(`review-${info.stamp}`, info.scratch_mp4_path, decReview);
+                  await openReview(
+                    `review-${info.stamp}`,
+                    {
+                      scratchPath: info.scratch_mp4_path,
+                      screenPath: info.screen_path,
+                      webcamPath: info.webcam_path,
+                      webcamLeadMs: info.webcam_lead_ms,
+                    },
+                    decReview,
+                  );
                 })
                 .catch((err) => {
                   setError(String(err));
@@ -974,7 +1027,7 @@ function App() {
       setLastSaved(finalPath);
       setFinalizeInfo((prev) =>
         prev
-          ? { ...prev, scratch_mp4_path: finalPath, sources_dir: null, composited: false }
+          ? { ...prev, scratch_mp4_path: finalPath, sources_dir: null }
           : null,
       );
     }).then((fn) => {
@@ -2337,7 +2390,7 @@ function StatusStrip({
     return (
       <StripRow
         tone="success"
-        label={finalizeInfo.composited ? "Composited" : "Saved"}
+        label="Ready"
         body={finalizeInfo.scratch_mp4_path}
         onDismiss={onDismiss}
       />
