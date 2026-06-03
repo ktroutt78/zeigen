@@ -859,11 +859,19 @@ export default function Review() {
   // immediate pause() forces the first frame to paint, and the frame
   // stays visible after pause. Muted autoplay is permitted without a
   // user gesture; we restore the original muted state on pause.
-  const primedRef = useRef(false);
+  //
+  // Phase 15 c3 fix: track which src has been primed. The raw → preview-
+  // screen.mp4 swap (when render_preview_audio resolves) reassigns the
+  // <video> src; the browser blanks the element and needs priming on the
+  // new src too. The prior one-shot bool refused to re-prime, leaving
+  // preview-screen.mp4 stuck on a black frame after the swap.
+  const primedSrcRef = useRef<string | null>(null);
   const primeFirstFrame = useCallback(() => {
     const v = videoRef.current;
-    if (!v || primedRef.current) return;
-    primedRef.current = true;
+    if (!v) return;
+    const currentSrc = v.currentSrc || v.src;
+    if (!currentSrc || primedSrcRef.current === currentSrc) return;
+    primedSrcRef.current = currentSrc;
     const wasMuted = v.muted;
     v.muted = true;
     v.play()
@@ -1524,11 +1532,28 @@ function BubbleLayer({
         }
       }
     };
-    const onTimeUpdate = () => align();
+    const onTimeUpdate = () => {
+      align();
+      // Phase 15 c3 fix: webcam needs play() once screen crosses LEAD
+      // during ongoing playback. onPlay alone misses this — it fires
+      // when the user clicks play (usually at t=0, before LEAD), so
+      // the pre-LEAD guard skips the play call and nothing later
+      // kicks the webcam off. Without this, align() runs every
+      // timeupdate seeing webcam paused, scrubs it via seek to target,
+      // and the bubble animates as 4-15fps stepped seeks instead of
+      // smooth continuous play. Once webcam is playing, align()'s
+      // 50ms drift threshold rarely fires — both videos advance at
+      // 1x and the LEAD offset is preserved by the play-from-0 +
+      // screen-LEAD-headstart arrangement.
+      if (w.paused && !s.paused && s.currentTime >= webcamLeadSec) {
+        w.play().catch(() => {});
+      }
+    };
     const onPlay = () => {
       align();
       // Don't try to play webcam during the pre-LEAD window — its
-      // currentTime is 0 and ahead-of-screen play would race.
+      // currentTime is 0 and ahead-of-screen play would race. The
+      // first timeupdate past LEAD picks it up via onTimeUpdate above.
       if (s.currentTime >= webcamLeadSec) {
         w.play().catch(() => {});
       }
