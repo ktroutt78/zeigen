@@ -1454,7 +1454,6 @@ function VideoStage(props: VideoStageProps) {
           webcamUrl={props.webcamUrl}
           webcamLeadSec={props.webcamLeadSec}
           bubblePositionLog={props.bubblePositionLog}
-          currentTime={props.currentTime}
           videoDims={props.watermarkPreview.videoDims}
         />
         <AnnotationLayer
@@ -1499,7 +1498,6 @@ function BubbleLayer({
   webcamUrl,
   webcamLeadSec,
   bubblePositionLog,
-  currentTime,
   videoDims,
 }: {
   stageRef: React.MutableRefObject<HTMLDivElement | null>;
@@ -1508,32 +1506,13 @@ function BubbleLayer({
   webcamUrl: string | null;
   webcamLeadSec: number;
   bubblePositionLog: BubblePositionEntry[];
-  currentTime: number;
+  // Phase 15 c3 rAF fix made currentTime obsolete here — the position
+  // loop reads screenVideoRef.current.currentTime directly. Accepting
+  // it would force callers to keep threading the prop; declining lets
+  // the prop die at the VideoStage callsite.
   videoDims: { w: number; h: number } | null;
 }) {
   const stage = useStageSize(stageRef);
-
-  // TEMP INSTRUMENTATION — Phase 15 c3 drag debug. Tag string is a unique
-  // marker so the user can confirm the running bundle includes this code.
-  // Logs route through the debug_log Tauri command so they land in the
-  // tauri dev terminal output instead of needing DevTools open.
-  // Remove this entire instrumentation block before final commit.
-  const TAG = "INSTR-ab8e90d";
-  const dbg = (label: string, data?: Record<string, unknown>) => {
-    const payload = data ? `${label} ${JSON.stringify(data)}` : label;
-    invoke("debug_log", { msg: `${TAG} ${payload}` }).catch(() => {});
-  };
-  const renderCountRef = useRef(0);
-  renderCountRef.current++;
-  if (renderCountRef.current === 1 || renderCountRef.current % 60 === 0) {
-    dbg(`render #${renderCountRef.current}`, {
-      logEntries: bubblePositionLog.length,
-      hasVideoDims: !!videoDims,
-      stageW: stage.width,
-      stageH: stage.height,
-      currentTime: +currentTime.toFixed(3),
-    });
-  }
 
   // Sync layer — screen video drives, webcam follows. 50ms drift window
   // is one frame at 30fps; correcting on every timeupdate keeps drift
@@ -1543,67 +1522,15 @@ function BubbleLayer({
     const w = webcamVideoRef.current;
     if (!s || !w) return;
 
-    // TEMP INSTRUMENTATION — counters reset every 1s summary tick.
-    // Local dbg so the useEffect deps don't grow with a per-render fn.
-    const idbg = (label: string, data?: Record<string, unknown>) => {
-      const payload = data ? `${label} ${JSON.stringify(data)}` : label;
-      invoke("debug_log", { msg: `${TAG} ${payload}` }).catch(() => {});
-    };
-    let alignCount = 0;
-    let correctionCount = 0;
-    let summaryInterval: number | null = null;
-    idbg("sync effect BIND", {
-      screenSrcTail: s.currentSrc.slice(-50),
-      webcamSrcTail: w.currentSrc.slice(-50),
-      webcamLeadSec,
-      logEntries: bubblePositionLog.length,
-    });
-
     const target = () => Math.max(0, s.currentTime - webcamLeadSec);
     const align = () => {
-      alignCount++;
-      const t = target();
-      const drift = w.currentTime - t;
-      if (Math.abs(drift) > 0.05) {
-        correctionCount++;
-        idbg("CORRECT", {
-          s_ct: +s.currentTime.toFixed(3),
-          target: +t.toFixed(3),
-          w_ct: +w.currentTime.toFixed(3),
-          drift_ms: Math.round(drift * 1000),
-          w_paused: w.paused,
-          s_paused: s.paused,
-        });
+      if (Math.abs(w.currentTime - target()) > 0.05) {
         try {
-          w.currentTime = t;
+          w.currentTime = target();
         } catch {
           // Webcam metadata may not be loaded yet — first timeupdate
           // after webcam loadedmetadata will retry.
         }
-      }
-    };
-    const startSummary = () => {
-      if (summaryInterval !== null) return;
-      summaryInterval = window.setInterval(() => {
-        const t = target();
-        idbg("1s SUMMARY", {
-          s_ct: +s.currentTime.toFixed(3),
-          w_ct: +w.currentTime.toFixed(3),
-          target: +t.toFixed(3),
-          drift_ms: Math.round((w.currentTime - t) * 1000),
-          aligns: alignCount,
-          corrections: correctionCount,
-          w_paused: w.paused,
-          w_rate: w.playbackRate,
-        });
-        alignCount = 0;
-        correctionCount = 0;
-      }, 1000);
-    };
-    const stopSummary = () => {
-      if (summaryInterval !== null) {
-        window.clearInterval(summaryInterval);
-        summaryInterval = null;
       }
     };
     const onTimeUpdate = () => {
@@ -1620,35 +1547,25 @@ function BubbleLayer({
       // 1x and the LEAD offset is preserved by the play-from-0 +
       // screen-LEAD-headstart arrangement.
       if (w.paused && !s.paused && s.currentTime >= webcamLeadSec) {
-        idbg("onTimeUpdate -> w.play()", { s_ct: +s.currentTime.toFixed(3) });
         w.play().catch(() => {});
       }
     };
     const onPlay = () => {
-      idbg("screen PLAY", {
-        s_ct: +s.currentTime.toFixed(3),
-        w_paused: w.paused,
-      });
       align();
       // Don't try to play webcam during the pre-LEAD window — its
       // currentTime is 0 and ahead-of-screen play would race. The
       // first timeupdate past LEAD picks it up via onTimeUpdate above.
       if (s.currentTime >= webcamLeadSec) {
-        idbg("onPlay -> w.play()", { s_ct: +s.currentTime.toFixed(3) });
         w.play().catch(() => {});
       }
-      startSummary();
     };
     const onPause = () => {
-      idbg("screen PAUSE", { s_ct: +s.currentTime.toFixed(3) });
       w.pause();
-      stopSummary();
     };
     const onSeeking = () => {
       w.pause();
     };
     const onSeeked = () => {
-      idbg("screen SEEKED", { s_ct: +s.currentTime.toFixed(3) });
       align();
       if (!s.paused && s.currentTime >= webcamLeadSec) {
         w.play().catch(() => {});
@@ -1659,13 +1576,7 @@ function BubbleLayer({
     };
     // When webcam metadata first loads (and on src change), snap to
     // current target so playback doesn't start with an unaligned bubble.
-    const onWebcamLoadedMeta = () => {
-      idbg("webcam loadedmetadata", {
-        w_duration: +w.duration.toFixed(3),
-        s_ct: +s.currentTime.toFixed(3),
-      });
-      align();
-    };
+    const onWebcamLoadedMeta = () => align();
 
     s.addEventListener("timeupdate", onTimeUpdate);
     s.addEventListener("play", onPlay);
@@ -1675,7 +1586,6 @@ function BubbleLayer({
     s.addEventListener("ratechange", onRateChange);
     w.addEventListener("loadedmetadata", onWebcamLoadedMeta);
     return () => {
-      stopSummary();
       s.removeEventListener("timeupdate", onTimeUpdate);
       s.removeEventListener("play", onPlay);
       s.removeEventListener("pause", onPause);

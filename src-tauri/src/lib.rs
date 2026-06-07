@@ -205,10 +205,9 @@ fn engine_start(
 // Phase 15 #4 fix: called by engine.rs stdout reader when the Swift
 // engine emits first_frame for the screen stream. Stamps the active
 // recording's first_frame_at with the receipt instant — IPC latency
-// over the line-buffered pipe is ~1-5ms, negligible vs the 30-80ms
-// SCK init lag we're measuring. Idempotent: only writes the first
-// time. Logs the lag to stderr for the verification pass (will be
-// removed in cleanup commit alongside the INSTR-ab8e90d log).
+// over the line-buffered pipe is ~1-5ms, negligible vs the 225-360ms
+// SCK init lag measured during verification. Idempotent: only writes
+// the first time.
 pub(crate) fn note_screen_first_frame(app: &AppHandle) {
     let now = Instant::now();
     let state = app.state::<Mutex<Option<ActiveRecording>>>();
@@ -217,12 +216,6 @@ pub(crate) fn note_screen_first_frame(app: &AppHandle) {
         if let Some(rec) = guard.as_mut() {
             if rec.first_frame_at.is_none() {
                 rec.first_frame_at = Some(now);
-                let lag = now.duration_since(rec.started_at);
-                eprintln!(
-                    "[sck-lag] recording={} sck_lag_ms={}",
-                    rec.stamp,
-                    lag.as_millis()
-                );
             }
         }
     }
@@ -480,21 +473,19 @@ fn recording_finalize(
     // Phase 15 #4 fix: shift bubble_position_log entries by the SCK
     // init lag so each entry's t corresponds to screen.mp4 PTS=0 (the
     // first SCK frame) instead of started_at (the engine_start IPC
-    // invocation, which precedes SCK by ~30-80ms). Composite + preview
-    // both read the resulting sidecar — single source of truth, no
-    // divergence (option B-unified). Entries with shifted t<0 are
-    // dropped: they correspond to bubble drags before SCK started
-    // capturing, so there's no screen content to overlay them onto.
+    // invocation, which precedes SCK by 225-360ms per measurement
+    // 2026-06-07). Composite + preview both read the resulting sidecar
+    // — single source of truth, no divergence (option B-unified).
+    // Entries with shifted t<0 are dropped: they correspond to bubble
+    // drags before SCK started capturing, so there's no screen content
+    // to overlay them onto.
     //
     // Fallback when first_frame_at is None (old engine binary, event
     // lost): no shift applied, log written as-is. Identical to pre-fix
-    // behavior. No regression. The temp [sck-lag] eprintln on both
-    // branches is the verification measurement (will be removed in
-    // cleanup commit alongside INSTR-ab8e90d).
+    // behavior. No regression.
     let bubble_position_log: Vec<BubblePositionEntry> = if let Some(ff) = first_frame_at {
         let sck_lag = ff.duration_since(started_at).as_secs_f64();
-        let before = bubble_position_log.len();
-        let shifted: Vec<BubblePositionEntry> = bubble_position_log
+        bubble_position_log
             .into_iter()
             .filter_map(|e| {
                 let t = e.t - sck_lag;
@@ -504,21 +495,8 @@ fn recording_finalize(
                     Some(BubblePositionEntry { t, ..e })
                 }
             })
-            .collect();
-        eprintln!(
-            "[sck-lag] recording={} finalize shift_ms={} entries={}->{} dropped_pre_first_frame={}",
-            stamp,
-            (sck_lag * 1000.0).round() as i64,
-            before,
-            shifted.len(),
-            before - shifted.len()
-        );
-        shifted
+            .collect()
     } else {
-        eprintln!(
-            "[sck-lag] recording={} finalize no first_frame received — log written without shift",
-            stamp
-        );
         bubble_position_log
     };
 
@@ -677,15 +655,6 @@ fn quit_app(app: AppHandle) {
     app.exit(0);
 }
 
-// TEMP — Phase 15 c3 instrumentation. Routes frontend debug strings to
-// the tauri dev terminal so we can capture them from the background
-// process output without DevTools. Remove when c3-debug-INSTR is gone
-// from Review.tsx.
-#[tauri::command]
-fn debug_log(msg: String) {
-    eprintln!("[c3-debug] {msg}");
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -777,7 +746,6 @@ pub fn run() {
             update_tray_elapsed,
             set_hotkey,
             quit_app,
-            debug_log,
             macos::make_capture_invisible,
             macos::set_window_frame_cg,
             bubble_position_event,
