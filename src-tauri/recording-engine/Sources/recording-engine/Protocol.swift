@@ -55,6 +55,14 @@ enum Event {
     case resumed(elapsed_s: Double)
     case stopped(output_path: String, duration_s: Double, bytes: Int64, frames: Int, dropped: Int)
     case window_frame(x: Int, y: Int, width: Int, height: Int, on_screen: Bool)
+    // Phase 15 #4 fix: emitted exactly once per recording, when SCK
+    // delivers the first sample buffer for the screen stream. Rust uses
+    // the receive timestamp to anchor bubble_position_log entries to
+    // screen.mp4 PTS=0 (which corresponds to this first frame) instead
+    // of the earlier engine_start invocation time. `stream` is currently
+    // always "screen"; the field future-proofs against a similar fix
+    // for the webcam stream if WEBCAM_LEAD_MS is ever retired.
+    case first_frame(stream: String)
     case error(code: String, message: String)
 }
 
@@ -98,6 +106,8 @@ func emit(_ event: Event) {
         ]
     case .window_frame(let x, let y, let width, let height, let on_screen):
         json = ["event": "window_frame", "x": x, "y": y, "width": width, "height": height, "on_screen": on_screen]
+    case .first_frame(let stream):
+        json = ["event": "first_frame", "stream": stream]
     case .error(let code, let message):
         json = ["event": "error", "code": code, "message": message]
     }

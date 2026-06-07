@@ -71,6 +71,17 @@ impl EngineClient {
                 let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
                     continue;
                 };
+                // Phase 15 #4 fix: peek at first_frame for the screen
+                // stream and timestamp on the ActiveRecording before
+                // forwarding to the frontend. Rust uses this anchor at
+                // finalize to shift bubble_position_log entries so their
+                // t corresponds to screen.mp4 PTS=0 instead of the
+                // earlier engine_start invocation time.
+                if value.get("event").and_then(|v| v.as_str()) == Some("first_frame")
+                    && value.get("stream").and_then(|v| v.as_str()) == Some("screen")
+                {
+                    crate::note_screen_first_frame(&app_for_stdout);
+                }
                 let _ = app_for_stdout.emit("engine-event", &value);
             }
         });

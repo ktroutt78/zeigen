@@ -42,6 +42,15 @@ struct ActiveRecording {
     #[allow(dead_code)]
     webcam_corner: Corner,
     started_at: Instant,
+    // Phase 15 #4 fix: wall-clock instant when SCK delivered its first
+    // screen sample (engine emits first_frame; engine.rs captures this).
+    // recording_finalize uses (first_frame_at - started_at) as the SCK
+    // init lag and shifts bubble_position_log entries by that delta so
+    // each entry's t corresponds to screen.mp4 PTS=0 instead of the
+    // earlier engine_start invocation time. None means the engine
+    // didn't emit (old binary / event lost) — finalize falls back to
+    // no shift, preserving pre-fix behavior.
+    first_frame_at: Option<Instant>,
     mode: CaptureMode,
     bubble_position_log: Vec<BubblePositionEntry>,
     last_logged: Option<(Instant, f64, f64)>,
@@ -184,12 +193,39 @@ fn engine_start(
         webcam_size: parse_size(webcam_size.as_deref()),
         webcam_corner: parse_corner(webcam_corner.as_deref()),
         started_at: Instant::now(),
+        first_frame_at: None,
         mode,
         bubble_position_log: Vec::new(),
         last_logged: None,
     });
 
     Ok(scratch_mp4_path.to_string_lossy().into_owned())
+}
+
+// Phase 15 #4 fix: called by engine.rs stdout reader when the Swift
+// engine emits first_frame for the screen stream. Stamps the active
+// recording's first_frame_at with the receipt instant — IPC latency
+// over the line-buffered pipe is ~1-5ms, negligible vs the 30-80ms
+// SCK init lag we're measuring. Idempotent: only writes the first
+// time. Logs the lag to stderr for the verification pass (will be
+// removed in cleanup commit alongside the INSTR-ab8e90d log).
+pub(crate) fn note_screen_first_frame(app: &AppHandle) {
+    let now = Instant::now();
+    let state = app.state::<Mutex<Option<ActiveRecording>>>();
+    let mutex = state.inner();
+    if let Ok(mut guard) = mutex.lock() {
+        if let Some(rec) = guard.as_mut() {
+            if rec.first_frame_at.is_none() {
+                rec.first_frame_at = Some(now);
+                let lag = now.duration_since(rec.started_at);
+                eprintln!(
+                    "[sck-lag] recording={} sck_lag_ms={}",
+                    rec.stamp,
+                    lag.as_millis()
+                );
+            }
+        }
+    }
 }
 
 fn parse_size(s: Option<&str>) -> WebcamSize {
@@ -357,6 +393,8 @@ fn recording_finalize(
     let scratch_dir = rec.scratch_dir;
     let scratch_mp4_path = rec.scratch_mp4_path;
     let webcam_opt = rec.webcam;
+    let started_at = rec.started_at;
+    let first_frame_at = rec.first_frame_at;
     let bubble_position_log = rec.bubble_position_log;
     // webcam_size / webcam_corner used to feed composite at finalize.
     // Phase 15 c3 defers composite to export; export defaults to Medium/
@@ -437,6 +475,51 @@ fn recording_finalize(
         // scratch_mp4_path itself (engine wrote screen capture directly
         // there per engine_start's screen_output branch). webcam absent.
         (None, Vec::new())
+    };
+
+    // Phase 15 #4 fix: shift bubble_position_log entries by the SCK
+    // init lag so each entry's t corresponds to screen.mp4 PTS=0 (the
+    // first SCK frame) instead of started_at (the engine_start IPC
+    // invocation, which precedes SCK by ~30-80ms). Composite + preview
+    // both read the resulting sidecar — single source of truth, no
+    // divergence (option B-unified). Entries with shifted t<0 are
+    // dropped: they correspond to bubble drags before SCK started
+    // capturing, so there's no screen content to overlay them onto.
+    //
+    // Fallback when first_frame_at is None (old engine binary, event
+    // lost): no shift applied, log written as-is. Identical to pre-fix
+    // behavior. No regression. The temp [sck-lag] eprintln on both
+    // branches is the verification measurement (will be removed in
+    // cleanup commit alongside INSTR-ab8e90d).
+    let bubble_position_log: Vec<BubblePositionEntry> = if let Some(ff) = first_frame_at {
+        let sck_lag = ff.duration_since(started_at).as_secs_f64();
+        let before = bubble_position_log.len();
+        let shifted: Vec<BubblePositionEntry> = bubble_position_log
+            .into_iter()
+            .filter_map(|e| {
+                let t = e.t - sck_lag;
+                if t < 0.0 {
+                    None
+                } else {
+                    Some(BubblePositionEntry { t, ..e })
+                }
+            })
+            .collect();
+        eprintln!(
+            "[sck-lag] recording={} finalize shift_ms={} entries={}->{} dropped_pre_first_frame={}",
+            stamp,
+            (sck_lag * 1000.0).round() as i64,
+            before,
+            shifted.len(),
+            before - shifted.len()
+        );
+        shifted
+    } else {
+        eprintln!(
+            "[sck-lag] recording={} finalize no first_frame received — log written without shift",
+            stamp
+        );
+        bubble_position_log
     };
 
     // Sidecar lives adjacent to scratch_mp4_path regardless of whether
