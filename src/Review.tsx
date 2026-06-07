@@ -1513,6 +1513,28 @@ function BubbleLayer({
 }) {
   const stage = useStageSize(stageRef);
 
+  // TEMP INSTRUMENTATION — Phase 15 c3 drag debug. Tag string is a unique
+  // marker so the user can confirm the running bundle includes this code.
+  // Logs route through the debug_log Tauri command so they land in the
+  // tauri dev terminal output instead of needing DevTools open.
+  // Remove this entire instrumentation block before final commit.
+  const TAG = "INSTR-ab8e90d";
+  const dbg = (label: string, data?: Record<string, unknown>) => {
+    const payload = data ? `${label} ${JSON.stringify(data)}` : label;
+    invoke("debug_log", { msg: `${TAG} ${payload}` }).catch(() => {});
+  };
+  const renderCountRef = useRef(0);
+  renderCountRef.current++;
+  if (renderCountRef.current === 1 || renderCountRef.current % 60 === 0) {
+    dbg(`render #${renderCountRef.current}`, {
+      logEntries: bubblePositionLog.length,
+      hasVideoDims: !!videoDims,
+      stageW: stage.width,
+      stageH: stage.height,
+      currentTime: +currentTime.toFixed(3),
+    });
+  }
+
   // Sync layer — screen video drives, webcam follows. 50ms drift window
   // is one frame at 30fps; correcting on every timeupdate keeps drift
   // bounded without thrashing the webcam decoder.
@@ -1521,15 +1543,67 @@ function BubbleLayer({
     const w = webcamVideoRef.current;
     if (!s || !w) return;
 
+    // TEMP INSTRUMENTATION — counters reset every 1s summary tick.
+    // Local dbg so the useEffect deps don't grow with a per-render fn.
+    const idbg = (label: string, data?: Record<string, unknown>) => {
+      const payload = data ? `${label} ${JSON.stringify(data)}` : label;
+      invoke("debug_log", { msg: `${TAG} ${payload}` }).catch(() => {});
+    };
+    let alignCount = 0;
+    let correctionCount = 0;
+    let summaryInterval: number | null = null;
+    idbg("sync effect BIND", {
+      screenSrcTail: s.currentSrc.slice(-50),
+      webcamSrcTail: w.currentSrc.slice(-50),
+      webcamLeadSec,
+      logEntries: bubblePositionLog.length,
+    });
+
     const target = () => Math.max(0, s.currentTime - webcamLeadSec);
     const align = () => {
-      if (Math.abs(w.currentTime - target()) > 0.05) {
+      alignCount++;
+      const t = target();
+      const drift = w.currentTime - t;
+      if (Math.abs(drift) > 0.05) {
+        correctionCount++;
+        idbg("CORRECT", {
+          s_ct: +s.currentTime.toFixed(3),
+          target: +t.toFixed(3),
+          w_ct: +w.currentTime.toFixed(3),
+          drift_ms: Math.round(drift * 1000),
+          w_paused: w.paused,
+          s_paused: s.paused,
+        });
         try {
-          w.currentTime = target();
+          w.currentTime = t;
         } catch {
           // Webcam metadata may not be loaded yet — first timeupdate
           // after webcam loadedmetadata will retry.
         }
+      }
+    };
+    const startSummary = () => {
+      if (summaryInterval !== null) return;
+      summaryInterval = window.setInterval(() => {
+        const t = target();
+        idbg("1s SUMMARY", {
+          s_ct: +s.currentTime.toFixed(3),
+          w_ct: +w.currentTime.toFixed(3),
+          target: +t.toFixed(3),
+          drift_ms: Math.round((w.currentTime - t) * 1000),
+          aligns: alignCount,
+          corrections: correctionCount,
+          w_paused: w.paused,
+          w_rate: w.playbackRate,
+        });
+        alignCount = 0;
+        correctionCount = 0;
+      }, 1000);
+    };
+    const stopSummary = () => {
+      if (summaryInterval !== null) {
+        window.clearInterval(summaryInterval);
+        summaryInterval = null;
       }
     };
     const onTimeUpdate = () => {
@@ -1546,25 +1620,35 @@ function BubbleLayer({
       // 1x and the LEAD offset is preserved by the play-from-0 +
       // screen-LEAD-headstart arrangement.
       if (w.paused && !s.paused && s.currentTime >= webcamLeadSec) {
+        idbg("onTimeUpdate -> w.play()", { s_ct: +s.currentTime.toFixed(3) });
         w.play().catch(() => {});
       }
     };
     const onPlay = () => {
+      idbg("screen PLAY", {
+        s_ct: +s.currentTime.toFixed(3),
+        w_paused: w.paused,
+      });
       align();
       // Don't try to play webcam during the pre-LEAD window — its
       // currentTime is 0 and ahead-of-screen play would race. The
       // first timeupdate past LEAD picks it up via onTimeUpdate above.
       if (s.currentTime >= webcamLeadSec) {
+        idbg("onPlay -> w.play()", { s_ct: +s.currentTime.toFixed(3) });
         w.play().catch(() => {});
       }
+      startSummary();
     };
     const onPause = () => {
+      idbg("screen PAUSE", { s_ct: +s.currentTime.toFixed(3) });
       w.pause();
+      stopSummary();
     };
     const onSeeking = () => {
       w.pause();
     };
     const onSeeked = () => {
+      idbg("screen SEEKED", { s_ct: +s.currentTime.toFixed(3) });
       align();
       if (!s.paused && s.currentTime >= webcamLeadSec) {
         w.play().catch(() => {});
@@ -1575,7 +1659,13 @@ function BubbleLayer({
     };
     // When webcam metadata first loads (and on src change), snap to
     // current target so playback doesn't start with an unaligned bubble.
-    const onWebcamLoadedMeta = () => align();
+    const onWebcamLoadedMeta = () => {
+      idbg("webcam loadedmetadata", {
+        w_duration: +w.duration.toFixed(3),
+        s_ct: +s.currentTime.toFixed(3),
+      });
+      align();
+    };
 
     s.addEventListener("timeupdate", onTimeUpdate);
     s.addEventListener("play", onPlay);
@@ -1585,6 +1675,7 @@ function BubbleLayer({
     s.addEventListener("ratechange", onRateChange);
     w.addEventListener("loadedmetadata", onWebcamLoadedMeta);
     return () => {
+      stopSummary();
       s.removeEventListener("timeupdate", onTimeUpdate);
       s.removeEventListener("play", onPlay);
       s.removeEventListener("pause", onPause);
@@ -1595,73 +1686,121 @@ function BubbleLayer({
     };
   }, [screenVideoRef, webcamVideoRef, webcamLeadSec, webcamUrl]);
 
+  // Phase 15 c3 fix: bubble position is driven by a requestAnimationFrame
+  // loop that reads screenVideoRef.current.currentTime directly and writes
+  // transform straight to the webcam element's style. React's render rate
+  // (≈10Hz, bound by parent timeupdate) was too low for smooth bubble
+  // glide during fast drags; rAF runs at ~60Hz independent of React. The
+  // sync layer above is unaffected — it manipulates currentTime / play /
+  // pause on the webcam element, not style.
+  //
+  // RIGOR: width, height, transform, visibility are MUTATED via this
+  // effect and the ref callback below. They MUST NOT appear in the JSX
+  // style prop — React would diff them against the JSX values and
+  // overwrite the mutations on every re-render. Stable properties only
+  // go in JSX style.
+  useEffect(() => {
+    const s = screenVideoRef.current;
+    const w = webcamVideoRef.current;
+    if (!s || !w) return;
+    if (
+      !videoDims ||
+      stage.width === 0 ||
+      stage.height === 0 ||
+      bubblePositionLog.length === 0
+    ) {
+      w.style.visibility = "hidden";
+      return;
+    }
+
+    // Letterbox math identical to WatermarkPreviewLayer — bubble lives
+    // inside the video content box, not the stage box. Stable per effect
+    // run; deps include stage size + videoDims so resize re-runs the
+    // effect with fresh values.
+    const { w: vw, h: vh } = videoDims;
+    const videoAspect = vw / vh;
+    const stageAspect = stage.width / stage.height;
+    let cw: number;
+    let ch: number;
+    if (videoAspect > stageAspect) {
+      cw = stage.width;
+      ch = stage.width / videoAspect;
+    } else {
+      ch = stage.height;
+      cw = stage.height * videoAspect;
+    }
+    const cx = (stage.width - cw) / 2;
+    const cy = (stage.height - ch) / 2;
+
+    const diameter = bubblePositionLog[0].diameter ?? DEFAULT_BUBBLE_DIAMETER_PX;
+    const cssDiameter = (diameter / vw) * cw;
+
+    // Size is constant per recording — bubble resize was removed in
+    // phase 14 (be4aa02). Set once per effect run; rAF only mutates
+    // transform.
+    w.style.width = `${cssDiameter}px`;
+    w.style.height = `${cssDiameter}px`;
+    w.style.visibility = "visible";
+
+    let rafId = 0;
+    const tick = () => {
+      const t = s.currentTime;
+      const bubble = bubbleAt(bubblePositionLog, t);
+      if (bubble) {
+        const centerX = cx + bubble.x * cw;
+        const centerY = cy + bubble.y * ch;
+        const tx = centerX - cssDiameter / 2;
+        const ty = centerY - cssDiameter / 2;
+        // transform order is right-to-left: scaleX(-1) flips around the
+        // element's center first (default transform-origin 50% 50%),
+        // then translate(...) shifts the flipped result. Same final
+        // placement as the prior left/top + scaleX(-1) form.
+        w.style.transform = `translate(${tx}px, ${ty}px) scaleX(-1)`;
+      }
+      rafId = requestAnimationFrame(tick);
+    };
+    rafId = requestAnimationFrame(tick);
+
+    return () => cancelAnimationFrame(rafId);
+  }, [
+    screenVideoRef,
+    webcamVideoRef,
+    bubblePositionLog,
+    videoDims,
+    stage.width,
+    stage.height,
+  ]);
+
+  // Ref callback: assign to the parent's webcam ref AND set initial
+  // visibility hidden, so the element doesn't flash at intrinsic webcam
+  // dimensions at origin (0, 0) before the rAF effect's first tick. The
+  // effect flips visibility to visible once it's ready to position.
+  // Using visibility (not display) keeps the video decoder running.
+  const setWebcamRef = useCallback(
+    (node: HTMLVideoElement | null) => {
+      webcamVideoRef.current = node;
+      if (node) {
+        node.style.visibility = "hidden";
+      }
+    },
+    [webcamVideoRef],
+  );
+
   if (!webcamUrl) return null;
-
-  const bubble = bubbleAt(bubblePositionLog, currentTime);
-  if (!bubble || !videoDims || stage.width === 0 || stage.height === 0) {
-    // Webcam exists but no keyframes / dims unknown — render the
-    // <video> hidden so the sync layer still has an element to drive.
-    return (
-      <video
-        ref={webcamVideoRef}
-        src={webcamUrl}
-        muted
-        playsInline
-        preload="auto"
-        style={{ display: "none" }}
-      />
-    );
-  }
-
-  // Letterbox math identical to WatermarkPreviewLayer — bubble lives
-  // inside the video content box, not the stage box.
-  const { w: vw, h: vh } = videoDims;
-  const videoAspect = vw / vh;
-  const stageAspect = stage.width / stage.height;
-  let cw: number;
-  let ch: number;
-  if (videoAspect > stageAspect) {
-    cw = stage.width;
-    ch = stage.width / videoAspect;
-  } else {
-    ch = stage.height;
-    cw = stage.height * videoAspect;
-  }
-  const cx = (stage.width - cw) / 2;
-  const cy = (stage.height - ch) / 2;
-
-  // Diameter in physical pixels → CSS pixels via the content-box scale.
-  const cssDiameter = (bubble.diameter / vw) * cw;
-  // Bubble center in CSS within the stage box.
-  const centerX = cx + bubble.x * cw;
-  const centerY = cy + bubble.y * ch;
 
   return (
     <video
-      ref={webcamVideoRef}
+      ref={setWebcamRef}
       src={webcamUrl}
       muted
       playsInline
       preload="auto"
       style={{
-        // Phase 15 c3 fix: position via transform: translate(...) instead
-        // of left/top so per-frame position updates during dragged-bubble
-        // playback don't trigger layout recalc. left/top changes force
-        // layout passes on the main thread, which stalled the webcam
-        // decoder enough to drop currentTime behind target — visible as
-        // mouth-vs-audio lag that scaled with drag-keyframe density.
-        // transform updates are compositor-only (GPU), no layout cost.
-        //
-        // transform order is right-to-left: scaleX(-1) flips around the
-        // element's center (default transform-origin 50% 50%), then
-        // translate(...) moves the flipped result. Net visual placement
-        // matches the previous left/top + scaleX(-1) form exactly.
+        // Stable properties only. width, height, transform, visibility are
+        // mutated by the rAF effect / ref callback — see RIGOR note above.
         position: "absolute",
         left: 0,
         top: 0,
-        width: `${cssDiameter}px`,
-        height: `${cssDiameter}px`,
-        transform: `translate(${centerX - cssDiameter / 2}px, ${centerY - cssDiameter / 2}px) scaleX(-1)`,
         borderRadius: "50%",
         objectFit: "cover",
         pointerEvents: "none",

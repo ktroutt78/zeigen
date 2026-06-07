@@ -594,6 +594,15 @@ fn quit_app(app: AppHandle) {
     app.exit(0);
 }
 
+// TEMP — Phase 15 c3 instrumentation. Routes frontend debug strings to
+// the tauri dev terminal so we can capture them from the background
+// process output without DevTools. Remove when c3-debug-INSTR is gone
+// from Review.tsx.
+#[tauri::command]
+fn debug_log(msg: String) {
+    eprintln!("[c3-debug] {msg}");
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -685,6 +694,7 @@ pub fn run() {
             update_tray_elapsed,
             set_hotkey,
             quit_app,
+            debug_log,
             macos::make_capture_invisible,
             macos::set_window_frame_cg,
             bubble_position_event,
