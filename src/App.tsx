@@ -972,7 +972,19 @@ function App() {
                   );
                 })
                 .catch((err) => {
-                  setError(String(err));
+                  // V2.3 c3.S1: recording_finalize bails with this sentinel
+                  // when AVAssetWriter never reached startWriting() (any
+                  // pre-writer-start fatal in the AVCaptureSession). The
+                  // friendly MIC_SESSION_FAILED banner set above lies about
+                  // having saved a partial — refine to neutral copy that
+                  // doesn't blame the mic (the trigger may have been an
+                  // iPhone Continuity device conflict, USB hot-swap, etc.).
+                  const errStr = String(err);
+                  setError(
+                    errStr.includes("RECORDING_FAILED_BEFORE_START")
+                      ? "Recording couldn't start. Please try again."
+                      : errStr,
+                  );
                   decReview();
                 })
                 .finally(() => {

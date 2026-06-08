@@ -411,6 +411,23 @@ fn recording_finalize(
         let sources_dir = webcam.sources_dir().to_path_buf();
         let screen_path = sources_dir.join("screen.mp4");
 
+        // V2.3 c3.S1: bail if the engine never wrote screen capture.
+        // AVAssetWriter only opens the output file when startWriting()
+        // runs, which requires both first-audio + first-video samples
+        // (RecordingSession.swift:677-687). When the AVCaptureSession
+        // runtime-error observer fires in the pre-writer-start window
+        // (iPhone Continuity device conflict, USB mic disconnect during
+        // init), the engine emits MIC_SESSION_FAILED but screen.mp4 never
+        // exists. Returning Ok with a non-existent screen_path opens a
+        // dead review window — the friendly "saved up to that point"
+        // banner is a lie. Bail BEFORE concat so we don't leave an orphan
+        // webcam.mp4 in scratch; webcam ffmpeg child is reaped via
+        // WebcamSegmenter::Drop when `rec` goes out of scope on Err
+        // return, scratch dir collected by the 24h launch sweeper.
+        if !screen_path.is_file() {
+            return Err("RECORDING_FAILED_BEFORE_START".into());
+        }
+
         // Concat the segments into a single playable webcam.mp4 alongside
         // them. Stream-copy via ffmpeg's concat demuxer — sub-second even
         // for long recordings and a no-op transcode for the N=1 case.
@@ -467,6 +484,14 @@ fn recording_finalize(
         // Screen-only: no sources/ dir. The "screen path" is
         // scratch_mp4_path itself (engine wrote screen capture directly
         // there per engine_start's screen_output branch). webcam absent.
+        //
+        // V2.3 c3.S1: same pre-writer-start bail as the webcam branch —
+        // a mic-only recording (no camera) still has the AVAssetWriter
+        // writing to scratch_mp4_path, so the same missing-file signal
+        // means the engine never reached startWriting().
+        if !scratch_mp4_path.is_file() {
+            return Err("RECORDING_FAILED_BEFORE_START".into());
+        }
         (None, Vec::new())
     };
 
