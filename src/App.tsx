@@ -932,7 +932,24 @@ function App() {
                 );
               })
               .catch((err) => {
-                setError(String(err));
+                // V2.3 c3.S2 race tolerance: when handleStop and a
+                // handleSessionRuntimeError-spawned Task overlap on the
+                // engine actor's reentry window, the engine emits BOTH a
+                // stopped and an error event for the same recording. Both
+                // event handlers invoke recording_finalize; whichever hits
+                // the Rust state Mutex first takes it via .take(). The
+                // loser returns "no active recording" — silent decrement
+                // here, the other handler already saved the recording.
+                const errStr = String(err);
+                if (errStr === "no active recording") {
+                  decReview();
+                  return;
+                }
+                setError(
+                  errStr.includes("RECORDING_FAILED_BEFORE_START")
+                    ? "Recording couldn't start. Please try again."
+                    : errStr,
+                );
                 decReview();
               })
               .finally(() => {
@@ -947,56 +964,77 @@ function App() {
             // frontend must NOT send Stop (that would produce a follow-on
             // INVALID_STATE that overwrites the original error).
             setState("idle");
-            if (ev.code === "MIC_SESSION_FAILED") {
-              // Salvage: the engine finalizes whatever screen was written
-              // before emitting this error, so route the partial through the
-              // same finalize -> review flow as a normal stop instead of
-              // discarding. Do NOT call recording_cleanup_local — it would
-              // .take() the handle recording_finalize needs. recording_finalize
-              // idempotently stops the live webcam segment, so the partial
-              // composites just like a normal stop.
-              incReview();
-              setCompositeProgress(0);
-              invoke<FinalizedRecording>("recording_finalize")
-                .then(async (info) => {
-                  setFinalizeInfo(info);
-                  await openReview(
-                    `review-${info.stamp}`,
-                    {
-                      scratchPath: info.scratch_mp4_path,
-                      screenPath: info.screen_path,
-                      webcamPath: info.webcam_path,
-                      webcamLeadMs: info.webcam_lead_ms,
-                    },
-                    decReview,
-                  );
-                })
-                .catch((err) => {
-                  // V2.3 c3.S1: recording_finalize bails with this sentinel
-                  // when AVAssetWriter never reached startWriting() (any
-                  // pre-writer-start fatal in the AVCaptureSession). The
-                  // friendly MIC_SESSION_FAILED banner set above lies about
-                  // having saved a partial — refine to neutral copy that
-                  // doesn't blame the mic (the trigger may have been an
-                  // iPhone Continuity device conflict, USB hot-swap, etc.).
-                  const errStr = String(err);
-                  setError(
-                    errStr.includes("RECORDING_FAILED_BEFORE_START")
-                      ? "Recording couldn't start. Please try again."
-                      : errStr,
-                  );
+            // V2.3 c3.S2: universal post-error finalize. Replaces the
+            // prior MIC_SESSION_FAILED-only salvage branch + the `else`
+            // branch's recording_cleanup_local. The old cleanup path
+            // discarded whatever was on disk — but when the engine fires
+            // a fatal AFTER user Stop (handleStop and handleFatalError
+            // racing on the actor's reentry window — see RecordingSession
+            // tearDownAfterFatalError running during handleStop's
+            // `await s.stop()` suspension), BOTH a stopped and an error
+            // event hit App.tsx. The old code routed stopped to finalize
+            // but error to cleanup_local, so whichever Tauri command
+            // reached the Rust state Mutex first took it. cleanup_local
+            // winning meant a real multi-second recording silently
+            // discarded ("no active recording" data-loss bug).
+            //
+            // Universal finalize means both handlers race on the same
+            // .take() and both try to SAVE. Whichever wins runs concat
+            // and opens review; the loser bails with "no active
+            // recording" via the .take()/?-propagation at lib.rs:380-388
+            // — proven zero side effects (no file touches, no subprocess
+            // spawn, no scratch mutation before the take).
+            //
+            // c3.S1's RECORDING_FAILED_BEFORE_START sentinel makes
+            // recording_finalize safe to call universally: when there's
+            // nothing on disk, it bails with that sentinel. The friendly
+            // map message set above is accurate for most error codes
+            // already; only MIC_SESSION_FAILED's "saved up to that
+            // point" text lies on sentinel-bail, so the catch refines
+            // banner copy only for that code.
+            incReview();
+            setCompositeProgress(0);
+            invoke<FinalizedRecording>("recording_finalize")
+              .then(async (info) => {
+                setFinalizeInfo(info);
+                await openReview(
+                  `review-${info.stamp}`,
+                  {
+                    scratchPath: info.scratch_mp4_path,
+                    screenPath: info.screen_path,
+                    webcamPath: info.webcam_path,
+                    webcamLeadMs: info.webcam_lead_ms,
+                  },
+                  decReview,
+                );
+              })
+              .catch((err) => {
+                const errStr = String(err);
+                if (errStr === "no active recording") {
+                  // c3.S2 race tolerance: the stopped handler already
+                  // finalized this recording. Silent decrement; the
+                  // friendly map banner above is the user-facing message.
                   decReview();
-                })
-                .finally(() => {
-                  setCompositeProgress(null);
-                });
-            } else {
-              // All other codes: nothing useful was captured — discard.
-              // Local-only cleanup (no Stop) drops the Rust-side handle and
-              // webcam child. Errors here happen before the finalize pipeline
-              // increments, so there is no review counter to decrement.
-              invoke("recording_cleanup_local").catch(() => {});
-            }
+                  return;
+                }
+                if (
+                  errStr.includes("RECORDING_FAILED_BEFORE_START") &&
+                  ev.code === "MIC_SESSION_FAILED"
+                ) {
+                  // Refine only the MIC_SESSION_FAILED friendly text on
+                  // sentinel-bail — other codes' friendly map entries
+                  // accurately describe their failure already.
+                  setError("Recording couldn't start. Please try again.");
+                } else if (!errStr.includes("RECORDING_FAILED_BEFORE_START")) {
+                  // Unexpected error (not the sentinel, not the race) —
+                  // surface verbatim, replacing the friendly map text.
+                  setError(errStr);
+                }
+                decReview();
+              })
+              .finally(() => {
+                setCompositeProgress(null);
+              });
             break;
         }
       });
