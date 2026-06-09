@@ -8,6 +8,7 @@ mod hotkey;
 mod linkedin;
 mod macos;
 mod settings;
+mod sync_harness;
 mod thumbs;
 mod tray;
 mod webcam;
@@ -54,6 +55,16 @@ struct ActiveRecording {
     mode: CaptureMode,
     bubble_position_log: Vec<BubblePositionEntry>,
     last_logged: Option<(Instant, f64, f64)>,
+    // A/V sync harness (Phase A) — diagnostic-only, additive.
+    // None if no webcam attached. Captured at WebcamSegmenter spawn
+    // time so we can express the spawn instant as a signed delta from
+    // started_at (will be slightly negative in current code since
+    // spawn precedes started_at by a few lines).
+    harness_webcam_spawn_at: Option<Instant>,
+    harness_camera_index: Option<u32>,
+    harness_microphone_uid: Option<String>,
+    harness_display_id: Option<u32>,
+    harness_window_id: Option<u32>,
 }
 
 // Display mode pins the capture frame at recording start (the chosen display
@@ -154,11 +165,17 @@ fn engine_start(
         .map_err(|e| format!("create {}: {}", scratch_dir.display(), e))?;
     let scratch_mp4_path = scratch_dir.join(format!("recording-{stamp}.mp4"));
 
+    // Sync harness (Phase A): stamp the webcam-spawn instant
+    // immediately before WebcamSegmenter::start_segment so the
+    // recorded delta reflects the avfoundation invocation point.
+    // None when there's no webcam.
+    let mut harness_webcam_spawn_at: Option<Instant> = None;
     let (screen_output, webcam) = if let Some(idx) = camera_index {
         let sources_dir = scratch_dir.join("sources");
         std::fs::create_dir_all(&sources_dir)
             .map_err(|e| format!("create {}: {}", sources_dir.display(), e))?;
         let mut segmenter = WebcamSegmenter::new(idx, sources_dir.clone());
+        harness_webcam_spawn_at = Some(Instant::now());
         segmenter.start_segment()?;
         (sources_dir.join("screen.mp4"), Some(segmenter))
     } else {
@@ -169,6 +186,10 @@ fn engine_start(
         Some((x, y, w, h)) => (Some(x), Some(y), Some(w), Some(h)),
         None => (None, None, None, None),
     };
+
+    // Sync harness (Phase A): clone microphone_uid before the
+    // EngineCommand::Start consumes it, so the diagnostic can echo it.
+    let harness_microphone_uid: Option<String> = microphone_uid.clone();
 
     engine
         .lock()
@@ -197,6 +218,11 @@ fn engine_start(
         mode,
         bubble_position_log: Vec::new(),
         last_logged: None,
+        harness_webcam_spawn_at,
+        harness_camera_index: camera_index,
+        harness_microphone_uid,
+        harness_display_id: display_id,
+        harness_window_id: window_id,
     });
 
     Ok(scratch_mp4_path.to_string_lossy().into_owned())
@@ -389,6 +415,19 @@ fn recording_finalize(
     let started_at = rec.started_at;
     let first_frame_at = rec.first_frame_at;
     let bubble_position_log = rec.bubble_position_log;
+    // Sync harness (Phase A) — drained out of rec before partial moves
+    // below would block field access. Diagnostic-only; never gates
+    // anything in finalize.
+    let harness_webcam_spawn_at = rec.harness_webcam_spawn_at;
+    let harness_camera_index = rec.harness_camera_index;
+    let harness_microphone_uid = rec.harness_microphone_uid;
+    let harness_display_id = rec.harness_display_id;
+    let harness_window_id = rec.harness_window_id;
+    let harness_mode_label: &str = match rec.mode {
+        CaptureMode::Display { .. } => "display",
+        CaptureMode::Window { .. } => "window",
+        CaptureMode::Area { .. } => "area",
+    };
     // webcam_size / webcam_corner used to feed composite at finalize.
     // Phase 15 c3 defers composite to export; export defaults to Medium/
     // BottomRight (engine_start parses these from None → defaults today,
@@ -534,6 +573,30 @@ fn recording_finalize(
         let mut state = edit::read_sidecar_path(&scratch_mp4_path)?.unwrap_or_default();
         state.bubble_position_log = bubble_position_log;
         edit::write_sidecar_path(&scratch_mp4_path, &state)?;
+    }
+
+    // Sync harness (Phase A) — emit one JSONL record per finalize.
+    // Best-effort: the logger swallows all errors. Movies dir derived
+    // via the existing movies_dir() helper; failure to resolve HOME
+    // also routes through the swallowed error path (we just skip).
+    if let Ok(dir) = movies_dir() {
+        let log_path = dir.join(".sync-measurements.jsonl");
+        let webcam_spawn_delta_ms = harness_webcam_spawn_at
+            .map(|w| sync_harness::signed_delta_ms(w, started_at));
+        let sck_first_frame_delta_ms = first_frame_at
+            .map(|f| sync_harness::signed_delta_ms(f, started_at));
+        let record = sync_harness::SyncMeasurement {
+            stamp: &stamp,
+            mode: harness_mode_label,
+            display_id: harness_display_id,
+            window_id: harness_window_id,
+            camera_index: harness_camera_index,
+            microphone_uid: harness_microphone_uid.as_deref(),
+            webcam_lead_ms_applied: composite::WEBCAM_LEAD_MS,
+            webcam_spawn_delta_ms,
+            sck_first_frame_delta_ms,
+        };
+        sync_harness::log_finalize_best_effort(&log_path, &record);
     }
 
     Ok(FinalizedRecording {
