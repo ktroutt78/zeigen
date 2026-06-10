@@ -59,6 +59,23 @@ impl WebcamSegmenter {
             .args([
                 "-y",
                 "-hide_banner",
+                // Phase B fixup: machine-readable progress to stderr,
+                // \n-terminated key=value lines so the reader can
+                // detect first frame in real time. -nostats suppresses
+                // the default \r-overwriting stats line (which would
+                // never flush through a line-buffered pipe and made
+                // the receipt instant collapse to ffmpeg-exit time).
+                // -progress pipe:2 == stderr (same FD the hardened
+                // reader is already draining). -stats_period 0.05
+                // gives ~50ms first-frame detection latency, well
+                // below the 100-200ms webcam_vs_sck delta we measure.
+                // All three are diagnostic-output flags; the recorded
+                // mp4 is bit-for-bit identical to the no-flag version.
+                "-nostats",
+                "-progress",
+                "pipe:2",
+                "-stats_period",
+                "0.05",
                 "-f",
                 "avfoundation",
                 "-framerate",
@@ -278,6 +295,23 @@ mod tests {
         ));
         assert!(line_has_frame_count("frame=1"));
         assert!(line_has_frame_count("frame=22"));
+    }
+
+    #[test]
+    fn matches_progress_block_format() {
+        // Phase B fixup: -progress pipe:2 emits structured key=value
+        // blocks. Each line is \n-terminated. First line of each
+        // block is the frame count — what we want to match on, NOT
+        // the periodic in-place stats line (suppressed by -nostats).
+        assert!(line_has_frame_count("frame=1"));
+        assert!(line_has_frame_count("frame=150"));
+        // Lines inside the same block that aren't frame= must NOT match.
+        assert!(!line_has_frame_count("fps=0.00"));
+        assert!(!line_has_frame_count("out_time_us=33333"));
+        assert!(!line_has_frame_count("progress=continue"));
+        assert!(!line_has_frame_count("progress=end"));
+        assert!(!line_has_frame_count("dup_frames=0"));
+        assert!(!line_has_frame_count("drop_frames=0"));
     }
 
     #[test]
