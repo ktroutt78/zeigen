@@ -439,6 +439,12 @@ fn recording_finalize(
     let mut screen_for_dual: Option<PathBuf> = None;
     let mut webcam_for_dual: Option<PathBuf> = None;
 
+    // Phase B: drained out of the segmenter before `webcam` falls out
+    // of scope and Drop runs. None for screen-only recordings, for
+    // recordings that ended before ffmpeg emitted a frame= line, and
+    // for exotic ffmpeg builds whose progress format we don't match.
+    let mut webcam_first_frame_at: Option<Instant> = None;
+
     let (sources_dir, segments) = if let Some(mut webcam) = webcam_opt {
         // Idempotently finalize the live webcam segment before reading it.
         // On a normal stop, engine_stop already stopped it (take() -> None,
@@ -448,6 +454,7 @@ fn recording_finalize(
         let _ = webcam.stop_segment();
         let segments = webcam.segments().to_vec();
         let sources_dir = webcam.sources_dir().to_path_buf();
+        webcam_first_frame_at = webcam.first_frame_at();
         let screen_path = sources_dir.join("screen.mp4");
 
         // V2.3 c3.S1: bail if the engine never wrote screen capture.
@@ -585,6 +592,8 @@ fn recording_finalize(
             .map(|w| sync_harness::signed_delta_ms(w, started_at));
         let sck_first_frame_delta_ms = first_frame_at
             .map(|f| sync_harness::signed_delta_ms(f, started_at));
+        let webcam_first_frame_delta_ms = webcam_first_frame_at
+            .map(|f| sync_harness::signed_delta_ms(f, started_at));
         let record = sync_harness::SyncMeasurement {
             stamp: &stamp,
             mode: harness_mode_label,
@@ -595,6 +604,7 @@ fn recording_finalize(
             webcam_lead_ms_applied: composite::WEBCAM_LEAD_MS,
             webcam_spawn_delta_ms,
             sck_first_frame_delta_ms,
+            webcam_first_frame_delta_ms,
         };
         sync_harness::log_finalize_best_effort(&log_path, &record);
     }

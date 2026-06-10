@@ -32,6 +32,11 @@ pub struct SyncMeasurement<'a> {
     pub webcam_lead_ms_applied: f64,
     pub webcam_spawn_delta_ms: Option<f64>,
     pub sck_first_frame_delta_ms: Option<f64>,
+    // Phase B: receipt instant of webcam ffmpeg's first progress
+    // line (frame=N, N>=1) expressed as signed ms delta from
+    // engine_start. None for screen-only recordings, missed
+    // markers, or recordings that ended before the first frame.
+    pub webcam_first_frame_delta_ms: Option<f64>,
 }
 
 pub fn signed_delta_ms(later: Instant, earlier: Instant) -> f64 {
@@ -46,13 +51,14 @@ pub fn log_finalize_best_effort(log_path: &Path, record: &SyncMeasurement<'_>) {
     // Live readout for the manual recording batch.
     eprintln!(
         "[sync-harness] stamp={} mode={} cam={:?} mic={:?} \
-         webcam_spawn_delta_ms={:?} sck_first_frame_delta_ms={:?} \
-         webcam_lead_ms_applied={}",
+         webcam_spawn_delta_ms={:?} webcam_first_frame_delta_ms={:?} \
+         sck_first_frame_delta_ms={:?} webcam_lead_ms_applied={}",
         record.stamp,
         record.mode,
         record.camera_index,
         record.microphone_uid,
         record.webcam_spawn_delta_ms,
+        record.webcam_first_frame_delta_ms,
         record.sck_first_frame_delta_ms,
         record.webcam_lead_ms_applied,
     );
