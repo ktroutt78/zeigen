@@ -7,6 +7,7 @@ mod exports;
 mod hotkey;
 mod linkedin;
 mod macos;
+mod prewarm;
 mod settings;
 mod thumbs;
 mod tray;
@@ -697,6 +698,7 @@ pub fn run() {
             let client = EngineClient::spawn(&handle, engine::engine_binary_path())?;
             app.manage(Mutex::new(client));
             app.manage(Mutex::new(None::<ActiveRecording>));
+            app.manage(Mutex::new(prewarm::PrewarmHandle::default()));
             tray::setup(&handle)?;
 
             // Resolve the bundled RNNoise model and hand its path to the
@@ -761,6 +763,8 @@ pub fn run() {
             enumerate_devices,
             engine_enumerate,
             engine_start,
+            prewarm::prewarm_capture,
+            prewarm::prewarm_abort,
             engine_pause,
             engine_resume,
             engine_stop,

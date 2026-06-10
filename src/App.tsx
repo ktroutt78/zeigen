@@ -1179,10 +1179,69 @@ function App() {
 
       if (countdownDuration > 0) {
         setState("countdown");
+        // Per-recording pre-warm runs concurrently with the countdown
+        // so its ~1.2s cost is hidden inside the countdown window. The
+        // throwaway capture cycle warms macOS framework caches
+        // (avfoundation device-open, VTCompressionSession, SCK
+        // first-capture-call) that otherwise pay first-call init lag on
+        // the first recording of a session, producing the audio-lag
+        // sync issue. Best-effort: any failure inside prewarm is logged
+        // Rust-side and never blocks the real recording. Skipped when
+        // countdown is Off — those users opted out of any delay.
+        const prewarmPromise = invoke("prewarm_capture", {
+          displayId:
+            sourceKind === "display"
+              ? selectedDisplay
+              : sourceKind === "area"
+              ? selectedArea?.display_id ?? null
+              : null,
+          windowId: sourceKind === "window" ? selectedWindow : null,
+          microphoneUid: selectedMic,
+          cameraIndex: selectedCamera,
+          maxFps: 30,
+          areaX: sourceKind === "area" ? selectedArea?.x ?? null : null,
+          areaY: sourceKind === "area" ? selectedArea?.y ?? null : null,
+          areaWidth:
+            sourceKind === "area" ? selectedArea?.width ?? null : null,
+          areaHeight:
+            sourceKind === "area" ? selectedArea?.height ?? null : null,
+        }).catch(() => {
+          /* logged Rust-side; pre-warm failure must never block */
+        });
+        // Hard ceiling on the prewarm await. Pre-warm's Rust-side
+        // bounded budget is ~1.2s (Track A 500ms + Track B 800+400ms).
+        // 1500ms covers normal variance with margin and fires well
+        // inside the 3s minimum countdown. If the timeout wins,
+        // prewarm_abort short-circuits both tracks and we proceed to
+        // the real recording — a wedged pre-warm can never strand the
+        // user beyond the countdown window.
+        const PREWARM_HARD_TIMEOUT_MS = 1500;
+        const prewarmBounded: Promise<"completed" | "timeout"> = Promise.race([
+          prewarmPromise.then(() => "completed" as const),
+          new Promise<"timeout">((resolve) =>
+            setTimeout(() => resolve("timeout"), PREWARM_HARD_TIMEOUT_MS),
+          ),
+        ]);
         const result = await awaitCountdown(countdownDuration, countdownFrame);
         if (result === "cancelled") {
+          // Abort the pre-warm. Drain the bounded promise so the engine
+          // has returned to .idle before the next user action.
+          invoke("prewarm_abort").catch(() => {});
+          await prewarmBounded;
           setState("idle");
           return;
+        }
+        // Wait for pre-warm to finish (engine back to .idle, scratch
+        // cleaned) before the real engine_start fires. With a 3s/5s
+        // countdown this has typically already resolved.
+        const pwResult = await prewarmBounded;
+        if (pwResult === "timeout") {
+          // Rust-side pre-warm hit a pathological hang. Abort and
+          // proceed — engine_start's actor-serialized state machine
+          // will surface any residual INVALID_STATE as a normal error.
+          // eslint-disable-next-line no-console
+          console.warn("[prewarm] hard timeout — aborting and proceeding");
+          invoke("prewarm_abort").catch(() => {});
         }
         playGoSound();
       }
