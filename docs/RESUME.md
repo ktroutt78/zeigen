@@ -77,6 +77,19 @@ Confirm pre-warm aborts cleanly when the user cancels during the countdown:
 
 This is the last user-action test. Once it passes, the session closes.
 
+## Polish — webcam bubble drop shadow (2026-06-11)
+
+Added a soft drop shadow to the webcam bubble in both render paths so it reads as floating just above the screen content instead of flat-pasted.
+
+- `src/Review.tsx` BubbleLayer — CSS `box-shadow: 0 8px 24px rgba(0,0,0,0.22)`.
+- `src-tauri/src/composite.rs` — pre-renders a `shadow-{target}.png` (tiny_skia: black opaque circle on padded transparent canvas), runs `gblur sigma=18` + `colorchannelmixer aa=0.22` on it, overlays behind the bubble offset down 8px. All three pixel params scale with `target` so the look stays proportional across resized bubbles.
+
+Tuning was by-eye against the CSS render on a mid-gray background — CSS box-shadow's blur curve doesn't match gblur's nominal `blur ≈ 2σ` relation, so sigma=18 (not the spec-implied 12) matches CSS blur=24 visually. Default-corner light-background test confirmed the shadow tapers to ~zero alpha well before the screen edge — no hard cut at the boundary.
+
+Live preview (`WebcamBubble.tsx`) was deliberately left alone: enlarging the bubble window to give the shadow room would ripple through `BUBBLE_W/H`, corner snap, and the position log we just stabilized in Phase 15. Polish that matters is in review (where you evaluate the recording) and export (what you share).
+
+Single commit: `87d54fc`.
+
 ## Remaining V2.3 work (carry-forward, unchanged)
 
 - **R6 packaged-app TCC permission UAT** (D-07 from original V2.3-PLAN). Build local unsigned `com.zeigen.app` bundle, confirm-gated `tccutil reset`, observe clean-machine Screen Recording → Microphone sequence, characterize relaunch-gotcha. ~30 min.
@@ -101,6 +114,6 @@ Surfaced as a strategic question mid-investigation. Searched the record — Wind
 
 ## Branch state
 
-`capture-engine-v2` is **57 commits ahead of `main`** as of `040b104`. Five A/V sync commits added this session on top of the V2.3 c3 supplement work.
+`capture-engine-v2` is **60 commits ahead of `main`** as of `87d54fc`. Five A/V sync commits + two A/V sync docs commits + one bubble drop-shadow commit added this session on top of the V2.3 c3 supplement work.
 
 `main` has not moved since v1.0 (`2484bb9`); forward-merge cadence remains a no-op.
