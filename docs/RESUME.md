@@ -44,12 +44,38 @@ Lessons captured:
 - "Cold/warm sliding lag" was the wrong model. The first-of-session pattern is binary, not continuous.
 - Adaptive-per-recording lead was on the table for a while; pre-warm made it unnecessary by collapsing the variance the adaptive scheme would have compensated for.
 
-## Two edge tests still pending before session close
+## Edge tests
 
-1. **countdown=Off, first recording of a fresh session.** Pre-warm is skipped on Off per the chosen policy. Need to characterize: is the first-recording sync mildly off, or unusable? If unusable, Off users may need a separate answer (e.g., a forced minimal pre-warm even on Off).
-2. **Cancel during countdown.** Confirm pre-warm aborts cleanly (Track A child killed, Track B engine Stop dispatched, scratch cleaned, state returns to idle, no orphan processes).
+### Test 1 — countdown=Off, first recording of a fresh session — CHARACTERIZED, documented as known limitation
 
-These are user-action tests. After both pass (or surface a follow-up), the session closes.
+Measured:
+
+| recording | sync |
+|---|---|
+| Off + cold (1st of session) | ~190ms video lag (bad) |
+| Off + warm (2nd+ of session) | ~55ms (fine, within ~1.5 frames) |
+
+Confirms the residual surface area is scoped to **first recording of a session with countdown=Off** only — pre-warm is skipped (no countdown to hide it behind), and the first real recording itself does the framework-cache warming. 2nd+ recordings in the same session are unaffected.
+
+### Known limitation — countdown=Off first-recording A/V drift
+
+With countdown set to Off, the **first recording of a session** may have ~190ms A/V lag because pre-warm is skipped (Off means zero-delay, and surfacing a visible pre-warm delay would contradict that user intent). 2nd+ recordings in the same session are fine — the first recording warms the pipeline.
+
+Mitigation: use any countdown (3s/5s) for guaranteed sync from the first recording.
+
+Not fixed by design. Revisit only if Off-path usage increases or this surfaces as a real-world complaint. The fix exists (remove the `countdownDuration > 0` guard around the prewarm block in `App.tsx` + add a "preparing…" indicator during the ~1.2s wait) but the trade — turning explicit zero-delay into ~1.2s delay on a rare path — is worse than the residual drift in the current user base.
+
+### Test 2 — cancel during countdown — STILL PENDING
+
+Confirm pre-warm aborts cleanly when the user cancels during the countdown:
+
+- Track A: webcam ffmpeg child killed.
+- Track B: engine Stop dispatched if Start was sent.
+- `.prewarm-` scratch dir cleaned.
+- React state returns to idle (no stuck "countdown" or "recording" state).
+- No orphan `recording-engine` or `ffmpeg` processes left behind.
+
+This is the last user-action test. Once it passes, the session closes.
 
 ## Remaining V2.3 work (carry-forward, unchanged)
 
