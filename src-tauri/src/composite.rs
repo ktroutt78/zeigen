@@ -14,20 +14,41 @@ pub(crate) const FFPROBE_PATH: &str = "/opt/homebrew/bin/ffprobe";
 // screen.currentTime; the constant is surfaced via the FinalizedRecording
 // payload so the frontend doesn't drift from this value.
 //
-// Empirically recalibrated from 280→220 on 2026-06-10. Four clean
-// clap-based A/V offset measurements on built-in hardware showed the
-// previous 280 over-corrected by 20-110ms (mean ~85ms): the bubble
-// consistently LAGGED the audio. Stamps + measured lag (positive =
-// video lags audio): 191323 +20, 191514 +110, 191649 +105, 204006
-// +110. Implied true webcam-vs-sck on warm takes was 170-260ms; 220
-// is the midpoint of that range. Cold-take behavior is still unmeasured
-// — if cold recordings show different behavior at 220, a per-recording
-// adaptive lead becomes the next step.
+// Calibration progression 280 → 220 → 360 over the 2026-06 A/V sync
+// investigation:
+//
+// - 280 (original, pre-investigation): empirically tuned by the v1
+//   author. Worked on average on warm takes but consistently produced
+//   a ~20-110ms video-lag on the four clean clap measurements
+//   (stamps 191323 +20, 191514 +110, 191649 +105, 204006 +110).
+//
+// - 220 (mid-investigation, 2026-06-10): lowered to the midpoint of
+//   the implied warm-take true-lead range (170-260ms). At this point
+//   we incorrectly believed cold and warm takes needed different leads
+//   — adaptive-lead was on the table — because cold first-of-session
+//   recordings still drifted. We later isolated the actual cause:
+//   cold ≠ warm wasn't a sliding-lag spectrum, it was a first-call
+//   penalty on macOS framework caches (avfoundation device-open,
+//   VTCompressionSession, SCK first-capture-call) that ONLY hits the
+//   first recording per process lifetime / long-idle break.
+//
+// - 360 (final, 2026-06-11, this value): set after the pre-warm
+//   integration (commit b906945) closed the cold/warm gap by warming
+//   those framework caches before every real recording. With pre-warm
+//   active, cold and warm pipelines hit the same warm-state webcam-vs-
+//   sck timing, and a single constant works for both. Validated by
+//   clean sharp-clap measurement at 360: cold ~30ms residual, warm
+//   ~10ms — both within one 30fps frame (~33ms), landing TOGETHER.
+//
+// The real value being approximated is the per-recording wallclock
+// offset between webcam ffmpeg's first encoded frame and SCK's first
+// captured frame on the warm-cache pipeline state. Pre-warm makes
+// this offset stable enough that a constant captures it.
 //
 // Tunable: raise if the bubble still LEADS the audio (mouth moves
 // before the sound), lower if the bubble LAGS. The proper auto-fix
 // would have the engine timestamp each pipeline's first real sample.
-pub(crate) const WEBCAM_LEAD_MS: f64 = 220.0;
+pub(crate) const WEBCAM_LEAD_MS: f64 = 360.0;
 
 // The inline `if(lt(t,...))` chain handles arbitrary log sizes — ffmpeg
 // parses the expression once and walks it per-frame, which is cheap.
