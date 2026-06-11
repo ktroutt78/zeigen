@@ -886,11 +886,17 @@ function App() {
             break;
           }
           case "started":
+            // Pre-warm fires real engine Start; ignore its started event
+            // so the UI doesn't flip from countdown to recording mid-warm.
+            if (prewarmInFlightRef.current) break;
             setState("recording");
             setProgress({ frames: 0, dropped: 0, elapsed_s: 0 });
             setError(null);
             break;
           case "progress":
+            // Same guard — pre-warm produces ~2-3 progress ticks before
+            // its Stop fires; those must not surface as real progress.
+            if (prewarmInFlightRef.current) break;
             setProgress({ frames: ev.frames, dropped: ev.dropped, elapsed_s: ev.elapsed_s });
             break;
           case "paused":
@@ -900,6 +906,21 @@ function App() {
             setState("recording");
             break;
           case "stopped":
+            // Pre-warm's Stop emits a stopped event with output_path
+            // pointing at the .prewarm- scratch dir. Without this guard
+            // the frontend treats the throwaway as a real save: shows
+            // a "Saved" toast, calls recording_finalize (which fails
+            // since there's no ActiveRecording in Rust state), and
+            // opens a review window. The path-filter is intrinsic to
+            // the event (no timing race); the ref filter is the primary
+            // guard for the 100ms grace window after prewarm_capture
+            // settles. Either matching → silently drop.
+            if (
+              prewarmInFlightRef.current ||
+              ev.output_path.includes("/.prewarm-")
+            ) {
+              break;
+            }
             setState("idle");
             incReview();
             setLastSaved(ev.output_path);
@@ -1188,6 +1209,10 @@ function App() {
         // sync issue. Best-effort: any failure inside prewarm is logged
         // Rust-side and never blocks the real recording. Skipped when
         // countdown is Off — those users opted out of any delay.
+        // Set BEFORE invoke so any engine event from pre-warm sees the
+        // ref already true. Cleared 100ms after settle (in either
+        // resolve or reject path) to cover late-arriving Tauri events.
+        prewarmInFlightRef.current = true;
         const prewarmPromise = invoke("prewarm_capture", {
           displayId:
             sourceKind === "display"
@@ -1205,9 +1230,15 @@ function App() {
             sourceKind === "area" ? selectedArea?.width ?? null : null,
           areaHeight:
             sourceKind === "area" ? selectedArea?.height ?? null : null,
-        }).catch(() => {
-          /* logged Rust-side; pre-warm failure must never block */
-        });
+        })
+          .catch(() => {
+            /* logged Rust-side; pre-warm failure must never block */
+          })
+          .finally(() => {
+            setTimeout(() => {
+              prewarmInFlightRef.current = false;
+            }, 100);
+          });
         // Hard ceiling on the prewarm await. Pre-warm's Rust-side
         // bounded budget is ~1.2s (Track A 500ms + Track B 800+400ms).
         // 1500ms covers normal variance with margin and fires well
@@ -1326,6 +1357,16 @@ function App() {
   // stop-clears-selection cycle so "Record another" in the review window
   // can restore it without making the user redraw.
   const lastUsedAreaRef = useRef<AreaSelection | null>(null);
+  // True while a pre-warm capture cycle is in flight. The engine emits
+  // started / progress / stopped events for the throwaway too, and
+  // those events flow through the same engine-event listener that
+  // drives the real recording's UI state. Without this guard, pre-warm
+  // would flip state to "recording" mid-countdown, surface progress
+  // counters from the throwaway, and trigger a "Saved" toast +
+  // recording_finalize call on the throwaway's stop. Cleared 100ms
+  // after prewarm_capture settles to cover any late-arriving Tauri
+  // events from the pre-warm window.
+  const prewarmInFlightRef = useRef(false);
   // Set true after restoring lastUsedAreaRef; an effect on selectedArea
   // kicks off start() once React commits the restored value.
   const [pendingAreaStart, setPendingAreaStart] = useState(false);
