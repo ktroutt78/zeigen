@@ -1715,6 +1715,11 @@ function BubbleLayer({
         objectFit: "cover",
         pointerEvents: "none",
         background: "#000",
+        // Soft drop shadow — matched in the export by a tiny_skia + gblur
+        // pass in composite.rs. Tuning the two to look the same is by-eye
+        // (CSS and ffmpeg render shadows differently); see composite.rs's
+        // shadow constants for the conversion.
+        boxShadow: "0 8px 24px rgba(0, 0, 0, 0.22)",
       }}
     />
   );

@@ -345,6 +345,69 @@ fn render_alpha_mask(diameter: u32, out_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+// Shadow source PNG: an opaque black circle of `diameter` on a transparent
+// canvas of size `diameter + 2 * padding`. ffmpeg's `gblur` then softens its
+// edge into the padding, and `colorchannelmixer aa=SHADOW_ALPHA` dims the
+// whole thing — producing the soft drop shadow overlaid behind the bubble.
+// Matches Review.tsx's `box-shadow: 0 8px 24px rgba(0,0,0,0.22)` by-eye;
+// see SHADOW_* constants below for the gblur→CSS-blur calibration.
+fn render_shadow_source(diameter: u32, padding: u32, out_path: &Path) -> Result<(), String> {
+    use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Transform};
+    let size = diameter + 2 * padding;
+    let mut pixmap = Pixmap::new(size, size)
+        .ok_or_else(|| format!("alloc shadow pixmap {size}x{size}"))?;
+    let center = size as f32 / 2.0;
+    let r = diameter as f32 / 2.0;
+    let path = PathBuilder::from_circle(center, center, r).ok_or("invalid shadow radius")?;
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(0, 0, 0, 255);
+    paint.anti_alias = true;
+    pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+    let png = pixmap.encode_png().map_err(|e| format!("encode shadow png: {e}"))?;
+    std::fs::write(out_path, png).map_err(|e| format!("write shadow png: {e}"))?;
+    Ok(())
+}
+
+// Shadow calibration vs Review.tsx's `box-shadow: 0 8px 24px rgba(0,0,0,0.22)`.
+// All three pixel params scale with `target` (bubble diameter) so a resized
+// bubble keeps the same visual shadow proportions. Values picked at
+// target=240 to match CSS by-eye on a mid-gray background (CSS blur and
+// ffmpeg gblur have different falloff curves, so the conversion isn't the
+// spec's blur≈2σ — see the shadow tuning notes in commit history).
+//   - PADDING:  diameter/4   — buffer around the circle so gblur has room
+//                              to fade alpha into transparent pixels
+//   - SIGMA:    diameter*0.075 (≈18 at target=240) — gblur stddev
+//   - OFFSET_Y: diameter/30   (≈8 at target=240) — vertical drop
+const SHADOW_PADDING_FRAC: f64 = 0.25;
+const SHADOW_SIGMA_FRAC: f64 = 0.075;
+const SHADOW_OFFSET_FRAC: f64 = 1.0 / 30.0;
+const SHADOW_ALPHA: f64 = 0.22;
+
+// Where the shadow's top-left lands when the bubble is statically placed at
+// a corner (no position log). Shadow canvas is (target + 2*shadow_padding),
+// centered on the bubble's center then shifted down by offset_y — so its
+// top-left is bubble_top_left + (-shadow_padding, offset_y - shadow_padding).
+// Literal arithmetic (not `overlay_w`) because the bubble's corner formula
+// uses its own overlay_w which differs from the shadow's.
+fn shadow_overlay_xy_for_corner(
+    corner: Corner,
+    padding: u32,
+    target: u32,
+    shadow_padding: u32,
+    offset_y: u32,
+) -> String {
+    let p = padding as i32;
+    let sp = shadow_padding as i32;
+    let oy = offset_y as i32;
+    let t = target as i32;
+    match corner {
+        Corner::TopLeft => format!("{}:{}", p - sp, p + oy - sp),
+        Corner::TopRight => format!("main_w-{}:{}", t + p + sp, p + oy - sp),
+        Corner::BottomLeft => format!("{}:main_h-{}", p - sp, t + p - oy + sp),
+        Corner::BottomRight => format!("main_w-{}:main_h-{}", t + p + sp, t + p - oy + sp),
+    }
+}
+
 pub fn composite(
     screen_path: &Path,
     webcam_segments: &[PathBuf],
@@ -386,11 +449,18 @@ pub fn composite(
 
     // Pre-render the circular alpha mask alongside the output so it lives in
     // the same scratch dir and gets cleaned up with the recording.
-    let mask_path = output_path
-        .parent()
-        .ok_or("output path has no parent")?
-        .join(format!("mask-{target}.png"));
+    let out_dir = output_path.parent().ok_or("output path has no parent")?;
+    let mask_path = out_dir.join(format!("mask-{target}.png"));
     render_alpha_mask(target, &mask_path)?;
+
+    // Shadow pixel params scale with the bubble's `target` diameter so the
+    // shadow's visual proportions stay consistent across bubble sizes — same
+    // intent as CSS `box-shadow` with fixed px, applied to a fixed bubble.
+    let shadow_padding = ((target as f64) * SHADOW_PADDING_FRAC).round() as u32;
+    let shadow_sigma = ((target as f64) * SHADOW_SIGMA_FRAC).round();
+    let shadow_offset_y = ((target as f64) * SHADOW_OFFSET_FRAC).round() as u32;
+    let shadow_path = out_dir.join(format!("shadow-{target}.png"));
+    render_shadow_source(target, shadow_padding, &shadow_path)?;
 
     let mut args: Vec<String> = vec![
         "-y".into(),
@@ -427,10 +497,20 @@ pub fn composite(
     args.push(format!("{:.3}", screen_dur));
     args.push("-i".into());
     args.push(mask_path.to_string_lossy().into_owned());
+    // Shadow source PNG, same looping treatment as the mask.
+    args.push("-loop".into());
+    args.push("1".into());
+    args.push("-framerate".into());
+    args.push("30".into());
+    args.push("-t".into());
+    args.push(format!("{:.3}", screen_dur));
+    args.push("-i".into());
+    args.push(shadow_path.to_string_lossy().into_owned());
     // Webcam segments occupy inputs 2..(2+N). Mask is the input after the
-    // last segment.
+    // last segment; shadow PNG sits one past the mask.
     let wc_input_base = 2usize;
     let mask_idx = wc_input_base + webcam_segments.len();
+    let shadow_idx = mask_idx + 1;
 
     // Build filter_complex.
     // Input 0 is screen (video — audio dropped). Input 1 is screen with the
@@ -487,7 +567,8 @@ pub fn composite(
 scale={target}:{target},\
 format=yuva420p[wc_rgba];\
 [{mask_idx}:v]format=gray[mask_g];\
-[wc_rgba][mask_g]alphamerge[wc];"
+[wc_rgba][mask_g]alphamerge[wc];\
+[{shadow_idx}:v]format=rgba,gblur=sigma={shadow_sigma},colorchannelmixer=aa={SHADOW_ALPHA}[shadow];"
     ));
 
     // Position the overlay. Empty log → static corner. Otherwise a single
@@ -501,16 +582,33 @@ format=yuva420p[wc_rgba];\
     let log_n = simplified_log.len();
     if log_n == 0 {
         let overlay_xy = corner.overlay_xy(PADDING_PX);
+        let shadow_xy = shadow_overlay_xy_for_corner(
+            corner,
+            PADDING_PX,
+            target,
+            shadow_padding,
+            shadow_offset_y,
+        );
         filter.push_str(&format!(
-            "[0:v][wc]overlay={overlay_xy}:eof_action=pass[outv]"
+            "[0:v][shadow]overlay={shadow_xy}:eof_action=pass[shadowed];\
+[shadowed][wc]overlay={overlay_xy}:eof_action=pass[outv]"
         ));
     } else if log_n <= POSITION_LOG_MAX_INLINE {
         let (x_expr, y_expr) = build_inline_position_expr(&simplified_log);
         let enable_expr = build_inline_enable_expr(&simplified_log);
+        // Shadow shares the bubble's x/y expressions because both expressions
+        // use `overlay_w/2`-style centering — applied to each overlay's own
+        // size, the centers land on the same bubble position. The shadow's y
+        // gets `+shadow_offset_y` for the downward drop.
         filter.push_str(&format!(
-            "[0:v][wc]overlay=x={x_expr}:y={y_expr}:enable={enable_expr}:eof_action=pass[outv]"
+            "[0:v][shadow]overlay=x={x_expr}:y=({y_expr})+{shadow_offset_y}:enable={enable_expr}:eof_action=pass[shadowed];\
+[shadowed][wc]overlay=x={x_expr}:y={y_expr}:enable={enable_expr}:eof_action=pass[outv]"
         ));
     } else {
+        // Dead path in practice — `simplify_position_log` caps at
+        // POSITION_LOG_MAX_SIMPLIFIED (80) before this branch's threshold
+        // (100_000) is ever crossed. Skip shadow here rather than thread it
+        // through the per-segment chain.
         filter.push_str(&format!("[wc]split={log_n}"));
         for i in 0..log_n {
             filter.push_str(&format!("[wc_{i}]"));
