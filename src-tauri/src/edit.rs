@@ -37,6 +37,13 @@ pub struct SidecarState {
     pub annotations: Vec<Annotation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bubble_position_log: Vec<BubblePositionEntry>,
+    // Original-timeline timestamp for the poster frame the user picked in
+    // review. None = use the export-time default (0.5s in) which kills the
+    // black/half-rendered frame-0 problem on every export. Stored in
+    // original-timeline coords like annotation.start_time — save_recording
+    // maps it to output-timeline (post-trim) before extracting the poster.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail_time: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -1042,6 +1049,232 @@ fn next_per_format_slot(movies: &Path, stamp: &str, ext: &str) -> PathBuf {
 #[derive(Serialize, Debug)]
 pub struct SaveResult {
     pub output_path: String,
+    // true when the user picked a thumbnail timestamp that fell outside the
+    // active trim range — the embedded poster + jpg used the clamped
+    // fallback (start of trimmed output) instead of their pick. Frontend
+    // surfaces a one-time toast in this case so the silent-fallback isn't
+    // an opaque surprise.
+    pub thumbnail_out_of_trim: bool,
+}
+
+// True when the user picked a thumbnail and trim is active and the picked
+// time is outside [trim.start, trim.out]. Pure computation off the sidecar
+// — used both to decide the toast flag and to drive the timeline tick's
+// muted-color state on the frontend (same condition, separate code path).
+fn thumbnail_out_of_trim(sidecar: &SidecarState) -> bool {
+    let (Some(t), Some(trim)) = (sidecar.thumbnail_time, sidecar.trim.as_ref()) else {
+        return false;
+    };
+    t < trim.start - TRIM_EPS || t > trim.out + TRIM_EPS
+}
+
+// Best-effort poster embed. Runs strictly after a successful run_edit_pipeline
+// — the output file at output_path is the deliverable and is sacred from this
+// point on. Any failure inside this function logs and cleans up; output_path
+// is never modified except by an atomic rename at the very end after ffprobe-
+// validating the tmp.
+//
+// MP4 path: extract a frame to a hidden sibling jpg (used as input to the
+// mjpeg remux only — not a user-visible artifact), then mjpeg remux into
+// output.tmp.mp4 with attached_pic disposition + ffprobe validate + atomic
+// rename over output.mp4. The temp jpg is deleted whether the embed succeeds
+// or fails.
+//
+// GIF path: no-op. GIF has no attached_pic concept and the previous
+// .jpg-alongside behavior was dropped to keep ~/Movies/Zeigen tidy
+// (the embed inside the mp4 is the only poster surface that ships).
+//
+// QuickTime Player.app caveat: QT Player shows frame 0 of the primary video
+// stream as its before-play still, NOT the attached_pic. attached_pic IS
+// honored by Finder/QuickLook, HTML5 `<video poster>`, iOS Photos, and most
+// messenger preview surfaces. This is a Player.app design choice — there's
+// no clean mp4-format-level fix without modifying the actual video stream.
+//
+// Default 0.5s applies when sidecar.thumbnail_time is None — eliminates the
+// black/half-rendered frame-0 problem for every export, even ones where the
+// user never opened the picker.
+fn try_embed_poster(output_path: &Path, sidecar: &SidecarState, is_mp4: bool) {
+    // GIF and other non-mp4 outputs: no poster surface to populate.
+    if !is_mp4 {
+        return;
+    }
+
+    let original_t = sidecar.thumbnail_time.unwrap_or(0.5);
+    let trim_in = sidecar.trim.as_ref().map(|t| t.start).unwrap_or(0.0);
+
+    // Probe the OUTPUT file's actual duration — accurate even if the trim
+    // got clamped or the pipeline produced a slightly different length than
+    // the math predicted.
+    let out_duration = match probe_duration_seconds(output_path) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("[poster] probe output duration failed: {e}");
+            return;
+        }
+    };
+    let max_t = (out_duration - 0.1).max(0.0);
+    let output_t = (original_t - trim_in).clamp(0.0, max_t);
+
+    // Hidden sibling — dotfile so Finder ignores it during the brief window
+    // it exists, and lives in the same dir as the output so we don't need a
+    // cache-dir lifecycle. Deleted before this function returns regardless
+    // of success/failure.
+    let jpg_path = output_path.with_file_name(format!(
+        ".{}.poster-src.jpg",
+        output_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("output")
+    ));
+
+    // Pass 1: extract frame at output_t to the temp jpg.
+    let extract = Command::new(FFMPEG_PATH)
+        .args(["-y", "-hide_banner", "-loglevel", "error"])
+        .args(["-ss", &format!("{output_t:.3}")])
+        .arg("-i")
+        .arg(output_path)
+        .args(["-frames:v", "1", "-qscale:v", "2"])
+        .arg(&jpg_path)
+        .output();
+    let jpg_ok = match &extract {
+        Ok(o) if o.status.success() => jpg_path
+            .metadata()
+            .map(|m| m.len() > 0)
+            .unwrap_or(false),
+        Ok(o) => {
+            eprintln!(
+                "[poster] frame extract non-zero exit at t={output_t:.3}s: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+            false
+        }
+        Err(e) => {
+            eprintln!("[poster] frame extract spawn failed: {e}");
+            false
+        }
+    };
+    if !jpg_ok {
+        let _ = std::fs::remove_file(&jpg_path);
+        return;
+    }
+
+    // Pass 2 wrapped so the temp jpg cleanup at the end of this function
+    // runs regardless of which exit path the remux/validate/rename takes.
+    let remux_and_swap = || {
+        // Tmp file is a sibling of output so the eventual rename is on the same
+        // volume (atomic on macOS APFS).
+        let tmp_path = output_path.with_file_name(format!(
+            "{}.poster.tmp",
+            output_path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("output.mp4")
+        ));
+        let _ = std::fs::remove_file(&tmp_path);
+
+        let remux = Command::new(FFMPEG_PATH)
+            .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+            .arg(output_path)
+            .arg("-i")
+            .arg(&jpg_path)
+            .args([
+                "-map", "0",
+                "-map", "1",
+                "-c", "copy",
+                "-c:v:1", "mjpeg",
+                "-disposition:v:1", "attached_pic",
+                // Explicit format — the `.poster.tmp` extension isn't a muxer
+                // hint ffmpeg recognizes, so without -f the muxer probe fails
+                // with "Unable to choose an output format". The tmp extension
+                // stays as-is so it's obviously transient on disk.
+                "-f", "mp4",
+            ])
+            .arg(&tmp_path)
+            .output();
+        let remux_ok = match &remux {
+            Ok(o) if o.status.success() => true,
+            Ok(o) => {
+                eprintln!(
+                    "[poster] mjpeg remux non-zero exit: {}",
+                    String::from_utf8_lossy(&o.stderr)
+                );
+                false
+            }
+            Err(e) => {
+                eprintln!("[poster] mjpeg remux spawn failed: {e}");
+                false
+            }
+        };
+        if !remux_ok {
+            let _ = std::fs::remove_file(&tmp_path);
+            return;
+        }
+
+        // Validate tmp: file exists, non-zero, stream 0 still a playable video
+        // with attached_pic=0, stream 1 is attached_pic=1. Catches any silent
+        // muxer corruption before we overwrite the sacred output.mp4.
+        if !validate_poster_mp4(&tmp_path) {
+            eprintln!("[poster] tmp validation failed for {}", tmp_path.display());
+            let _ = std::fs::remove_file(&tmp_path);
+            return;
+        }
+
+        // Atomic rename — last step, after every check has passed.
+        if let Err(e) = std::fs::rename(&tmp_path, output_path) {
+            eprintln!("[poster] atomic rename failed: {e}");
+            let _ = std::fs::remove_file(&tmp_path);
+        }
+    };
+    remux_and_swap();
+    let _ = std::fs::remove_file(&jpg_path);
+}
+
+// Validates a poster-embedded MP4 candidate before we atomically rename
+// over the sacred output. Two ffprobe calls, both `-v error` so any warning
+// from a broken container surfaces as a non-zero exit.
+//
+//   stream v:0 — codec_type=video, disposition.attached_pic=0  (primary plays)
+//   stream v:1 — disposition.attached_pic=1                    (poster flag)
+fn validate_poster_mp4(path: &Path) -> bool {
+    let meta_ok = path
+        .metadata()
+        .map(|m| m.len() > 0)
+        .unwrap_or(false);
+    if !meta_ok {
+        return false;
+    }
+    let probe = |args: &[&str]| -> Option<String> {
+        let out = Command::new(FFPROBE_PATH)
+            .args(["-v", "error"])
+            .args(args)
+            .arg(path)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    let primary = match probe(&[
+        "-select_streams", "v:0",
+        "-show_entries", "stream=codec_type:stream_disposition=attached_pic",
+        "-of", "default=noprint_wrappers=1",
+    ]) {
+        Some(s) => s,
+        None => return false,
+    };
+    if !primary.contains("codec_type=video") || !primary.contains("attached_pic=0") {
+        return false;
+    }
+    let poster = match probe(&[
+        "-select_streams", "v:1",
+        "-show_entries", "stream_disposition=attached_pic",
+        "-of", "default=noprint_wrappers=1",
+    ]) {
+        Some(s) => s,
+        None => return false,
+    };
+    poster.contains("attached_pic=1")
 }
 
 // Phase 11 unified save. Every save re-reads the raw scratch mp4 + current
@@ -1137,8 +1370,17 @@ pub fn save_recording(
         other => return Err(format!("unknown format: {other}")),
     };
 
+    // Poster pass — best-effort, never propagates Err. output is sacred
+    // from here; the helper writes the .jpg sidecar and, for MP4 only,
+    // attempts the attached_pic remux via tmp + ffprobe validate + atomic
+    // rename. Any failure leaves output intact, the toast flag still
+    // reflects whether the user's pick was within the trim range.
+    let is_mp4 = format.as_str() == "mp4";
+    try_embed_poster(&output, &sidecar, is_mp4);
+
     Ok(SaveResult {
         output_path: output.to_string_lossy().into_owned(),
+        thumbnail_out_of_trim: thumbnail_out_of_trim(&sidecar),
     })
 }
 

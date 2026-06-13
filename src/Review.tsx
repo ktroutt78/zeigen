@@ -72,9 +72,18 @@ type SidecarState = {
   trim?: Trim | null;
   annotations: Annotation[];
   bubble_position_log?: BubblePositionEntry[];
+  // Original-timeline timestamp picked via the Thumbnail tool. null/undefined
+  // means "use the export-time default" (0.5s in) applied on the Rust side.
+  // Stored in original-timeline coords like annotation.start_time.
+  thumbnail_time?: number | null;
 };
 
-const EMPTY_STATE: SidecarState = { trim: null, annotations: [], bubble_position_log: [] };
+const EMPTY_STATE: SidecarState = {
+  trim: null,
+  annotations: [],
+  bubble_position_log: [],
+  thumbnail_time: null,
+};
 const SIDECAR_DEBOUNCE_MS = 350;
 const TRIM_EPS = 0.05;
 
@@ -103,6 +112,19 @@ type WatermarkPreview = {
   src: string | null;
   corner: WmCorner;
   videoDims: { w: number; h: number } | null;
+};
+
+// Thumbnail controls passed from Review → LeftColumn → Toolbar. The Toolbar
+// renders the button + a popover anchored to it; the popover shows a paused
+// preview <video> at whatever currentTime the user had when they clicked.
+// previewUrl is the same source the main player uses (raw scratch during NR
+// render window, preview-screen.mp4 once ready) — capture-time consistency
+// matters less than just "show the same frame they're looking at."
+type ThumbnailControls = {
+  thumbnailTime: number | null;
+  setThumbnailTime: (t: number | null) => void;
+  previewUrl: string | null;
+  getCurrentTime: () => number;
 };
 
 type ReviewParams = {
@@ -171,6 +193,10 @@ function statesEqual(a: SidecarState, b: SidecarState, duration: number | null):
   for (let i = 0; i < a.annotations.length; i++) {
     if (JSON.stringify(a.annotations[i]) !== JSON.stringify(b.annotations[i])) return false;
   }
+  const tta = a.thumbnail_time ?? null;
+  const ttb = b.thumbnail_time ?? null;
+  if ((tta == null) !== (ttb == null)) return false;
+  if (tta != null && ttb != null && Math.abs(tta - ttb) > TRIM_EPS) return false;
   return true;
 }
 
@@ -220,7 +246,13 @@ function isLogicallyEmpty(s: SidecarState, duration: number | null): boolean {
   // even a "no edits yet" sidecar with only bubble_position_log is NOT
   // empty, or the delete branch below would wipe the keyframes.
   const noBubble = !s.bubble_position_log || s.bubble_position_log.length === 0;
-  return normalizeTrim(s.trim, duration) == null && s.annotations.length === 0 && noBubble;
+  const noThumb = s.thumbnail_time == null;
+  return (
+    normalizeTrim(s.trim, duration) == null &&
+    s.annotations.length === 0 &&
+    noBubble &&
+    noThumb
+  );
 }
 
 // Phase 14 c2. Tracks the NR-processed preview MP4 the main <video>
@@ -264,6 +296,10 @@ export default function Review() {
   const [currentTime, setCurrentTime] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Soft info message — currently only fired post-save when the user's
+  // thumbnail pick fell outside the trim range and the backend used the
+  // clamped fallback. Distinct from `error` (red, destructive styling).
+  const [notice, setNotice] = useState<string | null>(null);
   // S — audio-stream start_time in seconds, fetched once at review-open.
   // Threaded into Waveform alongside the video duration so peaks map onto the
   // video-time timeline instead of audio-time. Null until probe_audio_track
@@ -283,6 +319,9 @@ export default function Review() {
   // preserves what finalize wrote so sidecar rewrites (trim/annotation
   // edits, empty-state delete path) don't wipe the bubble keyframes.
   const [bubblePositionLog, setBubblePositionLog] = useState<BubblePositionEntry[]>([]);
+  // Original-timeline timestamp for the user's chosen poster frame. null =
+  // unset; export-time default (0.5s in) is applied on the Rust side.
+  const [thumbnailTime, setThumbnailTime] = useState<number | null>(null);
   const [snapshot, setSnapshot] = useState<SidecarState>(EMPTY_STATE);
 
   const [saving, setSaving] = useState(false);
@@ -459,10 +498,12 @@ export default function Review() {
             trim: state.trim ?? null,
             annotations: state.annotations ?? [],
             bubble_position_log: state.bubble_position_log ?? [],
+            thumbnail_time: state.thumbnail_time ?? null,
           });
           if (state.trim) setTrim(state.trim);
           if (state.annotations) setAnnotations(state.annotations);
           if (state.bubble_position_log) setBubblePositionLog(state.bubble_position_log);
+          if (state.thumbnail_time != null) setThumbnailTime(state.thumbnail_time);
         } else {
           setSnapshot(EMPTY_STATE);
         }
@@ -552,8 +593,13 @@ export default function Review() {
   }, [duration]);
 
   const currentState: SidecarState = useMemo(
-    () => ({ trim: trim ?? null, annotations, bubble_position_log: bubblePositionLog }),
-    [trim, annotations, bubblePositionLog],
+    () => ({
+      trim: trim ?? null,
+      annotations,
+      bubble_position_log: bubblePositionLog,
+      thumbnail_time: thumbnailTime,
+    }),
+    [trim, annotations, bubblePositionLog, thumbnailTime],
   );
 
   const dirty = useMemo(
@@ -574,6 +620,7 @@ export default function Review() {
         trim: normalizeTrim(currentState.trim, duration),
         annotations: currentState.annotations,
         bubble_position_log: currentState.bubble_position_log,
+        thumbnail_time: currentState.thumbnail_time ?? null,
       };
       setCommittedMp4Path(null);
       if (empty) {
@@ -612,7 +659,10 @@ export default function Review() {
       }
       setSaving(true);
       try {
-        const result = await invoke<{ output_path: string }>("save_recording", {
+        const result = await invoke<{
+          output_path: string;
+          thumbnail_out_of_trim: boolean;
+        }>("save_recording", {
           stamp,
           sourcePath,
           format: spec.format,
@@ -624,6 +674,11 @@ export default function Review() {
         setLastSavedPath(result.output_path);
         setLastSavedAt(Date.now());
         if (spec.format === "mp4") setCommittedMp4Path(result.output_path);
+        if (result.thumbnail_out_of_trim) {
+          setNotice(
+            "Thumbnail was outside the trim range — used the start of the trimmed output instead. Pick a new thumbnail to override.",
+          );
+        }
         // Notify main so its post-finalize toast updates from the scratch
         // path to whatever was just written under ~/Movies/Zeigen/.
         await emit("recording-committed", { final_path: result.output_path }).catch(
@@ -1001,6 +1056,12 @@ export default function Review() {
             placeTextAt,
             placeArrow,
           }}
+          thumbnail={{
+            thumbnailTime,
+            setThumbnailTime,
+            previewUrl: playbackUrl,
+            getCurrentTime: () => videoRef.current?.currentTime ?? 0,
+          }}
         />
         <ExportPanel
           sourcePath={sourcePath}
@@ -1036,6 +1097,9 @@ export default function Review() {
         />
       </div>
       {error && <ErrorStrip error={error} onDismiss={() => setError(null)} />}
+      {!error && notice && (
+        <NoticeStrip notice={notice} onDismiss={() => setNotice(null)} />
+      )}
       {showCloseModal && (
         <CloseModal
           onSave={onModalSave}
@@ -1145,6 +1209,7 @@ type LeftColumnProps = {
   audioStart: number | null;
   watermarkPreview: WatermarkPreview;
   editor: Editor;
+  thumbnail: ThumbnailControls;
 };
 
 function LeftColumn(props: LeftColumnProps) {
@@ -1159,7 +1224,12 @@ function LeftColumn(props: LeftColumnProps) {
         overflow: "hidden",
       }}
     >
-      <Toolbar duration={props.duration} trim={props.trim} editor={props.editor} />
+      <Toolbar
+        duration={props.duration}
+        trim={props.trim}
+        editor={props.editor}
+        thumbnail={props.thumbnail}
+      />
       <VideoStage
         assetUrl={props.playbackUrl}
         videoRef={props.videoRef}
@@ -1189,6 +1259,7 @@ function LeftColumn(props: LeftColumnProps) {
         seek={props.seek}
         audioStart={props.audioStart}
         editor={props.editor}
+        thumbnailTime={props.thumbnail.thumbnailTime}
       />
     </div>
   );
@@ -1198,10 +1269,12 @@ function Toolbar({
   duration,
   trim,
   editor,
+  thumbnail,
 }: {
   duration: number | null;
   trim: Trim | null;
   editor: Editor;
+  thumbnail: ThumbnailControls;
 }) {
   const len =
     trim && duration != null
@@ -1209,6 +1282,48 @@ function Toolbar({
       : duration != null
       ? duration
       : null;
+  const [popoverOpen, setPopoverOpen] = useState(false);
+  // Captured at click time so the preview <video> seeks to the exact frame
+  // the user had on screen, even if they scrub while the popover is open.
+  const [capturedTime, setCapturedTime] = useState<number | null>(null);
+
+  const onSetClick = useCallback(() => {
+    const t = thumbnail.getCurrentTime();
+    setCapturedTime(t);
+    setPopoverOpen(true);
+  }, [thumbnail]);
+
+  // Escape closes the popover. Click-outside is handled by the backdrop layer.
+  useEffect(() => {
+    if (!popoverOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setPopoverOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [popoverOpen]);
+
+  // Keyboard shortcut M opens the popover (skips when typing in inputs).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "m" && e.key !== "M") return;
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) {
+        return;
+      }
+      if (popoverOpen) return;
+      e.preventDefault();
+      onSetClick();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [popoverOpen, onSetClick]);
+
+  const useFrame = () => {
+    if (capturedTime != null) thumbnail.setThumbnailTime(capturedTime);
+    setPopoverOpen(false);
+  };
+
   return (
     <div
       style={{
@@ -1219,6 +1334,7 @@ function Toolbar({
         borderBottom: "1px solid var(--border-faint)",
         color: "var(--fg-secondary)",
         fontSize: 12,
+        position: "relative",
       }}
     >
       <div style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
@@ -1230,7 +1346,9 @@ function Toolbar({
           {fmt(len)} · .mp4
         </span>
       </div>
-      <div style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+      <div
+        style={{ display: "inline-flex", alignItems: "center", gap: 4, position: "relative" }}
+      >
         <ToolButton icon={P.edit} label="Trim" kbd="T" active={false} disabled />
         <ToolButton
           icon="M2 13h12M5 10l3-7 3 7M6.5 8h3"
@@ -1246,8 +1364,150 @@ function Toolbar({
           active={editor.tool === "arrow"}
           onClick={() => editor.setTool(editor.tool === "arrow" ? null : "arrow")}
         />
+        <ToolButton
+          icon="M5 2h6v11l-3-2.5L5 13z"
+          label="Thumbnail"
+          kbd="M"
+          active={thumbnail.thumbnailTime != null}
+          onClick={onSetClick}
+        />
+        {popoverOpen && capturedTime != null && (
+          <ThumbnailPopover
+            previewUrl={thumbnail.previewUrl}
+            time={capturedTime}
+            onUse={useFrame}
+            onCancel={() => setPopoverOpen(false)}
+          />
+        )}
       </div>
     </div>
+  );
+}
+
+// Anchored under the Thumbnail button. Renders a paused <video> seeked to
+// the captured currentTime so the user confirms the exact frame. The
+// preview does NOT show the composited bubble/annotations/watermark — those
+// are overlays in the main player — so the popover spells that out so the
+// user isn't surprised by the final embedded poster.
+function ThumbnailPopover({
+  previewUrl,
+  time,
+  onUse,
+  onCancel,
+}: {
+  previewUrl: string | null;
+  time: number;
+  onUse: () => void;
+  onCancel: () => void;
+}) {
+  const vRef = useRef<HTMLVideoElement | null>(null);
+  const onMeta = () => {
+    const v = vRef.current;
+    if (v) v.currentTime = time;
+  };
+  return (
+    <>
+      <div
+        onClick={onCancel}
+        style={{
+          position: "fixed",
+          inset: 0,
+          background: "transparent",
+          zIndex: 999,
+        }}
+      />
+      <div
+        style={{
+          position: "absolute",
+          top: "calc(100% + 6px)",
+          right: 0,
+          width: 280,
+          background: "var(--bg-elevated)",
+          border: "1px solid var(--border-default)",
+          borderRadius: 8,
+          boxShadow: "0 8px 24px rgba(0,0,0,0.22)",
+          padding: 12,
+          zIndex: 1000,
+        }}
+      >
+        <div
+          style={{
+            fontSize: 12,
+            fontWeight: 500,
+            color: "var(--fg-primary)",
+            marginBottom: 8,
+          }}
+        >
+          Use this frame as thumbnail?
+        </div>
+        <div
+          style={{
+            width: "100%",
+            aspectRatio: "16 / 9",
+            background: "#000",
+            borderRadius: 4,
+            overflow: "hidden",
+            marginBottom: 8,
+          }}
+        >
+          {previewUrl && (
+            <video
+              ref={vRef}
+              src={previewUrl}
+              preload="auto"
+              muted
+              playsInline
+              onLoadedMetadata={onMeta}
+              style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }}
+            />
+          )}
+        </div>
+        <div
+          style={{
+            fontFamily: "var(--font-mono)",
+            fontSize: 10.5,
+            color: "var(--fg-tertiary)",
+            marginBottom: 8,
+          }}
+        >
+          at {time.toFixed(2)}s · webcam bubble + annotations are added in the final export
+        </div>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 6 }}>
+          <button
+            onClick={onCancel}
+            style={{
+              padding: "5px 11px",
+              height: 26,
+              background: "transparent",
+              border: "1px solid var(--border-default)",
+              borderRadius: 6,
+              color: "var(--fg-secondary)",
+              fontSize: 12,
+              fontWeight: 500,
+              cursor: "pointer",
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onUse}
+            style={{
+              padding: "5px 11px",
+              height: 26,
+              background: "var(--accent)",
+              border: "1px solid var(--accent)",
+              borderRadius: 6,
+              color: "var(--accent-fg, white)",
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
+          >
+            Use this frame
+          </button>
+        </div>
+      </div>
+    </>
   );
 }
 
@@ -2359,6 +2619,7 @@ type TimelineProps = {
   seek: (t: number) => void;
   audioStart: number | null;
   editor: Editor;
+  thumbnailTime: number | null;
 };
 
 function Timeline(props: TimelineProps) {
@@ -2629,6 +2890,54 @@ function Timeline(props: TimelineProps) {
             );
           })}
 
+        {/* Thumbnail tick — sits below the track so it doesn't fight the
+            playhead/trim handles visually. Click jumps the scrubber to the
+            picked frame so the user can verify. Muted color + tooltip when
+            the picked time falls outside the active trim range. */}
+        {props.thumbnailTime != null && props.duration != null && (() => {
+          const t = props.thumbnailTime;
+          const pct = (t / props.duration) * 100;
+          const outOfRange =
+            props.trim != null &&
+            (t < props.trim.in - TRIM_EPS || t > props.trim.out + TRIM_EPS);
+          const color = outOfRange ? "var(--fg-tertiary)" : "var(--accent)";
+          const title = outOfRange
+            ? `Thumbnail at ${t.toFixed(2)}s — outside trim range, save will fall back to a frame inside the trimmed output`
+            : `Thumbnail at ${t.toFixed(2)}s — click to jump`;
+          return (
+            <div
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                props.seek(t);
+              }}
+              title={title}
+              style={{
+                position: "absolute",
+                left: `${pct}%`,
+                top: "calc(100% + 1px)",
+                transform: "translateX(-50%)",
+                cursor: "pointer",
+                pointerEvents: "auto",
+              }}
+            >
+              <svg
+                width={10}
+                height={12}
+                viewBox="0 0 10 12"
+                style={{ display: "block" }}
+                aria-hidden
+              >
+                <path
+                  d="M0 0h10v12L5 9.5 0 12z"
+                  fill={color}
+                  opacity={outOfRange ? 0.6 : 1}
+                />
+              </svg>
+            </div>
+          );
+        })()}
+
         {/* Trim handles */}
         {props.trim && props.duration != null && (
           <>
@@ -2805,6 +3114,60 @@ function CloseModal({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+function NoticeStrip({
+  notice,
+  onDismiss,
+}: {
+  notice: string;
+  onDismiss: () => void;
+}) {
+  return (
+    <div
+      style={{
+        position: "fixed",
+        left: 14,
+        right: 14,
+        bottom: 14,
+        padding: "6px 10px",
+        background: "var(--accent-soft)",
+        border: "1px solid var(--accent)",
+        borderRadius: 6,
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        fontSize: 11.5,
+        zIndex: 999,
+      }}
+    >
+      <span style={{ color: "var(--accent)", fontWeight: 600, flexShrink: 0 }}>Note</span>
+      <span
+        style={{
+          color: "var(--fg-secondary)",
+          fontSize: 11.5,
+          flex: 1,
+        }}
+      >
+        {notice}
+      </span>
+      <button
+        onClick={onDismiss}
+        aria-label="Dismiss"
+        style={{
+          background: "transparent",
+          border: "none",
+          color: "var(--fg-tertiary)",
+          cursor: "pointer",
+          padding: 0,
+          lineHeight: 1,
+          fontSize: 14,
+        }}
+      >
+        ×
+      </button>
     </div>
   );
 }
