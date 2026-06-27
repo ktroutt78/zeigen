@@ -982,11 +982,33 @@ fn run_edit_pipeline_single_input(
                 args.push("h264_videotoolbox".into());
                 args.push("-b:v".into());
                 args.push("8M".into());
+                // Browser-compat + graceful fallback. -profile high and
+                // yuv420p keep the stream decodable everywhere (some players
+                // reject VideoToolbox's default chroma); avc1 is the standard
+                // sample-entry tag; allow_sw falls back to the software encoder
+                // when the HW session is unavailable (e.g. contended) instead
+                // of hard-failing the save.
+                args.push("-profile:v".into());
+                args.push("high".into());
+                args.push("-pix_fmt".into());
+                args.push("yuv420p".into());
+                args.push("-tag:v".into());
+                args.push("avc1".into());
+                args.push("-allow_sw".into());
+                args.push("1".into());
             }
             args.push("-c:a".into());
             args.push("aac".into());
             args.push("-b:a".into());
             args.push("192k".into());
+            // Front-load the moov atom so the Cloudflare /v/[id] viewer can
+            // start progressive playback before the whole file downloads.
+            // AVAssetWriter writes moov-at-end (shouldOptimizeForNetworkUse is
+            // unset) and ffmpeg's mp4 muxer defaults to the same, so this is
+            // required on BOTH branches. faststart is a post-mux relocation,
+            // so it works with -c:v copy too — no separate remux pass needed.
+            args.push("-movflags".into());
+            args.push("+faststart".into());
         }
         PipelineMode::Gif { .. } => {
             args.push("-loop".into());

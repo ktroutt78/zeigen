@@ -1595,6 +1595,27 @@ function App() {
       .catch((err) => setError(String(err)));
   };
 
+  // Re-enumerate when audio/video hardware connects, drops, or wakes after
+  // launch (e.g. AirPods pairing late). WebKit surfaces these as `devicechange`;
+  // debounce because a single connect typically fires it several times.
+  const deviceChangeTimer = useRef<number | null>(null);
+  useEffect(() => {
+    const onDeviceChange = () => {
+      if (deviceChangeTimer.current !== null)
+        window.clearTimeout(deviceChangeTimer.current);
+      deviceChangeTimer.current = window.setTimeout(refresh, 250);
+    };
+    navigator.mediaDevices.addEventListener("devicechange", onDeviceChange);
+    return () => {
+      navigator.mediaDevices.removeEventListener(
+        "devicechange",
+        onDeviceChange,
+      );
+      if (deviceChangeTimer.current !== null)
+        window.clearTimeout(deviceChangeTimer.current);
+    };
+  }, []);
+
   const recording = state === "recording" || state === "paused";
   const cameraName =
     selectedCamera == null
