@@ -675,6 +675,20 @@ pub(crate) fn run_edit_pipeline(
         .map_err(|e| format!("create {}: {e}", temp_dir.display()))?;
     let composite_tmp = temp_dir.join("composite.mp4");
 
+    // Fix B: composite the watermark into pass 1 (composite()) for the webcam
+    // path rather than pass 2. With the watermark gone from pass 2, a
+    // watermarked-but-unedited export keeps needs_filter=false and stays on the
+    // pass-2 copy path instead of a second full re-encode. Validate the logo
+    // here with the same skip-if-missing semantics single_input uses, so
+    // composite() never fails an export over a deleted logo.
+    let composite_watermark = watermark.filter(|wm| {
+        let ok = wm.logo_path.is_file();
+        if !ok {
+            eprintln!("[watermark] logo missing at {}, skipping", wm.logo_path.display());
+        }
+        ok
+    });
+
     crate::composite::composite(
         screen_path,
         webcam_segments,
@@ -682,11 +696,14 @@ pub(crate) fn run_edit_pipeline(
         webcam_size,
         webcam_corner,
         &sidecar.bubble_position_log,
+        composite_watermark,
         |_| {},
     )?;
 
+    // Watermark already baked into composite_tmp above — pass None so pass 2
+    // doesn't re-apply it (and doesn't trip needs_filter into a re-encode).
     let result =
-        run_edit_pipeline_single_input(&composite_tmp, output, sidecar, mode, watermark);
+        run_edit_pipeline_single_input(&composite_tmp, output, sidecar, mode, None);
 
     // Best-effort cleanup either way — leave the temp for inspection on
     // failure isn't worth the disk vs. the simpler always-clean rule.

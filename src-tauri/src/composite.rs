@@ -415,6 +415,7 @@ pub fn composite(
     size: WebcamSize,
     corner: Corner,
     bubble_position_log: &[BubblePositionEntry],
+    watermark: Option<Watermark>,
     on_progress: impl Fn(f64) + Send + 'static,
 ) -> Result<(), String> {
     if webcam_segments.is_empty() {
@@ -506,11 +507,20 @@ pub fn composite(
     args.push(format!("{:.3}", screen_dur));
     args.push("-i".into());
     args.push(shadow_path.to_string_lossy().into_owned());
+    // Fix B: watermark logo input (single still — overlay's default
+    // eof_action=repeat holds it across the clip, so no -loop, matching the
+    // pass-2 watermark path). Sits one input past the shadow.
+    if let Some(wm) = &watermark {
+        args.push("-i".into());
+        args.push(wm.logo_path.to_string_lossy().into_owned());
+    }
     // Webcam segments occupy inputs 2..(2+N). Mask is the input after the
-    // last segment; shadow PNG sits one past the mask.
+    // last segment; shadow PNG sits one past the mask; watermark logo (if any)
+    // one past the shadow.
     let wc_input_base = 2usize;
     let mask_idx = wc_input_base + webcam_segments.len();
     let shadow_idx = mask_idx + 1;
+    let wm_logo_idx = shadow_idx + 1;
 
     // Build filter_complex.
     // Input 0 is screen (video — audio dropped). Input 1 is screen with the
@@ -591,7 +601,7 @@ format=yuva420p[wc_rgba];\
         );
         filter.push_str(&format!(
             "[0:v][shadow]overlay={shadow_xy}:eof_action=pass[shadowed];\
-[shadowed][wc]overlay={overlay_xy}:eof_action=pass[outv]"
+[shadowed][wc]overlay={overlay_xy}:eof_action=pass[outv_pre]"
         ));
     } else if log_n <= POSITION_LOG_MAX_INLINE {
         let (x_expr, y_expr) = build_inline_position_expr(&simplified_log);
@@ -602,7 +612,7 @@ format=yuva420p[wc_rgba];\
         // gets `+shadow_offset_y` for the downward drop.
         filter.push_str(&format!(
             "[0:v][shadow]overlay=x={x_expr}:y=({y_expr})+{shadow_offset_y}:enable={enable_expr}:eof_action=pass[shadowed];\
-[shadowed][wc]overlay=x={x_expr}:y={y_expr}:enable={enable_expr}:eof_action=pass[outv]"
+[shadowed][wc]overlay=x={x_expr}:y={y_expr}:enable={enable_expr}:eof_action=pass[outv_pre]"
         ));
     } else {
         // Dead path in practice — `simplify_position_log` caps at
@@ -656,7 +666,7 @@ format=yuva420p[wc_rgba];\
                 (enable, x, y)
             };
             let next_label = if i + 1 == log_n {
-                "outv".to_string()
+                "outv_pre".to_string()
             } else {
                 format!("v_{i}")
             };
@@ -669,11 +679,27 @@ format=yuva420p[wc_rgba];\
         }
     }
 
+    // Fix B: bake the watermark as one final overlay over the composited frame.
+    // All three position-log branches above terminate in [outv_pre]; this is the
+    // single shared overlay that consumes it and produces the mapped [outv]. The
+    // logo uses its own PNG alpha and never enters the webcam circular-mask
+    // chain. Screen dims drive metrics/placement — identical to what the pass-2
+    // watermark fed (composite output == screen dims), so position is unchanged.
+    let map_label = match &watermark {
+        Some(wm) => {
+            let (sw, sh) = crate::edit::probe_dimensions(screen_path)?;
+            filter.push(';');
+            filter.push_str(&wm.filter_fragment(wm_logo_idx, "outv_pre", "outv", sw, sh));
+            "[outv]"
+        }
+        None => "[outv_pre]",
+    };
+
     args.push("-filter_complex".into());
     args.push(filter);
 
     args.push("-map".into());
-    args.push("[outv]".into());
+    args.push(map_label.into());
     // Audio comes from input 1 (screen.mp4 with `-itsoffset` applied), not
     // input 0 — input 0 is the un-shifted copy used only for video.
     args.push("-map".into());

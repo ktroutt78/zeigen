@@ -108,6 +108,10 @@ pub fn linkedin_export(
             crate::composite::WebcamSize::Medium,
             crate::composite::Corner::BottomRight,
             &sidecar.bubble_position_log,
+            // None: the LinkedIn path applies its watermark in its own custom
+            // transcode pass below (which always re-encodes to LinkedIn specs),
+            // so Fix B's pass-1 watermark fold doesn't apply here.
+            None,
             |_| {},
         )?;
         Some(tmp)
