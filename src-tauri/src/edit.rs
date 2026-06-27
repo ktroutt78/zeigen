@@ -726,8 +726,33 @@ fn run_edit_pipeline_single_input(
     // None on Source (pipeline stays byte-identical to pre-phase-11); Some
     // on P480/P720/P1080 forces a scale node onto the tail of the overlay
     // chain and forces the filter graph to be built even with no overlays.
+    //
+    // Fix A: skip a resolution scale that wouldn't actually shrink the source.
+    // An identity (or upscale) scale still sets needs_filter=true and forces a
+    // full second re-encode for zero pixel change — the dominant export-time
+    // waste (PHASE-5.5-PLAN.md, W1). Compare against the dimension each scale
+    // filter constrains: P480/P720 force height (`-2:H`), P1080 caps width at
+    // 1920 (`'min(iw,1920)':-2`). A <=1080p source under the 1080p default thus
+    // lands on the copy path. General rule, no source-specific constants.
     let mp4_scale: Option<Mp4Resolution> = match mode {
-        PipelineMode::Mp4 { resolution } if resolution != Mp4Resolution::Source => Some(resolution),
+        PipelineMode::Mp4 { resolution } if resolution != Mp4Resolution::Source => {
+            let downscales = match probe_dimensions(source) {
+                Ok((w, h)) => match resolution {
+                    Mp4Resolution::P480 => h > 480,
+                    Mp4Resolution::P720 => h > 720,
+                    Mp4Resolution::P1080 => w > 1920,
+                    Mp4Resolution::Source => false,
+                },
+                // Can't probe (missing source is reported just below) — keep
+                // the scale so behavior is unchanged on the error path.
+                Err(_) => true,
+            };
+            if downscales {
+                Some(resolution)
+            } else {
+                None
+            }
+        }
         _ => None,
     };
     if !source.exists() {
