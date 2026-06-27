@@ -122,11 +122,19 @@ criterion) and wastes bits at 720p. Fix: scale target bitrate by output
 resolution, or switch to VideoToolbox's quality mode (`-q:v`) which adapts to
 content. Deferred from the faststart commit on purpose.
 
-## Workstream 1c — Fix B: single-pass watermark composite [PLAN, no code yet]
+## Workstream 1c — Fix B: single-pass watermark composite [SHIPPED]
 
 Goal: make a watermarked webcam export reach the copy path on pass 2 (like Fix A
 already does for non-watermarked exports) by folding the watermark overlay into
 the pass-1 composite, so it is no longer a `needs_filter` trigger in pass 2.
+
+Result (measured 2026-06-27, 6m39s clip, watermark on, unedited, default 1080p):
+pass 1 composite 40.22s (watermark adds ~0s) + pass 2 `mp4 copy (fast remux)`
+6.32s = **46.60s total, down from ~80s**. Pass 2 took the copy path, not a
+re-encode. Watermark placement unchanged — same filter fragment and screen dims;
+watermark-region **SSIM 0.995**, difference image YMAX 16/255 with no edge
+ghosting (**no positional/size drift**). GIF export still carries the logo and
+the webcam circular mask is unaffected.
 
 ### Current vs proposed
 
@@ -205,6 +213,17 @@ loss (slight quality improvement).
 Audio RNNoise + faststart stay in pass 2 (the copy path handles them in ~6s, per
 test C). Eliminating pass 2 entirely (folding audio NR + faststart into
 composite) is a larger follow-up, not needed to hit the ~46s target.
+
+### NOTE — watermark-placement regression test [follow-up, not implemented]
+
+Fix B's gate-(b) check (byte-identical watermark position/size, SSIM 0.995) was
+run via throwaway fixtures hardcoded to local sample paths, then stripped — it
+does not ship. The placement depends on the watermark filter fragment and the
+screen dims matching between the pass-1 fold and the old pass-2 path, which is
+exactly the kind of invariant that can silently regress in a later refactor. A
+proper regression test with a small COMMITTED fixture (a few-frame screen +
+webcam clip + a logo under `resources/`, no absolute paths) asserting the
+watermark crop's SSIM vs a golden frame is a worthwhile follow-up.
 
 ## Workstream 2 — Progress feedback [GAP, not yet done]
 
