@@ -122,6 +122,90 @@ criterion) and wastes bits at 720p. Fix: scale target bitrate by output
 resolution, or switch to VideoToolbox's quality mode (`-q:v`) which adapts to
 content. Deferred from the faststart commit on purpose.
 
+## Workstream 1c — Fix B: single-pass watermark composite [PLAN, no code yet]
+
+Goal: make a watermarked webcam export reach the copy path on pass 2 (like Fix A
+already does for non-watermarked exports) by folding the watermark overlay into
+the pass-1 composite, so it is no longer a `needs_filter` trigger in pass 2.
+
+### Current vs proposed
+
+- **Current:** `composite()` (composite.rs) overlays screen + webcam + shadow and
+  encodes to `composite.mp4` (`-c:a copy`, no watermark). Then
+  `run_edit_pipeline_single_input()` (edit.rs pass 2) adds the watermark as a
+  filter node, applies audio RNNoise + faststart + browser-compat, and
+  re-encodes. With a watermark, `needs_filter=true` (`edit.rs:868`) forces pass 2
+  into a full second `h264_videotoolbox` re-encode (~40s on a 6.6-min clip).
+- **Proposed:** apply the watermark inside `composite()`'s filter graph (one
+  encode, alongside the webcam overlay). `run_edit_pipeline()` then passes
+  `watermark: None` to pass 2 for the webcam path. With no watermark, no
+  annotations, no trim, and Fix A skipping the no-op scale, pass 2's
+  `needs_filter=false` -> video copy + audio NR + faststart (~6s, the test-C
+  path). Screen-only exports (no `composite()` call) keep the watermark in pass 2
+  unchanged — they are single-pass already, so no double-encode to remove.
+
+### Single-pass composite graph with the watermark
+
+The watermark is an independent overlay using the logo PNG's own alpha — it does
+NOT touch the webcam `alphamerge`/circular-mask chain. Append it after the final
+`[outv]` the existing graph builds:
+
+```
+... existing shadow + bubble overlays -> [outv_pre];
+[<logo_idx>:v]scale=-2:<wm_h>[wm];
+[outv_pre][wm]overlay=<wm_xy>[outv]
+```
+
+Reuse `Watermark::filter_fragment` / `metrics` / `overlay_xy` (already in
+composite.rs) with the SCREEN dimensions as `(sw, sh)` — identical to what pass 2
+feeds today, so placement and size are byte-for-byte the same. Plumbing:
+
+- Add `watermark: Option<Watermark>` to `composite()`; add `-i <logo>` as the
+  input after the mask + shadow inputs; bump `logo_idx` accordingly.
+- The watermark overlay must attach to whichever label is the final composite
+  output in ALL THREE position-log branches (empty-log static, inline-expr, and
+  the dead split path) — rename their terminal `[outv]` to `[outv_pre]` and add
+  the single watermark overlay once after the branch.
+- `run_edit_pipeline()`: pass the (existence-checked) watermark to `composite()`
+  on the webcam path and `None` to `single_input`; leave the screen-only path
+  passing watermark to `single_input` as today.
+- Preserve the "skip a missing logo with a warning" guard (move/duplicate it so
+  composite() never fails an export over a deleted logo).
+
+### Expected time
+
+Watermark overlay adds ~0s to the encode (same as the webcam overlay — proven by
+the A==B split). So a watermarked 6.6-min export: ~40s composite (now incl.
+watermark) + ~6s pass-2 copy = **~46s, down from ~80s** — matching Fix A's
+non-watermarked numbers. Bonus: the watermark is now encoded once instead of
+drawn onto an already-encoded composite, removing one generation of re-encode
+loss (slight quality improvement).
+
+### Risks
+
+- **Positioning/size drift:** must use the screen `(sw, sh)` for
+  `Watermark::metrics`/`overlay_xy`, exactly as pass 2 does, or the logo moves or
+  resizes. Mitigation: same dims + a before/after pixel diff on one clip.
+- **Filter-label wiring:** composite.rs has three position-log branches; the new
+  overlay must hang off the final node in each. A missed branch = a broken graph
+  or a dropped watermark. Mitigation: rename to `[outv_pre]` in each branch and
+  add the watermark overlay in one shared place.
+- **eof_action:** the logo is a single still; rely on overlay's default
+  `eof_action=repeat` to hold it for the clip (as the current pass-2 fragment
+  does) — no `-loop` needed.
+- **alphamerge interaction:** none expected — the watermark uses the logo's PNG
+  alpha and is a separate overlay after the bubble; it never enters the
+  webcam mask chain. Call out as a thing to verify, not a known problem.
+- **GIF path:** `composite()` runs for GIF too (then single_input transcodes);
+  moving the watermark there keeps GIF watermarking working — verify a GIF export
+  still shows the logo.
+
+### Out of scope for Fix B
+
+Audio RNNoise + faststart stay in pass 2 (the copy path handles them in ~6s, per
+test C). Eliminating pass 2 entirely (folding audio NR + faststart into
+composite) is a larger follow-up, not needed to hit the ~46s target.
+
 ## Workstream 2 — Progress feedback [GAP, not yet done]
 
 Goal: replace the indefinite spinner with honest, duration-aware progress.
