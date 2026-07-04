@@ -169,6 +169,13 @@ pub(crate) fn probe_duration_seconds(path: &Path) -> Result<f64, String> {
 const TRIM_EPS: f64 = 0.05;
 const DEFAULT_TEXT_SIZE_PX: f64 = 36.0;
 const DEFAULT_ARROW_STROKE_PX: f64 = 8.0;
+// Blur/redact region tuning. Sigma scales off the region's shorter side —
+// same shape as composite.rs's SHADOW_SIGMA_FRAC-off-diameter calibration —
+// but much stronger (0.35 vs 0.075) because the goal is destroying text
+// legibility, not a cosmetic soften. Floor keeps small regions genuinely
+// redacted rather than lightly softened.
+const BLUR_SIGMA_FRAC: f64 = 0.35;
+const BLUR_SIGMA_MIN_PX: f64 = 8.0;
 // SFNS.ttf is a variable font with PostScript-style outlines that
 // ab_glyph 0.2.x silently rasterizes as zero-coverage — text rendered fine
 // in the preview but the saved PNGs were blank backgrounds. Geneva is a
@@ -552,6 +559,50 @@ fn rasterize_arrow(
     Ok(())
 }
 
+// Blur/redact filter-graph fragment for one sidecar "blur" annotation.
+// Crops the region, applies a strong gblur, and overlays it back over the
+// exact same rect for [start, end]. Pure filter graph — no rasterized PNG
+// input (unlike text/arrow), so no temp file lifecycle to manage.
+//
+// Shared by edit.rs's pass-2 pipeline (trim-adjusted start/end) and
+// linkedin.rs's custom transcode (raw start/end — LinkedIn never trims),
+// so both export paths that leave the machine apply the same redaction.
+// `idx` only needs to be unique among fragments chained into the same
+// filter string — callers pass a per-loop counter.
+pub(crate) fn blur_region_fragment(
+    idx: usize,
+    prev_label: &str,
+    next_label: &str,
+    ann: &Annotation,
+    src_dims: (u32, u32),
+    start: f64,
+    end: f64,
+) -> String {
+    let (sw, sh) = src_dims;
+    let endpoint = ann
+        .endpoint
+        .as_ref()
+        .expect("blur region missing endpoint");
+    let x0 = ann.position.x.clamp(0.0, 1.0).min(endpoint.x.clamp(0.0, 1.0));
+    let y0 = ann.position.y.clamp(0.0, 1.0).min(endpoint.y.clamp(0.0, 1.0));
+    let x1 = ann.position.x.clamp(0.0, 1.0).max(endpoint.x.clamp(0.0, 1.0));
+    let y1 = ann.position.y.clamp(0.0, 1.0).max(endpoint.y.clamp(0.0, 1.0));
+    let cx = (x0 * sw as f64).round() as i64;
+    let cy = (y0 * sh as f64).round() as i64;
+    let cw = (((x1 - x0) * sw as f64).round() as i64)
+        .max(1)
+        .min((sw as i64 - cx).max(1));
+    let ch = (((y1 - y0) * sh as f64).round() as i64)
+        .max(1)
+        .min((sh as i64 - cy).max(1));
+    let sigma = (cw.min(ch) as f64 * BLUR_SIGMA_FRAC).max(BLUR_SIGMA_MIN_PX);
+    format!(
+        "[{prev_label}]split=2[bs{idx}][bc{idx}];\
+[bc{idx}]crop={cw}:{ch}:{cx}:{cy},gblur=sigma={sigma:.1}[bb{idx}];\
+[bs{idx}][bb{idx}]overlay=x={cx}:y={cy}:enable=between(t\\,{start:.3}\\,{end:.3})[{next_label}]"
+    )
+}
+
 // Derive the raw-input paths the Phase 15 c2 composite-at-export
 // pipeline needs from a scratch source path. For webcam recordings the
 // scratch layout is:
@@ -813,6 +864,14 @@ fn run_edit_pipeline_single_input(
         .enumerate()
         .filter(|(_, a)| a.kind == "arrow" && a.endpoint.is_some())
         .collect();
+    // Blur regions are pure filter graph (crop+gblur+overlay, no rasterized
+    // PNG) so they don't participate in need_temp.
+    let blur_anns: Vec<(usize, &Annotation)> = sidecar
+        .annotations
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| a.kind == "blur" && a.endpoint.is_some())
+        .collect();
     let need_temp = !text_anns.is_empty() || !arrow_anns.is_empty();
     if need_temp {
         std::fs::create_dir_all(&temp_dir)
@@ -830,9 +889,13 @@ fn run_edit_pipeline_single_input(
         text_paths.push((*idx, p, ann));
     }
 
-    // Probe source dims once — arrow PNGs are source-sized, and the
-    // watermark scales relative to the shorter source dimension.
-    let src_dims: Option<(u32, u32)> = if !arrow_anns.is_empty() || watermark.is_some() {
+    // Probe source dims once — arrow PNGs are source-sized, blur regions
+    // need pixel rects, and the watermark scales relative to the shorter
+    // source dimension.
+    let src_dims: Option<(u32, u32)> = if !arrow_anns.is_empty()
+        || !blur_anns.is_empty()
+        || watermark.is_some()
+    {
         Some(probe_dimensions(source)?)
     } else {
         None
@@ -894,6 +957,7 @@ fn run_edit_pipeline_single_input(
     // tail can chain off [0:v]) or whenever an MP4 scale is requested.
     let needs_filter = !text_paths.is_empty()
         || !arrow_paths.is_empty()
+        || !blur_anns.is_empty()
         || watermark.is_some()
         || gif_mode
         || mp4_scale.is_some();
@@ -902,6 +966,37 @@ fn run_edit_pipeline_single_input(
         let mut prev_label = String::from("0:v");
         let mut step = 0usize;
         let mut input_idx = 1usize;
+
+        // Blur/redact regions — applied first, directly on the base video,
+        // so text/arrow overlays below draw ON TOP of the redaction rather
+        // than getting blurred out themselves. No extra inputs consumed
+        // (pure filter graph), so input_idx is untouched here.
+        for (i, (_idx, ann)) in blur_anns.iter().enumerate() {
+            let (sw, sh) = src_dims.expect("src_dims set when blur present");
+            let next_label = format!("v{step}");
+            step += 1;
+            let start = (ann.start_time - trim_in).max(0.0);
+            let end = (ann.end_time - trim_in).max(start).min(out_duration);
+            filter.push_str(&blur_region_fragment(
+                i,
+                &prev_label,
+                &next_label,
+                ann,
+                (sw, sh),
+                start,
+                end,
+            ));
+            if i + 1 < blur_anns.len()
+                || !text_paths.is_empty()
+                || !arrow_paths.is_empty()
+                || watermark.is_some()
+                || gif_mode
+                || mp4_scale.is_some()
+            {
+                filter.push(';');
+            }
+            prev_label = next_label;
+        }
 
         // Text overlays — small text PNG positioned at W*posX, H*posY.
         // overlay's W and H are the main (base) layer dimensions.

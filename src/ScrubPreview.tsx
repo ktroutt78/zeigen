@@ -28,6 +28,11 @@ const FALLBACK_W = 160;
 const FALLBACK_H = 90;
 const ABOVE_TRACK_GAP = 10;
 const VIEWPORT_EDGE_PAD = 4;
+// Caption strip height below the thumbnail image (padding "3px 6px" + an
+// explicit 14px line-height set below, so this stays exact rather than
+// guessed off the browser's default line-height). The box's total height
+// is thumbH + CAPTION_H, not just thumbH — top must clear both.
+const CAPTION_H = 20;
 
 function fmtTime(s: number): string {
   if (!isFinite(s) || s < 0) return "00:00";
@@ -103,7 +108,14 @@ export default function ScrubPreview(props: Props) {
       VIEWPORT_EDGE_PAD,
       Math.min(window.innerWidth - thumbW - VIEWPORT_EDGE_PAD, cursorX - thumbW / 2),
     );
-    top = props.trackRect!.top - thumbH - ABOVE_TRACK_GAP;
+    // Clear the full box (image + caption strip), not just the image —
+    // otherwise the caption's height silently eats into ABOVE_TRACK_GAP
+    // and the box's tail overlaps the track. Floor at VIEWPORT_EDGE_PAD so
+    // a short window clamps instead of rendering off the top edge.
+    top = Math.max(
+      VIEWPORT_EDGE_PAD,
+      props.trackRect!.top - thumbH - CAPTION_H - ABOVE_TRACK_GAP,
+    );
   }
 
   let body: React.ReactNode = null;
@@ -173,6 +185,7 @@ export default function ScrubPreview(props: Props) {
           <div
             style={{
               padding: "3px 6px",
+              lineHeight: "14px",
               fontSize: 11,
               fontFamily: "var(--font-mono)",
               color: "rgba(255,255,255,0.92)",

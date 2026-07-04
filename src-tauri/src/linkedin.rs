@@ -144,6 +144,19 @@ pub fn linkedin_export(
         ok
     });
 
+    // Blur/redact regions from the sidecar. LinkedIn export never trims
+    // (Phase 14 decision — no-trim, no-annotation, bubble-baked output), so
+    // unlike edit.rs's pass-2 pipeline these use ann.start_time/end_time
+    // directly with no trim_in offset. Redaction is the one sidecar concept
+    // this path DOES honor — trim/text/arrow stay excluded per that
+    // decision, but this export leaves the machine, so unredacted regions
+    // silently shipping here would defeat the feature's purpose.
+    let blur_anns: Vec<&crate::edit::Annotation> = sidecar
+        .annotations
+        .iter()
+        .filter(|a| a.kind == "blur" && a.endpoint.is_some())
+        .collect();
+
     let mut args: Vec<String> = vec![
         "-y".into(),
         "-hide_banner".into(),
@@ -152,16 +165,44 @@ pub fn linkedin_export(
     ];
 
     // Cap to 1080p wide, even-aligned, then convert to yuv420p so every
-    // player plays it back without surprises. With a watermark the logo is
-    // overlaid at source res before that scale, so -vf becomes a
-    // -filter_complex with an explicit output map.
-    if let Some(wm) = &watermark {
+    // player plays it back without surprises. Blur and/or a watermark force
+    // -filter_complex with an explicit output map; otherwise the simple -vf
+    // scale path is unchanged.
+    if watermark.is_some() || !blur_anns.is_empty() {
         let (sw, sh) = crate::edit::probe_dimensions(&transcode_input)?;
-        args.push("-i".into());
-        args.push(wm.logo_path.to_string_lossy().into_owned());
-        let frag = wm.filter_fragment(1, "0:v", "ov", sw, sh);
+        let mut filter = String::new();
+        let mut prev_label = String::from("0:v");
+
+        for (i, ann) in blur_anns.iter().enumerate() {
+            let next_label = format!("v{i}");
+            filter.push_str(&crate::edit::blur_region_fragment(
+                i,
+                &prev_label,
+                &next_label,
+                ann,
+                (sw, sh),
+                ann.start_time,
+                ann.end_time,
+            ));
+            filter.push(';');
+            prev_label = next_label;
+        }
+
+        if let Some(wm) = &watermark {
+            args.push("-i".into());
+            args.push(wm.logo_path.to_string_lossy().into_owned());
+            let next_label = String::from("ov");
+            filter.push_str(&wm.filter_fragment(1, &prev_label, &next_label, sw, sh));
+            filter.push(';');
+            prev_label = next_label;
+        }
+
+        filter.push_str(&format!(
+            "[{prev_label}]scale='min(1920,iw)':-2,format=yuv420p[outv]"
+        ));
+
         args.push("-filter_complex".into());
-        args.push(format!("{frag};[ov]scale='min(1920,iw)':-2,format=yuv420p[outv]"));
+        args.push(filter);
         args.push("-map".into());
         args.push("[outv]".into());
         args.push("-map".into());

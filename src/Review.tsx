@@ -19,19 +19,21 @@ import ScrubPreview from "./ScrubPreview";
 type Position = { x: number; y: number };
 
 type Annotation = {
-  type: "text" | "arrow";
+  type: "text" | "arrow" | "blur";
   start_time: number;
   end_time: number;
   position: Position;
   content: string;
   // Text-only: font size in source pixels. Defaults to 36 when absent.
   size?: number;
-  // Arrow-only (C5): end point in source-fraction coords + stroke width.
+  // Arrow-only (C5) and blur-only: end point in source-fraction coords.
+  // Blur reuses the arrow's two-point shape as its rect corners — no new
+  // sidecar field, same reuse the Rust side makes in edit.rs.
   endpoint?: Position;
   stroke?: number;
 };
 
-type Tool = "text" | "arrow" | null;
+type Tool = "text" | "arrow" | "blur" | null;
 const DEFAULT_TEXT_SIZE = 36;
 const ANNOTATION_DEFAULT_DURATION = 3;
 const MIN_TEXT_SIZE = 12;
@@ -49,10 +51,19 @@ type Editor = {
   deleteAnnotation: (idx: number) => void;
   placeTextAt: (xFrac: number, yFrac: number) => void;
   placeArrow: (start: Position, end: Position) => void;
+  placeBlur: (start: Position, end: Position) => void;
 };
 
 const DEFAULT_ARROW_STROKE = 8;
 const ARROW_MIN_LENGTH_FRAC = 0.01;
+// Below this, both drag dimensions are too small to redact anything
+// meaningful — drop the drag instead of creating a near-zero-size region.
+const BLUR_MIN_SIZE_FRAC = 0.01;
+// Rough visual match to edit.rs's BLUR_SIGMA_MIN_PX / BLUR_SIGMA_FRAC —
+// same class of by-eye calibration as composite.rs's shadow gblur-vs-CSS-
+// blur note. CSS backdrop-filter and ffmpeg gblur aren't the same math, so
+// this is "looks about as strong," not a derived equivalence.
+const BLUR_PREVIEW_PX = 18;
 
 type Trim = { in: number; out: number };
 
@@ -489,6 +500,32 @@ export default function Review() {
         position: start,
         endpoint: end,
         stroke: DEFAULT_ARROW_STROKE,
+        content: "",
+      };
+      setAnnotations((prev) => {
+        const next = [...prev, ann];
+        const newIdx = next.length - 1;
+        Promise.resolve().then(() => {
+          setSelectedIndex(newIdx);
+        });
+        return next;
+      });
+      setTool(null);
+    },
+    [duration],
+  );
+
+  const placeBlur = useCallback(
+    (start: Position, end: Position) => {
+      const t = videoRef.current?.currentTime ?? 0;
+      const endT =
+        duration != null ? Math.min(duration, t + ANNOTATION_DEFAULT_DURATION) : t + ANNOTATION_DEFAULT_DURATION;
+      const ann: Annotation = {
+        type: "blur",
+        start_time: t,
+        end_time: endT,
+        position: start,
+        endpoint: end,
         content: "",
       };
       setAnnotations((prev) => {
@@ -1023,6 +1060,11 @@ export default function Review() {
         setTool((prev) => (prev === "arrow" ? null : "arrow"));
         setSelectedIndex(null);
         setEditingIndex(null);
+      } else if (key === "b") {
+        e.preventDefault();
+        setTool((prev) => (prev === "blur" ? null : "blur"));
+        setSelectedIndex(null);
+        setEditingIndex(null);
       } else if (e.key === " ") {
         e.preventDefault();
         togglePlay();
@@ -1157,6 +1199,7 @@ export default function Review() {
             deleteAnnotation,
             placeTextAt,
             placeArrow,
+            placeBlur,
           }}
           thumbnail={{
             thumbnailTime,
@@ -1470,6 +1513,13 @@ function Toolbar({
           onClick={() => editor.setTool(editor.tool === "arrow" ? null : "arrow")}
         />
         <ToolButton
+          icon="M2 3h12v10H2z M2 3l12 10M14 3L2 13"
+          label="Blur"
+          kbd="B"
+          active={editor.tool === "blur"}
+          onClick={() => editor.setTool(editor.tool === "blur" ? null : "blur")}
+        />
+        <ToolButton
           icon="M5 2h6v11l-3-2.5L5 13z"
           label="Thumbnail"
           kbd="M"
@@ -1685,7 +1735,11 @@ type VideoStageProps = {
 
 function VideoStage(props: VideoStageProps) {
   const stageRef = useRef<HTMLDivElement | null>(null);
-  const [drawingArrow, setDrawingArrow] = useState<{
+  // Shared drag-to-draw state for both the arrow and blur tools — both are
+  // "two points, drag from start to end" gestures; only the placement
+  // callback and the live preview shape differ.
+  const [drawingShape, setDrawingShape] = useState<{
+    tool: "arrow" | "blur";
     start: Position;
     end: Position;
   } | null>(null);
@@ -1708,7 +1762,8 @@ function VideoStage(props: VideoStageProps) {
   };
 
   const onStagePointerDown = (e: React.PointerEvent) => {
-    if (props.editor.tool !== "arrow") return;
+    const tool = props.editor.tool;
+    if (tool !== "arrow" && tool !== "blur") return;
     if ((e.target as HTMLElement).dataset.stageBg !== "1") return;
     e.preventDefault();
     const rect = stageRef.current?.getBoundingClientRect();
@@ -1717,37 +1772,46 @@ function VideoStage(props: VideoStageProps) {
     const startY = (e.clientY - rect.top) / rect.height;
     if (startX < 0 || startX > 1 || startY < 0 || startY > 1) return;
     const start = { x: startX, y: startY };
-    setDrawingArrow({ start, end: start });
+    setDrawingShape({ tool, start, end: start });
     const onMove = (ev: PointerEvent) => {
       const r = stageRef.current?.getBoundingClientRect();
       if (!r) return;
       const ex = Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width));
       const ey = Math.max(0, Math.min(1, (ev.clientY - r.top) / r.height));
-      setDrawingArrow({ start, end: { x: ex, y: ey } });
+      setDrawingShape({ tool, start, end: { x: ex, y: ey } });
     };
     const onUp = (ev: PointerEvent) => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       const r = stageRef.current?.getBoundingClientRect();
       if (!r) {
-        setDrawingArrow(null);
+        setDrawingShape(null);
         return;
       }
       const ex = Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width));
       const ey = Math.max(0, Math.min(1, (ev.clientY - r.top) / r.height));
-      const dx = ex - start.x;
-      const dy = ey - start.y;
-      const lenFrac = Math.sqrt(dx * dx + dy * dy);
-      setDrawingArrow(null);
-      if (lenFrac < ARROW_MIN_LENGTH_FRAC) return;
-      props.editor.placeArrow(start, { x: ex, y: ey });
+      setDrawingShape(null);
+      if (tool === "arrow") {
+        const dx = ex - start.x;
+        const dy = ey - start.y;
+        const lenFrac = Math.sqrt(dx * dx + dy * dy);
+        if (lenFrac < ARROW_MIN_LENGTH_FRAC) return;
+        props.editor.placeArrow(start, { x: ex, y: ey });
+      } else {
+        const wFrac = Math.abs(ex - start.x);
+        const hFrac = Math.abs(ey - start.y);
+        if (wFrac < BLUR_MIN_SIZE_FRAC || hFrac < BLUR_MIN_SIZE_FRAC) return;
+        props.editor.placeBlur(start, { x: ex, y: ey });
+      }
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
   };
 
   const cursor =
-    props.editor.tool === "text" || props.editor.tool === "arrow" ? "crosshair" : "default";
+    props.editor.tool === "text" || props.editor.tool === "arrow" || props.editor.tool === "blur"
+      ? "crosshair"
+      : "default";
 
   return (
     <div
@@ -1827,7 +1891,7 @@ function VideoStage(props: VideoStageProps) {
           videoRef={props.videoRef}
           editor={props.editor}
           currentTime={props.currentTime}
-          drawingArrow={drawingArrow}
+          drawingShape={drawingShape}
         />
         <PlayerOverlay
           playing={props.playing}
@@ -2163,13 +2227,13 @@ function AnnotationLayer({
   videoRef,
   editor,
   currentTime,
-  drawingArrow,
+  drawingShape,
 }: {
   stageRef: React.MutableRefObject<HTMLDivElement | null>;
   videoRef: React.MutableRefObject<HTMLVideoElement | null>;
   editor: Editor;
   currentTime: number;
-  drawingArrow: { start: Position; end: Position } | null;
+  drawingShape: { tool: "arrow" | "blur"; start: Position; end: Position } | null;
 }) {
   return (
     <div
@@ -2184,7 +2248,17 @@ function AnnotationLayer({
           currentTime >= ann.start_time - 0.001 && currentTime <= ann.end_time + 0.001;
         const isSelected = editor.selectedIndex === idx;
         const isEditing = editor.editingIndex === idx;
-        if (!visible && !isSelected && !isEditing) return null;
+        // Text/arrow stay visible while selected/editing regardless of
+        // playhead position — an editing aid so you can nudge them without
+        // scrubbing into their active window. Blur is different: its whole
+        // point is "only visible in this window," so keeping it rendered
+        // outside that range (even while selected for a timeline-handle
+        // resize) would misrepresent what the export actually does. The
+        // timeline pip's band + resize handles don't depend on this render
+        // — they key off isSelected directly — so this doesn't block
+        // resizing from the timeline.
+        const staysVisibleWhenInactive = ann.type !== "blur" && (isSelected || isEditing);
+        if (!visible && !staysVisibleWhenInactive) return null;
         if (ann.type === "text") {
           return (
             <TextAnnotationView
@@ -2211,9 +2285,26 @@ function AnnotationLayer({
             />
           );
         }
+        if (ann.type === "blur" && ann.endpoint) {
+          return (
+            <BlurAnnotationView
+              key={idx}
+              ann={ann}
+              idx={idx}
+              stageRef={stageRef}
+              editor={editor}
+              isSelected={isSelected}
+            />
+          );
+        }
         return null;
       })}
-      {drawingArrow && <ArrowPreview start={drawingArrow.start} end={drawingArrow.end} />}
+      {drawingShape?.tool === "arrow" && (
+        <ArrowPreview start={drawingShape.start} end={drawingShape.end} />
+      )}
+      {drawingShape?.tool === "blur" && (
+        <BlurPreview start={drawingShape.start} end={drawingShape.end} />
+      )}
     </div>
   );
 }
@@ -2597,6 +2688,165 @@ function ArrowAnnotationView({
   );
 }
 
+// Redact-region preview. Same two-point drag model as ArrowAnnotationView
+// (position + endpoint, whole-body drag translates both) — rendered as an
+// HTML div with a CSS blur instead of an SVG line, since the region needs
+// a rect, not a stroke. Corner handles are plain HTML circles (PointHandle)
+// rather than EndpointHandle's SVG <circle>, since this view has no <svg>
+// wrapper to host one.
+//
+// Positions relative to the stage box, same convention as Text/Arrow (not
+// the letterbox-aware content-box math Bubble/Watermark use) — consistency
+// with its annotation siblings, carrying the same pre-existing non-16:9-
+// source caveat they already have.
+function BlurAnnotationView({
+  ann,
+  idx,
+  stageRef,
+  editor,
+  isSelected,
+}: {
+  ann: Annotation;
+  idx: number;
+  stageRef: React.MutableRefObject<HTMLDivElement | null>;
+  editor: Editor;
+  isSelected: boolean;
+}) {
+  const stageSize = useStageSize(stageRef);
+  const endpoint = ann.endpoint!;
+
+  const x0 = Math.min(ann.position.x, endpoint.x) * stageSize.width;
+  const y0 = Math.min(ann.position.y, endpoint.y) * stageSize.height;
+  const x1 = Math.max(ann.position.x, endpoint.x) * stageSize.width;
+  const y1 = Math.max(ann.position.y, endpoint.y) * stageSize.height;
+
+  const startCornerDrag = (which: "position" | "endpoint") => (e: React.PointerEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    if (!isSelected) editor.setSelectedIndex(idx);
+    const stage = stageRef.current?.getBoundingClientRect();
+    if (!stage) return;
+    const onMove = (ev: PointerEvent) => {
+      const fx = Math.max(0, Math.min(1, (ev.clientX - stage.left) / stage.width));
+      const fy = Math.max(0, Math.min(1, (ev.clientY - stage.top) / stage.height));
+      if (which === "position") {
+        editor.updateAnnotation(idx, { position: { x: fx, y: fy } });
+      } else {
+        editor.updateAnnotation(idx, { endpoint: { x: fx, y: fy } });
+      }
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+
+  const startBodyDrag = (e: React.PointerEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    if (!isSelected) editor.setSelectedIndex(idx);
+    const stage = stageRef.current?.getBoundingClientRect();
+    if (!stage) return;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startPos = ann.position;
+    const startEnd = endpoint;
+    const onMove = (ev: PointerEvent) => {
+      const dx = (ev.clientX - startX) / stage.width;
+      const dy = (ev.clientY - startY) / stage.height;
+      const np = {
+        x: Math.max(0, Math.min(1, startPos.x + dx)),
+        y: Math.max(0, Math.min(1, startPos.y + dy)),
+      };
+      const ne = {
+        x: Math.max(0, Math.min(1, startEnd.x + dx)),
+        y: Math.max(0, Math.min(1, startEnd.y + dy)),
+      };
+      editor.updateAnnotation(idx, { position: np, endpoint: ne });
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+
+  return (
+    <>
+      <div
+        onPointerDown={startBodyDrag}
+        onClick={(e) => {
+          e.stopPropagation();
+          if (!isSelected) editor.setSelectedIndex(idx);
+        }}
+        style={{
+          position: "absolute",
+          left: x0,
+          top: y0,
+          width: Math.max(0, x1 - x0),
+          height: Math.max(0, y1 - y0),
+          backdropFilter: `blur(${BLUR_PREVIEW_PX}px)`,
+          WebkitBackdropFilter: `blur(${BLUR_PREVIEW_PX}px)`,
+          background: "rgba(255,255,255,0.02)",
+          outline: isSelected ? "1.5px solid var(--accent)" : "1px dashed rgba(255,255,255,0.5)",
+          outlineOffset: isSelected ? 0 : -1,
+          cursor: "move",
+          pointerEvents: "auto",
+        }}
+      />
+      {isSelected && (
+        <>
+          <PointHandle
+            x={ann.position.x * stageSize.width}
+            y={ann.position.y * stageSize.height}
+            onPointerDown={startCornerDrag("position")}
+          />
+          <PointHandle
+            x={endpoint.x * stageSize.width}
+            y={endpoint.y * stageSize.height}
+            onPointerDown={startCornerDrag("endpoint")}
+          />
+        </>
+      )}
+    </>
+  );
+}
+
+// Plain-HTML analog of EndpointHandle (which is an SVG <circle> and needs
+// an <svg> host) — same size/treatment, usable directly inside the div-
+// based BlurAnnotationView.
+function PointHandle({
+  x,
+  y,
+  onPointerDown,
+}: {
+  x: number;
+  y: number;
+  onPointerDown: (e: React.PointerEvent) => void;
+}) {
+  return (
+    <div
+      onPointerDown={onPointerDown}
+      style={{
+        position: "absolute",
+        left: x - 5,
+        top: y - 5,
+        width: 10,
+        height: 10,
+        borderRadius: "50%",
+        background: "#fff",
+        border: "1.5px solid var(--accent)",
+        cursor: "grab",
+        touchAction: "none",
+        pointerEvents: "auto",
+      }}
+    />
+  );
+}
+
 function EndpointHandle({
   cx,
   cy,
@@ -2648,6 +2898,27 @@ function ArrowPreview({ start, end }: { start: Position; end: Position }) {
         markerEnd={`url(#${markerId})`}
       />
     </svg>
+  );
+}
+
+// Live drag preview for the blur tool — a dashed marquee, no blur effect
+// applied yet (the actual redaction only renders once the region is
+// committed as an annotation). Percentage-based like TextAnnotationView,
+// since this is a direct child of the same full-stage AnnotationLayer div.
+function BlurPreview({ start, end }: { start: Position; end: Position }) {
+  return (
+    <div
+      style={{
+        position: "absolute",
+        left: `${Math.min(start.x, end.x) * 100}%`,
+        top: `${Math.min(start.y, end.y) * 100}%`,
+        width: `${Math.abs(end.x - start.x) * 100}%`,
+        height: `${Math.abs(end.y - start.y) * 100}%`,
+        border: "1.5px dashed rgba(255,255,255,0.85)",
+        background: "rgba(255,255,255,0.06)",
+        pointerEvents: "none",
+      }}
+    />
   );
 }
 
@@ -2951,11 +3222,19 @@ function Timeline(props: TimelineProps) {
           )}
         </div>
 
-        {/* Annotation pips — one per annotation, drag to shift in time */}
+        {/* Annotation pips — one per annotation. Dot drags the whole window
+            (start+end together, duration preserved); when selected, a
+            highlighted band + two edge handles appear so start/end can be
+            resized independently — the video content under a blur region
+            can shift take-to-take, so the redaction window needs to track
+            it rather than staying pinned at its creation-time 3s default. */}
         {props.duration != null &&
           props.editor.annotations.map((ann, idx) => {
+            const duration = props.duration as number;
             const mid = (ann.start_time + ann.end_time) / 2;
-            const pct = (mid / (props.duration as number)) * 100;
+            const pct = (mid / duration) * 100;
+            const startPct = (ann.start_time / duration) * 100;
+            const endPct = (ann.end_time / duration) * 100;
             const selected = props.editor.selectedIndex === idx;
             const onPipDown = (e: React.PointerEvent) => {
               e.stopPropagation();
@@ -2968,12 +3247,12 @@ function Timeline(props: TimelineProps) {
               const startStart = ann.start_time;
               const startEnd = ann.end_time;
               const onMove = (ev: PointerEvent) => {
-                const dx = ((ev.clientX - startX) / rect.width) * (props.duration as number);
+                const dx = ((ev.clientX - startX) / rect.width) * duration;
                 const dur = startEnd - startStart;
                 let nextStart = Math.max(0, startStart + dx);
                 let nextEnd = nextStart + dur;
-                if (nextEnd > (props.duration as number)) {
-                  nextEnd = props.duration as number;
+                if (nextEnd > duration) {
+                  nextEnd = duration;
                   nextStart = nextEnd - dur;
                 }
                 props.editor.updateAnnotation(idx, {
@@ -2988,37 +3267,85 @@ function Timeline(props: TimelineProps) {
               window.addEventListener("pointermove", onMove);
               window.addEventListener("pointerup", onUp);
             };
-            const label = ann.type === "text" ? "T" : "→";
+            const onEdgeDown = (side: "start" | "end") => (e: React.PointerEvent) => {
+              e.stopPropagation();
+              e.preventDefault();
+              props.editor.setSelectedIndex(idx);
+              const track = trackRef.current;
+              if (!track || props.duration == null) return;
+              const rect = track.getBoundingClientRect();
+              const fixedStart = ann.start_time;
+              const fixedEnd = ann.end_time;
+              const onMove = (ev: PointerEvent) => {
+                const t = ((ev.clientX - rect.left) / rect.width) * duration;
+                if (side === "start") {
+                  const next = Math.max(0, Math.min(fixedEnd - 0.1, t));
+                  props.editor.updateAnnotation(idx, { start_time: next });
+                } else {
+                  const next = Math.min(duration, Math.max(fixedStart + 0.1, t));
+                  props.editor.updateAnnotation(idx, { end_time: next });
+                }
+              };
+              const onUp = () => {
+                window.removeEventListener("pointermove", onMove);
+                window.removeEventListener("pointerup", onUp);
+              };
+              window.addEventListener("pointermove", onMove);
+              window.addEventListener("pointerup", onUp);
+            };
+            const label = ann.type === "text" ? "T" : ann.type === "arrow" ? "→" : "B";
             return (
-              <div
-                key={idx}
-                onPointerDown={onPipDown}
-                style={{
-                  position: "absolute",
-                  left: `${pct}%`,
-                  top: -2,
-                  transform: "translateX(-50%)",
-                  cursor: "grab",
-                }}
-              >
-                <span
+              <div key={idx}>
+                {selected && (
+                  <div
+                    style={{
+                      position: "absolute",
+                      left: `${startPct}%`,
+                      width: `${Math.max(0, endPct - startPct)}%`,
+                      top: -2,
+                      height: 14,
+                      background: "rgba(255,255,255,0.12)",
+                      border: "1px solid var(--accent)",
+                      borderRadius: 3,
+                      pointerEvents: "none",
+                    }}
+                  />
+                )}
+                <div
+                  onPointerDown={onPipDown}
                   style={{
-                    display: "inline-block",
-                    width: 14,
-                    height: 14,
-                    borderRadius: 99,
-                    background: selected ? "var(--accent)" : "var(--bg-elevated)",
-                    border: "1px solid var(--accent)",
-                    color: selected ? "#fff" : "var(--accent)",
-                    textAlign: "center",
-                    lineHeight: "12px",
-                    fontSize: 9,
-                    fontWeight: 700,
-                    fontFamily: "var(--font-system)",
+                    position: "absolute",
+                    left: `${pct}%`,
+                    top: -2,
+                    transform: "translateX(-50%)",
+                    cursor: "grab",
                   }}
                 >
-                  {label}
-                </span>
+                  <span
+                    style={{
+                      display: "inline-block",
+                      width: 14,
+                      height: 14,
+                      borderRadius: 99,
+                      background: selected ? "var(--accent)" : "var(--bg-elevated)",
+                      border: "1px solid var(--accent)",
+                      color: selected ? "#fff" : "var(--accent)",
+                      textAlign: "center",
+                      lineHeight: "12px",
+                      fontSize: 9,
+                      fontWeight: 700,
+                      fontFamily: "var(--font-system)",
+                    }}
+                  >
+                    {label}
+                  </span>
+                </div>
+                {selected && (
+                  <>
+                    <AnnotationEdgeHandle pct={startPct} side="start" onPointerDown={onEdgeDown("start")} />
+                    <AnnotationEdgeHandle pct={endPct} side="end" onPointerDown={onEdgeDown("end")} />
+                  </>
+                )}
               </div>
             );
           })}
@@ -3154,6 +3481,38 @@ function TrimHandle({
     >
       <span style={{ width: 1, height: 14, background: "rgba(255,255,255,0.55)" }} />
     </div>
+  );
+}
+
+// Per-annotation start/end resize handle — same ew-resize visual language
+// as TrimHandle, scaled down to sit at the annotation pip's row instead of
+// spanning the full track height.
+function AnnotationEdgeHandle({
+  pct,
+  side,
+  onPointerDown,
+}: {
+  pct: number;
+  side: "start" | "end";
+  onPointerDown: (e: React.PointerEvent) => void;
+}) {
+  return (
+    <div
+      onPointerDown={onPointerDown}
+      style={{
+        position: "absolute",
+        left: `${pct}%`,
+        top: -2,
+        width: 6,
+        height: 14,
+        transform: side === "start" ? "translateX(-100%)" : "translateX(0)",
+        background: "var(--accent)",
+        borderRadius: 2,
+        cursor: "ew-resize",
+        boxShadow: "0 1px 2px rgba(0,0,0,0.4)",
+        touchAction: "none",
+      }}
+    />
   );
 }
 
