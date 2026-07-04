@@ -157,6 +157,16 @@ pub fn linkedin_export(
         .filter(|a| a.kind == "blur" && a.endpoint.is_some())
         .collect();
 
+    // Spotlight regions from the sidecar. Same reasoning as blur above: this
+    // export leaves the machine, so it honors the same redact/attention
+    // sidecar concepts blur does (still no trim, no text/arrow — Phase 14
+    // decision).
+    let spotlight_anns: Vec<&crate::edit::Annotation> = sidecar
+        .annotations
+        .iter()
+        .filter(|a| a.kind == "spotlight" && a.endpoint.is_some())
+        .collect();
+
     let mut args: Vec<String> = vec![
         "-y".into(),
         "-hide_banner".into(),
@@ -165,10 +175,10 @@ pub fn linkedin_export(
     ];
 
     // Cap to 1080p wide, even-aligned, then convert to yuv420p so every
-    // player plays it back without surprises. Blur and/or a watermark force
-    // -filter_complex with an explicit output map; otherwise the simple -vf
-    // scale path is unchanged.
-    if watermark.is_some() || !blur_anns.is_empty() {
+    // player plays it back without surprises. Blur/spotlight and/or a
+    // watermark force -filter_complex with an explicit output map; otherwise
+    // the simple -vf scale path is unchanged.
+    if watermark.is_some() || !blur_anns.is_empty() || !spotlight_anns.is_empty() {
         let (sw, sh) = crate::edit::probe_dimensions(&transcode_input)?;
         let mut filter = String::new();
         let mut prev_label = String::from("0:v");
@@ -176,6 +186,24 @@ pub fn linkedin_export(
         for (i, ann) in blur_anns.iter().enumerate() {
             let next_label = format!("v{i}");
             filter.push_str(&crate::edit::blur_region_fragment(
+                i,
+                &prev_label,
+                &next_label,
+                ann,
+                (sw, sh),
+                ann.start_time,
+                ann.end_time,
+            ));
+            filter.push(';');
+            prev_label = next_label;
+        }
+
+        // Spotlight runs after blur — same ordering as edit.rs's pass-2
+        // chain, same reasoning (the two commute; this just avoids
+        // reshuffling the already-shipped blur stage).
+        for (i, ann) in spotlight_anns.iter().enumerate() {
+            let next_label = format!("sv{i}");
+            filter.push_str(&crate::edit::spotlight_region_fragment(
                 i,
                 &prev_label,
                 &next_label,

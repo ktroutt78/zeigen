@@ -19,21 +19,22 @@ import ScrubPreview from "./ScrubPreview";
 type Position = { x: number; y: number };
 
 type Annotation = {
-  type: "text" | "arrow" | "blur";
+  type: "text" | "arrow" | "blur" | "spotlight";
   start_time: number;
   end_time: number;
   position: Position;
   content: string;
   // Text-only: font size in source pixels. Defaults to 36 when absent.
   size?: number;
-  // Arrow-only (C5) and blur-only: end point in source-fraction coords.
-  // Blur reuses the arrow's two-point shape as its rect corners — no new
-  // sidecar field, same reuse the Rust side makes in edit.rs.
+  // Arrow-only (C5), blur-only, and spotlight-only: end point in
+  // source-fraction coords. Blur and spotlight reuse the arrow's two-point
+  // shape as their rect corners — no new sidecar field, same reuse the
+  // Rust side makes in edit.rs.
   endpoint?: Position;
   stroke?: number;
 };
 
-type Tool = "text" | "arrow" | "blur" | null;
+type Tool = "text" | "arrow" | "blur" | "spotlight" | null;
 const DEFAULT_TEXT_SIZE = 36;
 const ANNOTATION_DEFAULT_DURATION = 3;
 const MIN_TEXT_SIZE = 12;
@@ -52,18 +53,25 @@ type Editor = {
   placeTextAt: (xFrac: number, yFrac: number) => void;
   placeArrow: (start: Position, end: Position) => void;
   placeBlur: (start: Position, end: Position) => void;
+  placeSpotlight: (start: Position, end: Position) => void;
 };
 
 const DEFAULT_ARROW_STROKE = 8;
 const ARROW_MIN_LENGTH_FRAC = 0.01;
-// Below this, both drag dimensions are too small to redact anything
-// meaningful — drop the drag instead of creating a near-zero-size region.
-const BLUR_MIN_SIZE_FRAC = 0.01;
+// Below this, both drag dimensions are too small to redact/highlight
+// anything meaningful — drop the drag instead of creating a near-zero-size
+// region. Shared by both rect tools (blur, spotlight): same two-point drag
+// gesture, same "too small to matter" threshold.
+const REGION_MIN_SIZE_FRAC = 0.01;
 // Rough visual match to edit.rs's BLUR_SIGMA_MIN_PX / BLUR_SIGMA_FRAC —
 // same class of by-eye calibration as composite.rs's shadow gblur-vs-CSS-
 // blur note. CSS backdrop-filter and ffmpeg gblur aren't the same math, so
 // this is "looks about as strong," not a derived equivalence.
 const BLUR_PREVIEW_PX = 18;
+// Rough visual match to edit.rs's SPOTLIGHT_DIM_FACTOR (0.45) — a flat
+// black overlay at this alpha approximates "45% brightness" closely enough
+// for a live preview. Same "looks about as strong" caveat as BLUR_PREVIEW_PX.
+const SPOTLIGHT_PREVIEW_DIM_ALPHA = 1 - 0.45;
 
 type Trim = { in: number; out: number };
 
@@ -522,6 +530,32 @@ export default function Review() {
         duration != null ? Math.min(duration, t + ANNOTATION_DEFAULT_DURATION) : t + ANNOTATION_DEFAULT_DURATION;
       const ann: Annotation = {
         type: "blur",
+        start_time: t,
+        end_time: endT,
+        position: start,
+        endpoint: end,
+        content: "",
+      };
+      setAnnotations((prev) => {
+        const next = [...prev, ann];
+        const newIdx = next.length - 1;
+        Promise.resolve().then(() => {
+          setSelectedIndex(newIdx);
+        });
+        return next;
+      });
+      setTool(null);
+    },
+    [duration],
+  );
+
+  const placeSpotlight = useCallback(
+    (start: Position, end: Position) => {
+      const t = videoRef.current?.currentTime ?? 0;
+      const endT =
+        duration != null ? Math.min(duration, t + ANNOTATION_DEFAULT_DURATION) : t + ANNOTATION_DEFAULT_DURATION;
+      const ann: Annotation = {
+        type: "spotlight",
         start_time: t,
         end_time: endT,
         position: start,
@@ -1065,6 +1099,11 @@ export default function Review() {
         setTool((prev) => (prev === "blur" ? null : "blur"));
         setSelectedIndex(null);
         setEditingIndex(null);
+      } else if (key === "s") {
+        e.preventDefault();
+        setTool((prev) => (prev === "spotlight" ? null : "spotlight"));
+        setSelectedIndex(null);
+        setEditingIndex(null);
       } else if (e.key === " ") {
         e.preventDefault();
         togglePlay();
@@ -1200,6 +1239,7 @@ export default function Review() {
             placeTextAt,
             placeArrow,
             placeBlur,
+            placeSpotlight,
           }}
           thumbnail={{
             thumbnailTime,
@@ -1520,6 +1560,13 @@ function Toolbar({
           onClick={() => editor.setTool(editor.tool === "blur" ? null : "blur")}
         />
         <ToolButton
+          icon="M8 3a5 5 0 100 10 5 5 0 000-10z M8 0.5v2M8 13.5v2M0.5 8h2M13.5 8h2"
+          label="Spotlight"
+          kbd="S"
+          active={editor.tool === "spotlight"}
+          onClick={() => editor.setTool(editor.tool === "spotlight" ? null : "spotlight")}
+        />
+        <ToolButton
           icon="M5 2h6v11l-3-2.5L5 13z"
           label="Thumbnail"
           kbd="M"
@@ -1735,14 +1782,20 @@ type VideoStageProps = {
 
 function VideoStage(props: VideoStageProps) {
   const stageRef = useRef<HTMLDivElement | null>(null);
-  // Shared drag-to-draw state for both the arrow and blur tools — both are
-  // "two points, drag from start to end" gestures; only the placement
-  // callback and the live preview shape differ.
+  // Shared drag-to-draw state for the arrow, blur, and spotlight tools — all
+  // three are "two points, drag from start to end" gestures; only the
+  // placement callback and the live preview shape differ.
   const [drawingShape, setDrawingShape] = useState<{
-    tool: "arrow" | "blur";
+    tool: "arrow" | "blur" | "spotlight";
     start: Position;
     end: Position;
   } | null>(null);
+
+  // videoDims drives the letterbox-aware content box below — annotation
+  // coordinates must be captured relative to the actual video frame, not
+  // the (possibly larger, if the source isn't 16:9) stage box, since that's
+  // how the Rust export interprets position/endpoint fractions.
+  const videoDims = props.watermarkPreview.videoDims;
 
   const onStageClick = (e: React.MouseEvent) => {
     if (props.editor.tool !== "text") {
@@ -1755,30 +1808,46 @@ function VideoStage(props: VideoStageProps) {
     }
     const rect = stageRef.current?.getBoundingClientRect();
     if (!rect) return;
-    const xFrac = (e.clientX - rect.left) / rect.width;
-    const yFrac = (e.clientY - rect.top) / rect.height;
-    if (xFrac < 0 || xFrac > 1 || yFrac < 0 || yFrac > 1) return;
-    props.editor.placeTextAt(xFrac, yFrac);
+    const box = contentBox({ width: rect.width, height: rect.height }, videoDims);
+    const stagePx = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    // Reject clicks landing in the letterbox bars — outside the video itself.
+    if (
+      stagePx.x < box.x ||
+      stagePx.x > box.x + box.w ||
+      stagePx.y < box.y ||
+      stagePx.y > box.y + box.h
+    ) {
+      return;
+    }
+    const frac = toContentFrac(stagePx, box);
+    props.editor.placeTextAt(frac.x, frac.y);
   };
 
   const onStagePointerDown = (e: React.PointerEvent) => {
     const tool = props.editor.tool;
-    if (tool !== "arrow" && tool !== "blur") return;
+    if (tool !== "arrow" && tool !== "blur" && tool !== "spotlight") return;
     if ((e.target as HTMLElement).dataset.stageBg !== "1") return;
     e.preventDefault();
     const rect = stageRef.current?.getBoundingClientRect();
     if (!rect) return;
-    const startX = (e.clientX - rect.left) / rect.width;
-    const startY = (e.clientY - rect.top) / rect.height;
-    if (startX < 0 || startX > 1 || startY < 0 || startY > 1) return;
-    const start = { x: startX, y: startY };
+    const box = contentBox({ width: rect.width, height: rect.height }, videoDims);
+    const startPx = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    if (
+      startPx.x < box.x ||
+      startPx.x > box.x + box.w ||
+      startPx.y < box.y ||
+      startPx.y > box.y + box.h
+    ) {
+      return;
+    }
+    const start = toContentFrac(startPx, box);
     setDrawingShape({ tool, start, end: start });
     const onMove = (ev: PointerEvent) => {
       const r = stageRef.current?.getBoundingClientRect();
       if (!r) return;
-      const ex = Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width));
-      const ey = Math.max(0, Math.min(1, (ev.clientY - r.top) / r.height));
-      setDrawingShape({ tool, start, end: { x: ex, y: ey } });
+      const b = contentBox({ width: r.width, height: r.height }, videoDims);
+      const end = toContentFrac({ x: ev.clientX - r.left, y: ev.clientY - r.top }, b);
+      setDrawingShape({ tool, start, end });
     };
     const onUp = (ev: PointerEvent) => {
       window.removeEventListener("pointermove", onMove);
@@ -1788,20 +1857,24 @@ function VideoStage(props: VideoStageProps) {
         setDrawingShape(null);
         return;
       }
-      const ex = Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width));
-      const ey = Math.max(0, Math.min(1, (ev.clientY - r.top) / r.height));
+      const b = contentBox({ width: r.width, height: r.height }, videoDims);
+      const end = toContentFrac({ x: ev.clientX - r.left, y: ev.clientY - r.top }, b);
       setDrawingShape(null);
       if (tool === "arrow") {
-        const dx = ex - start.x;
-        const dy = ey - start.y;
+        const dx = end.x - start.x;
+        const dy = end.y - start.y;
         const lenFrac = Math.sqrt(dx * dx + dy * dy);
         if (lenFrac < ARROW_MIN_LENGTH_FRAC) return;
-        props.editor.placeArrow(start, { x: ex, y: ey });
+        props.editor.placeArrow(start, end);
       } else {
-        const wFrac = Math.abs(ex - start.x);
-        const hFrac = Math.abs(ey - start.y);
-        if (wFrac < BLUR_MIN_SIZE_FRAC || hFrac < BLUR_MIN_SIZE_FRAC) return;
-        props.editor.placeBlur(start, { x: ex, y: ey });
+        const wFrac = Math.abs(end.x - start.x);
+        const hFrac = Math.abs(end.y - start.y);
+        if (wFrac < REGION_MIN_SIZE_FRAC || hFrac < REGION_MIN_SIZE_FRAC) return;
+        if (tool === "blur") {
+          props.editor.placeBlur(start, end);
+        } else {
+          props.editor.placeSpotlight(start, end);
+        }
       }
     };
     window.addEventListener("pointermove", onMove);
@@ -1809,7 +1882,10 @@ function VideoStage(props: VideoStageProps) {
   };
 
   const cursor =
-    props.editor.tool === "text" || props.editor.tool === "arrow" || props.editor.tool === "blur"
+    props.editor.tool === "text" ||
+    props.editor.tool === "arrow" ||
+    props.editor.tool === "blur" ||
+    props.editor.tool === "spotlight"
       ? "crosshair"
       : "default";
 
@@ -1892,6 +1968,7 @@ function VideoStage(props: VideoStageProps) {
           editor={props.editor}
           currentTime={props.currentTime}
           drawingShape={drawingShape}
+          videoDims={videoDims}
         />
         <PlayerOverlay
           playing={props.playing}
@@ -2054,24 +2131,11 @@ function BubbleLayer({
       return;
     }
 
-    // Letterbox math identical to WatermarkPreviewLayer — bubble lives
-    // inside the video content box, not the stage box. Stable per effect
-    // run; deps include stage size + videoDims so resize re-runs the
-    // effect with fresh values.
-    const { w: vw, h: vh } = videoDims;
-    const videoAspect = vw / vh;
-    const stageAspect = stage.width / stage.height;
-    let cw: number;
-    let ch: number;
-    if (videoAspect > stageAspect) {
-      cw = stage.width;
-      ch = stage.width / videoAspect;
-    } else {
-      ch = stage.height;
-      cw = stage.height * videoAspect;
-    }
-    const cx = (stage.width - cw) / 2;
-    const cy = (stage.height - ch) / 2;
+    // Bubble lives inside the video content box, not the stage box. Stable
+    // per effect run; deps include stage size + videoDims so resize
+    // re-runs the effect with fresh values.
+    const { w: vw } = videoDims;
+    const { x: cx, y: cy, w: cw, h: ch } = contentBox(stage, videoDims);
 
     const diameter = bubblePositionLog[0].diameter ?? DEFAULT_BUBBLE_DIAMETER_PX;
     const cssDiameter = (diameter / vw) * cw;
@@ -2174,20 +2238,7 @@ function WatermarkPreviewLayer({
   }
 
   // Contain-fit the video inside the 16:9 stage box.
-  const { w: vw, h: vh } = preview.videoDims;
-  const videoAspect = vw / vh;
-  const stageAspect = stage.width / stage.height;
-  let cw: number;
-  let ch: number;
-  if (videoAspect > stageAspect) {
-    cw = stage.width;
-    ch = stage.width / videoAspect;
-  } else {
-    ch = stage.height;
-    cw = stage.height * videoAspect;
-  }
-  const cx = (stage.width - cw) / 2;
-  const cy = (stage.height - ch) / 2;
+  const { x: cx, y: cy, w: cw, h: ch } = contentBox(stage, preview.videoDims);
 
   const shorter = Math.min(cw, ch);
   const logoH = shorter * 0.1;
@@ -2228,12 +2279,14 @@ function AnnotationLayer({
   editor,
   currentTime,
   drawingShape,
+  videoDims,
 }: {
   stageRef: React.MutableRefObject<HTMLDivElement | null>;
   videoRef: React.MutableRefObject<HTMLVideoElement | null>;
   editor: Editor;
   currentTime: number;
-  drawingShape: { tool: "arrow" | "blur"; start: Position; end: Position } | null;
+  drawingShape: { tool: "arrow" | "blur" | "spotlight"; start: Position; end: Position } | null;
+  videoDims: { w: number; h: number } | null;
 }) {
   return (
     <div
@@ -2250,14 +2303,15 @@ function AnnotationLayer({
         const isEditing = editor.editingIndex === idx;
         // Text/arrow stay visible while selected/editing regardless of
         // playhead position — an editing aid so you can nudge them without
-        // scrubbing into their active window. Blur is different: its whole
-        // point is "only visible in this window," so keeping it rendered
-        // outside that range (even while selected for a timeline-handle
-        // resize) would misrepresent what the export actually does. The
-        // timeline pip's band + resize handles don't depend on this render
-        // — they key off isSelected directly — so this doesn't block
-        // resizing from the timeline.
-        const staysVisibleWhenInactive = ann.type !== "blur" && (isSelected || isEditing);
+        // scrubbing into their active window. Blur and spotlight are
+        // different: their whole point is "only visible in this window," so
+        // keeping them rendered outside that range (even while selected for
+        // a timeline-handle resize) would misrepresent what the export
+        // actually does. The timeline pip's band + resize handles don't
+        // depend on this render — they key off isSelected directly — so
+        // this doesn't block resizing from the timeline.
+        const staysVisibleWhenInactive =
+          ann.type !== "blur" && ann.type !== "spotlight" && (isSelected || isEditing);
         if (!visible && !staysVisibleWhenInactive) return null;
         if (ann.type === "text") {
           return (
@@ -2270,6 +2324,7 @@ function AnnotationLayer({
               editor={editor}
               isSelected={isSelected}
               isEditing={isEditing}
+              videoDims={videoDims}
             />
           );
         }
@@ -2282,6 +2337,7 @@ function AnnotationLayer({
               stageRef={stageRef}
               editor={editor}
               isSelected={isSelected}
+              videoDims={videoDims}
             />
           );
         }
@@ -2294,16 +2350,48 @@ function AnnotationLayer({
               stageRef={stageRef}
               editor={editor}
               isSelected={isSelected}
+              videoDims={videoDims}
+            />
+          );
+        }
+        if (ann.type === "spotlight" && ann.endpoint) {
+          return (
+            <SpotlightAnnotationView
+              key={idx}
+              ann={ann}
+              idx={idx}
+              stageRef={stageRef}
+              editor={editor}
+              isSelected={isSelected}
+              videoDims={videoDims}
             />
           );
         }
         return null;
       })}
       {drawingShape?.tool === "arrow" && (
-        <ArrowPreview start={drawingShape.start} end={drawingShape.end} />
+        <ArrowPreview
+          start={drawingShape.start}
+          end={drawingShape.end}
+          stageRef={stageRef}
+          videoDims={videoDims}
+        />
       )}
       {drawingShape?.tool === "blur" && (
-        <BlurPreview start={drawingShape.start} end={drawingShape.end} />
+        <BlurPreview
+          start={drawingShape.start}
+          end={drawingShape.end}
+          stageRef={stageRef}
+          videoDims={videoDims}
+        />
+      )}
+      {drawingShape?.tool === "spotlight" && (
+        <SpotlightPreview
+          start={drawingShape.start}
+          end={drawingShape.end}
+          stageRef={stageRef}
+          videoDims={videoDims}
+        />
       )}
     </div>
   );
@@ -2317,6 +2405,7 @@ function TextAnnotationView({
   editor,
   isSelected,
   isEditing,
+  videoDims,
 }: {
   ann: Annotation;
   idx: number;
@@ -2325,17 +2414,21 @@ function TextAnnotationView({
   editor: Editor;
   isSelected: boolean;
   isEditing: boolean;
+  videoDims: { w: number; h: number } | null;
 }) {
   const bodyRef = useRef<HTMLDivElement | null>(null);
+  const box = useContentBox(stageRef, videoDims);
 
-  // Compute font size in CSS pixels: source-pixel size scaled by display
-  // height vs source video height. Falls back to a 1:1 mapping until video
+  // Compute font size in CSS pixels: source-pixel size scaled by the video
+  // content box's rendered height vs source video height (not the stage's
+  // own height — those differ whenever the source isn't 16:9 and the video
+  // letterboxes inside the stage). Falls back to a 1:1 mapping until video
   // metadata is known.
   const sourceHeight = videoRef.current?.videoHeight || 0;
-  const stageHeight = stageRef.current?.getBoundingClientRect().height || 0;
-  const scale = sourceHeight && stageHeight ? stageHeight / sourceHeight : 1;
+  const scale = sourceHeight && box.h ? box.h / sourceHeight : 1;
   const sizeSrc = ann.size ?? DEFAULT_TEXT_SIZE;
   const sizeCss = sizeSrc * scale;
+  const pos = toStagePx(ann.position, box);
 
   const startBodyDrag = (e: React.PointerEvent) => {
     e.stopPropagation();
@@ -2345,12 +2438,13 @@ function TextAnnotationView({
     }
     const stage = stageRef.current?.getBoundingClientRect();
     if (!stage) return;
+    const dragBox = contentBox({ width: stage.width, height: stage.height }, videoDims);
     const startX = e.clientX;
     const startY = e.clientY;
     const startPos = ann.position;
     const onMove = (ev: PointerEvent) => {
-      const dx = (ev.clientX - startX) / stage.width;
-      const dy = (ev.clientY - startY) / stage.height;
+      const dx = (ev.clientX - startX) / dragBox.w;
+      const dy = (ev.clientY - startY) / dragBox.h;
       editor.updateAnnotation(idx, {
         position: {
           x: Math.max(0, Math.min(1, startPos.x + dx)),
@@ -2445,8 +2539,8 @@ function TextAnnotationView({
       onDoubleClick={onBodyDoubleClick}
       style={{
         position: "absolute",
-        left: `${ann.position.x * 100}%`,
-        top: `${ann.position.y * 100}%`,
+        left: pos.x,
+        top: pos.y,
         padding: `${Math.max(3, sizeCss * 0.15)}px ${Math.max(6, sizeCss * 0.3)}px`,
         background: "rgba(20,20,22,0.86)",
         color: "#fff",
@@ -2539,6 +2633,62 @@ function useStageSize(stageRef: React.MutableRefObject<HTMLDivElement | null>) {
   return size;
 }
 
+// Letterbox-aware content box within the stage — the actual rendered video
+// rect when the source aspect isn't 16:9 (the stage is CSS-locked to 16:9;
+// `objectFit: contain` leaves bars otherwise). Single source of truth for
+// math that used to be duplicated inline in WatermarkPreviewLayer and
+// BubbleLayer — now also used by annotation capture/render so a drawn box
+// can't drift from how the Rust export interprets position/endpoint
+// (always a fraction of the true video frame; ffmpeg's pixel space has no
+// letterbox concept).
+function contentBox(
+  stage: { width: number; height: number },
+  videoDims: { w: number; h: number } | null,
+): { x: number; y: number; w: number; h: number } {
+  if (!videoDims || stage.width === 0 || stage.height === 0) {
+    return { x: 0, y: 0, w: stage.width, h: stage.height };
+  }
+  const videoAspect = videoDims.w / videoDims.h;
+  const stageAspect = stage.width / stage.height;
+  let w: number;
+  let h: number;
+  if (videoAspect > stageAspect) {
+    w = stage.width;
+    h = stage.width / videoAspect;
+  } else {
+    h = stage.height;
+    w = stage.height * videoAspect;
+  }
+  return { x: (stage.width - w) / 2, y: (stage.height - h) / 2, w, h };
+}
+
+function useContentBox(
+  stageRef: React.MutableRefObject<HTMLDivElement | null>,
+  videoDims: { w: number; h: number } | null,
+) {
+  return contentBox(useStageSize(stageRef), videoDims);
+}
+
+// Content-box-relative fraction (the same convention the Rust export reads
+// position/endpoint in) → absolute pixel position within the stage.
+function toStagePx(
+  frac: Position,
+  box: { x: number; y: number; w: number; h: number },
+): Position {
+  return { x: box.x + frac.x * box.w, y: box.y + frac.y * box.h };
+}
+
+// Inverse — a stage-relative pixel position → content-box fraction, clamped
+// to [0,1]. Used by pointer handlers capturing drag coordinates.
+function toContentFrac(
+  stagePx: Position,
+  box: { x: number; y: number; w: number; h: number },
+): Position {
+  const fx = box.w > 0 ? (stagePx.x - box.x) / box.w : 0;
+  const fy = box.h > 0 ? (stagePx.y - box.y) / box.h : 0;
+  return { x: Math.max(0, Math.min(1, fx)), y: Math.max(0, Math.min(1, fy)) };
+}
+
 function ArrowMarker({ id }: { id: string }) {
   return (
     <marker
@@ -2561,14 +2711,16 @@ function ArrowAnnotationView({
   stageRef,
   editor,
   isSelected,
+  videoDims,
 }: {
   ann: Annotation;
   idx: number;
   stageRef: React.MutableRefObject<HTMLDivElement | null>;
   editor: Editor;
   isSelected: boolean;
+  videoDims: { w: number; h: number } | null;
 }) {
-  const stageSize = useStageSize(stageRef);
+  const box = useContentBox(stageRef, videoDims);
   const endpoint = ann.endpoint!;
   const stroke = ann.stroke ?? DEFAULT_ARROW_STROKE;
 
@@ -2578,10 +2730,8 @@ function ArrowAnnotationView({
   const strokeCss = Math.max(2, Math.min(8, stroke * 0.35));
   const markerId = `arrow-head-${idx}`;
 
-  const sx = ann.position.x * stageSize.width;
-  const sy = ann.position.y * stageSize.height;
-  const ex = endpoint.x * stageSize.width;
-  const ey = endpoint.y * stageSize.height;
+  const { x: sx, y: sy } = toStagePx(ann.position, box);
+  const { x: ex, y: ey } = toStagePx(endpoint, box);
 
   const startEndpointDrag = (which: "start" | "end") => (e: React.PointerEvent) => {
     e.stopPropagation();
@@ -2589,13 +2739,13 @@ function ArrowAnnotationView({
     if (!isSelected) editor.setSelectedIndex(idx);
     const stage = stageRef.current?.getBoundingClientRect();
     if (!stage) return;
+    const dragBox = contentBox({ width: stage.width, height: stage.height }, videoDims);
     const onMove = (ev: PointerEvent) => {
-      const fx = Math.max(0, Math.min(1, (ev.clientX - stage.left) / stage.width));
-      const fy = Math.max(0, Math.min(1, (ev.clientY - stage.top) / stage.height));
+      const frac = toContentFrac({ x: ev.clientX - stage.left, y: ev.clientY - stage.top }, dragBox);
       if (which === "start") {
-        editor.updateAnnotation(idx, { position: { x: fx, y: fy } });
+        editor.updateAnnotation(idx, { position: frac });
       } else {
-        editor.updateAnnotation(idx, { endpoint: { x: fx, y: fy } });
+        editor.updateAnnotation(idx, { endpoint: frac });
       }
     };
     const onUp = () => {
@@ -2612,13 +2762,14 @@ function ArrowAnnotationView({
     if (!isSelected) editor.setSelectedIndex(idx);
     const stage = stageRef.current?.getBoundingClientRect();
     if (!stage) return;
+    const dragBox = contentBox({ width: stage.width, height: stage.height }, videoDims);
     const startX = e.clientX;
     const startY = e.clientY;
     const startPos = ann.position;
     const startEnd = endpoint;
     const onMove = (ev: PointerEvent) => {
-      const dx = (ev.clientX - startX) / stage.width;
-      const dy = (ev.clientY - startY) / stage.height;
+      const dx = (ev.clientX - startX) / dragBox.w;
+      const dy = (ev.clientY - startY) / dragBox.h;
       const np = {
         x: Math.max(0, Math.min(1, startPos.x + dx)),
         y: Math.max(0, Math.min(1, startPos.y + dy)),
@@ -2695,30 +2846,35 @@ function ArrowAnnotationView({
 // rather than EndpointHandle's SVG <circle>, since this view has no <svg>
 // wrapper to host one.
 //
-// Positions relative to the stage box, same convention as Text/Arrow (not
-// the letterbox-aware content-box math Bubble/Watermark use) — consistency
-// with its annotation siblings, carrying the same pre-existing non-16:9-
-// source caveat they already have.
+// Positions relative to the letterbox-aware content box (via useContentBox),
+// same convention as Bubble/Watermark and now Text/Arrow/Spotlight too —
+// matches how the Rust export reads position/endpoint as a fraction of the
+// true video frame, independent of any letterbox bars the stage renders
+// when the source isn't 16:9.
 function BlurAnnotationView({
   ann,
   idx,
   stageRef,
   editor,
   isSelected,
+  videoDims,
 }: {
   ann: Annotation;
   idx: number;
   stageRef: React.MutableRefObject<HTMLDivElement | null>;
   editor: Editor;
   isSelected: boolean;
+  videoDims: { w: number; h: number } | null;
 }) {
-  const stageSize = useStageSize(stageRef);
+  const box = useContentBox(stageRef, videoDims);
   const endpoint = ann.endpoint!;
 
-  const x0 = Math.min(ann.position.x, endpoint.x) * stageSize.width;
-  const y0 = Math.min(ann.position.y, endpoint.y) * stageSize.height;
-  const x1 = Math.max(ann.position.x, endpoint.x) * stageSize.width;
-  const y1 = Math.max(ann.position.y, endpoint.y) * stageSize.height;
+  const p0 = toStagePx(ann.position, box);
+  const p1 = toStagePx(endpoint, box);
+  const x0 = Math.min(p0.x, p1.x);
+  const y0 = Math.min(p0.y, p1.y);
+  const x1 = Math.max(p0.x, p1.x);
+  const y1 = Math.max(p0.y, p1.y);
 
   const startCornerDrag = (which: "position" | "endpoint") => (e: React.PointerEvent) => {
     e.stopPropagation();
@@ -2726,13 +2882,13 @@ function BlurAnnotationView({
     if (!isSelected) editor.setSelectedIndex(idx);
     const stage = stageRef.current?.getBoundingClientRect();
     if (!stage) return;
+    const dragBox = contentBox({ width: stage.width, height: stage.height }, videoDims);
     const onMove = (ev: PointerEvent) => {
-      const fx = Math.max(0, Math.min(1, (ev.clientX - stage.left) / stage.width));
-      const fy = Math.max(0, Math.min(1, (ev.clientY - stage.top) / stage.height));
+      const frac = toContentFrac({ x: ev.clientX - stage.left, y: ev.clientY - stage.top }, dragBox);
       if (which === "position") {
-        editor.updateAnnotation(idx, { position: { x: fx, y: fy } });
+        editor.updateAnnotation(idx, { position: frac });
       } else {
-        editor.updateAnnotation(idx, { endpoint: { x: fx, y: fy } });
+        editor.updateAnnotation(idx, { endpoint: frac });
       }
     };
     const onUp = () => {
@@ -2749,13 +2905,14 @@ function BlurAnnotationView({
     if (!isSelected) editor.setSelectedIndex(idx);
     const stage = stageRef.current?.getBoundingClientRect();
     if (!stage) return;
+    const dragBox = contentBox({ width: stage.width, height: stage.height }, videoDims);
     const startX = e.clientX;
     const startY = e.clientY;
     const startPos = ann.position;
     const startEnd = endpoint;
     const onMove = (ev: PointerEvent) => {
-      const dx = (ev.clientX - startX) / stage.width;
-      const dy = (ev.clientY - startY) / stage.height;
+      const dx = (ev.clientX - startX) / dragBox.w;
+      const dy = (ev.clientY - startY) / dragBox.h;
       const np = {
         x: Math.max(0, Math.min(1, startPos.x + dx)),
         y: Math.max(0, Math.min(1, startPos.y + dy)),
@@ -2799,16 +2956,8 @@ function BlurAnnotationView({
       />
       {isSelected && (
         <>
-          <PointHandle
-            x={ann.position.x * stageSize.width}
-            y={ann.position.y * stageSize.height}
-            onPointerDown={startCornerDrag("position")}
-          />
-          <PointHandle
-            x={endpoint.x * stageSize.width}
-            y={endpoint.y * stageSize.height}
-            onPointerDown={startCornerDrag("endpoint")}
-          />
+          <PointHandle x={p0.x} y={p0.y} onPointerDown={startCornerDrag("position")} />
+          <PointHandle x={p1.x} y={p1.y} onPointerDown={startCornerDrag("endpoint")} />
         </>
       )}
     </>
@@ -2870,7 +3019,20 @@ function EndpointHandle({
   );
 }
 
-function ArrowPreview({ start, end }: { start: Position; end: Position }) {
+function ArrowPreview({
+  start,
+  end,
+  stageRef,
+  videoDims,
+}: {
+  start: Position;
+  end: Position;
+  stageRef: React.MutableRefObject<HTMLDivElement | null>;
+  videoDims: { w: number; h: number } | null;
+}) {
+  const box = useContentBox(stageRef, videoDims);
+  const p1 = toStagePx(start, box);
+  const p2 = toStagePx(end, box);
   const markerId = "arrow-preview-head";
   return (
     <svg
@@ -2887,10 +3049,10 @@ function ArrowPreview({ start, end }: { start: Position; end: Position }) {
         <ArrowMarker id={markerId} />
       </defs>
       <line
-        x1={`${start.x * 100}%`}
-        y1={`${start.y * 100}%`}
-        x2={`${end.x * 100}%`}
-        y2={`${end.y * 100}%`}
+        x1={p1.x}
+        y1={p1.y}
+        x2={p2.x}
+        y2={p2.y}
         stroke="#fff"
         strokeOpacity="0.85"
         strokeWidth={4}
@@ -2905,15 +3067,183 @@ function ArrowPreview({ start, end }: { start: Position; end: Position }) {
 // applied yet (the actual redaction only renders once the region is
 // committed as an annotation). Percentage-based like TextAnnotationView,
 // since this is a direct child of the same full-stage AnnotationLayer div.
-function BlurPreview({ start, end }: { start: Position; end: Position }) {
+function BlurPreview({
+  start,
+  end,
+  stageRef,
+  videoDims,
+}: {
+  start: Position;
+  end: Position;
+  stageRef: React.MutableRefObject<HTMLDivElement | null>;
+  videoDims: { w: number; h: number } | null;
+}) {
+  const box = useContentBox(stageRef, videoDims);
+  const p1 = toStagePx(start, box);
+  const p2 = toStagePx(end, box);
   return (
     <div
       style={{
         position: "absolute",
-        left: `${Math.min(start.x, end.x) * 100}%`,
-        top: `${Math.min(start.y, end.y) * 100}%`,
-        width: `${Math.abs(end.x - start.x) * 100}%`,
-        height: `${Math.abs(end.y - start.y) * 100}%`,
+        left: Math.min(p1.x, p2.x),
+        top: Math.min(p1.y, p2.y),
+        width: Math.abs(p2.x - p1.x),
+        height: Math.abs(p2.y - p1.y),
+        border: "1.5px dashed rgba(255,255,255,0.85)",
+        background: "rgba(255,255,255,0.06)",
+        pointerEvents: "none",
+      }}
+    />
+  );
+}
+
+// Spotlight preview — inverse of BlurAnnotationView: instead of blurring the
+// rect, dims everything OUTSIDE it. Same two-point drag model (position +
+// endpoint, whole-body drag translates both, corner PointHandles resize),
+// same rect math, reused verbatim from BlurAnnotationView's startCornerDrag/
+// startBodyDrag shape.
+//
+// The dim itself is a single CSS box-shadow with a huge spread
+// (`0 0 0 9999px`) on the rect div — a standard "spotlight cutout" trick.
+// The spread fills everything outside the rect's box with the dim color and
+// is naturally clipped by the stage's own `overflow: hidden`, so no second
+// full-stage overlay element is needed.
+function SpotlightAnnotationView({
+  ann,
+  idx,
+  stageRef,
+  editor,
+  isSelected,
+  videoDims,
+}: {
+  ann: Annotation;
+  idx: number;
+  stageRef: React.MutableRefObject<HTMLDivElement | null>;
+  editor: Editor;
+  isSelected: boolean;
+  videoDims: { w: number; h: number } | null;
+}) {
+  const box = useContentBox(stageRef, videoDims);
+  const endpoint = ann.endpoint!;
+
+  const p0 = toStagePx(ann.position, box);
+  const p1 = toStagePx(endpoint, box);
+  const x0 = Math.min(p0.x, p1.x);
+  const y0 = Math.min(p0.y, p1.y);
+  const x1 = Math.max(p0.x, p1.x);
+  const y1 = Math.max(p0.y, p1.y);
+
+  const startCornerDrag = (which: "position" | "endpoint") => (e: React.PointerEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    if (!isSelected) editor.setSelectedIndex(idx);
+    const stage = stageRef.current?.getBoundingClientRect();
+    if (!stage) return;
+    const dragBox = contentBox({ width: stage.width, height: stage.height }, videoDims);
+    const onMove = (ev: PointerEvent) => {
+      const frac = toContentFrac({ x: ev.clientX - stage.left, y: ev.clientY - stage.top }, dragBox);
+      if (which === "position") {
+        editor.updateAnnotation(idx, { position: frac });
+      } else {
+        editor.updateAnnotation(idx, { endpoint: frac });
+      }
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+
+  const startBodyDrag = (e: React.PointerEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    if (!isSelected) editor.setSelectedIndex(idx);
+    const stage = stageRef.current?.getBoundingClientRect();
+    if (!stage) return;
+    const dragBox = contentBox({ width: stage.width, height: stage.height }, videoDims);
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startPos = ann.position;
+    const startEnd = endpoint;
+    const onMove = (ev: PointerEvent) => {
+      const dx = (ev.clientX - startX) / dragBox.w;
+      const dy = (ev.clientY - startY) / dragBox.h;
+      const np = {
+        x: Math.max(0, Math.min(1, startPos.x + dx)),
+        y: Math.max(0, Math.min(1, startPos.y + dy)),
+      };
+      const ne = {
+        x: Math.max(0, Math.min(1, startEnd.x + dx)),
+        y: Math.max(0, Math.min(1, startEnd.y + dy)),
+      };
+      editor.updateAnnotation(idx, { position: np, endpoint: ne });
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+
+  return (
+    <>
+      <div
+        onPointerDown={startBodyDrag}
+        onClick={(e) => {
+          e.stopPropagation();
+          if (!isSelected) editor.setSelectedIndex(idx);
+        }}
+        style={{
+          position: "absolute",
+          left: x0,
+          top: y0,
+          width: Math.max(0, x1 - x0),
+          height: Math.max(0, y1 - y0),
+          boxShadow: `0 0 0 9999px rgba(0,0,0,${SPOTLIGHT_PREVIEW_DIM_ALPHA})`,
+          outline: isSelected ? "1.5px solid var(--accent)" : "1px dashed rgba(255,255,255,0.5)",
+          outlineOffset: isSelected ? 0 : -1,
+          cursor: "move",
+          pointerEvents: "auto",
+        }}
+      />
+      {isSelected && (
+        <>
+          <PointHandle x={p0.x} y={p0.y} onPointerDown={startCornerDrag("position")} />
+          <PointHandle x={p1.x} y={p1.y} onPointerDown={startCornerDrag("endpoint")} />
+        </>
+      )}
+    </>
+  );
+}
+
+// Live drag preview for the spotlight tool — a dashed marquee, no dim effect
+// applied yet, same as BlurPreview (the actual dim only renders once the
+// region is committed as an annotation).
+function SpotlightPreview({
+  start,
+  end,
+  stageRef,
+  videoDims,
+}: {
+  start: Position;
+  end: Position;
+  stageRef: React.MutableRefObject<HTMLDivElement | null>;
+  videoDims: { w: number; h: number } | null;
+}) {
+  const box = useContentBox(stageRef, videoDims);
+  const p1 = toStagePx(start, box);
+  const p2 = toStagePx(end, box);
+  return (
+    <div
+      style={{
+        position: "absolute",
+        left: Math.min(p1.x, p2.x),
+        top: Math.min(p1.y, p2.y),
+        width: Math.abs(p2.x - p1.x),
+        height: Math.abs(p2.y - p1.y),
         border: "1.5px dashed rgba(255,255,255,0.85)",
         background: "rgba(255,255,255,0.06)",
         pointerEvents: "none",
@@ -3293,7 +3623,14 @@ function Timeline(props: TimelineProps) {
               window.addEventListener("pointermove", onMove);
               window.addEventListener("pointerup", onUp);
             };
-            const label = ann.type === "text" ? "T" : ann.type === "arrow" ? "→" : "B";
+            const label =
+              ann.type === "text"
+                ? "T"
+                : ann.type === "arrow"
+                  ? "→"
+                  : ann.type === "blur"
+                    ? "B"
+                    : "S";
             return (
               <div key={idx}>
                 {selected && (

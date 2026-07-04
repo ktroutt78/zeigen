@@ -176,6 +176,11 @@ const DEFAULT_ARROW_STROKE_PX: f64 = 8.0;
 // redacted rather than lightly softened.
 const BLUR_SIGMA_FRAC: f64 = 0.35;
 const BLUR_SIGMA_MIN_PX: f64 = 8.0;
+// Spotlight dim strength for the frame OUTSIDE the drawn rect. Multiplicative
+// (colorchannelmixer) rather than eq's additive brightness so "45% brightness"
+// means what it says regardless of the frame's original exposure. By-eye
+// calibration, same class of tuning as BLUR_SIGMA_FRAC above.
+const SPOTLIGHT_DIM_FACTOR: f64 = 0.45;
 // SFNS.ttf is a variable font with PostScript-style outlines that
 // ab_glyph 0.2.x silently rasterizes as zero-coverage — text rendered fine
 // in the preview but the saved PNGs were blank backgrounds. Geneva is a
@@ -559,6 +564,32 @@ fn rasterize_arrow(
     Ok(())
 }
 
+// Region annotation → pixel crop rect (cx, cy, cw, ch), clamped to the frame.
+// Shared by blur_region_fragment and spotlight_region_fragment — both read a
+// two-corner fractional rect (position/endpoint) off the same annotation
+// shape and need the identical clamp/rounding math to land on the same
+// pixels.
+fn region_crop_px(ann: &Annotation, src_dims: (u32, u32)) -> (i64, i64, i64, i64) {
+    let (sw, sh) = src_dims;
+    let endpoint = ann
+        .endpoint
+        .as_ref()
+        .expect("region annotation missing endpoint");
+    let x0 = ann.position.x.clamp(0.0, 1.0).min(endpoint.x.clamp(0.0, 1.0));
+    let y0 = ann.position.y.clamp(0.0, 1.0).min(endpoint.y.clamp(0.0, 1.0));
+    let x1 = ann.position.x.clamp(0.0, 1.0).max(endpoint.x.clamp(0.0, 1.0));
+    let y1 = ann.position.y.clamp(0.0, 1.0).max(endpoint.y.clamp(0.0, 1.0));
+    let cx = (x0 * sw as f64).round() as i64;
+    let cy = (y0 * sh as f64).round() as i64;
+    let cw = (((x1 - x0) * sw as f64).round() as i64)
+        .max(1)
+        .min((sw as i64 - cx).max(1));
+    let ch = (((y1 - y0) * sh as f64).round() as i64)
+        .max(1)
+        .min((sh as i64 - cy).max(1));
+    (cx, cy, cw, ch)
+}
+
 // Blur/redact filter-graph fragment for one sidecar "blur" annotation.
 // Crops the region, applies a strong gblur, and overlays it back over the
 // exact same rect for [start, end]. Pure filter graph — no rasterized PNG
@@ -578,28 +609,43 @@ pub(crate) fn blur_region_fragment(
     start: f64,
     end: f64,
 ) -> String {
-    let (sw, sh) = src_dims;
-    let endpoint = ann
-        .endpoint
-        .as_ref()
-        .expect("blur region missing endpoint");
-    let x0 = ann.position.x.clamp(0.0, 1.0).min(endpoint.x.clamp(0.0, 1.0));
-    let y0 = ann.position.y.clamp(0.0, 1.0).min(endpoint.y.clamp(0.0, 1.0));
-    let x1 = ann.position.x.clamp(0.0, 1.0).max(endpoint.x.clamp(0.0, 1.0));
-    let y1 = ann.position.y.clamp(0.0, 1.0).max(endpoint.y.clamp(0.0, 1.0));
-    let cx = (x0 * sw as f64).round() as i64;
-    let cy = (y0 * sh as f64).round() as i64;
-    let cw = (((x1 - x0) * sw as f64).round() as i64)
-        .max(1)
-        .min((sw as i64 - cx).max(1));
-    let ch = (((y1 - y0) * sh as f64).round() as i64)
-        .max(1)
-        .min((sh as i64 - cy).max(1));
+    let (cx, cy, cw, ch) = region_crop_px(ann, src_dims);
     let sigma = (cw.min(ch) as f64 * BLUR_SIGMA_FRAC).max(BLUR_SIGMA_MIN_PX);
     format!(
         "[{prev_label}]split=2[bs{idx}][bc{idx}];\
 [bc{idx}]crop={cw}:{ch}:{cx}:{cy},gblur=sigma={sigma:.1}[bb{idx}];\
 [bs{idx}][bb{idx}]overlay=x={cx}:y={cy}:enable=between(t\\,{start:.3}\\,{end:.3})[{next_label}]"
+    )
+}
+
+// Spotlight filter-graph fragment for one sidecar "spotlight" annotation.
+// Darkens the WHOLE frame (colorchannelmixer, multiplicative so it's a true
+// percentage of brightness), then overlays the untouched crop of the same
+// rect back on top for [start, end] — the inverse of blur_region_fragment,
+// which overlays a blurred crop over a sharp base. Same pure-filter-graph
+// shape (split + crop + overlay, no rasterized PNG), same idx/prev_label/
+// next_label contract, same dual-caller reuse (edit.rs pass-2, linkedin.rs
+// custom transcode) as blur.
+pub(crate) fn spotlight_region_fragment(
+    idx: usize,
+    prev_label: &str,
+    next_label: &str,
+    ann: &Annotation,
+    src_dims: (u32, u32),
+    start: f64,
+    end: f64,
+) -> String {
+    let (cx, cy, cw, ch) = region_crop_px(ann, src_dims);
+    let f = SPOTLIGHT_DIM_FACTOR;
+    // colorchannelmixer is a timeline filter (supports `enable`) — without
+    // it the dim would apply for the whole clip and only the box's
+    // restoring overlay would be time-boxed, leaving every frame outside
+    // [start,end] fully dimmed with nothing to undo it.
+    format!(
+        "[{prev_label}]split=2[sps{idx}][spc{idx}];\
+[sps{idx}]colorchannelmixer=rr={f}:gg={f}:bb={f}:enable=between(t\\,{start:.3}\\,{end:.3})[spd{idx}];\
+[spc{idx}]crop={cw}:{ch}:{cx}:{cy}[spr{idx}];\
+[spd{idx}][spr{idx}]overlay=x={cx}:y={cy}:enable=between(t\\,{start:.3}\\,{end:.3})[{next_label}]"
     )
 }
 
@@ -872,6 +918,13 @@ fn run_edit_pipeline_single_input(
         .enumerate()
         .filter(|(_, a)| a.kind == "blur" && a.endpoint.is_some())
         .collect();
+    // Spotlight regions are pure filter graph too, same reason as blur above.
+    let spotlight_anns: Vec<(usize, &Annotation)> = sidecar
+        .annotations
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| a.kind == "spotlight" && a.endpoint.is_some())
+        .collect();
     let need_temp = !text_anns.is_empty() || !arrow_anns.is_empty();
     if need_temp {
         std::fs::create_dir_all(&temp_dir)
@@ -894,6 +947,7 @@ fn run_edit_pipeline_single_input(
     // source dimension.
     let src_dims: Option<(u32, u32)> = if !arrow_anns.is_empty()
         || !blur_anns.is_empty()
+        || !spotlight_anns.is_empty()
         || watermark.is_some()
     {
         Some(probe_dimensions(source)?)
@@ -958,6 +1012,7 @@ fn run_edit_pipeline_single_input(
     let needs_filter = !text_paths.is_empty()
         || !arrow_paths.is_empty()
         || !blur_anns.is_empty()
+        || !spotlight_anns.is_empty()
         || watermark.is_some()
         || gif_mode
         || mp4_scale.is_some();
@@ -987,6 +1042,43 @@ fn run_edit_pipeline_single_input(
                 end,
             ));
             if i + 1 < blur_anns.len()
+                || !spotlight_anns.is_empty()
+                || !text_paths.is_empty()
+                || !arrow_paths.is_empty()
+                || watermark.is_some()
+                || gif_mode
+                || mp4_scale.is_some()
+            {
+                filter.push(';');
+            }
+            prev_label = next_label;
+        }
+
+        // Spotlight regions — same layer as blur (a base-video pixel
+        // transform, not a fresh-content overlay), applied right after so
+        // text/arrow below still draw on top undimmed. Runs after blur:
+        // the two commute (both are per-pixel/spatial transforms with no
+        // new content), so ordering between them doesn't affect whether a
+        // blurred region stays redacted — it's blurred at whatever point in
+        // the chain blur_region_fragment runs, before or after spotlight's
+        // dim+restore. Placing spotlight second keeps this a pure addition
+        // that doesn't reshuffle the already-shipped blur stage.
+        for (i, (_idx, ann)) in spotlight_anns.iter().enumerate() {
+            let (sw, sh) = src_dims.expect("src_dims set when spotlight present");
+            let next_label = format!("v{step}");
+            step += 1;
+            let start = (ann.start_time - trim_in).max(0.0);
+            let end = (ann.end_time - trim_in).max(start).min(out_duration);
+            filter.push_str(&spotlight_region_fragment(
+                i,
+                &prev_label,
+                &next_label,
+                ann,
+                (sw, sh),
+                start,
+                end,
+            ));
+            if i + 1 < spotlight_anns.len()
                 || !text_paths.is_empty()
                 || !arrow_paths.is_empty()
                 || watermark.is_some()
