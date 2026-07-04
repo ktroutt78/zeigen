@@ -138,6 +138,7 @@ pub fn clipboard_copy_recording(
         crate::composite::WebcamSize::Medium,
         crate::composite::Corner::BottomRight,
         Watermark::from_args(watermark_logo, watermark_corner),
+        |_| {},
     )?;
     write_url_to_pasteboard(&temp_file)
 }

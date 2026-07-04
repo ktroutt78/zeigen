@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { emit } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { revealItemInDir, openUrl } from "@tauri-apps/plugin-opener";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { Icon, I, P } from "./components/icons";
@@ -340,6 +340,11 @@ export default function Review() {
   const [snapshot, setSnapshot] = useState<SidecarState>(EMPTY_STATE);
 
   const [saving, setSaving] = useState(false);
+  // 0-1 fraction from the Rust "save-progress" event, emitted from
+  // ffmpeg's -progress out_time_us during save_recording. null when not
+  // saving — distinct from 0 so the Save button can tell "about to start"
+  // from "started, no progress line yet" if that distinction ever matters.
+  const [saveProgress, setSaveProgress] = useState<number | null>(null);
   const [discarding, setDiscarding] = useState(false);
   const [showCloseModal, setShowCloseModal] = useState(false);
   const busy = saving || discarding;
@@ -673,6 +678,14 @@ export default function Review() {
         return null;
       }
       setSaving(true);
+      setSaveProgress(0);
+      // save-progress carries a 0-1 fraction from ffmpeg's -progress
+      // out_time_us (see edit.rs::save_recording). Listen only for the
+      // duration of this call — a fresh listener per save keeps it simple
+      // and avoids leaking state across saves that never resolve.
+      const unlisten = await listen<number>("save-progress", (event) => {
+        setSaveProgress(event.payload);
+      });
       try {
         const result = await invoke<{
           output_path: string;
@@ -704,7 +717,9 @@ export default function Review() {
         setError(`save: ${err}`);
         return null;
       } finally {
+        unlisten();
         setSaving(false);
+        setSaveProgress(null);
       }
     },
     [sourcePath, wmEffectiveLogo, wmCorner],
@@ -1159,6 +1174,7 @@ export default function Review() {
           trim={trim}
           busy={busy}
           saving={saving}
+          saveProgress={saveProgress}
           format={format}
           setFormat={setFormat}
           mp4Res={mp4Res}
@@ -3357,6 +3373,7 @@ function ExportPanel({
   trim,
   busy,
   saving,
+  saveProgress,
   format,
   setFormat,
   mp4Res,
@@ -3380,6 +3397,7 @@ function ExportPanel({
   trim: Trim | null;
   busy: boolean;
   saving: boolean;
+  saveProgress: number | null;
   format: "mp4" | "gif";
   setFormat: (f: "mp4" | "gif") => void;
   mp4Res: "480p" | "720p" | "1080p" | "source";
@@ -3658,6 +3676,8 @@ function ExportPanel({
           disabled={saveDisabled}
           className="btn-primary"
           style={{
+            position: "relative",
+            overflow: "hidden",
             marginTop: 8,
             width: "100%",
             padding: "8px 0",
@@ -3673,19 +3693,36 @@ function ExportPanel({
             cursor: saveDisabled ? "not-allowed" : "pointer",
           }}
         >
-          {justSaved ? (
-            <>
-              <Icon d={P.check} size={13} stroke={1.8} />
-              <span>Saved</span>
-            </>
-          ) : saving ? (
-            <span>Saving…</span>
-          ) : (
-            <>
-              <Icon d={P.check} size={13} stroke={1.6} />
-              <span>Save as {formatLabel}</span>
-            </>
+          {saving && saveProgress != null && (
+            // Fill bar behind the label — a percent in text is easy to miss;
+            // this makes progress visible at a glance without staring at digits.
+            <span
+              style={{
+                position: "absolute",
+                inset: 0,
+                width: `${Math.round(saveProgress * 100)}%`,
+                background: "rgba(255,255,255,0.22)",
+                transition: "width 200ms linear",
+              }}
+            />
           )}
+          <span style={{ position: "relative", display: "inline-flex", alignItems: "center", gap: 6 }}>
+            {justSaved ? (
+              <>
+                <Icon d={P.check} size={13} stroke={1.8} />
+                <span>Saved</span>
+              </>
+            ) : saving ? (
+              <span>
+                Saving…{saveProgress != null ? ` ${Math.round(saveProgress * 100)}%` : ""}
+              </span>
+            ) : (
+              <>
+                <Icon d={P.check} size={13} stroke={1.6} />
+                <span>Save as {formatLabel}</span>
+              </>
+            )}
+          </span>
         </button>
       </div>
 

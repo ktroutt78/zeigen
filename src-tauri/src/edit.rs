@@ -1,9 +1,11 @@
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
 use ab_glyph::{point, Font, FontRef, Glyph, PxScale, ScaleFont};
 use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Emitter};
 
 use crate::composite::{Watermark, FFMPEG_PATH, FFPROBE_PATH};
 
@@ -644,6 +646,7 @@ pub(crate) fn run_edit_pipeline(
     webcam_size: crate::composite::WebcamSize,
     webcam_corner: crate::composite::Corner,
     watermark: Option<Watermark>,
+    on_progress: impl Fn(f64) + Send + Clone + 'static,
 ) -> Result<(), String> {
     // Phase 15 c3: callers can no longer assume a file exists at the
     // scratch logical path (composite moved to export). The thing that
@@ -654,7 +657,7 @@ pub(crate) fn run_edit_pipeline(
     }
 
     if webcam_segments.is_empty() {
-        return run_edit_pipeline_single_input(screen_path, output, sidecar, mode, watermark);
+        return run_edit_pipeline_single_input(screen_path, output, sidecar, mode, watermark, on_progress);
     }
 
     // Temp composite file. Lives under the scratch's .sources sibling
@@ -689,6 +692,13 @@ pub(crate) fn run_edit_pipeline(
         ok
     });
 
+    // Two ffmpeg passes share one progress bar: composite fills 0-50%,
+    // the single-input pass fills 50-100%. on_progress is cloned into the
+    // composite callback so the original survives to build the second.
+    let composite_progress = {
+        let on_progress = on_progress.clone();
+        move |frac: f64| on_progress(frac * 0.5)
+    };
     crate::composite::composite(
         screen_path,
         webcam_segments,
@@ -697,13 +707,14 @@ pub(crate) fn run_edit_pipeline(
         webcam_corner,
         &sidecar.bubble_position_log,
         composite_watermark,
-        |_| {},
+        composite_progress,
     )?;
 
     // Watermark already baked into composite_tmp above — pass None so pass 2
     // doesn't re-apply it (and doesn't trip needs_filter into a re-encode).
+    let single_progress = move |frac: f64| on_progress(0.5 + frac * 0.5);
     let result =
-        run_edit_pipeline_single_input(&composite_tmp, output, sidecar, mode, None);
+        run_edit_pipeline_single_input(&composite_tmp, output, sidecar, mode, None, single_progress);
 
     // Best-effort cleanup either way — leave the temp for inspection on
     // failure isn't worth the disk vs. the simpler always-clean rule.
@@ -725,6 +736,7 @@ fn run_edit_pipeline_single_input(
     sidecar: &SidecarState,
     mode: PipelineMode,
     watermark: Option<Watermark>,
+    on_progress: impl Fn(f64) + Send + 'static,
 ) -> Result<(), String> {
     // Skip a watermark whose logo file is gone — never fail an export over a
     // missing logo; the rest of the pipeline proceeds without it.
@@ -840,7 +852,13 @@ fn run_edit_pipeline_single_input(
         }
     }
 
-    let mut args: Vec<String> = vec!["-y".into(), "-hide_banner".into()];
+    let mut args: Vec<String> = vec![
+        "-y".into(),
+        "-hide_banner".into(),
+        "-nostats".into(),
+        "-progress".into(),
+        "pipe:1".into(),
+    ];
     if let Some(t) = trim {
         let start = t.start.max(0.0);
         let end = t.out.min(duration);
@@ -1060,17 +1078,52 @@ fn run_edit_pipeline_single_input(
 
     args.push(output.to_string_lossy().into_owned());
 
-    let result = Command::new(FFMPEG_PATH)
+    let mut child = Command::new(FFMPEG_PATH)
         .args(&args)
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("failed to spawn ffmpeg: {e}"))?;
 
-    if !result.status.success() {
-        let stderr = String::from_utf8_lossy(&result.stderr);
+    // Same out_time_us parsing as composite.rs's progress thread — see that
+    // module for why total_us is derived from the encoded duration rather
+    // than read back from ffmpeg.
+    let stdout = child.stdout.take().ok_or("ffmpeg stdout missing")?;
+    let stderr = child.stderr.take().ok_or("ffmpeg stderr missing")?;
+    let total_us = (out_duration * 1_000_000.0).max(1.0) as u64;
+    let progress_thread = std::thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines().map_while(Result::ok) {
+            if let Some(rest) = line.strip_prefix("out_time_us=") {
+                if let Ok(us) = rest.trim().parse::<u64>() {
+                    let frac = (us as f64 / total_us as f64).clamp(0.0, 1.0);
+                    on_progress(frac);
+                }
+            }
+        }
+    });
+    let stderr_thread = std::thread::spawn(move || {
+        let mut buf = String::new();
+        let reader = BufReader::new(stderr);
+        for line in reader.lines().map_while(Result::ok) {
+            buf.push_str(&line);
+            buf.push('\n');
+        }
+        buf
+    });
+
+    let status = child
+        .wait()
+        .map_err(|e| format!("failed to wait on ffmpeg: {e}"))?;
+    let _ = progress_thread.join();
+    let stderr_text = stderr_thread.join().unwrap_or_default();
+
+    if !status.success() {
         return Err(format!(
             "ffmpeg edit pipeline failed (exit {:?}):\n{}",
-            result.status.code(),
-            stderr
+            status.code(),
+            stderr_text
                 .lines()
                 .rev()
                 .take(40)
@@ -1352,6 +1405,7 @@ fn validate_poster_mp4(path: &Path) -> bool {
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub fn save_recording(
+    app: AppHandle,
     stamp: String,
     source_path: String,
     format: String,
@@ -1359,6 +1413,38 @@ pub fn save_recording(
     fps: Option<u32>,
     watermark_logo: Option<String>,
     watermark_corner: Option<String>,
+) -> Result<SaveResult, String> {
+    // Fraction 0.0-1.0 out_time_us progress from the ffmpeg pass(es) run_edit_pipeline
+    // drives — the review window's Save button listens for this to show a percent.
+    let on_progress = move |frac: f64| {
+        if let Err(e) = app.emit("save-progress", frac) {
+            eprintln!("[save-progress] emit failed: {e}");
+        }
+    };
+    save_recording_impl(
+        stamp,
+        source_path,
+        format,
+        resolution,
+        fps,
+        watermark_logo,
+        watermark_corner,
+        on_progress,
+    )
+}
+
+// Split from save_recording so tests can call this directly without needing
+// an AppHandle — mock_app() plumbing isn't worth it for one progress event.
+#[allow(clippy::too_many_arguments)]
+fn save_recording_impl(
+    stamp: String,
+    source_path: String,
+    format: String,
+    resolution: String,
+    fps: Option<u32>,
+    watermark_logo: Option<String>,
+    watermark_corner: Option<String>,
+    on_progress: impl Fn(f64) + Send + Clone + 'static,
 ) -> Result<SaveResult, String> {
     let source = Path::new(&source_path);
     // Phase 15 c3: don't is_file-check source. It's the scratch logical
@@ -1407,6 +1493,7 @@ pub fn save_recording(
                 webcam_size,
                 webcam_corner,
                 watermark,
+                on_progress,
             )?;
             output
         }
@@ -1428,6 +1515,7 @@ pub fn save_recording(
                 webcam_size,
                 webcam_corner,
                 watermark,
+                on_progress,
             )?;
             output
         }
@@ -1596,6 +1684,7 @@ mod tests {
             crate::composite::WebcamSize::Medium,
             crate::composite::Corner::BottomRight,
             None,
+            |_| {},
         )
         .expect("source pipeline");
 
@@ -1635,6 +1724,7 @@ mod tests {
             crate::composite::WebcamSize::Medium,
             crate::composite::Corner::BottomRight,
             None,
+            |_| {},
         )
         .expect("p720 pipeline");
         let (_, h720) = probe_dimensions(Path::new(&p720_out_str)).expect("probe p720 dims");
@@ -1825,6 +1915,7 @@ mod tests {
                 crate::composite::WebcamSize::Medium,
                 crate::composite::Corner::BottomRight,
                 None,
+                |_| {},
             )
             .expect("run new pipeline");
             let elapsed = start.elapsed();
@@ -1928,7 +2019,7 @@ mod tests {
         let _ = std::fs::remove_file(&noop_out_first);
         let _ = std::fs::remove_file(&noop_out_second);
 
-        let result = save_recording(
+        let result = save_recording_impl(
             "test-noop-c2".to_string(),
             noop_src.to_string_lossy().into_owned(),
             "mp4".to_string(),
@@ -1936,6 +2027,7 @@ mod tests {
             None,
             None,
             None,
+            |_| {},
         )
         .expect("save_recording noop");
         assert_eq!(result.output_path, noop_out_first.to_string_lossy());
@@ -1967,7 +2059,7 @@ mod tests {
         assert_ne!(src_a, out_a, "noop audio stream should differ (arnndn + AAC ran)");
 
         // --- per-format collision: second call lands at -2.mp4 ---
-        let result2 = save_recording(
+        let result2 = save_recording_impl(
             "test-noop-c2".to_string(),
             noop_src.to_string_lossy().into_owned(),
             "mp4".to_string(),
@@ -1975,6 +2067,7 @@ mod tests {
             None,
             None,
             None,
+            |_| {},
         )
         .expect("save_recording second");
         assert_eq!(result2.output_path, noop_out_second.to_string_lossy());
@@ -1994,7 +2087,7 @@ mod tests {
         let p720_out = movies.join("recording-test-edits-c2.mp4");
         let _ = std::fs::remove_file(&p720_out);
 
-        let result3 = save_recording(
+        let result3 = save_recording_impl(
             "test-edits-c2".to_string(),
             edited_src.to_string_lossy().into_owned(),
             "mp4".to_string(),
@@ -2002,6 +2095,7 @@ mod tests {
             None,
             None,
             None,
+            |_| {},
         )
         .expect("save_recording p720");
         assert_eq!(result3.output_path, p720_out.to_string_lossy());
@@ -2019,7 +2113,7 @@ mod tests {
         let gif_out = movies.join("recording-test-edits-c2.gif");
         let _ = std::fs::remove_file(&gif_out);
 
-        let result4 = save_recording(
+        let result4 = save_recording_impl(
             "test-edits-c2".to_string(),
             edited_src.to_string_lossy().into_owned(),
             "gif".to_string(),
@@ -2027,6 +2121,7 @@ mod tests {
             Some(15),
             None,
             None,
+            |_| {},
         )
         .expect("save_recording gif");
         assert_eq!(result4.output_path, gif_out.to_string_lossy());
@@ -2039,7 +2134,7 @@ mod tests {
         );
 
         // --- fps required for gif format ---
-        let err = save_recording(
+        let err = save_recording_impl(
             "test-edits-c2".to_string(),
             edited_src.to_string_lossy().into_owned(),
             "gif".to_string(),
@@ -2047,6 +2142,7 @@ mod tests {
             None,
             None,
             None,
+            |_| {},
         )
         .expect_err("gif without fps should fail");
         assert!(err.contains("fps"), "expected fps error, got: {err}");
@@ -2103,7 +2199,7 @@ mod tests {
         run_edit_pipeline(source, &[], Path::new(out_src), &sidecar,
             PipelineMode::Mp4 { resolution: Mp4Resolution::Source },
             crate::composite::WebcamSize::Medium, crate::composite::Corner::BottomRight,
-            wm_tr.clone())
+            wm_tr.clone(), |_| {})
             .expect("mp4 source + watermark");
         assert_eq!(probe_dimensions(Path::new(out_src)).unwrap(), (sw, sh), "source res preserved");
         extract_frame(out_src, "/tmp/zeigen-wm-frame-pipeline-tr.png");
@@ -2113,7 +2209,7 @@ mod tests {
         run_edit_pipeline(source, &[], Path::new(out_bl), &sidecar,
             PipelineMode::Mp4 { resolution: Mp4Resolution::Source },
             crate::composite::WebcamSize::Medium, crate::composite::Corner::BottomRight,
-            wm_bl)
+            wm_bl, |_| {})
             .expect("mp4 source + watermark bl");
         extract_frame(out_bl, "/tmp/zeigen-wm-frame-pipeline-bl.png");
 
@@ -2122,7 +2218,7 @@ mod tests {
         run_edit_pipeline(source, &[], Path::new(out_720), &sidecar,
             PipelineMode::Mp4 { resolution: Mp4Resolution::P720 },
             crate::composite::WebcamSize::Medium, crate::composite::Corner::BottomRight,
-            wm_tr.clone())
+            wm_tr.clone(), |_| {})
             .expect("mp4 720 + watermark");
         assert_eq!(probe_dimensions(Path::new(out_720)).unwrap().1, 720, "720 tall");
 
@@ -2131,7 +2227,7 @@ mod tests {
         run_edit_pipeline(source, &[], Path::new(out_gif), &sidecar,
             PipelineMode::Gif { resolution: GifResolution::P480, fps: 12 },
             crate::composite::WebcamSize::Medium, crate::composite::Corner::BottomRight,
-            wm_tr.clone())
+            wm_tr.clone(), |_| {})
             .expect("gif + watermark");
         let gif_bytes = std::fs::read(out_gif).expect("read gif");
         assert!(
@@ -2151,7 +2247,7 @@ mod tests {
         run_edit_pipeline(source, &[], Path::new(noop), &sidecar,
             PipelineMode::Mp4 { resolution: Mp4Resolution::Source },
             crate::composite::WebcamSize::Medium, crate::composite::Corner::BottomRight,
-            None)
+            None, |_| {})
             .expect("noop");
         assert_eq!(
             stream_md5(&source_str, "0:v"), stream_md5(noop, "0:v"),
