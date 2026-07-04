@@ -684,6 +684,21 @@ fn quit_app(app: AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Must be registered first — Tauri's single-instance guard needs to
+        // intercept a second launch before the rest of setup runs. Without
+        // this, every launch (double-click, Spotlight, hotkey) spawned a
+        // brand-new process with its own recording-engine child, tray icon,
+        // and global-shortcut registration; concurrent instances fighting
+        // over the same ScreenCaptureKit/mic resources meant one instance's
+        // engine child would die, and the next command sent to it hit a
+        // dead stdin pipe (EngineClient::send's "Broken pipe" error).
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(
