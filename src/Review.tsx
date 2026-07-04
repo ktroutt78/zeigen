@@ -87,6 +87,20 @@ const EMPTY_STATE: SidecarState = {
 const SIDECAR_DEBOUNCE_MS = 350;
 const TRIM_EPS = 0.05;
 
+// Keyboard transport constants. FRAME_SECONDS assumes 30fps — same
+// assumption composite.rs's mask/shadow loop inputs make; screen
+// captures are VFR so this is an approximation, not exact frame math.
+const SEEK_SECONDS = 5;
+const FRAME_SECONDS = 1 / 30;
+const PLAYBACK_SPEEDS = [1, 1.5, 2] as const;
+
+function cyclePlaybackRate(current: number, dir: 1 | -1): number {
+  const idx = PLAYBACK_SPEEDS.indexOf(current as (typeof PLAYBACK_SPEEDS)[number]);
+  const base = idx === -1 ? 0 : idx;
+  const next = (base + dir + PLAYBACK_SPEEDS.length) % PLAYBACK_SPEEDS.length;
+  return PLAYBACK_SPEEDS[next];
+}
+
 type WmCorner = "tl" | "tr" | "bl" | "br";
 const WM_CORNERS: WmCorner[] = ["tl", "tr", "bl", "br"];
 
@@ -295,6 +309,7 @@ export default function Review() {
   const [duration, setDuration] = useState<number | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [playing, setPlaying] = useState(false);
+  const [playbackRate, setPlaybackRate] = useState(1);
   const [error, setError] = useState<string | null>(null);
   // Soft info message — currently only fired post-save when the user's
   // thumbnail pick fell outside the trim range and the backend used the
@@ -772,49 +787,6 @@ export default function Review() {
     await emit("record-another").catch(() => {});
   }, []);
 
-  // Global keyboard shortcuts: T/A → text tool, R → arrow tool (C5),
-  // Esc → cancel tool/selection, Backspace/Delete → delete selection.
-  // Suppressed while the close modal is open (its own handler runs)
-  // and while editing text content (contentEditable).
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (showCloseModal) return;
-      const target = e.target as HTMLElement | null;
-      if (target?.isContentEditable) return;
-      if (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA") return;
-      if (e.metaKey || e.ctrlKey || e.altKey) return;
-
-      const key = e.key.toLowerCase();
-      if (key === "t" || key === "a") {
-        e.preventDefault();
-        setTool((prev) => (prev === "text" ? null : "text"));
-        setSelectedIndex(null);
-        setEditingIndex(null);
-      } else if (key === "r") {
-        e.preventDefault();
-        setTool((prev) => (prev === "arrow" ? null : "arrow"));
-        setSelectedIndex(null);
-        setEditingIndex(null);
-      } else if (e.key === "Escape") {
-        e.preventDefault();
-        if (editingIndex != null) {
-          setEditingIndex(null);
-        } else if (selectedIndex != null) {
-          setSelectedIndex(null);
-        } else if (tool != null) {
-          setTool(null);
-        }
-      } else if (e.key === "Backspace" || e.key === "Delete") {
-        if (selectedIndex != null && editingIndex == null) {
-          e.preventDefault();
-          deleteAnnotation(selectedIndex);
-        }
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [showCloseModal, tool, selectedIndex, editingIndex, deleteAnnotation]);
-
   // Discard: instant cleanup + close. iPhone-screenshot semantics — no
   // confirm modal. The user explicitly chose discard; they meant it.
   // Disabled in the sidebar post-save so users can't accidentally delete
@@ -987,6 +959,101 @@ export default function Review() {
     v.currentTime = Math.max(0, Math.min(duration ?? Infinity, t));
   }, [duration]);
 
+  // Applying playbackRate as a property (not a JSX attribute — HTMLMediaElement
+  // has no such DOM attribute). Fires the video's native 'ratechange' event,
+  // which the webcam sync layer (BubbleLayer's onRateChange) already listens
+  // for to mirror the rate onto the webcam element.
+  useEffect(() => {
+    const v = videoRef.current;
+    if (v) v.playbackRate = playbackRate;
+  }, [playbackRate]);
+
+  const frameStep = useCallback(
+    (dir: 1 | -1) => {
+      const v = videoRef.current;
+      if (!v) return;
+      v.pause();
+      seek(v.currentTime + dir * FRAME_SECONDS);
+    },
+    [seek],
+  );
+
+  // Global keyboard shortcuts: T/A → text tool, R → arrow tool (C5),
+  // Space → play/pause, ←/→ → seek, ,/. → frame-step (Premiere/Final Cut
+  // convention — doesn't collide with arrow-key seeking), Shift+,/. (</>)
+  // → cycle playback speed (YouTube's own binding for the same keys),
+  // Esc → cancel tool/selection, Backspace/Delete → delete selection.
+  // Suppressed while the close modal is open (its own handler runs)
+  // and while editing text content (contentEditable).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (showCloseModal) return;
+      const target = e.target as HTMLElement | null;
+      if (target?.isContentEditable) return;
+      if (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA") return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+      const key = e.key.toLowerCase();
+      if (key === "t" || key === "a") {
+        e.preventDefault();
+        setTool((prev) => (prev === "text" ? null : "text"));
+        setSelectedIndex(null);
+        setEditingIndex(null);
+      } else if (key === "r") {
+        e.preventDefault();
+        setTool((prev) => (prev === "arrow" ? null : "arrow"));
+        setSelectedIndex(null);
+        setEditingIndex(null);
+      } else if (e.key === " ") {
+        e.preventDefault();
+        togglePlay();
+      } else if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        seek((videoRef.current?.currentTime ?? 0) - SEEK_SECONDS);
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        seek((videoRef.current?.currentTime ?? 0) + SEEK_SECONDS);
+      } else if (e.key === ",") {
+        e.preventDefault();
+        frameStep(-1);
+      } else if (e.key === ".") {
+        e.preventDefault();
+        frameStep(1);
+      } else if (e.key === "<") {
+        e.preventDefault();
+        setPlaybackRate((r) => cyclePlaybackRate(r, -1));
+      } else if (e.key === ">") {
+        e.preventDefault();
+        setPlaybackRate((r) => cyclePlaybackRate(r, 1));
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        if (editingIndex != null) {
+          setEditingIndex(null);
+        } else if (selectedIndex != null) {
+          setSelectedIndex(null);
+        } else if (tool != null) {
+          setTool(null);
+        }
+      } else if (e.key === "Backspace" || e.key === "Delete") {
+        if (selectedIndex != null && editingIndex == null) {
+          e.preventDefault();
+          deleteAnnotation(selectedIndex);
+        }
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [
+    showCloseModal,
+    tool,
+    selectedIndex,
+    editingIndex,
+    deleteAnnotation,
+    togglePlay,
+    seek,
+    frameStep,
+  ]);
+
   return (
     <main
       className="accent-blue"
@@ -1034,6 +1101,7 @@ export default function Review() {
           currentTime={currentTime}
           playing={playing}
           togglePlay={togglePlay}
+          playbackRate={playbackRate}
           seek={seek}
           trim={trim}
           setTrim={setTrim}
@@ -1203,6 +1271,7 @@ type LeftColumnProps = {
   currentTime: number;
   playing: boolean;
   togglePlay: () => void;
+  playbackRate: number;
   seek: (t: number) => void;
   trim: Trim | null;
   setTrim: React.Dispatch<React.SetStateAction<Trim | null>>;
@@ -1245,6 +1314,7 @@ function LeftColumn(props: LeftColumnProps) {
         currentTime={props.currentTime}
         playing={props.playing}
         togglePlay={props.togglePlay}
+        playbackRate={props.playbackRate}
         watermarkPreview={props.watermarkPreview}
         editor={props.editor}
       />
@@ -1573,6 +1643,7 @@ type VideoStageProps = {
   currentTime: number;
   playing: boolean;
   togglePlay: () => void;
+  playbackRate: number;
   watermarkPreview: WatermarkPreview;
   editor: Editor;
 };
@@ -1728,6 +1799,7 @@ function VideoStage(props: VideoStageProps) {
           duration={props.duration}
           currentTime={props.currentTime}
           togglePlay={props.togglePlay}
+          playbackRate={props.playbackRate}
         />
         <WatermarkPreviewLayer
           stageRef={stageRef}
@@ -2549,11 +2621,13 @@ function PlayerOverlay({
   duration,
   currentTime,
   togglePlay,
+  playbackRate,
 }: {
   playing: boolean;
   duration: number | null;
   currentTime: number;
   togglePlay: () => void;
+  playbackRate: number;
 }) {
   return (
     <div
@@ -2604,6 +2678,18 @@ function PlayerOverlay({
       >
         {fmt(currentTime)} / {fmt(duration)}
       </span>
+      {playbackRate !== 1 && (
+        <span
+          style={{
+            fontFamily: "var(--font-mono)",
+            fontSize: 11,
+            color: "var(--accent)",
+            fontVariantNumeric: "tabular-nums",
+          }}
+        >
+          {playbackRate}x
+        </span>
+      )}
     </div>
   );
 }
