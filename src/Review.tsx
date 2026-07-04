@@ -935,7 +935,11 @@ export default function Review() {
     const v = videoRef.current;
     if (!v) return;
     setCurrentTime(v.currentTime);
-    if (trim && v.currentTime >= trim.out - 0.01) {
+    // Loop-back only applies during active playback. Without the !v.paused
+    // guard, seeking to trim.out itself while paused (trim-handle drag,
+    // playhead scrub) would immediately snap back to trim.in — the out
+    // handle could never preview its own boundary frame.
+    if (trim && !v.paused && v.currentTime >= trim.out - 0.01) {
       v.currentTime = trim.in;
     }
   };
@@ -1025,6 +1029,20 @@ export default function Review() {
       } else if (e.key === ">") {
         e.preventDefault();
         setPlaybackRate((r) => cyclePlaybackRate(r, 1));
+      } else if (key === "i" && duration != null) {
+        e.preventDefault();
+        const t = videoRef.current?.currentTime ?? 0;
+        setTrim((prev) => {
+          const out = prev?.out ?? duration;
+          return { in: Math.max(0, Math.min(out - 0.1, t)), out };
+        });
+      } else if (key === "o" && duration != null) {
+        e.preventDefault();
+        const t = videoRef.current?.currentTime ?? 0;
+        setTrim((prev) => {
+          const trimIn = prev?.in ?? 0;
+          return { in: trimIn, out: Math.min(duration, Math.max(trimIn + 0.1, t)) };
+        });
       } else if (e.key === "Escape") {
         e.preventDefault();
         if (editingIndex != null) {
@@ -1052,6 +1070,7 @@ export default function Review() {
     togglePlay,
     seek,
     frameStep,
+    duration,
   ]);
 
   return (
@@ -2722,30 +2741,42 @@ function Timeline(props: TimelineProps) {
   const playPct =
     props.duration != null ? (props.currentTime / props.duration) * 100 : 0;
 
+  // Trim with your eyes: the video seeks to follow the handle during drag
+  // so the user sees the exact frame they're cutting on. The bound NOT
+  // being dragged (fixedIn/fixedOut) is captured once at drag-start rather
+  // than read from a functional setTrim updater — it never changes during
+  // this gesture, so a plain closure is enough and lets the seek live next
+  // to the setTrim call instead of inside a state-updater side effect.
   const startHandleDrag = useCallback(
     (side: "in" | "out") => (e: React.PointerEvent) => {
       e.preventDefault();
       e.stopPropagation();
       const track = trackRef.current;
-      if (!track || props.duration == null) return;
+      if (!track || props.duration == null || !props.trim) return;
+      const duration = props.duration;
       const rect = track.getBoundingClientRect();
+      const fixedIn = props.trim.in;
+      const fixedOut = props.trim.out;
+      const video = props.videoRef.current;
+      const wasPlaying = !!video && !video.paused;
+      video?.pause();
       const move = (clientX: number) => {
-        const t = ((clientX - rect.left) / rect.width) * (props.duration as number);
-        props.setTrim((prev) => {
-          if (!prev || props.duration == null) return prev;
-          if (side === "in") {
-            const next = Math.max(0, Math.min(prev.out - 0.1, t));
-            return { in: next, out: prev.out };
-          } else {
-            const next = Math.min(props.duration, Math.max(prev.in + 0.1, t));
-            return { in: prev.in, out: next };
-          }
-        });
+        const t = ((clientX - rect.left) / rect.width) * duration;
+        if (side === "in") {
+          const next = Math.max(0, Math.min(fixedOut - 0.1, t));
+          props.setTrim({ in: next, out: fixedOut });
+          props.seek(next);
+        } else {
+          const next = Math.min(duration, Math.max(fixedIn + 0.1, t));
+          props.setTrim({ in: fixedIn, out: next });
+          props.seek(next);
+        }
       };
       const onMove = (ev: PointerEvent) => move(ev.clientX);
       const onUp = () => {
         window.removeEventListener("pointermove", onMove);
         window.removeEventListener("pointerup", onUp);
+        if (wasPlaying) video?.play().catch(() => {});
       };
       window.addEventListener("pointermove", onMove);
       window.addEventListener("pointerup", onUp);
