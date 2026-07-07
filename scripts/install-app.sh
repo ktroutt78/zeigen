@@ -44,5 +44,20 @@ echo "==> Installing fresh build"
 cp -R "$BUILT_APP" "$INSTALL_DIR/Zeigen.app"
 xattr -dr com.apple.quarantine "$INSTALL_DIR/Zeigen.app" 2>/dev/null || true
 
+# Every ad-hoc rebuild changes the code signature, so TCC (Screen
+# Recording/Mic/Camera permissions) treats each build as a distinct app —
+# without this, the previous grant is orphaned on every upgrade and System
+# Settings accumulates stale duplicate entries (some toggled off, none of
+# them necessarily matching the binary that's actually installed now). An
+# unauthorized capture attempt makes the Swift engine helper die immediately,
+# which surfaces as a "Broken pipe" toast on the next command sent to it.
+# Resetting here guarantees exactly one current, correct grant — the cost is
+# a one-time re-approval prompt on next launch.
+echo "==> Clearing stale TCC grants for $BUNDLE_ID"
+tccutil reset ScreenCapture "$BUNDLE_ID" 2>/dev/null || true
+tccutil reset Microphone "$BUNDLE_ID" 2>/dev/null || true
+tccutil reset Camera "$BUNDLE_ID" 2>/dev/null || true
+
 version=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$INSTALL_DIR/Zeigen.app/Contents/Info.plist")
 echo "==> Installed Zeigen $version to $INSTALL_DIR/Zeigen.app"
+echo "==> Screen Recording/Mic/Camera permissions were reset — grant them again on next launch"
