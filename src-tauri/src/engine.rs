@@ -82,6 +82,16 @@ impl EngineClient {
                 {
                     crate::note_screen_first_frame(&app_for_stdout);
                 }
+                // The frontend maps most EngineError codes to a friendly,
+                // detail-free toast string. eprintln! only reaches a
+                // terminal when this app happens to be launched from one —
+                // Dock/Spotlight launches have no attached stdio to see it,
+                // which is the normal way this app runs. Log the raw event
+                // to a file instead so a generic "INTERNAL"/"unexpected
+                // error" report is diagnosable regardless of launch method.
+                if value.get("event").and_then(|v| v.as_str()) == Some("error") {
+                    log_engine_error(&value);
+                }
                 let _ = app_for_stdout.emit("engine-event", &value);
             }
         });
@@ -107,6 +117,31 @@ impl EngineClient {
         stdin.flush().map_err(|e| e.to_string())?;
         Ok(())
     }
+}
+
+// Append a JSON engine "error" event to ~/Library/Logs/Zeigen/engine.log —
+// standard macOS convention, works regardless of launch method (Dock and
+// Spotlight launches have no attached stdio for eprintln! to reach, unlike
+// a Terminal launch). Best-effort: a logging failure must never affect the
+// app itself.
+fn log_engine_error(value: &serde_json::Value) {
+    let Ok(home) = std::env::var("HOME") else { return };
+    let dir = PathBuf::from(home).join("Library/Logs/Zeigen");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("engine.log"))
+    else {
+        return;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let _ = writeln!(f, "{now} {value}");
 }
 
 impl Drop for EngineClient {

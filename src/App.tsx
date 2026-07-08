@@ -872,17 +872,26 @@ function App() {
             setMics(mics);
             setWindows(wins);
             setSelectedDisplay((prev) => prev ?? displays[0]?.id ?? null);
-            // Prefer a built-in / non-Continuity mic by default. iPhone
-            // Continuity audio is flaky (drops when the phone sleeps) and
-            // sorts first alphabetically ("KT iPhone…" < "MacBook…"), so
-            // pick the first non-iPhone mic, falling back to the first mic.
+            // Prefer the built-in mic by default: Bluetooth headsets (e.g.
+            // AirPods) sort first alphabetically but degrade to low-quality
+            // SCO audio while their mic is active, and iPhone Continuity
+            // audio is flaky (drops when the phone sleeps). Fall back to
+            // any non-Continuity mic, then to whatever exists.
             setSelectedMic((prev) => {
               if (prev) return prev;
-              const builtin = mics.find((m) => !/iphone|ipad|continuity/i.test(m.name));
-              return (builtin ?? mics[0])?.uid ?? null;
+              const builtin = mics.find((m) => /built-in|macbook/i.test(m.name));
+              const nonContinuity = mics.find(
+                (m) => !/iphone|ipad|continuity/i.test(m.name),
+              );
+              return (builtin ?? nonContinuity ?? mics[0])?.uid ?? null;
             });
             // Don't auto-select a window — empty default forces an explicit
             // pick once the user toggles the Window source.
+            // A prior enumerate can have failed on a permission error (see
+            // the window-focus retry below) — clear it now that a fresh
+            // enumerate actually succeeded, so granting access in System
+            // Settings and coming back doesn't leave a stale error banner.
+            setError(null);
             break;
           }
           case "started":
@@ -1615,6 +1624,24 @@ function App() {
         window.clearTimeout(deviceChangeTimer.current);
     };
   }, []);
+
+  // Re-enumerate on window focus, but only while a permission error is
+  // showing. The most common cause of a failed initial enumerate is Screen
+  // Recording not granted yet — unlike Mic/Camera, macOS has no inline
+  // "Allow" for it, so the only path is Open System Settings, toggle it on,
+  // then switch back to Zeigen. That switch-back is a focus event; without
+  // this, the permission error from the first (too-early) enumerate just
+  // sits there until something else happens to retry it. The gate matters:
+  // an unconditional focus listener re-enumerates on every focus bounce
+  // (e.g. the webcam preview window opening after a camera pick), and each
+  // SCK enumerate freezes the pickers for seconds and flashes the
+  // screen-observation indicator in the menu bar.
+  const permissionErrorShowing = error === ERROR_MESSAGES.PERMISSION_DENIED;
+  useEffect(() => {
+    if (!permissionErrorShowing) return;
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
+  }, [permissionErrorShowing]);
 
   const recording = state === "recording" || state === "paused";
   const cameraName =
