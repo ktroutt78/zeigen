@@ -34,4 +34,5 @@ fn main() {
 
     println!("cargo:rerun-if-changed=recording-engine/Sources");
     println!("cargo:rerun-if-changed=recording-engine/Package.swift");
+    println!("cargo:rerun-if-changed=recording-engine/Info.plist");
 }

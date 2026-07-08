@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Embedded into the binary (__TEXT __info_plist, see Package.swift).
+	     macOS force-registers whichever process drives an SCStream with
+	     Launch Services when capture starts; without this plist that
+	     registration is a Foreground app sharing the main app's bundle id -
+	     a bouncing ghost Dock tile for every recording, and AppleScript
+	     resolving "Zeigen" to this (event-loop-less) process. With it, the
+	     engine registers as a background-only process under its own id. -->
+	<key>CFBundleIdentifier</key>
+	<string>com.zeigen.recording-engine</string>
+	<key>CFBundleName</key>
+	<string>Zeigen Recording Engine</string>
+	<key>CFBundleVersion</key>
+	<string>1.0</string>
+	<key>LSBackgroundOnly</key>
+	<true/>
+</dict>
+</plist>

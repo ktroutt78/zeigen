@@ -1,15 +1,20 @@
-import AppKit
 import AVFoundation
+import CoreGraphics
 import Foundation
 
-// Bring up AppKit/CoreGraphics in this CLI binary without launching a UI.
+// Initialize the CoreGraphics window-server connection in this CLI binary.
 // SCK's window-capture path (SCContentFilter(desktopIndependentWindow:),
 // SCShareableContent.windows access, etc.) and CGWindowList* APIs assert
 // "CGS_REQUIRE_INIT" if CG isn't initialized — which it isn't by default
-// in a daemon-style Swift CLI process. Touching NSApplication.shared
-// triggers NSApplication's class load, which initializes CG; we don't
-// call .run() so no run loop or Dock icon.
-_ = NSApplication.shared
+// in a daemon-style Swift CLI process. Do NOT use NSApplication.shared for
+// this: it registers the process with Launch Services as a launching
+// Foreground app that never finishes launching (no .run()), which bounces
+// a ghost Zeigen tile in the Dock for ~2 min, stalls SCK enumeration
+// behind the launch handshake, and — because it shares the app's bundle id
+// — makes AppleScript resolve "Zeigen" to this process, breaking
+// `tell application "Zeigen" to quit`. CGMainDisplayID() establishes the
+// CGS connection with no LS registration at all.
+_ = CGMainDisplayID()
 
 // D-08: pre-request both permissions before ready fires so AVCaptureSession
 // never encounters a missing-mic-permission case mid-recording.

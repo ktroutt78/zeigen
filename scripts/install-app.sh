@@ -11,21 +11,43 @@ BUNDLE_ID="com.zeigen.app"
 BUILT_APP="src-tauri/target/release/bundle/macos/Zeigen.app"
 INSTALL_DIR="/Applications"
 
+# The installed app is signed below with the "Zeigen Dev Signing"
+# certificate (self-signed, in the login keychain), which gives every build
+# the same code signing identity — so TCC permission grants (Screen
+# Recording/Mic/Camera) survive upgrades and no reset is needed. If that
+# certificate is ever missing, fail fast rather than silently producing an
+# app with a fresh identity that orphans the grants.
+if ! security find-identity -v -p codesigning | grep -q "Zeigen Dev Signing"; then
+    echo "error: 'Zeigen Dev Signing' certificate not found in keychain." >&2
+    echo "Recreate it (self-signed, code signing) or permissions will break on every build." >&2
+    exit 1
+fi
+
 echo "==> Building release bundle"
-npm run tauri build
+# app bundle only — the dmg step scripts Finder and fails in non-interactive
+# shells, and we install by copying the .app anyway
+npm run tauri build -- --bundles app
 
 if [ ! -d "$BUILT_APP" ]; then
     echo "error: expected build output at $BUILT_APP, not found" >&2
     exit 1
 fi
 
-if pgrep -x "Zeigen" > /dev/null; then
+# The executable inside the bundle is lowercase "zeigen" — that's the
+# process name, so match it case-insensitively or the quit step never fires
+# and the old instance keeps running through the install.
+if pgrep -xqi "zeigen"; then
     echo "==> Quitting running Zeigen"
     osascript -e 'tell application "Zeigen" to quit' || true
     for _ in $(seq 1 20); do
-        pgrep -x "Zeigen" > /dev/null || break
+        pgrep -xqi "zeigen" || break
         sleep 0.5
     done
+    # AppleScript quit can fail (e.g. a stray process shadowing the bundle
+    # id); don't install under a live instance.
+    pkill -xi "zeigen" 2>/dev/null || true
+    pkill -x "recording-engine" 2>/dev/null || true
+    sleep 1
 fi
 
 echo "==> Removing existing installs"
@@ -41,23 +63,21 @@ for existing in "$INSTALL_DIR"/Zeigen*.app; do
 done
 
 echo "==> Installing fresh build"
-cp -R "$BUILT_APP" "$INSTALL_DIR/Zeigen.app"
-xattr -dr com.apple.quarantine "$INSTALL_DIR/Zeigen.app" 2>/dev/null || true
+# ditto --noextattr: the project lives in iCloud-synced Documents, so build
+# outputs carry file-provider xattrs (com.apple.provenance, com.apple.macl)
+# that codesign rejects as "detritus". A clean copy is the only reliable way
+# to shed them — com.apple.macl cannot be deleted in place.
+ditto --norsrc --noextattr --noacl "$BUILT_APP" "$INSTALL_DIR/Zeigen.app"
 
-# Every ad-hoc rebuild changes the code signature, so TCC (Screen
-# Recording/Mic/Camera permissions) treats each build as a distinct app —
-# without this, the previous grant is orphaned on every upgrade and System
-# Settings accumulates stale duplicate entries (some toggled off, none of
-# them necessarily matching the binary that's actually installed now). An
-# unauthorized capture attempt makes the Swift engine helper die immediately,
-# which surfaces as a "Broken pipe" toast on the next command sent to it.
-# Resetting here guarantees exactly one current, correct grant — the cost is
-# a one-time re-approval prompt on next launch.
-echo "==> Clearing stale TCC grants for $BUNDLE_ID"
-tccutil reset ScreenCapture "$BUNDLE_ID" 2>/dev/null || true
-tccutil reset Microphone "$BUNDLE_ID" 2>/dev/null || true
-tccutil reset Camera "$BUNDLE_ID" 2>/dev/null || true
+echo "==> Signing with Zeigen Dev Signing"
+# No hardened runtime (--options runtime): it blocks camera/mic access unless
+# every binary carries device entitlements — getUserMedia in the webview fails
+# with NotAllowedError and the engine's mic capture hangs. Hardened runtime is
+# only required for notarization, which a locally-built app doesn't need.
+codesign --force -s "Zeigen Dev Signing" \
+    "$INSTALL_DIR/Zeigen.app/Contents/MacOS/recording-engine"
+codesign --force -s "Zeigen Dev Signing" "$INSTALL_DIR/Zeigen.app"
+codesign --verify --deep --strict "$INSTALL_DIR/Zeigen.app"
 
 version=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$INSTALL_DIR/Zeigen.app/Contents/Info.plist")
 echo "==> Installed Zeigen $version to $INSTALL_DIR/Zeigen.app"
-echo "==> Screen Recording/Mic/Camera permissions were reset — grant them again on next launch"
