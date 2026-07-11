@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { emit } from "@tauri-apps/api/event";
 import { Icon, P } from "./icons";
 import { useCornerSnap } from "../hooks/useCornerSnap";
 import { useBubblePositionLog } from "../hooks/useBubblePositionLog";
@@ -191,7 +192,55 @@ export default function WebcamBubble() {
             <TimerChip state={recState} elapsedSec={elapsed} capSec={capSec} />
           </div>
         )}
+
       </div>
+
+      {!recActive && (
+        <div
+          style={{
+            height: PILL_STRIP_CSS,
+            width: "100%",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            flexShrink: 0,
+          }}
+        >
+          <div
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 4,
+              padding: 4,
+              background: "rgba(20,20,22,0.78)",
+              backdropFilter: "blur(10px)",
+              WebkitBackdropFilter: "blur(10px)",
+              border: "0.5px solid rgba(255,255,255,0.18)",
+              borderRadius: 99,
+              boxShadow: "0 4px 14px rgba(0,0,0,0.4)",
+            }}
+          >
+            <button
+              title="Turn camera off"
+              onClick={() => emit("bubble-close-request").catch(() => {})}
+              style={{
+                width: 26,
+                height: 26,
+                borderRadius: 99,
+                background: "transparent",
+                color: "#fff",
+                border: "none",
+                cursor: "pointer",
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              <Icon d={P.x} size={12} stroke={1.5} />
+            </button>
+          </div>
+        </div>
+      )}
 
       {recActive && (
         <div

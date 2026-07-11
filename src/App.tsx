@@ -14,7 +14,6 @@ let bubbleDeviceName: string | null = null;
 
 const BUBBLE_W = 240;
 const BUBBLE_H = BUBBLE_W + PILL_STRIP_CSS;
-const BUBBLE_MIN = 120;
 const BUBBLE_MARGIN = 24;
 
 // Anchor rect for placing the bubble. Coords + size are in logical
@@ -86,12 +85,12 @@ async function openBubble(deviceName: string, anchor: BubbleAnchor) {
     title: "Webcam",
     width: BUBBLE_W,
     height: BUBBLE_H,
-    minWidth: BUBBLE_MIN,
-    minHeight: BUBBLE_MIN + PILL_STRIP_CSS,
     decorations: false,
     transparent: true,
     alwaysOnTop: true,
-    resizable: true,
+    // Fixed size by design. Even without a resize handle in the UI,
+    // resizable: true lets macOS edge-drag resize borderless windows.
+    resizable: false,
     skipTaskbar: true,
     visibleOnAllWorkspaces: true,
     shadow: false,
@@ -1657,16 +1656,18 @@ function App() {
 
   // Bubble window lifecycle is driven by camera selection, NOT recording
   // state. Open while a camera is selected (idle, countdown, recording,
-  // paused alike); close only when camera is deselected. The timer chip
-  // and control pill inside the bubble are gated on recording state — see
-  // WebcamBubble.tsx — but the window itself persists as long as the user
-  // wants a webcam in the loop. In area mode anchor the bubble to the
-  // selected region's bottom-right corner so an explicitly-re-enabled
-  // camera lands INSIDE the recorded rect (otherwise the default primary-
-  // display corner may fall outside the area and not appear in the
-  // recording).
+  // paused alike); close when camera is deselected or while a review
+  // window is up — the preview has nothing to preview once the take is
+  // done, and it would float over the review UI. It reopens on the same
+  // camera when the review closes. The timer chip and control pill inside
+  // the bubble are gated on recording state — see WebcamBubble.tsx — but
+  // the window itself persists as long as the user wants a webcam in the
+  // loop. In area mode anchor the bubble to the selected region's
+  // bottom-right corner so an explicitly-re-enabled camera lands INSIDE
+  // the recorded rect (otherwise the default primary-display corner may
+  // fall outside the area and not appear in the recording).
   useEffect(() => {
-    if (!cameraName) {
+    if (!cameraName || reviewActivity > 0) {
       closeBubble().catch(() => {});
       return;
     }
@@ -1702,7 +1703,21 @@ function App() {
     if (anchor) {
       openBubble(cameraName, anchor).catch((err) => setError(String(err)));
     }
-  }, [cameraName, sourceKind, selectedArea, selectedDisplay, selectedWindow, displays, windows]);
+  }, [cameraName, reviewActivity, sourceKind, selectedArea, selectedDisplay, selectedWindow, displays, windows]);
+
+  // The bubble's hover close button. The bubble window can't reach this
+  // window's state directly, so it emits an event; treat it exactly like
+  // picking "Off" in the camera dropdown (the lifecycle effect above then
+  // closes the window, and the dropdown stays in sync).
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    listen("bubble-close-request", () => setSelectedCamera(null)).then((f) => {
+      unlisten = f;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, []);
 
   // Dashed-border area indicator persists from marquee-confirm through
   // recording-end. Driven purely by selection state — not by recording
