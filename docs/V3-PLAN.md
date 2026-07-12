@@ -1,5 +1,7 @@
 # V3 — Cursor, Zoom, Redaction
 
+**Status (2026-07-11): pivoted to export-time polish.** Synthetic cursor (B) and auto-zoom (C) are dropped; Phase A telemetry is complete but dormant; redaction (D) is unscheduled. Live work: **E1 — webcam bubble styling** and **E2 — export presets**, defined in §2. Dropped sections are kept for the record. Rationale in `DECISIONS.md` 2026-07-11.
+
 Charter for the next major slice. Three features, one shared foundation.
 
 - **Synthetic cursor** — replace the burned-in system cursor with a composited, smoothed one.
@@ -43,9 +45,13 @@ This is not a rewrite. `composite.rs` (782 lines, webcam overlay) and the video 
 
 **Verification gate for this decision:** a 5-minute recording with zoom + cursor + one blur region must save in **under 15s** on Apple silicon. If the Swift compositor can't hit that, stop and re-plan before building Phases C and D on top of it.
 
+**Outcome (2026-07-11): the gate failed — 106s, encoder-bound, unfixable in software.** See §2 B.0 for the measurements. This decision is void; the quality arguments above (zoompan stutter, sprite compositing) were never disproven but are moot with cursor/zoom dropped.
+
 ---
 
 ## 1. Phase A — Cursor telemetry (foundation)
+
+**Status: complete (A.5 closed — `DECISIONS.md` 2026-07-11) and dormant, default-off with no consumer. See §2.**
 
 Capture cursor motion and clicks as a timestamped track alongside the video. Nothing visible ships in this phase. It is the substrate for B and C.
 
@@ -118,38 +124,41 @@ Backward compatibility: `capture_cursor: false` reproduces exactly today's behav
 
 ---
 
-## 2. Phase B — Synthetic cursor
+## 2. Phase B — dropped (2026-07-11); superseded by E1/E2
 
-Draw the cursor ourselves, on a smoothed path. This is the "buttery" feel, and it ships as a visible quality win on its own — independent of zoom.
+**The synthetic cursor and auto-zoom are dropped.** No capture-time complexity, no re-encode wait on the default save path. V3's remaining work is export-time polish: **E1 — webcam bubble styling** and **E2 — export presets** (below). Rationale in `DECISIONS.md` 2026-07-11.
 
-### B.1 Smoothing
+### B.0 gate result — the measurement that forced the pivot
 
-Raw cursor motion is jittery: hand tremor, mouse sensor noise, 120 Hz sampling of a fundamentally noisy signal. Smoothing removes that without introducing lag.
+The compositor bootstrap was built and the §0.2 gate run before any cursor work, as planned. It failed decisively, and the failure was root-caused to hardware, not to the compositor:
 
-Fit a **Catmull-Rom spline** through the sample points and resample at video frame times. Catmull-Rom passes *through* its control points (unlike a B-spline, which would cut corners and make clicks land visibly off-target) while producing C¹-continuous motion.
+- A 5-minute Retina-2x (2940x1912) recording with one blur region and a placeholder transform saved in **106s wall clock** against the 15s gate (99.5s video pass + 6.6s audio/mux).
+- The wall is the **VideoToolbox h264 encoder: ~500 megapixels/s total on an M4**, and it is a floor no software choice moves:
+  - The Core Image stages are free (full stages vs. pure passthrough differed by 0.1s).
+  - `PrioritizeEncodingSpeedOverQuality`, `RealTime` off, `MaximizePowerEfficiency` off — all accepted by `VTSessionSetProperty` (status 0), zero effect on throughput.
+  - No parallel headroom: two concurrent encode sessions each ran exactly 2x slower — the media engine saturates.
+  - HEVC encodes at the same rate; ProRes is only 2x faster and still needs a final h264 pass.
+- §0.2's speed premise was therefore wrong: a Swift compositor cannot out-encode ffmpeg, because ffmpeg's `h264_videotoolbox` is the same silicon — measured within 0.1s of each other on identical input. (Corroboration: the rejected full-re-encode in `DECISIONS.md` 2026-05-20 measured 39.28s for 5 minutes at 1920x1080 — the same ~490 MP/s floor.)
 
-Then apply a small critically-damped spring (a one-euro filter is the pragmatic alternative) to kill residual high-frequency jitter.
+**Encoder-floor numbers (load-bearing for E2):** a full re-encode of a 5-minute recording (~8,800 VFR frames) costs ~**95s at Retina 2x**, ~**29s at 1x** — which is what every recording currently is, per the `SCDisplay` points finding in `DECISIONS.md` 2026-07-11 — and ~**16s of encode at a 720p downscale**. Cost scales linearly with output pixels and with format; bitrate/quality settings do not change it. `-c:v copy` is the only instant path.
 
-**Invariant: at any click event, the rendered cursor must be within 2px of the true recorded position.** Smoothing that moves the cursor away from where the user actually clicked is worse than no smoothing — it makes the video lie. Pin the spline to exact positions in a small window around every click.
+### Phase A status: dormant, not reverted
 
-### B.2 Rendering
+The cursor telemetry (commit `ac4cfb5`) stays in-tree but off: `lib.rs` and `prewarm.rs` pin `capture_cursor: false`, so no recording hides the system cursor or writes telemetry, and the byte-identical save guarantee holds by construction. `CursorTracker.swift`, the IPC flag, and the `cursor_track_written` event are dormant code with no consumer. Kept because the A.2/A.5 alignment work is the expensive part to rebuild if cursor polish ever returns. Do not flip the default to `true` without a renderer for the hidden cursor — a plain save of a telemetry recording has no pointer at all. The B.0 compositor spike was never committed and was discarded; its measurements above are the durable output.
 
-In the Swift compositor:
+### E1 — Webcam bubble styling
 
-- Draw a cursor sprite at the smoothed position each frame.
-- **Constant apparent size regardless of zoom.** When Phase C scales the frame 2x, the cursor sprite is drawn at 1x. This is the entire reason Phase A exists. Get it wrong and zoom looks amateur.
-- Ship a single high-quality arrow asset (`@3x` PNG or vector). Do not try to reproduce every system cursor state (I-beam, resize handles, etc.) in v1 — it's a long tail with sharply diminishing returns.
-- Click feedback: a subtle expanding ring on `left_down`. ~300ms, ease-out, low opacity. Resist the urge to make it flashy.
+Export-time bubble controls: roundness (circle → rounded-rect), size, position. Mostly parameterizing machinery that already exists in `composite.rs` — the tiny_skia mask and shadow renderers hardcode a circle, and everything else (diameter handling, corner/position-log placement, diameter-scaled shadow calibrated against the Review.tsx CSS) is already built. Adds sidecar style fields, Review.tsx controls, and a precedence rule between export-time style and the record-time position log. Plan in detail when scheduled.
 
-### B.3 Done when
+### E2 — Export presets
 
-- Cursor motion is visibly smoother than the raw recording, with no perceptible lag against the content it's interacting with.
-- Clicks land on target, every time.
-- Cursor is the same on-screen size at 1x and at 2.5x zoom.
+Quality / resolution / format choices at export, wired into the existing `edit.rs` ffmpeg pipeline — no new render stack. Resolution and format genuinely change export speed (see the encoder-floor numbers); quality does not, and the export UI should say so honestly, with time estimates derived from the measured rates. The source-resolution, no-video-work path must keep `-c:v copy` (guarded by `save_recording_baseline`). **Preset tiers deliberately not specced yet — scope decision pending.**
 
 ---
 
 ## 3. Phase C — Auto-zoom
+
+**Status: dropped with the 2026-07-11 pivot (see §2). Kept for the record.**
 
 Derive zoom/pan keyframes from the telemetry. Store them in the sidecar. Let the user override.
 
@@ -209,6 +218,8 @@ Do not build a curve editor. If someone needs a curve editor, they should be usi
 ---
 
 ## 4. Phase D — Auto-redaction
+
+**Status: unscheduled. Its blur rendering assumed the shared B/C compositor, which is shelved; the detection design below stands on its own. Revisit after E1/E2.**
 
 Detect sensitive on-screen data and blur it. Independent of A/B/C; shares the compositor.
 
@@ -271,25 +282,28 @@ Applied in the Swift compositor, **before** the zoom transform, so that zooming 
 
 ## 5. Sequencing and stop points
 
-| Phase | Ships | Depends on | Stop-and-reassess if |
-|---|---|---|---|
-| A — Telemetry | Nothing visible | — | Click alignment > 1 frame |
-| B — Synthetic cursor | Visible quality win | A | Cursor lag is perceptible |
-| C — Auto-zoom | The headline feature | A, B | You'd turn it off on >3 of 10 of your own recordings |
-| D — Redaction | The differentiator | Compositor from B | Any leaked frame, ever |
+Post-pivot state:
 
-**Build the Swift compositor as part of B**, not as a separate phase. It's the vehicle for the cursor, and C and D bolt onto it. Prove the 15s/5-min save budget there before committing to C and D.
+| Phase | Status |
+|---|---|
+| A — Telemetry | Complete; dormant (default-off, no consumer) |
+| B — Synthetic cursor | Dropped — B.0 encoder-floor gate (§2) |
+| C — Auto-zoom | Dropped with B |
+| D — Redaction | Unscheduled |
+| E1 — Bubble styling | Next |
+| E2 — Export presets | After E1; tiers not yet decided |
 
-If you only ship one thing: **A + B.** A smooth cursor with no zoom is still better than what you have, and it de-risks everything else.
+E1 and E2 are independent of A–D and of each other. E1 first: it is small, and it exercises the same Review.tsx + sidecar + `composite.rs` seams E2's export UI will touch.
 
 ---
 
 ## 6. Open questions
 
-1. **Cursor sprite.** Ship one arrow, or handle I-beam/pointer/resize states? Recommend one arrow for v1; revisit only if it looks wrong in practice.
-2. **Zoom during webcam overlay.** Does the webcam bubble stay pinned to the frame (yes, probably) or to the zoomed content (almost certainly not)? Decide before building C.
-3. **Redaction on the R2/Cloudflare share path.** The `/v/[id]` viewer serves the exported mp4, so redaction is already baked in by then — confirm there is no path where the *unredacted* scratch file can reach R2. Audit `exports.rs` and `linkedin.rs`. This is a real leak vector and worth an explicit check.
-4. **Does `arnndn` still no-op on GIF?** Zoom and blur now mean GIF exports have video work too. Confirm the GIF path handles the compositor output.
+1. **E2 preset tiers.** What the quality/resolution/format matrix actually is. Deliberately undecided — do not spec until settled.
+2. **E1 position control.** Is bubble position export-adjustable, or only roundness/size (position stays record-time, from the position log)? Decide during E1 planning.
+3. **(Deferred with Phase D) Redaction on the R2/Cloudflare share path.** The `/v/[id]` viewer serves the exported mp4, so redaction is already baked in by then — confirm there is no path where the *unredacted* scratch file can reach R2. Audit `exports.rs` and `linkedin.rs` if D is revived. This is a real leak vector and worth an explicit check.
+
+Questions 1, 2, and 4 of the original list (cursor sprite states, zoom-vs-webcam pinning, GIF handling of compositor output) died with the pivot.
 
 ---
 

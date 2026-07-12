@@ -4,7 +4,26 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
-## 2026-07-11 — V3 Phase A: cursor telemetry capture-side decisions
+## 2026-07-11 — V3 pivot: cursor/zoom dropped, export-time polish instead (E1 bubble styling, E2 export presets)
+
+Synthetic cursor (Phase B) and auto-zoom (Phase C) are dropped. V3's remaining work is export-time polish on the existing ffmpeg pipeline: **E1 — webcam bubble styling** (roundness/size/position controls on the existing `composite.rs` overlay) and **E2 — export presets** (quality/resolution/format at export; tiers deliberately undecided as of this entry). Redaction (Phase D) is unscheduled.
+
+### Why: the encoder is the wall, and the features sat on the wrong side of it
+
+The B.0 compositor gate (V3-PLAN §2) was run before any cursor work, as planned, and failed at **106s against the 15s budget** for a 5-minute Retina-2x recording with one blur region. Root cause is hardware, isolated by measurement, not guessed:
+
+- **VideoToolbox h264 encode runs at ~500 MP/s total on an M4, full stop.** Decode is ~4x faster than encode; the Core Image stages are free (±0.1s); `PrioritizeEncodingSpeedOverQuality` / `RealTime` / `MaximizePowerEfficiency` are accepted (status 0) and change nothing; two concurrent sessions each run exactly 2x slower (the media engine saturates); HEVC is the same rate; ProRes only 2x.
+- **A Swift compositor cannot out-encode ffmpeg** — `h264_videotoolbox` is the same silicon; the two measured within 0.1s of each other. The §0.2 "compositor buys save speed" premise is void. (The 2026-05-20 entry's rejected full re-encode — 39.28s for 5 min at 1920x1080 — is the same ~490 MP/s floor, measured a year apart.)
+- **Floor for a full re-encode of a 5-minute recording (~8,800 VFR frames): ~95s at Retina 2x, ~29s at 1x (all current recordings — see the `SCDisplay` points finding below), ~16s of encode at a 720p downscale.** Scales linearly with output pixels. Bitrate/quality does not move it. `-c:v copy` is the only instant path.
+
+Cursor smoothing and auto-zoom force a full re-encode of every save that uses them (the cursor must be composited into every frame once it's not burned in), so they inescapably cost the numbers above — either on the default save path (unacceptable wait) or behind capture-time opt-in complexity (two recording families, unrecoverable record-time decisions). Not wanted either way. Export-time polish costs the re-encode only when the user explicitly asks for a differently-shaped export, which is the honest place for it.
+
+These encoder-floor numbers are load-bearing for E2: resolution and format genuinely change export speed, quality does not, and the UI should present estimates accordingly.
+
+### Disposition of the V3 work so far
+
+- **Phase A telemetry: dormant, not reverted.** `capture_cursor` stays pinned `false` in `lib.rs`/`prewarm.rs`; no telemetry is written, the cursor stays burned in, and the byte-identical save guarantee holds by construction. The code (commit `ac4cfb5`) is isolated and its A.2/A.5 alignment work is the expensive part to rebuild if cursor polish ever returns. Do not flip the default without a renderer — a plain save of a cursor-hidden recording has no pointer.
+- **B.0 compositor spike: discarded, never committed.** Its measurements (above) are the durable output.
 
 Implements V3-PLAN Phase A. The engine samples cursor position at 120 Hz (`CGEvent(source: nil)?.location`). Details that weren't in the plan, plus one forced deviation:
 
