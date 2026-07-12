@@ -4,7 +4,14 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
-## 2026-07-11 — V3 pivot: cursor/zoom dropped, export-time polish instead (E1 bubble styling, E2 export presets)
+## 2026-07-11 — E1: bubble roundness (roundness only; size and position stay record-time)
+
+E1 shipped as roundness-only: one slider making the webcam bubble a rounded square instead of a circle. The size slider was cut from scope before build — size stays driven by the record-time position log exactly as before, which also deleted the need for any precedence rule between record-time and export-time values. Roundness has no record-time counterpart: one optional sidecar field, absent = circle = today.
+
+- **Mechanism:** `composite.rs`'s mask/shadow renderers generalized from a hardcoded circle to a rounded square (four cubic arcs, corner radius = roundness × diameter/2). `SidecarState.bubble_roundness: Option<f64>` (0.0 square … 1.0 circle) threads into both composite call sites; styling bakes in composite pass 1, so MP4/GIF/Copy/R2/LinkedIn all inherit it.
+- **Legacy byte-identity is structural, not asserted-after-the-fact:** `None` keeps the pre-E1 `from_circle` branch and the pre-E1 mask filename, and the Review slider writes `null` at the circle end, so an untouched (or returned-to-circle) recording has no field in its sidecar at all. Guards: mask/shadow PNGs captured from the pre-E1 code as fixtures (`tests/fixtures/`), plus the full ffmpeg arg vector pinned for both live filter branches via the new `build_composite_args` split. Full-mp4 byte-identity is not assertable for webcam exports (h264_videotoolbox is not bit-deterministic — see 2026-05-20); identical command + identical mask bytes is the honest equivalent.
+- **Preview parity is arithmetic:** CSS `border-radius: roundness × 50%` on the square bubble element equals the mask's roundness × diameter/2, and CSS box-shadow follows border-radius, so the existing shadow calibration needed no retune.
+- **Gate:** `e1_roundness_gate` (ignored test, phase15-baseline fixture) renders circle/squircle(0.35)/near-square(0.08) through the real composite path for eyeball comparison against the Review preview.
 
 Synthetic cursor (Phase B) and auto-zoom (Phase C) are dropped. V3's remaining work is export-time polish on the existing ffmpeg pipeline: **E1 — webcam bubble styling** (roundness/size/position controls on the existing `composite.rs` overlay) and **E2 — export presets** (quality/resolution/format at export; tiers deliberately undecided as of this entry). Redaction (Phase D) is unscheduled.
 

@@ -933,6 +933,50 @@ mod tests {
         .unwrap()
     }
 
+    // E1 visual gate renderer: full composites of the stashed phase-15
+    // baseline recording at three roundness values, for eyeball comparison
+    // against the Review preview. Ignored — needs the out-of-repo fixture.
+    //
+    //   cargo test --lib e1_roundness_gate -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn e1_roundness_gate() {
+        let home = std::env::var("HOME").unwrap();
+        let fix_dir = PathBuf::from(&home)
+            .join("Movies/Zeigen/.phase15-baseline/recording-2026-06-02-205517");
+        let screen = fix_dir.join("sources/screen.mp4");
+        let webcam = fix_dir.join("sources/webcam-00.mp4");
+        assert!(screen.is_file(), "fixture missing: {}", screen.display());
+        assert!(webcam.is_file(), "fixture missing: {}", webcam.display());
+        let sidecar = crate::edit::read_sidecar_path(
+            &fix_dir.join("recording-2026-06-02-205517.mp4"),
+        )
+        .expect("read sidecar")
+        .expect("fixture sidecar present");
+
+        let out_dir = temp_dir("gate");
+        for (name, roundness) in [
+            ("circle", None),
+            ("squircle", Some(0.35)),
+            ("nearsquare", Some(0.08)),
+        ] {
+            let out = out_dir.join(format!("gate-{name}.mp4"));
+            composite(
+                &screen,
+                std::slice::from_ref(&webcam),
+                &out,
+                WebcamSize::Medium,
+                Corner::BottomRight,
+                &sidecar.bubble_position_log,
+                roundness,
+                None,
+                |_| {},
+            )
+            .unwrap();
+            println!("rendered {}", out.display());
+        }
+    }
+
     // E1 regression guard: the full ffmpeg argument vector for a
     // roundness-less sidecar is pinned (pre-E1 behavior, both live filter
     // branches). Paths are normalized to <TMP>. If this fails because you
