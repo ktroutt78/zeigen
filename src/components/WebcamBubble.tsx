@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { emit } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { Icon, P } from "./icons";
 import { useCornerSnap } from "../hooks/useCornerSnap";
 import { useBubblePositionLog } from "../hooks/useBubblePositionLog";
@@ -73,6 +73,25 @@ export default function WebcamBubble() {
   useBubblePositionLog();
   const { state: recState, elapsed, capSec } = useRecordingState();
 
+  // Corner roundness (null = circle). Initial value from settings on mount
+  // — the slider in the main window persists there — then live updates via
+  // the bubble-style event while the user drags. Same border-radius
+  // arithmetic as the export mask (roundness * 50% of the square element ==
+  // roundness * diameter/2 in composite.rs), so this preview IS the export
+  // shape.
+  const [roundness, setRoundness] = useState<number | null>(null);
+  useEffect(() => {
+    invoke<{ bubble_roundness?: number | null }>("get_settings")
+      .then((s) => setRoundness(s.bubble_roundness ?? null))
+      .catch(() => {});
+    const un = listen<{ roundness: number | null }>("bubble-style", (e) => {
+      setRoundness(e.payload.roundness ?? null);
+    });
+    return () => {
+      un.then((f) => f()).catch(() => {});
+    };
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     let stream: MediaStream | null = null;
@@ -124,7 +143,7 @@ export default function WebcamBubble() {
           width: `min(100vw, calc(100vh - ${PILL_STRIP_CSS}px))`,
           height: `min(100vw, calc(100vh - ${PILL_STRIP_CSS}px))`,
           flexShrink: 0,
-          borderRadius: "50%",
+          borderRadius: `${(roundness ?? 1) * 50}%`,
           overflow: "hidden",
           position: "relative",
           background: "#1a1a1c",

@@ -76,6 +76,7 @@ export const I = {
   video: <Icon d={<><rect x="1.5" y="4" width="9" height="8" rx="1.5"/><path d="M10.5 7l4-2v6l-4-2z"/></>}/>,
   webcam: <Icon d={<><circle cx="8" cy="8" r="4"/><circle cx="8" cy="8" r="1.5"/></>}/>,
   square: <Icon d={<rect x="3" y="3" width="10" height="10" rx="1"/>}/>,
+  roundness: <Icon d={<rect x="3" y="3" width="10" height="10" rx="4"/>}/>,
   rect:   <Icon d={<rect x="2" y="4" width="12" height="8" rx="1"/>}/>,
   window: <Icon d={<><rect x="2" y="3" width="12" height="10" rx="1"/><path d="M2 6h12"/></>}/>,
   area:   <Icon d={P.area}/>,

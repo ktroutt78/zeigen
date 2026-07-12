@@ -807,6 +807,10 @@ function App() {
   const [selectedArea, setSelectedArea] = useState<AreaSelection | null>(null);
   const [selectedMic, setSelectedMic] = useState<string | null>(null);
   const [selectedCamera, setSelectedCamera] = useState<number | null>(null);
+  // Bubble roundness preference (null = circle). Set before recording; the
+  // backend stamps the value into each recording's sidecar at finalize, so
+  // this is a remembered default, not an edit of existing recordings.
+  const [bubbleRoundness, setBubbleRoundness] = useState<number | null>(null);
   const [countdownDuration, setCountdownDuration] =
     useState<CountdownDuration>(5);
   const [lengthCapMode, setLengthCapMode] = useState<LengthCapMode>("off");
@@ -829,14 +833,15 @@ function App() {
   // progress bar instead of staring at nothing during a multi-minute composite.
   const [compositeProgress, setCompositeProgress] = useState<number | null>(null);
 
-  // Load persisted noise-reduction level on launch.
+  // Load persisted noise-reduction level and bubble roundness on launch.
   useEffect(() => {
-    invoke<{ noise_reduction?: string }>("get_settings")
+    invoke<{ noise_reduction?: string; bubble_roundness?: number | null }>("get_settings")
       .then((s) => {
         const lvl = s.noise_reduction;
         if (lvl === "off" || lvl === "low" || lvl === "med" || lvl === "high") {
           setNoiseReduction(lvl);
         }
+        setBubbleRoundness(s.bubble_roundness ?? null);
       })
       .catch(() => {});
   }, []);
@@ -1909,6 +1914,29 @@ function App() {
           disabled={recording}
         />
 
+        {selectedCamera != null && (
+          <>
+            <RowLabel icon={I.roundness} label="Bubble" />
+            <RoundnessRow
+              value={bubbleRoundness}
+              onChange={(v) => {
+                setBubbleRoundness(v);
+                // Live-preview push to the floating bubble window; the
+                // window also reads get_settings on mount, so a missed
+                // event can't leave it stale.
+                emit("bubble-style", { roundness: v }).catch(() => {});
+                invoke("set_bubble_roundness", { roundness: v }).catch((e) =>
+                  setError(String(e)),
+                );
+              }}
+              // Roundness is captured into the recording at start — a
+              // mid-recording (or mid-countdown) change would only apply to
+              // the next one, so lock the control to match.
+              disabled={recording || state === "countdown"}
+            />
+          </>
+        )}
+
         <RowLabel icon={I.mic} label="Microphone" />
         <select
           className="select"
@@ -2379,6 +2407,50 @@ function RowLabel({ icon, label }: { icon: React.ReactNode; label: string }) {
     >
       {icon}
       <span>{label}</span>
+    </div>
+  );
+}
+
+// Bubble roundness slider: square (0) to full circle (right end). Full
+// circle maps to null so the preference — and each recording's sidecar
+// stamp — omits the field entirely, keeping the legacy byte-identical
+// mask path (see composite.rs bubble_path).
+function RoundnessRow({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: number | null;
+  onChange: (v: number | null) => void;
+  disabled: boolean;
+}) {
+  const pct = Math.round((value ?? 1) * 100);
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+      <input
+        type="range"
+        min={0}
+        max={100}
+        value={pct}
+        disabled={disabled}
+        onChange={(e) => {
+          const v = Number(e.target.value);
+          onChange(v >= 100 ? null : v / 100);
+        }}
+        style={{ flex: 1, display: "block" }}
+      />
+      <span
+        style={{
+          fontFamily: "var(--font-mono)",
+          fontSize: 11,
+          color: "var(--fg-tertiary)",
+          width: 44,
+          textAlign: "right",
+          flexShrink: 0,
+        }}
+      >
+        {pct === 100 ? "Circle" : pct === 0 ? "Square" : `${pct}%`}
+      </span>
     </div>
   );
 }
