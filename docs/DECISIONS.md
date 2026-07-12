@@ -4,7 +4,16 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
-## 2026-07-11 — E1: bubble roundness (roundness only; size and position stay record-time)
+## 2026-07-11 — E1 placement: roundness is a before-record control, not a Review edit
+
+Supersedes the placement half of the E1 entry below (the rendering mechanism, byte-identity guards, and preview-parity arithmetic all stand unchanged). The Roundness slider moved from the Review toolbar to the recorder panel, next to the camera picker, visible when a camera is selected and locked during countdown/recording. After recording there is no roundness control anywhere.
+
+**Data path:** slider → `set_bubble_roundness` → `settings.json` (remembered default; full circle normalizes to absent, same convention as the sidecar) → captured into the active recording at start → **stamped into the sidecar at finalize**, in the same block that writes `bubble_position_log`. Export reads only the sidecar. Stamping at record-stop rather than reading the preference at export is deliberate: changing the default later never reshapes an existing un-exported recording.
+
+- **Live preview:** the main window pushes `bubble-style` events to the floating bubble window, which binds the value to `border-radius` — the same radius fraction the export mask uses. The bubble window also reads `get_settings` on mount, so a missed event can't leave it stale.
+- **Review is read-only for roundness:** the control is gone, but the sidecar field's read→write round trip is kept so Review's debounced auto-save preserves the record-time stamp, and `BubbleLayer` still previews the stamped shape during playback.
+- **No recording-engine changes:** the Swift binary never sees the bubble — webcam capture is a separate ffmpeg process, the position log is app-side, compositing is export-time. UI + settings + one sidecar stamp only.
+- Shadow deliberately untouched — a depth-look shadow strengthening is queued as the next step and current calibration is the baseline for it.
 
 E1 shipped as roundness-only: one slider making the webcam bubble a rounded square instead of a circle. The size slider was cut from scope before build — size stays driven by the record-time position log exactly as before, which also deleted the need for any precedence rule between record-time and export-time values. Roundness has no record-time counterpart: one optional sidecar field, absent = circle = today.
 
