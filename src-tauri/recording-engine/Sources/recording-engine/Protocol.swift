@@ -16,6 +16,10 @@ struct Command: Decodable {
     let area_y: Double?
     let area_width: Double?
     let area_height: Double?
+    // V3 Phase A. Default true: SCK's burned-in cursor is disabled
+    // (showsCursor = false) and a cursor telemetry sidecar is written at
+    // stop. false reproduces pre-V3 behavior exactly.
+    let capture_cursor: Bool?
 }
 
 // MARK: Events
@@ -63,6 +67,9 @@ enum Event {
     // always "screen"; the field future-proofs against a similar fix
     // for the webcam stream if WEBCAM_LEAD_MS is ever retired.
     case first_frame(stream: String)
+    // V3 Phase A: emitted after `stopped` when capture_cursor was on and
+    // at least one video frame was written.
+    case cursor_track_written(path: String, sample_count: Int)
     case error(code: String, message: String)
 }
 
@@ -108,6 +115,8 @@ func emit(_ event: Event) {
         json = ["event": "window_frame", "x": x, "y": y, "width": width, "height": height, "on_screen": on_screen]
     case .first_frame(let stream):
         json = ["event": "first_frame", "stream": stream]
+    case .cursor_track_written(let path, let sample_count):
+        json = ["event": "cursor_track_written", "path": path, "sample_count": sample_count]
     case .error(let code, let message):
         json = ["event": "error", "code": code, "message": message]
     }

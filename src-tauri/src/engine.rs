@@ -34,6 +34,11 @@ pub enum EngineCommand {
         area_width: Option<f64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         area_height: Option<f64>,
+        // V3 Phase A. Engine default is true (cursor telemetry on, system
+        // cursor NOT burned into pixels), but until the Phase B compositor
+        // draws the synthetic cursor the app pins this to false so
+        // recordings keep the visible cursor — byte-identical to pre-V3.
+        capture_cursor: bool,
     },
     Pause,
     Resume,

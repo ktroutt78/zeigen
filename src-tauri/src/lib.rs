@@ -184,6 +184,7 @@ fn engine_start(
             area_y: area_y_send,
             area_width: area_w_send,
             area_height: area_h_send,
+            capture_cursor: false,
         })?;
 
     *active = Some(ActiveRecording {

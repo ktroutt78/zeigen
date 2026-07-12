@@ -69,6 +69,14 @@ final class RecordingSession: NSObject,
     private var heartbeatTimer: DispatchSourceTimer?
     private let audioQueue: DispatchQueue?
 
+    // V3 Phase A cursor telemetry. Non-nil iff capture_cursor is on, in
+    // which case showsCursor is false and a telemetry sidecar is written
+    // at stop. cursorAnchorSet guards the one-shot anchor handoff (first
+    // video frame accepted by the writer) without locking the tracker on
+    // every frame.
+    private let cursorTracker: CursorTracker?
+    private var cursorAnchorSet = false
+
     let capturedWindowID: UInt32?
 
     var frameCount: Int { lock.withLock { frames } }
@@ -93,6 +101,7 @@ final class RecordingSession: NSObject,
         microphoneUID: String?,
         outputPath: String,
         maxFPS: Int,
+        captureCursor: Bool,
         onFatalError: @escaping @Sendable (EngineError) -> Void
     ) async throws {
         self.outputURL = URL(fileURLWithPath: outputPath)
@@ -113,6 +122,10 @@ final class RecordingSession: NSObject,
         // SCK default: CGRect.zero on sourceRect means "capture the full source".
         // For .area we override with a display-relative point rect.
         var sourceRect: CGRect = .zero
+        // Screen-points → video-pixels mapping for cursor telemetry
+        // (V3-PLAN A.2): same origin offset and scale factor each capture
+        // mode already uses for its output dimensions.
+        let cursorMapping: CursorTracker.Mapping
         switch source {
         case .display(let displayID):
             guard let display = shareable.displays.first(where: { $0.displayID == displayID }) else {
@@ -122,6 +135,14 @@ final class RecordingSession: NSObject,
             width = Int(display.width)
             height = Int(display.height)
             resolvedWindowID = nil
+            let scale = display.frame.width > 0
+                ? Double(display.width) / Double(display.frame.width)
+                : 1.0
+            cursorMapping = .fixed(
+                originX: Double(display.frame.origin.x),
+                originY: Double(display.frame.origin.y),
+                scale: scale
+            )
         case .window(let windowID):
             guard let window = shareable.windows.first(where: { $0.windowID == windowID }) else {
                 throw EngineError(code: "WINDOW_NOT_FOUND", message: "window_id \(windowID) not present")
@@ -137,6 +158,7 @@ final class RecordingSession: NSObject,
             width = max(2, Int((window.frame.width * scale).rounded()))
             height = max(2, Int((window.frame.height * scale).rounded()))
             resolvedWindowID = windowID
+            cursorMapping = .window(windowID: windowID, pixelWidth: width, pixelHeight: height)
         case .area(let displayID, let pointRect):
             guard let display = shareable.displays.first(where: { $0.displayID == displayID }) else {
                 throw EngineError(code: "DISPLAY_NOT_FOUND", message: "display_id \(displayID) not present")
@@ -149,8 +171,18 @@ final class RecordingSession: NSObject,
             height = max(2, Int((pointRect.height * scale).rounded()))
             resolvedWindowID = nil
             sourceRect = pointRect
+            // Area rect is display-relative points; cursor locations are
+            // global points, so the mapping origin is display + rect.
+            cursorMapping = .fixed(
+                originX: Double(display.frame.origin.x + pointRect.origin.x),
+                originY: Double(display.frame.origin.y + pointRect.origin.y),
+                scale: Double(scale)
+            )
         }
         self.capturedWindowID = resolvedWindowID
+        self.cursorTracker = captureCursor
+            ? CursorTracker(mapping: cursorMapping, videoWidth: width, videoHeight: height)
+            : nil
 
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
         let videoSettings: [String: Any] = [
@@ -235,7 +267,10 @@ final class RecordingSession: NSObject,
         config.sourceRect = sourceRect
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(maxFPS))
         config.queueDepth = 6
-        config.showsCursor = true
+        // V3 Phase A: with cursor telemetry on, the system cursor must NOT
+        // be burned into the pixels — Phase B composites a synthetic one.
+        // With it off, pre-V3 behavior is preserved exactly.
+        config.showsCursor = !captureCursor
         config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         // captureMicrophone deliberately left unset: V2.2 routes mic
         // through AVCaptureSession (Track B).
@@ -294,6 +329,7 @@ final class RecordingSession: NSObject,
                 }
             }
         }
+        cursorTracker?.start()
         startHeartbeat()
     }
 
@@ -379,6 +415,7 @@ final class RecordingSession: NSObject,
             paused = true
             pauseStartedAt = CMClockGetTime(CMClockGetHostTimeClock())
         }
+        cursorTracker?.pause()
     }
 
     func resume() {
@@ -390,11 +427,16 @@ final class RecordingSession: NSObject,
                 pauseStartedAt = nil
             }
         }
+        cursorTracker?.resume()
     }
 
     func stop() async throws -> RecordingResult {
         heartbeatTimer?.cancel()
         heartbeatTimer = nil
+        // Stop sampling at the stop command so telemetry ends where the
+        // cutoff clamp ends the video; the sidecar is written after the
+        // writer finalizes, below.
+        cursorTracker?.stop()
         removeNotificationObservers()
 
         // Cutoff clamp before teardown — late samples from either pipeline
@@ -497,12 +539,35 @@ final class RecordingSession: NSObject,
         }
 
         let bytes = (try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size] as? Int64) ?? 0
+
+        // V3 Phase A: write the telemetry sidecar next to the mp4, using
+        // the same hidden-dotfile convention as edit.rs:sidecar_path().
+        // Telemetry is capture-owned and immutable; the annotations sidecar
+        // is user-edited state — separate files, separate lifecycles.
+        var cursorTrackPath: String?
+        var cursorSampleCount: Int?
+        if let tracker = cursorTracker {
+            let stem = outputURL.deletingPathExtension().lastPathComponent
+            let trackURL = outputURL.deletingLastPathComponent()
+                .appendingPathComponent(".\(stem).cursor.json")
+            do {
+                if let count = try tracker.writeTrack(to: trackURL) {
+                    cursorTrackPath = trackURL.path
+                    cursorSampleCount = count
+                }
+            } catch {
+                logStderr("cursor track write failed: \(error)")
+            }
+        }
+
         return RecordingResult(
             path: outputURL.path,
             duration: elapsedSeconds,
             bytes: bytes,
             frames: frameCount,
-            dropped: droppedCount
+            dropped: droppedCount,
+            cursorTrackPath: cursorTrackPath,
+            cursorSampleCount: cursorSampleCount
         )
     }
 
@@ -513,6 +578,9 @@ final class RecordingSession: NSObject,
     func tearDownAfterFatalError() async {
         heartbeatTimer?.cancel()
         heartbeatTimer = nil
+        // Fatal path saves partial video state on the way out; no telemetry
+        // sidecar is written — just stop sampling and remove the monitor.
+        cursorTracker?.stop()
         removeNotificationObservers()
 
         lock.withLock {
@@ -734,6 +802,18 @@ final class RecordingSession: NSObject,
         if ok {
             if isVideo {
                 lastAppendedRawVideoPTS = rawPTS
+                // V3 Phase A alignment anchor (A.2): the first video frame
+                // the writer accepted, paired with mach time now — receipt
+                // and append happen in the same callback, microseconds
+                // apart. adjustedPTS - sessionStartPTS is this frame's
+                // position on the output timeline.
+                if !cursorAnchorSet, let tracker = cursorTracker {
+                    cursorAnchorSet = true
+                    tracker.setAnchor(
+                        mach: mach_absolute_time(),
+                        ptsSeconds: CMTimeGetSeconds(adjustedPTS - sessionStartPTS)
+                    )
+                }
             } else {
                 lastAppendedRawAudioPTS = rawPTS
                 audioAppended += 1

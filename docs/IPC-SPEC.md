@@ -44,6 +44,7 @@ Fields:
 - `output_path` (string) — absolute path; parent directory must already exist.
 - `max_fps` (uint, optional) — frame rate ceiling. Default 30. SCK delivers VFR; this is the max, not the guaranteed rate.
 - `area_x`, `area_y`, `area_width`, `area_height` (float, optional) — sub-region of the display to capture. All four must be present together alongside `display_id`; partial sets are rejected. Units are logical points relative to the display's top-left origin. When present, SCK is configured via `SCStreamConfiguration.sourceRect` and the output mp4's pixel dimensions are `area_width × scale` by `area_height × scale` where `scale = SCDisplay.width / SCDisplay.frame.width` for the chosen display. Forbidden with `window_id`.
+- `capture_cursor` (bool, optional, default `true`) — V3 Phase A cursor telemetry. When true, the system cursor is NOT composited into the video (`SCStreamConfiguration.showsCursor = false`) and the engine samples cursor position at 120 Hz plus click/scroll events, writing a `.<stem>.cursor.json` telemetry sidecar next to the output mp4 at stop (same hidden-dotfile convention as the annotations sidecar). A `cursor_track_written` event follows `stopped`. When false, behavior is byte-identical to pre-V3: cursor burned into pixels, no telemetry file, no extra event. The app pins this to `false` until the Phase B compositor can draw the synthetic cursor.
 
 For window captures the engine sizes the output to native pixels (window's point size × the containing display's scale factor) and fixes that resolution for the lifetime of the recording. Resizing the window mid-record is allowed but the resized content gets letterboxed/padded inside the original frame.
 
@@ -157,6 +158,14 @@ Emitted after `stop` completes.
   "dropped": 0
 }
 ```
+
+### `cursor_track_written`
+Emitted once, immediately after `stopped`, when `capture_cursor` was on and at least one video frame was written. `path` is the telemetry sidecar (hidden dotfile next to the mp4); `sample_count` is the number of cursor position samples in it.
+```json
+{"event": "cursor_track_written", "path": "/Users/you/Movies/Zeigen/.recording-2026-04-24-110000.cursor.json", "sample_count": 14203}
+```
+
+The sidecar format (V3-PLAN A.3): `version`, `anchor` (`first_frame_pts` seconds on the output timeline + `first_frame_mach` raw mach ticks — persisted, never recomputed), `video_size` (pixels), `sample_rate_hz` (120), `samples` (`t`/`x`/`y` — seconds on the gapless output timeline, video pixel space), and `events` (`kind` one of `left_down`, `left_up`, `right_down`, `scroll`). Events are detected by polling `CGEventSource` counter deltas on the sampler tick (permission-free; see DECISIONS.md 2026-07-11), so timestamps quantize to ±8.3 ms and scroll events carry **no `dy`** — scroll direction/magnitude would require the Input Monitoring permission. Telemetry is capture-owned and immutable — it is a separate file from the user-edited annotations sidecar and must stay that way.
 
 ### `window_frame`
 Only emitted while a `window`-mode recording is active. 5Hz cadence (200ms). Reports the captured window's current `CGWindowListCopyWindowInfo` bounds so the consumer can map screen-space coordinates (e.g., the floating bubble) into window-relative fractions even as the user moves or resizes the window mid-record. `on_screen: false` means the window has been minimized, hidden, or moved to a Space the engine isn't observing — frame values are still the last-known bounds.

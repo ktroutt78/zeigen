@@ -194,6 +194,7 @@ actor Engine {
                 microphoneUID: cmd.microphone_uid,
                 outputPath: outputPath,
                 maxFPS: cmd.max_fps ?? 30,
+                captureCursor: cmd.capture_cursor ?? true,
                 onFatalError: onFatal
             )
             try await newSession.start()
@@ -266,6 +267,9 @@ actor Engine {
                 frames: result.frames,
                 dropped: result.dropped
             ))
+            if let path = result.cursorTrackPath, let count = result.cursorSampleCount {
+                emit(.cursor_track_written(path: path, sample_count: count))
+            }
         } catch {
             emit(.error(code: "WRITER_FAILED", message: "stop failed: \(error)"))
         }
@@ -333,4 +337,8 @@ struct RecordingResult {
     let bytes: Int64
     let frames: Int
     let dropped: Int
+    // V3 Phase A: set when capture_cursor was on and a telemetry sidecar
+    // was written (nil when the flag was off or no video frame landed).
+    let cursorTrackPath: String?
+    let cursorSampleCount: Int?
 }

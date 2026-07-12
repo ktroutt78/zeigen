@@ -190,6 +190,7 @@ fn run_track_b(
             area_y,
             area_width,
             area_height,
+            capture_cursor: false,
         })?;
     }
 
