@@ -95,6 +95,11 @@ type SidecarState = {
   // means "use the export-time default" (0.5s in) applied on the Rust side.
   // Stored in original-timeline coords like annotation.start_time.
   thumbnail_time?: number | null;
+  // Bubble corner roundness, 0.0 (square)..1.0 (circle). null/undefined =
+  // circle via the legacy mask path — composite.rs keeps that branch
+  // byte-identical to pre-E1, so the slider only writes the field when the
+  // user moves it off full circle.
+  bubble_roundness?: number | null;
 };
 
 const EMPTY_STATE: SidecarState = {
@@ -102,6 +107,7 @@ const EMPTY_STATE: SidecarState = {
   annotations: [],
   bubble_position_log: [],
   thumbnail_time: null,
+  bubble_roundness: null,
 };
 const SIDECAR_DEBOUNCE_MS = 350;
 const TRIM_EPS = 0.05;
@@ -158,6 +164,17 @@ type ThumbnailControls = {
   setThumbnailTime: (t: number | null) => void;
   previewUrl: string | null;
   getCurrentTime: () => number;
+};
+
+// Bubble style controls passed Review → LeftColumn → Toolbar (same shape as
+// ThumbnailControls). Roundness is E1's only styled property: 0..1 corner-
+// radius fraction, null = full circle. The slider writes null at the circle
+// end so an untouched (or returned-to-circle) recording keeps the field out
+// of its sidecar entirely and stays on the byte-identical legacy mask path.
+type BubbleControls = {
+  roundness: number | null;
+  setRoundness: (r: number | null) => void;
+  hasBubble: boolean;
 };
 
 type ReviewParams = {
@@ -230,6 +247,10 @@ function statesEqual(a: SidecarState, b: SidecarState, duration: number | null):
   const ttb = b.thumbnail_time ?? null;
   if ((tta == null) !== (ttb == null)) return false;
   if (tta != null && ttb != null && Math.abs(tta - ttb) > TRIM_EPS) return false;
+  const bra = a.bubble_roundness ?? null;
+  const brb = b.bubble_roundness ?? null;
+  if ((bra == null) !== (brb == null)) return false;
+  if (bra != null && brb != null && Math.abs(bra - brb) > 0.001) return false;
   return true;
 }
 
@@ -280,11 +301,13 @@ function isLogicallyEmpty(s: SidecarState, duration: number | null): boolean {
   // empty, or the delete branch below would wipe the keyframes.
   const noBubble = !s.bubble_position_log || s.bubble_position_log.length === 0;
   const noThumb = s.thumbnail_time == null;
+  const noRoundness = s.bubble_roundness == null;
   return (
     normalizeTrim(s.trim, duration) == null &&
     s.annotations.length === 0 &&
     noBubble &&
-    noThumb
+    noThumb &&
+    noRoundness
   );
 }
 
@@ -353,6 +376,7 @@ export default function Review() {
   // preserves what finalize wrote so sidecar rewrites (trim/annotation
   // edits, empty-state delete path) don't wipe the bubble keyframes.
   const [bubblePositionLog, setBubblePositionLog] = useState<BubblePositionEntry[]>([]);
+  const [bubbleRoundness, setBubbleRoundness] = useState<number | null>(null);
   // Original-timeline timestamp for the user's chosen poster frame. null =
   // unset; export-time default (0.5s in) is applied on the Rust side.
   const [thumbnailTime, setThumbnailTime] = useState<number | null>(null);
@@ -590,11 +614,13 @@ export default function Review() {
             annotations: state.annotations ?? [],
             bubble_position_log: state.bubble_position_log ?? [],
             thumbnail_time: state.thumbnail_time ?? null,
+            bubble_roundness: state.bubble_roundness ?? null,
           });
           if (state.trim) setTrim(state.trim);
           if (state.annotations) setAnnotations(state.annotations);
           if (state.bubble_position_log) setBubblePositionLog(state.bubble_position_log);
           if (state.thumbnail_time != null) setThumbnailTime(state.thumbnail_time);
+          if (state.bubble_roundness != null) setBubbleRoundness(state.bubble_roundness);
         } else {
           setSnapshot(EMPTY_STATE);
         }
@@ -689,8 +715,9 @@ export default function Review() {
       annotations,
       bubble_position_log: bubblePositionLog,
       thumbnail_time: thumbnailTime,
+      bubble_roundness: bubbleRoundness,
     }),
-    [trim, annotations, bubblePositionLog, thumbnailTime],
+    [trim, annotations, bubblePositionLog, thumbnailTime, bubbleRoundness],
   );
 
   const dirty = useMemo(
@@ -712,6 +739,7 @@ export default function Review() {
         annotations: currentState.annotations,
         bubble_position_log: currentState.bubble_position_log,
         thumbnail_time: currentState.thumbnail_time ?? null,
+        bubble_roundness: currentState.bubble_roundness ?? null,
       };
       setCommittedMp4Path(null);
       if (empty) {
@@ -1247,6 +1275,11 @@ export default function Review() {
             previewUrl: playbackUrl,
             getCurrentTime: () => videoRef.current?.currentTime ?? 0,
           }}
+          bubble={{
+            roundness: bubbleRoundness,
+            setRoundness: setBubbleRoundness,
+            hasBubble: webcamAssetUrl != null && bubblePositionLog.length > 0,
+          }}
         />
         <ExportPanel
           sourcePath={sourcePath}
@@ -1397,6 +1430,7 @@ type LeftColumnProps = {
   watermarkPreview: WatermarkPreview;
   editor: Editor;
   thumbnail: ThumbnailControls;
+  bubble: BubbleControls;
 };
 
 function LeftColumn(props: LeftColumnProps) {
@@ -1416,6 +1450,7 @@ function LeftColumn(props: LeftColumnProps) {
         trim={props.trim}
         editor={props.editor}
         thumbnail={props.thumbnail}
+        bubble={props.bubble}
       />
       <VideoStage
         assetUrl={props.playbackUrl}
@@ -1424,6 +1459,7 @@ function LeftColumn(props: LeftColumnProps) {
         webcamVideoRef={props.webcamVideoRef}
         webcamLeadSec={props.webcamLeadSec}
         bubblePositionLog={props.bubblePositionLog}
+        bubbleRoundness={props.bubble.roundness}
         onLoadedMetadata={props.onLoadedMetadata}
         onTimeUpdate={props.onTimeUpdate}
         onPlay={props.onPlay}
@@ -1458,12 +1494,15 @@ function Toolbar({
   trim,
   editor,
   thumbnail,
+  bubble,
 }: {
   duration: number | null;
   trim: Trim | null;
   editor: Editor;
   thumbnail: ThumbnailControls;
+  bubble: BubbleControls;
 }) {
+  const [bubbleOpen, setBubbleOpen] = useState(false);
   const len =
     trim && duration != null
       ? Math.max(0, trim.out - trim.in)
@@ -1573,6 +1612,14 @@ function Toolbar({
           active={thumbnail.thumbnailTime != null}
           onClick={onSetClick}
         />
+        {bubble.hasBubble && (
+          <ToolButton
+            icon="M3 6.5A3.5 3.5 0 016.5 3h3A3.5 3.5 0 0113 6.5v3a3.5 3.5 0 01-3.5 3.5h-3A3.5 3.5 0 013 9.5z"
+            label="Bubble"
+            active={bubble.roundness != null}
+            onClick={() => setBubbleOpen((v) => !v)}
+          />
+        )}
         {popoverOpen && capturedTime != null && (
           <ThumbnailPopover
             previewUrl={thumbnail.previewUrl}
@@ -1581,8 +1628,87 @@ function Toolbar({
             onCancel={() => setPopoverOpen(false)}
           />
         )}
+        {bubbleOpen && (
+          <BubblePopover bubble={bubble} onClose={() => setBubbleOpen(false)} />
+        )}
       </div>
     </div>
+  );
+}
+
+// Anchored under the Bubble button. One slider: corner roundness, live in
+// the preview via BubbleLayer's border-radius (the export mask uses the same
+// radius fraction). Slider at the circle end writes null so the sidecar
+// field disappears and the recording stays on the legacy byte-identical
+// mask path.
+function BubblePopover({
+  bubble,
+  onClose,
+}: {
+  bubble: BubbleControls;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const pct = Math.round((bubble.roundness ?? 1) * 100);
+  return (
+    <>
+      <div
+        onClick={onClose}
+        style={{
+          position: "fixed",
+          inset: 0,
+          background: "transparent",
+          zIndex: 999,
+        }}
+      />
+      <div
+        style={{
+          position: "absolute",
+          top: "calc(100% + 6px)",
+          right: 0,
+          width: 240,
+          background: "var(--bg-elevated)",
+          border: "1px solid var(--border-default)",
+          borderRadius: 8,
+          boxShadow: "0 8px 24px rgba(0,0,0,0.22)",
+          padding: 12,
+          zIndex: 1000,
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            marginBottom: 8,
+            fontSize: 12,
+          }}
+        >
+          <span style={{ color: "var(--fg-primary)" }}>Roundness</span>
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--fg-tertiary)" }}>
+            {pct === 100 ? "Circle" : `${pct}%`}
+          </span>
+        </div>
+        <input
+          type="range"
+          min={0}
+          max={100}
+          value={pct}
+          onChange={(e) => {
+            const v = Number(e.target.value);
+            bubble.setRoundness(v >= 100 ? null : v / 100);
+          }}
+          style={{ width: "100%", display: "block" }}
+        />
+      </div>
+    </>
   );
 }
 
@@ -1724,7 +1850,7 @@ function ToolButton({
 }: {
   icon: string;
   label: string;
-  kbd: string;
+  kbd?: string;
   active: boolean;
   disabled?: boolean;
   onClick?: () => void;
@@ -1754,7 +1880,9 @@ function ToolButton({
     >
       <Icon d={icon} size={12} stroke={1.4} />
       <span>{label}</span>
-      <span style={{ marginLeft: 4, color: "var(--fg-tertiary)", fontSize: 10.5 }}>{kbd}</span>
+      {kbd && (
+        <span style={{ marginLeft: 4, color: "var(--fg-tertiary)", fontSize: 10.5 }}>{kbd}</span>
+      )}
     </button>
   );
 }
@@ -1767,6 +1895,7 @@ type VideoStageProps = {
   webcamVideoRef: React.MutableRefObject<HTMLVideoElement | null>;
   webcamLeadSec: number;
   bubblePositionLog: BubblePositionEntry[];
+  bubbleRoundness: number | null;
   onLoadedMetadata: () => void;
   onTimeUpdate: () => void;
   onPlay: () => void;
@@ -1960,6 +2089,7 @@ function VideoStage(props: VideoStageProps) {
           webcamUrl={props.webcamUrl}
           webcamLeadSec={props.webcamLeadSec}
           bubblePositionLog={props.bubblePositionLog}
+          bubbleRoundness={props.bubbleRoundness}
           videoDims={props.watermarkPreview.videoDims}
         />
         <AnnotationLayer
@@ -2006,6 +2136,7 @@ function BubbleLayer({
   webcamUrl,
   webcamLeadSec,
   bubblePositionLog,
+  bubbleRoundness,
   videoDims,
 }: {
   stageRef: React.MutableRefObject<HTMLDivElement | null>;
@@ -2014,6 +2145,7 @@ function BubbleLayer({
   webcamUrl: string | null;
   webcamLeadSec: number;
   bubblePositionLog: BubblePositionEntry[];
+  bubbleRoundness: number | null;
   // Phase 15 c3 rAF fix made currentTime obsolete here — the position
   // loop reads screenVideoRef.current.currentTime directly. Accepting
   // it would force callers to keep threading the prop; declining lets
@@ -2203,10 +2335,15 @@ function BubbleLayer({
       style={{
         // Stable properties only. width, height, transform, visibility are
         // mutated by the rAF effect / ref callback — see RIGOR note above.
+        // (borderRadius is prop-driven, not rAF-mutated, so it's fine here.)
         position: "absolute",
         left: 0,
         top: 0,
-        borderRadius: "50%",
+        // E1 roundness: fraction of the full-circle radius. Mirrors the
+        // export mask exactly — composite.rs corner radius is
+        // roundness * diameter/2, and N% border-radius on a square element
+        // is (N/50) * diameter/2. null = circle = legacy mask.
+        borderRadius: `${(bubbleRoundness ?? 1) * 50}%`,
         objectFit: "cover",
         pointerEvents: "none",
         background: "#000",
