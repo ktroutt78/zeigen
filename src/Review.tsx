@@ -166,16 +166,6 @@ type ThumbnailControls = {
   getCurrentTime: () => number;
 };
 
-// Bubble style controls passed Review → LeftColumn → Toolbar (same shape as
-// ThumbnailControls). Roundness is E1's only styled property: 0..1 corner-
-// radius fraction, null = full circle. The slider writes null at the circle
-// end so an untouched (or returned-to-circle) recording keeps the field out
-// of its sidecar entirely and stays on the byte-identical legacy mask path.
-type BubbleControls = {
-  roundness: number | null;
-  setRoundness: (r: number | null) => void;
-  hasBubble: boolean;
-};
 
 type ReviewParams = {
   // Logical scratch identity — what save/discard/clipboard pin against.
@@ -1275,11 +1265,7 @@ export default function Review() {
             previewUrl: playbackUrl,
             getCurrentTime: () => videoRef.current?.currentTime ?? 0,
           }}
-          bubble={{
-            roundness: bubbleRoundness,
-            setRoundness: setBubbleRoundness,
-            hasBubble: webcamAssetUrl != null && bubblePositionLog.length > 0,
-          }}
+          bubbleRoundness={bubbleRoundness}
         />
         <ExportPanel
           sourcePath={sourcePath}
@@ -1430,7 +1416,9 @@ type LeftColumnProps = {
   watermarkPreview: WatermarkPreview;
   editor: Editor;
   thumbnail: ThumbnailControls;
-  bubble: BubbleControls;
+  // Read-only: stamped into the sidecar at record time (recorder UI owns
+  // the control); Review only previews it via BubbleLayer's border-radius.
+  bubbleRoundness: number | null;
 };
 
 function LeftColumn(props: LeftColumnProps) {
@@ -1450,7 +1438,6 @@ function LeftColumn(props: LeftColumnProps) {
         trim={props.trim}
         editor={props.editor}
         thumbnail={props.thumbnail}
-        bubble={props.bubble}
       />
       <VideoStage
         assetUrl={props.playbackUrl}
@@ -1459,7 +1446,7 @@ function LeftColumn(props: LeftColumnProps) {
         webcamVideoRef={props.webcamVideoRef}
         webcamLeadSec={props.webcamLeadSec}
         bubblePositionLog={props.bubblePositionLog}
-        bubbleRoundness={props.bubble.roundness}
+        bubbleRoundness={props.bubbleRoundness}
         onLoadedMetadata={props.onLoadedMetadata}
         onTimeUpdate={props.onTimeUpdate}
         onPlay={props.onPlay}
@@ -1494,15 +1481,12 @@ function Toolbar({
   trim,
   editor,
   thumbnail,
-  bubble,
 }: {
   duration: number | null;
   trim: Trim | null;
   editor: Editor;
   thumbnail: ThumbnailControls;
-  bubble: BubbleControls;
 }) {
-  const [bubbleOpen, setBubbleOpen] = useState(false);
   const len =
     trim && duration != null
       ? Math.max(0, trim.out - trim.in)
@@ -1612,14 +1596,6 @@ function Toolbar({
           active={thumbnail.thumbnailTime != null}
           onClick={onSetClick}
         />
-        {bubble.hasBubble && (
-          <ToolButton
-            icon="M3 6.5A3.5 3.5 0 016.5 3h3A3.5 3.5 0 0113 6.5v3a3.5 3.5 0 01-3.5 3.5h-3A3.5 3.5 0 013 9.5z"
-            label="Bubble"
-            active={bubble.roundness != null}
-            onClick={() => setBubbleOpen((v) => !v)}
-          />
-        )}
         {popoverOpen && capturedTime != null && (
           <ThumbnailPopover
             previewUrl={thumbnail.previewUrl}
@@ -1628,87 +1604,8 @@ function Toolbar({
             onCancel={() => setPopoverOpen(false)}
           />
         )}
-        {bubbleOpen && (
-          <BubblePopover bubble={bubble} onClose={() => setBubbleOpen(false)} />
-        )}
       </div>
     </div>
-  );
-}
-
-// Anchored under the Bubble button. One slider: corner roundness, live in
-// the preview via BubbleLayer's border-radius (the export mask uses the same
-// radius fraction). Slider at the circle end writes null so the sidecar
-// field disappears and the recording stays on the legacy byte-identical
-// mask path.
-function BubblePopover({
-  bubble,
-  onClose,
-}: {
-  bubble: BubbleControls;
-  onClose: () => void;
-}) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
-  const pct = Math.round((bubble.roundness ?? 1) * 100);
-  return (
-    <>
-      <div
-        onClick={onClose}
-        style={{
-          position: "fixed",
-          inset: 0,
-          background: "transparent",
-          zIndex: 999,
-        }}
-      />
-      <div
-        style={{
-          position: "absolute",
-          top: "calc(100% + 6px)",
-          right: 0,
-          width: 240,
-          background: "var(--bg-elevated)",
-          border: "1px solid var(--border-default)",
-          borderRadius: 8,
-          boxShadow: "0 8px 24px rgba(0,0,0,0.22)",
-          padding: 12,
-          zIndex: 1000,
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            marginBottom: 8,
-            fontSize: 12,
-          }}
-        >
-          <span style={{ color: "var(--fg-primary)" }}>Roundness</span>
-          <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--fg-tertiary)" }}>
-            {pct === 100 ? "Circle" : `${pct}%`}
-          </span>
-        </div>
-        <input
-          type="range"
-          min={0}
-          max={100}
-          value={pct}
-          onChange={(e) => {
-            const v = Number(e.target.value);
-            bubble.setRoundness(v >= 100 ? null : v / 100);
-          }}
-          style={{ width: "100%", display: "block" }}
-        />
-      </div>
-    </>
   );
 }
 
