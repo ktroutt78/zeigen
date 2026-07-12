@@ -46,6 +46,13 @@ pub struct SidecarState {
     // maps it to output-timeline (post-trim) before extracting the poster.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thumbnail_time: Option<f64>,
+    // Bubble corner roundness set in review: 0.0 (square) ..= 1.0 (circle).
+    // None = circle via the legacy mask path — composite.rs keeps that branch
+    // byte-identical to pre-E1, so untouched recordings render exactly as
+    // before. Corner radius = roundness * diameter/2, mirrored by
+    // Review.tsx's border-radius for preview parity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bubble_roundness: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -803,6 +810,7 @@ pub(crate) fn run_edit_pipeline(
         webcam_size,
         webcam_corner,
         &sidecar.bubble_position_log,
+        sidecar.bubble_roundness,
         composite_watermark,
         composite_progress,
     )?;

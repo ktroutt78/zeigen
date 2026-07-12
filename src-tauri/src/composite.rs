@@ -324,18 +324,80 @@ fn build_inline_position_expr(log: &[BubblePositionEntry]) -> (String, String) {
     (x_expr, y_expr)
 }
 
-// Render a circular alpha mask to disk for use as an ffmpeg input. The PNG
-// has a white opaque circle on a transparent background; ffmpeg's `format=gray`
-// filter then yields a luma-only stream where 255 = inside circle, 0 = outside.
-// Doing this once per recording costs ~1ms vs the per-pixel-per-frame cost of
-// the previous inline `geq` expression, which dominated composite time on
-// multi-minute clips.
-fn render_alpha_mask(diameter: u32, out_path: &Path) -> Result<(), String> {
-    use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Transform};
+// Rounded-square path: side `size`, corner radius `radius`, top-left at
+// (offset, offset). Four cubic arcs with the standard circle kappa — at
+// radius = size/2 this is the usual 4-arc circle approximation (max radial
+// deviation ~0.02%, invisible at bubble sizes).
+fn rounded_square_path(size: f32, radius: f32, offset: f32) -> Option<tiny_skia::Path> {
+    use tiny_skia::PathBuilder;
+    let r = radius.clamp(0.0, size / 2.0);
+    let k = 0.552_284_75_f32;
+    let c = r * k;
+    let (x0, y0) = (offset, offset);
+    let (x1, y1) = (offset + size, offset + size);
+    let mut pb = PathBuilder::new();
+    pb.move_to(x0 + r, y0);
+    pb.line_to(x1 - r, y0);
+    pb.cubic_to(x1 - r + c, y0, x1, y0 + r - c, x1, y0 + r);
+    pb.line_to(x1, y1 - r);
+    pb.cubic_to(x1, y1 - r + c, x1 - r + c, y1, x1 - r, y1);
+    pb.line_to(x0 + r, y1);
+    pb.cubic_to(x0 + r - c, y1, x0, y1 - r + c, x0, y1 - r);
+    pb.line_to(x0, y0 + r);
+    pb.cubic_to(x0, y0 + r - c, x0 + r - c, y0, x0 + r, y0);
+    pb.close();
+    pb.finish()
+}
+
+// Bubble silhouette at the given roundness (0.0 square -> 1.0 circle; corner
+// radius = roundness * diameter/2, mirrored by Review.tsx's border-radius so
+// preview and export agree by construction). None = the pre-E1 from_circle
+// path, kept as its own branch so roundness-less sidecars produce
+// byte-identical mask/shadow PNGs — that is the E1 regression guard; don't
+// collapse it into rounded_square_path even though roundness 1.0 looks the
+// same.
+fn bubble_path(diameter: u32, roundness: Option<f64>, offset: f32) -> Option<tiny_skia::Path> {
+    use tiny_skia::PathBuilder;
+    match roundness {
+        None => {
+            let r = diameter as f32 / 2.0;
+            PathBuilder::from_circle(offset + r, offset + r, r)
+        }
+        Some(rd) => {
+            let radius = (rd.clamp(0.0, 1.0) * diameter as f64 / 2.0) as f32;
+            rounded_square_path(diameter as f32, radius, offset)
+        }
+    }
+}
+
+// "mask-240.png" for the legacy circle (None) — the exact pre-E1 name, part
+// of the pinned arg vector — and "mask-240-r035.png" for roundness 0.35, so
+// styled and legacy masks can't collide in the same scratch dir.
+fn mask_file_name(prefix: &str, target: u32, roundness: Option<f64>) -> String {
+    match roundness {
+        None => format!("{prefix}-{target}.png"),
+        Some(r) => format!(
+            "{prefix}-{target}-r{:03}.png",
+            (r.clamp(0.0, 1.0) * 100.0).round() as u32
+        ),
+    }
+}
+
+// Render the bubble alpha mask to disk for use as an ffmpeg input. The PNG
+// has a white opaque silhouette on a transparent background; ffmpeg's
+// `format=gray` filter then yields a luma-only stream where 255 = inside,
+// 0 = outside. Doing this once per recording costs ~1ms vs the
+// per-pixel-per-frame cost of the previous inline `geq` expression, which
+// dominated composite time on multi-minute clips.
+fn render_alpha_mask(
+    diameter: u32,
+    roundness: Option<f64>,
+    out_path: &Path,
+) -> Result<(), String> {
+    use tiny_skia::{FillRule, Paint, Pixmap, Transform};
     let mut pixmap = Pixmap::new(diameter, diameter)
         .ok_or_else(|| format!("alloc mask pixmap {diameter}x{diameter}"))?;
-    let r = diameter as f32 / 2.0;
-    let path = PathBuilder::from_circle(r, r, r).ok_or("invalid mask radius")?;
+    let path = bubble_path(diameter, roundness, 0.0).ok_or("invalid mask path")?;
     let mut paint = Paint::default();
     paint.set_color_rgba8(255, 255, 255, 255);
     paint.anti_alias = true;
@@ -345,20 +407,25 @@ fn render_alpha_mask(diameter: u32, out_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-// Shadow source PNG: an opaque black circle of `diameter` on a transparent
-// canvas of size `diameter + 2 * padding`. ffmpeg's `gblur` then softens its
-// edge into the padding, and `colorchannelmixer aa=SHADOW_ALPHA` dims the
-// whole thing — producing the soft drop shadow overlaid behind the bubble.
-// Matches Review.tsx's `box-shadow: 0 8px 24px rgba(0,0,0,0.22)` by-eye;
-// see SHADOW_* constants below for the gblur→CSS-blur calibration.
-fn render_shadow_source(diameter: u32, padding: u32, out_path: &Path) -> Result<(), String> {
-    use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Transform};
+// Shadow source PNG: an opaque black bubble silhouette of `diameter` on a
+// transparent canvas of size `diameter + 2 * padding`. ffmpeg's `gblur` then
+// softens its edge into the padding, and `colorchannelmixer aa=SHADOW_ALPHA`
+// dims the whole thing — producing the soft drop shadow overlaid behind the
+// bubble. Matches Review.tsx's `box-shadow: 0 8px 24px rgba(0,0,0,0.22)`
+// by-eye; see SHADOW_* constants below for the gblur→CSS-blur calibration.
+// CSS box-shadow follows border-radius automatically, so the rounded-rect
+// silhouette keeps preview parity with no recalibration.
+fn render_shadow_source(
+    diameter: u32,
+    padding: u32,
+    roundness: Option<f64>,
+    out_path: &Path,
+) -> Result<(), String> {
+    use tiny_skia::{FillRule, Paint, Pixmap, Transform};
     let size = diameter + 2 * padding;
     let mut pixmap = Pixmap::new(size, size)
         .ok_or_else(|| format!("alloc shadow pixmap {size}x{size}"))?;
-    let center = size as f32 / 2.0;
-    let r = diameter as f32 / 2.0;
-    let path = PathBuilder::from_circle(center, center, r).ok_or("invalid shadow radius")?;
+    let path = bubble_path(diameter, roundness, padding as f32).ok_or("invalid shadow path")?;
     let mut paint = Paint::default();
     paint.set_color_rgba8(0, 0, 0, 255);
     paint.anti_alias = true;
@@ -415,6 +482,7 @@ pub fn composite(
     size: WebcamSize,
     corner: Corner,
     bubble_position_log: &[BubblePositionEntry],
+    bubble_roundness: Option<f64>,
     watermark: Option<Watermark>,
     on_progress: impl Fn(f64) + Send + 'static,
 ) -> Result<(), String> {
@@ -422,6 +490,49 @@ pub fn composite(
         return Err("no webcam segments to composite".into());
     }
 
+    // Webcam-vs-audio alignment via tpad on the webcam stream — see
+    // module-level WEBCAM_LEAD_MS for the rationale. Fixed calibrated
+    // value, not derived from the screen/webcam duration delta (which
+    // is dominated by stop-timing jitter, not start latency).
+    let screen_dur = probe_duration_seconds(screen_path)?;
+
+    // Drop the screen.mp4 audio's own leading gap (SCK mic-init latency — the
+    // audio stream's start_time, typically 0-70ms) via `-itsoffset` on the
+    // audio-only input copy, so the audio and screen video share t=0. The mp4
+    // muxer normalizes the resulting negative PTS to zero.
+    let audio_shift = probe_audio_start_time(screen_path).unwrap_or(0.0);
+
+    let args = build_composite_args(
+        screen_path,
+        webcam_segments,
+        output_path,
+        size,
+        corner,
+        bubble_position_log,
+        bubble_roundness,
+        watermark,
+        screen_dur,
+        audio_shift,
+    )?;
+    run_composite_ffmpeg(args, screen_dur, bubble_position_log.len(), on_progress)
+}
+
+// Everything deterministic about a composite: mask/shadow PNG rendering and
+// the full ffmpeg argument vector. Split from the ffmpeg run so tests can pin
+// the exact args (and mask bytes) a roundness-less sidecar produces.
+#[allow(clippy::too_many_arguments)]
+fn build_composite_args(
+    screen_path: &Path,
+    webcam_segments: &[PathBuf],
+    output_path: &Path,
+    size: WebcamSize,
+    corner: Corner,
+    bubble_position_log: &[BubblePositionEntry],
+    bubble_roundness: Option<f64>,
+    watermark: Option<Watermark>,
+    screen_dur: f64,
+    audio_shift: f64,
+) -> Result<Vec<String>, String> {
     // Prefer the live bubble diameter (sampled in physical pixels at record
     // time) over the legacy WebcamSize default. The Size/Corner UI controls
     // were removed in phase 8; the bubble is now drag-resizable and the
@@ -434,25 +545,13 @@ pub fn composite(
         .map(|d| d.round().max(1.0) as u32)
         .unwrap_or_else(|| size.px());
 
-    // Webcam-vs-audio alignment via tpad on the webcam stream — see
-    // module-level WEBCAM_LEAD_MS for the rationale. Fixed calibrated
-    // value, not derived from the screen/webcam duration delta (which
-    // is dominated by stop-timing jitter, not start latency).
-    let screen_dur = probe_duration_seconds(screen_path)?;
     let lead_in = WEBCAM_LEAD_MS / 1000.0;
 
-    // Drop the screen.mp4 audio's own leading gap (SCK mic-init latency — the
-    // audio stream's start_time, typically 0-70ms) via `-itsoffset` on the
-    // audio-only input copy, so the audio and screen video share t=0. The mp4
-    // muxer normalizes the resulting negative PTS to zero.
-    let audio_offset = probe_audio_start_time(screen_path).unwrap_or(0.0);
-    let audio_shift = audio_offset;
-
-    // Pre-render the circular alpha mask alongside the output so it lives in
-    // the same scratch dir and gets cleaned up with the recording.
+    // Pre-render the alpha mask alongside the output so it lives in the same
+    // scratch dir and gets cleaned up with the recording.
     let out_dir = output_path.parent().ok_or("output path has no parent")?;
-    let mask_path = out_dir.join(format!("mask-{target}.png"));
-    render_alpha_mask(target, &mask_path)?;
+    let mask_path = out_dir.join(mask_file_name("mask", target, bubble_roundness));
+    render_alpha_mask(target, bubble_roundness, &mask_path)?;
 
     // Shadow pixel params scale with the bubble's `target` diameter so the
     // shadow's visual proportions stay consistent across bubble sizes — same
@@ -460,8 +559,8 @@ pub fn composite(
     let shadow_padding = ((target as f64) * SHADOW_PADDING_FRAC).round() as u32;
     let shadow_sigma = ((target as f64) * SHADOW_SIGMA_FRAC).round();
     let shadow_offset_y = ((target as f64) * SHADOW_OFFSET_FRAC).round() as u32;
-    let shadow_path = out_dir.join(format!("shadow-{target}.png"));
-    render_shadow_source(target, shadow_padding, &shadow_path)?;
+    let shadow_path = out_dir.join(mask_file_name("shadow", target, bubble_roundness));
+    render_shadow_source(target, shadow_padding, bubble_roundness, &shadow_path)?;
 
     let mut args: Vec<String> = vec![
         "-y".into(),
@@ -714,6 +813,15 @@ format=yuva420p[wc_rgba];\
 
     args.push(output_path.to_string_lossy().into_owned());
 
+    Ok(args)
+}
+
+fn run_composite_ffmpeg(
+    args: Vec<String>,
+    screen_dur: f64,
+    position_log_len: usize,
+    on_progress: impl Fn(f64) + Send + 'static,
+) -> Result<(), String> {
     let mut child = Command::new(FFMPEG_PATH)
         .args(&args)
         .stdin(Stdio::null())
@@ -768,7 +876,7 @@ format=yuva420p[wc_rgba];\
         eprintln!(
             "[composite] ffmpeg failed (exit {:?}); position_log entries={}\n{}",
             status.code(),
-            bubble_position_log.len(),
+            position_log_len,
             tail
         );
         return Err(format!(
@@ -779,4 +887,134 @@ format=yuva420p[wc_rgba];\
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture_bytes(name: &str) -> Vec<u8> {
+        let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name);
+        std::fs::read(&p).unwrap_or_else(|e| panic!("read fixture {}: {e}", p.display()))
+    }
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("zeigen-e1-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn log_2_entries() -> Vec<BubblePositionEntry> {
+        vec![
+            BubblePositionEntry { t: 0.0, x: 0.9, y: 0.85, diameter: Some(240.0) },
+            BubblePositionEntry { t: 2.0, x: 0.5, y: 0.5, diameter: Some(240.0) },
+        ]
+    }
+
+    fn build_args_for_test(
+        dir: &Path,
+        log: &[BubblePositionEntry],
+        roundness: Option<f64>,
+    ) -> Vec<String> {
+        build_composite_args(
+            &dir.join("screen.mp4"),
+            &[dir.join("webcam-0.mp4")],
+            &dir.join("composite.mp4"),
+            WebcamSize::Medium,
+            Corner::BottomRight,
+            log,
+            roundness,
+            None,
+            10.0,
+            0.02,
+        )
+        .unwrap()
+    }
+
+    // E1 regression guard: the full ffmpeg argument vector for a
+    // roundness-less sidecar is pinned (pre-E1 behavior, both live filter
+    // branches). Paths are normalized to <TMP>. If this fails because you
+    // intentionally changed the composite graph, re-pin — but a failure
+    // during styling work means the legacy path regressed.
+    #[test]
+    fn legacy_args_pinned() {
+        let expected_static = "-y\u{1}-hide_banner\u{1}-nostats\u{1}-progress\u{1}pipe:1\u{1}-i\u{1}<TMP>/screen.mp4\u{1}-itsoffset\u{1}-0.020\u{1}-i\u{1}<TMP>/screen.mp4\u{1}-i\u{1}<TMP>/webcam-0.mp4\u{1}-loop\u{1}1\u{1}-framerate\u{1}30\u{1}-t\u{1}10.000\u{1}-i\u{1}<TMP>/mask-240.png\u{1}-loop\u{1}1\u{1}-framerate\u{1}30\u{1}-t\u{1}10.000\u{1}-i\u{1}<TMP>/shadow-240.png\u{1}-filter_complex\u{1}[2:v]tpad=start_duration=0.360:start_mode=clone[wc_full];[wc_full]hflip,crop='min(iw\\,ih)':'min(iw\\,ih)',scale=240:240,format=yuva420p[wc_rgba];[3:v]format=gray[mask_g];[wc_rgba][mask_g]alphamerge[wc];[4:v]format=rgba,gblur=sigma=18,colorchannelmixer=aa=0.22[shadow];[0:v][shadow]overlay=main_w-324:main_h-316:eof_action=pass[shadowed];[shadowed][wc]overlay=main_w-overlay_w-24:main_h-overlay_h-24:eof_action=pass[outv_pre]\u{1}-map\u{1}[outv_pre]\u{1}-map\u{1}1:a?\u{1}-c:v\u{1}h264_videotoolbox\u{1}-b:v\u{1}8M\u{1}-c:a\u{1}copy\u{1}<TMP>/composite.mp4";
+        let expected_keyframe = "-y\u{1}-hide_banner\u{1}-nostats\u{1}-progress\u{1}pipe:1\u{1}-i\u{1}<TMP>/screen.mp4\u{1}-itsoffset\u{1}-0.020\u{1}-i\u{1}<TMP>/screen.mp4\u{1}-i\u{1}<TMP>/webcam-0.mp4\u{1}-loop\u{1}1\u{1}-framerate\u{1}30\u{1}-t\u{1}10.000\u{1}-i\u{1}<TMP>/mask-240.png\u{1}-loop\u{1}1\u{1}-framerate\u{1}30\u{1}-t\u{1}10.000\u{1}-i\u{1}<TMP>/shadow-240.png\u{1}-filter_complex\u{1}[2:v]tpad=start_duration=0.360:start_mode=clone[wc_full];[wc_full]hflip,crop='min(iw\\,ih)':'min(iw\\,ih)',scale=240:240,format=yuva420p[wc_rgba];[3:v]format=gray[mask_g];[wc_rgba][mask_g]alphamerge[wc];[4:v]format=rgba,gblur=sigma=18,colorchannelmixer=aa=0.22[shadow];[0:v][shadow]overlay=x=if(lt(t\\,2.000)\\,main_w*(0.9000+(-0.4000)*max(0\\,(t-0.000)/2.000))-overlay_w/2\\,main_w*0.5000-overlay_w/2):y=(if(lt(t\\,2.000)\\,main_h*(0.8500+(-0.3500)*max(0\\,(t-0.000)/2.000))-overlay_h/2\\,main_h*0.5000-overlay_h/2))+8:enable=if(lt(t\\,2.000)\\,1\\,1):eof_action=pass[shadowed];[shadowed][wc]overlay=x=if(lt(t\\,2.000)\\,main_w*(0.9000+(-0.4000)*max(0\\,(t-0.000)/2.000))-overlay_w/2\\,main_w*0.5000-overlay_w/2):y=if(lt(t\\,2.000)\\,main_h*(0.8500+(-0.3500)*max(0\\,(t-0.000)/2.000))-overlay_h/2\\,main_h*0.5000-overlay_h/2):enable=if(lt(t\\,2.000)\\,1\\,1):eof_action=pass[outv_pre]\u{1}-map\u{1}[outv_pre]\u{1}-map\u{1}1:a?\u{1}-c:v\u{1}h264_videotoolbox\u{1}-b:v\u{1}8M\u{1}-c:a\u{1}copy\u{1}<TMP>/composite.mp4";
+        for (expected, log) in [
+            (expected_static, vec![]),
+            (expected_keyframe, log_2_entries()),
+        ] {
+            let dir = temp_dir("pin");
+            let args = build_args_for_test(&dir, &log, None);
+            let joined = args
+                .join("\u{1}")
+                .replace(&dir.to_string_lossy().into_owned(), "<TMP>");
+            assert_eq!(joined, expected);
+        }
+
+        // And the roundness-less callpath produced the pre-E1 mask bytes,
+        // under the pre-E1 filename, end to end.
+        let dir = temp_dir("pin");
+        assert_eq!(
+            std::fs::read(dir.join("mask-240.png")).unwrap(),
+            fixture_bytes("mask-240-circle.png")
+        );
+    }
+
+    // E1 regression guard: roundness-less renders are byte-identical to the
+    // pre-E1 circle output (fixtures captured from the pre-E1 code).
+    #[test]
+    fn legacy_mask_and_shadow_byte_identical_to_pre_e1() {
+        let dir = temp_dir("legacy");
+        let mask240 = dir.join("mask-240.png");
+        let mask320 = dir.join("mask-320.png");
+        let shadow240 = dir.join("shadow-240.png");
+        render_alpha_mask(240, None, &mask240).unwrap();
+        render_alpha_mask(320, None, &mask320).unwrap();
+        render_shadow_source(240, 60, None, &shadow240).unwrap();
+        assert_eq!(std::fs::read(&mask240).unwrap(), fixture_bytes("mask-240-circle.png"));
+        assert_eq!(std::fs::read(&mask320).unwrap(), fixture_bytes("mask-320-circle.png"));
+        assert_eq!(
+            std::fs::read(&shadow240).unwrap(),
+            fixture_bytes("shadow-240-pad60-circle.png")
+        );
+    }
+
+    // Rounded-square geometry sanity: low roundness leaves the corner region
+    // transparent and fills edge midpoints; full roundness matches a circle's
+    // occupancy (corner transparent, center opaque).
+    #[test]
+    fn rounded_square_mask_geometry() {
+        let dir = temp_dir("geom");
+        let d = 240u32;
+
+        let near_square = dir.join("mask-square.png");
+        render_alpha_mask(d, Some(0.08), &near_square).unwrap();
+        let px = tiny_skia::Pixmap::decode_png(&std::fs::read(&near_square).unwrap()).unwrap();
+        // Corner radius is 0.08 * 120 ≈ 10px. (12,2) is past the corner arc
+        // on the top edge run — filled on a near-square, far outside a
+        // circle. (0,0) is clearly inside the corner cut ((2,2) is too close
+        // to the arc — anti-aliasing leaves it faintly covered).
+        assert!(px.pixel(12, 2).unwrap().alpha() > 200, "near-square top edge filled");
+        assert_eq!(px.pixel(0, 0).unwrap().alpha(), 0, "near-square corner cut transparent");
+        assert!(px.pixel(120, 120).unwrap().alpha() > 200, "center filled");
+
+        let circle = dir.join("mask-round.png");
+        render_alpha_mask(d, Some(1.0), &circle).unwrap();
+        let px = tiny_skia::Pixmap::decode_png(&std::fs::read(&circle).unwrap()).unwrap();
+        assert_eq!(px.pixel(12, 2).unwrap().alpha(), 0, "circle: (12,2) outside");
+        assert!(px.pixel(120, 120).unwrap().alpha() > 200, "circle center filled");
+        assert!(px.pixel(120, 2).unwrap().alpha() > 200, "circle top midpoint filled");
+    }
+
+    // Styled masks must not collide with the legacy mask file in the same
+    // scratch dir.
+    #[test]
+    fn styled_mask_gets_distinct_filename() {
+        assert_eq!(mask_file_name("mask", 240, None), "mask-240.png");
+        assert_eq!(mask_file_name("mask", 240, Some(0.35)), "mask-240-r035.png");
+        assert_eq!(mask_file_name("shadow", 240, Some(1.0)), "shadow-240-r100.png");
+    }
 }
