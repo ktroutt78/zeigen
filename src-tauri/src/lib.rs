@@ -54,6 +54,11 @@ struct ActiveRecording {
     first_frame_at: Option<Instant>,
     mode: CaptureMode,
     bubble_position_log: Vec<BubblePositionEntry>,
+    // Bubble roundness preference captured at recording start (None =
+    // circle). Stamped into the sidecar at finalize alongside the position
+    // log so the recording keeps the shape it was made with even if the
+    // preference changes later.
+    bubble_roundness: Option<f64>,
     last_logged: Option<(Instant, f64, f64)>,
 }
 
@@ -198,6 +203,7 @@ fn engine_start(
         first_frame_at: None,
         mode,
         bubble_position_log: Vec::new(),
+        bubble_roundness: settings::bubble_roundness(),
         last_logged: None,
     });
 
@@ -391,6 +397,7 @@ fn recording_finalize(
     let started_at = rec.started_at;
     let first_frame_at = rec.first_frame_at;
     let bubble_position_log = rec.bubble_position_log;
+    let bubble_roundness = rec.bubble_roundness;
     // webcam_size / webcam_corner used to feed composite at finalize.
     // Phase 15 c3 defers composite to export; export defaults to Medium/
     // BottomRight (engine_start parses these from None → defaults today,
@@ -535,6 +542,10 @@ fn recording_finalize(
     if !bubble_position_log.is_empty() {
         let mut state = edit::read_sidecar_path(&scratch_mp4_path)?.unwrap_or_default();
         state.bubble_position_log = bubble_position_log;
+        // Roundness captured at recording start (already normalized: None =
+        // circle). Stamped here so the recording keeps the shape it was made
+        // with; the export side reads only the sidecar, never the setting.
+        state.bubble_roundness = bubble_roundness;
         edit::write_sidecar_path(&scratch_mp4_path, &state)?;
     }
 
@@ -811,6 +822,7 @@ pub fn run() {
             settings::set_watermark_corner,
             settings::clear_watermark_logo,
             settings::set_noise_reduction,
+            settings::set_bubble_roundness,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

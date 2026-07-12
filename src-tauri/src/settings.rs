@@ -15,6 +15,13 @@ pub struct Settings {
     // "off" | "low" | "med" | "high" — RNNoise (arnndn) strength.
     #[serde(default = "default_noise_reduction")]
     pub noise_reduction: String,
+    // Webcam bubble corner roundness set in the recorder before recording:
+    // 0.0 (square) .. <1.0 (rounded square). None = full circle. Remembered
+    // default only — the value each recording was made with is stamped into
+    // its sidecar at finalize (lib.rs), so changing this later never
+    // reshapes an existing recording.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bubble_roundness: Option<f64>,
 }
 
 impl Default for Settings {
@@ -22,6 +29,7 @@ impl Default for Settings {
         Self {
             watermark: WatermarkSettings::default(),
             noise_reduction: default_noise_reduction(),
+            bubble_roundness: None,
         }
     }
 }
@@ -66,6 +74,14 @@ fn config_dir(app: &AppHandle) -> Result<PathBuf, String> {
 fn home_config_dir() -> Option<PathBuf> {
     let home = std::env::var("HOME").ok()?;
     Some(PathBuf::from(home).join("Library/Application Support/com.zeigen.app"))
+}
+
+// Bubble roundness preference, read fresh at recording start (lib.rs
+// captures it into the active recording; the finalize stamp uses that
+// captured value, not a re-read).
+pub fn bubble_roundness() -> Option<f64> {
+    let dir = home_config_dir()?;
+    read_settings_from(&dir).bubble_roundness
 }
 
 // Noise-reduction strength as an arnndn `mix` (0..1), or None when "off".
@@ -150,6 +166,18 @@ pub fn get_settings(app: AppHandle) -> Settings {
             Settings::default()
         }
     }
+}
+
+#[tauri::command]
+pub fn set_bubble_roundness(app: AppHandle, roundness: Option<f64>) -> Result<(), String> {
+    let dir = config_dir(&app)?;
+    let mut settings = read_settings_from(&dir);
+    // Full circle stores as None — same normalization the sidecar stamp
+    // uses, so "circle" is always the absent-field state everywhere.
+    settings.bubble_roundness = roundness
+        .filter(|r| *r < 1.0)
+        .map(|r| r.clamp(0.0, 1.0));
+    write_settings_to(&dir, &settings)
 }
 
 #[tauri::command]
