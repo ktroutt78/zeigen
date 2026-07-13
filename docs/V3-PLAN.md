@@ -2,6 +2,8 @@
 
 **Status (2026-07-11): pivoted to export-time polish.** Synthetic cursor (B) and auto-zoom (C) are dropped; Phase A telemetry is complete but dormant; redaction (D) is unscheduled. Live work: **E1 — webcam bubble styling** and **E2 — export presets**, defined in §2. Dropped sections are kept for the record. Rationale in `DECISIONS.md` 2026-07-11.
 
+**Update (2026-07-13): zoom is revived as an editable export-time layer** — plan in `ZOOM-LAYER-PLAN.md`, decisions in `DECISIONS.md` 2026-07-13. Phase A telemetry becomes its interaction track (step 1 decouples telemetry from cursor-hiding); §3 C.1's heuristic is the detection spec for its step 5. The synthetic cursor stays dropped.
+
 Charter for the next major slice. Three features, one shared foundation.
 
 - **Synthetic cursor** — replace the burned-in system cursor with a composited, smoothed one.
@@ -288,7 +290,7 @@ Post-pivot state:
 |---|---|
 | A — Telemetry | Complete; dormant (default-off, no consumer) |
 | B — Synthetic cursor | Dropped — B.0 encoder-floor gate (§2) |
-| C — Auto-zoom | Dropped with B |
+| C — Auto-zoom | Revived 2026-07-13 as an export-time layer — see `ZOOM-LAYER-PLAN.md` |
 | D — Redaction | Unscheduled |
 | E1 — Bubble styling | Next |
 | E2 — Export presets | After E1; tiers not yet decided |

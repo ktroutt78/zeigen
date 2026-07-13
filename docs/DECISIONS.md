@@ -4,6 +4,22 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-13 — Zoom ships as an editable export-time layer; plan approved
+
+Revives V3 Phase C in a shape that honors the 2026-07-11 pivot instead of superseding it — the encoder-floor measurements and the "no re-encode on the default save path" principle stand; this design is built on them. Full plan: `docs/ZOOM-LAYER-PLAN.md`.
+
+**Model:** record normally (raw video untouched, saves stay on the video-copy path); the app suggests zoom moments from the Phase A cursor telemetry; the user edits them on a timeline track; zoom applies only at export. Governing invariant: an empty/wiped zoom track serializes to *absent* (E1 roundness `None` convention), so a no-zoom recording rides today's exact path and guards — the layer can only add. Only zoomed exports pay the measured encoder floor (~29s per 5 min at 1x full res, ~12s per 2-min demo, ~16s at 720p).
+
+**Owner decisions:**
+
+1. **Burned-in cursor scales with zoom at <=2.5x: accepted.** The synthetic cursor is deliberately traded away for the byte-identity/simplicity of the layer model. Eyeball a 2.5x zoom on a real recording during step 3/4; the trade stands regardless.
+2. **Swift-vs-ffmpeg export rendering: deferred to step 4, gated like B.0** — pick an approach, measure a real slow-pan zoom for stutter, build only on a smooth result. The overlay-ordering constraint (content-anchored arrow/blur/spotlight zoom with the frame; screen-anchored bubble/watermark do not) is part of that step's design.
+3. **GIF: MP4-only for v1.**
+
+**Build order (each step its own session):** (1) decouple telemetry from cursor-hiding and flip it on — `.cursor.json` written with `showsCursor` untouched, saves provably inert, tracks accumulate for tuning; (2) sidecar zoom track + byte-identity guards; (3) generic overlay-timeline track extracted from the existing annotation pips + manual zoom editing + live CSS-transform preview — delivers the queued annotation-duration timeline as a side effect (build the overlay-timeline once, not twice); (4) export rendering behind the measured gate; (5) suggestion detection last (heuristic is V3-PLAN §3 C.1 unchanged, tuned against telemetry accumulated since step 1).
+
+**Scoping facts this rests on (verified 2026-07-13):** Phase A telemetry has everything detection needs — 120 Hz positions in video pixel space, clicks with position on the output timeline, scroll presence, <=8 ms proven alignment — except the flag currently couples telemetry to hiding the cursor; step 1 decouples. The B.0 spike's code is gone (never committed) — rendering is a rebuild from its durable measurements, and its quality argument (ffmpeg `zoompan` integer-offset stutter) motivates the step-4 gate. `Review.tsx` annotation pips already implement drag/resize time-bounded segments, so step 3 is extraction, not new construction.
+
 ## 2026-07-13 — Known gap: exported watermark opacity renders lighter than preview (not fixing now)
 
 Observed during watermark size/opacity UAT (feature commit 8d51699): at the same opacity setting, the exported watermark looks noticeably lighter than the stage preview. Likely cause: the two opacity paths differ — preview applies CSS `opacity` on an `<img>` in sRGB compositing; export multiplies the PNG's alpha via ffmpeg `format=rgba,colorchannelmixer=aa=` and then blends inside the yuv420 pipeline. The synthetic pixel check (opaque white logo at aa=0.5 over solid blue) matched preview math exactly, so the mismatch likely involves the real logo's own alpha channel and/or colorspace conversion, not the fraction itself.
