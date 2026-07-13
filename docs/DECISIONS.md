@@ -4,6 +4,12 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-13 — Known gap: five stream-md5 fixture guards are non-functional (baseline recordings missing)
+
+Discovered while proving the zoom-layer step 1 gate. `save_recording_baseline`, `mp4_save_baseline`, `probe_audio_track_baseline`, `render_preview_audio_baseline` (edit.rs), and `sprite_smoke` (thumbs.rs) all fail at their first assert — the May 2026 baseline recordings they read from `~/Movies/Zeigen/.scratch-baseline-c1/` (and the sprite test's scratch source) no longer exist on this machine. No pipeline code runs before that assert; the failures are environmental, not regressions. But a byte-identity guard that can't run isn't protecting anything.
+
+**Restore before zoom-layer step 4 (export rendering) — owner's ruling.** Step 4 is where real video re-encoding enters the pipeline, and the stream-md5 guard (`save_recording_baseline`: video stream bit-exact under `-c:v copy`, audio re-encode tolerated) is the thing that catches a copy path accidentally falling through to a re-encode. Restoration is its own small task: stash a fresh baseline recording at the expected path (or repoint the tests at an in-repo fixture like the phase15-baseline used by the tests that still pass) and confirm all five run green.
+
 ## 2026-07-13 — Zoom ships as an editable export-time layer; plan approved
 
 Revives V3 Phase C in a shape that honors the 2026-07-11 pivot instead of superseding it — the encoder-floor measurements and the "no re-encode on the default save path" principle stand; this design is built on them. Full plan: `docs/ZOOM-LAYER-PLAN.md`.

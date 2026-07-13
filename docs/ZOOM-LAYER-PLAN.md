@@ -45,6 +45,8 @@ Extract the annotation pip/band/handle machinery into a generic track component 
 
 ### Step 4 — Export rendering, behind a measured gate
 
+**Prerequisite:** restore the five non-functional stream-md5 fixture guards first (`DECISIONS.md` 2026-07-13 known-gap entry) — step 4 introduces real video re-encoding, and `save_recording_baseline` is the guard that catches the copy path accidentally falling through to a re-encode.
+
 The one open design. Candidates: rebuild the Swift pass (quality proven by B.0, code must be rebuilt; must solve where it slots against the existing ffmpeg pass without double-encoding) vs express zoom inside the existing `filter_complex` single pass (no new stack; known integer-offset stutter risk on the 600ms ease ramps). **Gate (B.0-style): render a real slow-pan zoom, measure/eyeball for stutter, build only on a smooth result.** Design must also cover: overlay ordering (content-anchored zooms with the frame, screen-anchored bubble/watermark do not — this constraint may itself decide the approach); trim interplay (`ann.start_time - trim_in` pattern at `edit.rs:1123`); a preview-vs-export parity check so the watermark-opacity gap (DECISIONS.md 2026-07-13) is not repeated. MP4-only (decision 3).
 
 **Done when:** the gate passes and a zoomed export matches the step-3 preview; a no-zoom export remains on the copy path.
