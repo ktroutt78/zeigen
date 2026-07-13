@@ -280,6 +280,10 @@ type ZoomEditor = {
   // Neighbor-bounded window per segment so zooms can't overlap.
   bounds: (i: number) => { min: number; max: number };
   canAdd: boolean;
+  // Step 5: fill the lane with auto_generated suggestions from the cursor
+  // telemetry. Replaces previous suggestions; manual segments are kept.
+  suggest: () => void;
+  suggesting: boolean;
 };
 
 type SidecarState = {
@@ -965,6 +969,47 @@ export default function Review() {
       return next;
     });
   }, [duration, videoDims, zoomSegments, selectZoom]);
+
+  // Step 5 suggestion detection. Runs the C.1 heuristic over the cursor
+  // telemetry on the Rust side; the result replaces auto_generated
+  // segments only. Suggestions overlapping a manual zoom are dropped —
+  // user-placed segments always win. Button-only by design: no auto-run
+  // at review-open until the detector has earned it (ZOOM-LAYER-PLAN).
+  const [suggesting, setSuggesting] = useState(false);
+  const suggestZooms = useCallback(async () => {
+    if (!sourcePath || duration == null) return;
+    setSuggesting(true);
+    try {
+      const kfs = await invoke<ZoomKeyframe[] | null>("suggest_zooms", {
+        sourcePath,
+      });
+      if (kfs == null) {
+        setNotice("No cursor telemetry for this recording");
+        return;
+      }
+      const manual = zoomSegments.filter((s) => !s.auto_generated);
+      const suggested = zoomKeyframesToSegments(kfs)
+        .map((s) => ({ ...s, end: Math.min(s.end, duration) }))
+        .filter(
+          (s) =>
+            s.end - s.start >= ZOOM_MIN_DURATION &&
+            manual.every((m) => s.end <= m.start || s.start >= m.end),
+        );
+      setZoomSegments(
+        [...manual, ...suggested].sort((a, b) => a.start - b.start),
+      );
+      setZoomSelectedIndex(null);
+      setNotice(
+        suggested.length === 0
+          ? "No zoom-worthy moments detected"
+          : `${suggested.length} zoom${suggested.length === 1 ? "" : "s"} suggested — drag, resize, or delete on the lane`,
+      );
+    } catch (err) {
+      setError(`suggest zooms: ${err}`);
+    } finally {
+      setSuggesting(false);
+    }
+  }, [sourcePath, duration, zoomSegments]);
 
   // Neighbor-bounded window per segment — segments stay sorted and
   // non-overlapping because drags/resizes can't cross these bounds.
@@ -1731,6 +1776,8 @@ export default function Review() {
     addAtPlayhead: addZoomAtPlayhead,
     bounds: zoomBounds,
     canAdd: duration != null && videoDims != null,
+    suggest: suggestZooms,
+    suggesting,
   };
 
   const thumbnailControls: ThumbnailControls = {
@@ -5213,6 +5260,14 @@ function ExportPanel({
             <button
               className="btn-secondary"
               style={{ height: 26, fontSize: 11.5 }}
+              onClick={zoom.suggest}
+              disabled={!zoom.canAdd || busy || zoom.suggesting}
+            >
+              {zoom.suggesting ? "Suggesting…" : "Suggest zooms"}
+            </button>
+            <button
+              className="btn-secondary"
+              style={{ height: 26, fontSize: 11.5 }}
               onClick={zoom.addAtPlayhead}
               disabled={!zoom.canAdd || busy}
             >
@@ -5263,9 +5318,10 @@ function ExportPanel({
               </div>
             ) : (
               <div style={{ fontSize: 11, color: "var(--fg-tertiary)" }}>
-                Add a zoom at the playhead, then set its scale and center.
-                Playback previews it live. Export rendering is not wired up
-                yet — saved files ignore zoom for now.
+                Suggest zooms fills the lane from your cursor activity, or
+                add one manually at the playhead. Playback previews live.
+                Export rendering is not wired up yet — saved files ignore
+                zoom for now.
               </div>
             )}
           </div>

@@ -12,6 +12,7 @@ mod settings;
 mod thumbs;
 mod tray;
 mod webcam;
+mod zoom;
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -813,6 +814,7 @@ pub fn run() {
             edit::write_sidecar,
             edit::delete_sidecar,
             edit::save_recording,
+            zoom::suggest_zooms,
             edit::probe_audio_track,
             edit::render_preview_audio,
             thumbs::extract_thumb_sprite,
