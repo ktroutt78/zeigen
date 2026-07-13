@@ -53,6 +53,33 @@ pub struct SidecarState {
     // Review.tsx's border-radius for preview parity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bubble_roundness: Option<f64>,
+    // Global color for all text/arrow annotations, "#RRGGBB". None = white
+    // (the pre-feature hardcode) — the review only writes the field when
+    // annotations exist and the color is non-white, so legacy sidecars and
+    // untouched recordings rasterize byte-identically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotation_color: Option<String>,
+}
+
+// Parse "#RRGGBB" → (r, g, b). Anything malformed falls back to white so a
+// hand-edited sidecar can't break an export.
+fn parse_annotation_color(hex: Option<&str>) -> (u8, u8, u8) {
+    let Some(s) = hex else { return (255, 255, 255) };
+    let s = s.strip_prefix('#').unwrap_or(s);
+    if s.len() != 6 {
+        return (255, 255, 255);
+    }
+    match u32::from_str_radix(s, 16) {
+        Ok(n) => (((n >> 16) & 0xff) as u8, ((n >> 8) & 0xff) as u8, (n & 0xff) as u8),
+        Err(_) => (255, 255, 255),
+    }
+}
+
+// Rec.709 luma; dark glyph colors get a light text pill (and vice versa) so
+// the glyphs stay readable. Mirrors Review.tsx's isDarkColor exactly so the
+// preview pill and the exported pill match.
+fn is_dark_color((r, g, b): (u8, u8, u8)) -> bool {
+    2126 * (r as u32) + 7152 * (g as u32) + 722 * (b as u32) < 128 * 10000
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -385,7 +412,12 @@ fn font_bytes() -> Option<&'static [u8]> {
 // time and isn't present in every Homebrew ffmpeg build (notably 8.x core).
 // By rendering text in Rust we drop that dependency: text and arrows now
 // share a single overlay-PNG path through the filter graph.
-fn rasterize_text(content: &str, size_src_px: f64, out_path: &Path) -> Result<(), String> {
+fn rasterize_text(
+    content: &str,
+    size_src_px: f64,
+    color: (u8, u8, u8),
+    out_path: &Path,
+) -> Result<(), String> {
     use tiny_skia::{
         FillRule, Paint, PathBuilder, Pixmap, PremultipliedColorU8, Rect, Transform,
     };
@@ -414,7 +446,8 @@ fn rasterize_text(content: &str, size_src_px: f64, out_path: &Path) -> Result<()
         Pixmap::new(total_w, total_h).ok_or_else(|| format!("alloc text pixmap {total_w}x{total_h}"))?;
 
     // Background rect: matches the previous drawtext box style
-    // (rgba 20,20,22,0xCC, ~86% opacity).
+    // (rgba 20,20,22,0xCC, ~86% opacity); flips to a light pill for dark
+    // glyph colors — same rule as the preview (Review.tsx isDarkColor).
     {
         let rect = Rect::from_xywh(0.0, 0.0, total_w as f32, total_h as f32)
             .ok_or("invalid bg rect")?;
@@ -422,16 +455,21 @@ fn rasterize_text(content: &str, size_src_px: f64, out_path: &Path) -> Result<()
         pb.push_rect(rect);
         let path = pb.finish().ok_or("empty bg path")?;
         let mut paint = Paint::default();
-        paint.set_color_rgba8(20, 20, 22, 0xCC);
+        if is_dark_color(color) {
+            paint.set_color_rgba8(245, 245, 247, 0xCC);
+        } else {
+            paint.set_color_rgba8(20, 20, 22, 0xCC);
+        }
         paint.anti_alias = true;
         pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
     }
 
-    // Glyph pass: draw white glyphs over the bg via per-pixel alpha
+    // Glyph pass: draw colored glyphs over the bg via per-pixel alpha
     // compositing. tiny-skia stores premultiplied RGBA; the compositing
-    // formula for "white at alpha a, over premul dst" is:
-    //   src_premul = (a, a, a, a)
+    // formula for "color c at alpha a, over premul dst" is:
+    //   src_premul = (c.r*a/255, c.g*a/255, c.b*a/255, a)
     //   out = src + dst * (1 - a/255)
+    let (cr, cg, cb) = (color.0 as u32, color.1 as u32, color.2 as u32);
     let baseline_y = pad_v as f32 + ascent;
     let mut x_cursor: f32 = 0.0;
     let pixels = pixmap.pixels_mut();
@@ -457,9 +495,9 @@ fn rasterize_text(content: &str, size_src_px: f64, out_path: &Path) -> Result<()
                 }
                 let inv = 255 - a;
                 let cur = pixels[idx];
-                let r = (a + cur.red() as u32 * inv / 255).min(255) as u8;
-                let g = (a + cur.green() as u32 * inv / 255).min(255) as u8;
-                let b = (a + cur.blue() as u32 * inv / 255).min(255) as u8;
+                let r = (cr * a / 255 + cur.red() as u32 * inv / 255).min(255) as u8;
+                let g = (cg * a / 255 + cur.green() as u32 * inv / 255).min(255) as u8;
+                let b = (cb * a / 255 + cur.blue() as u32 * inv / 255).min(255) as u8;
                 let alpha = (a + cur.alpha() as u32 * inv / 255).min(255) as u8;
                 if let Some(c) = PremultipliedColorU8::from_rgba(r, g, b, alpha) {
                     pixels[idx] = c;
@@ -488,6 +526,7 @@ fn rasterize_arrow(
     start: &Position,
     end: &Position,
     stroke_src_px: f64,
+    color: (u8, u8, u8),
     out_path: &Path,
 ) -> Result<(), String> {
     use tiny_skia::{
@@ -529,7 +568,7 @@ fn rasterize_arrow(
     let shaft_ey = sy + uy * shaft_len;
 
     let mut paint = Paint::default();
-    paint.set_color_rgba8(255, 255, 255, 255);
+    paint.set_color_rgba8(color.0, color.1, color.2, 255);
     paint.anti_alias = true;
 
     // Shaft
@@ -939,6 +978,10 @@ fn run_edit_pipeline_single_input(
             .map_err(|e| format!("create {}: {}", temp_dir.display(), e))?;
     }
 
+    // Global annotation color from the sidecar (None/malformed = white,
+    // the pre-feature behavior). One color for all text + arrows.
+    let ann_color = parse_annotation_color(sidecar.annotation_color.as_deref());
+
     // Rasterize each text annotation into a small PNG (sized to the styled
     // text box). The annotation's source-fraction position becomes the
     // overlay x/y.
@@ -946,7 +989,7 @@ fn run_edit_pipeline_single_input(
     for (idx, ann) in &text_anns {
         let size = ann.size.unwrap_or(DEFAULT_TEXT_SIZE_PX);
         let p = temp_dir.join(format!("text-{idx}.png"));
-        rasterize_text(&ann.content, size, &p)?;
+        rasterize_text(&ann.content, size, ann_color, &p)?;
         text_paths.push((*idx, p, ann));
     }
 
@@ -972,7 +1015,7 @@ fn run_edit_pipeline_single_input(
             let endpoint = ann.endpoint.as_ref().expect("filtered above");
             let stroke = ann.stroke.unwrap_or(DEFAULT_ARROW_STROKE_PX);
             let p = temp_dir.join(format!("arrow-{idx}.png"));
-            rasterize_arrow(sw, sh, &ann.position, endpoint, stroke, &p)?;
+            rasterize_arrow(sw, sh, &ann.position, endpoint, stroke, ann_color, &p)?;
             arrow_paths.push((*idx, p, ann));
         }
     }
@@ -1734,6 +1777,76 @@ fn save_recording_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn annotation_color_parses_and_defaults_white() {
+        assert_eq!(parse_annotation_color(None), (255, 255, 255));
+        assert_eq!(parse_annotation_color(Some("#FF3B30")), (255, 59, 48));
+        assert_eq!(parse_annotation_color(Some("0A84FF")), (10, 132, 255));
+        assert_eq!(parse_annotation_color(Some("nonsense")), (255, 255, 255));
+        assert_eq!(parse_annotation_color(Some("#FFF")), (255, 255, 255));
+    }
+
+    // Arrow PNG renders in the sidecar color: rasterize a fat horizontal
+    // red arrow and check a mid-shaft pixel is (unpremultiplied) red.
+    #[test]
+    fn arrow_rasterizes_in_annotation_color() {
+        let dir = std::env::temp_dir().join("zeigen-ann-color-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("arrow-red.png");
+        rasterize_arrow(
+            200,
+            100,
+            &Position { x: 0.1, y: 0.5 },
+            &Position { x: 0.9, y: 0.5 },
+            10.0,
+            (255, 59, 48),
+            &p,
+        )
+        .expect("rasterize arrow");
+        let pixmap = tiny_skia::Pixmap::load_png(&p).expect("decode arrow png");
+        // Mid-shaft: x=40% of 200, y=50% of 100 — solidly inside the stroke.
+        let px = pixmap.pixel(80, 50).expect("pixel in bounds");
+        assert_eq!(px.alpha(), 255, "shaft pixel should be opaque");
+        assert_eq!(
+            (px.red(), px.green(), px.blue()),
+            (255, 59, 48),
+            "shaft pixel should be the sidecar red"
+        );
+    }
+
+    // Text PNG: red glyphs land red-dominant pixels on the dark pill, and
+    // a black color flips the pill light (the isDarkColor mirror).
+    #[test]
+    fn text_rasterizes_in_annotation_color_with_pill_flip() {
+        let dir = std::env::temp_dir().join("zeigen-ann-color-test");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let red_path = dir.join("text-red.png");
+        rasterize_text("X", 64.0, (255, 59, 48), &red_path).expect("rasterize red text");
+        let red = tiny_skia::Pixmap::load_png(&red_path).expect("decode red text png");
+        let red_hit = red.pixels().iter().any(|px| {
+            // Unpremultiplied check: fully-covered glyph pixels are opaque,
+            // so premul == straight there. Red glyph over dark bg stays
+            // red-dominant.
+            px.alpha() == 255 && px.red() > 200 && px.green() < 100 && px.blue() < 100
+        });
+        assert!(red_hit, "red text should produce red glyph pixels");
+
+        let black_path = dir.join("text-black.png");
+        rasterize_text("X", 64.0, (0, 0, 0), &black_path).expect("rasterize black text");
+        let black = tiny_skia::Pixmap::load_png(&black_path).expect("decode black text png");
+        // Corner pixel is pure pill (no glyph coverage): light pill for a
+        // dark color. 0xCC-alpha premul of 245 ≈ 196.
+        let corner = black.pixel(1, 1).expect("corner pixel");
+        assert!(
+            corner.red() > 150 && corner.green() > 150 && corner.blue() > 150,
+            "black text should sit on a light pill, got ({}, {}, {})",
+            corner.red(),
+            corner.green(),
+            corner.blue()
+        );
+    }
 
     // The OnceLock set in lib.rs::run setup doesn't fire under cargo test,
     // so any test that hits the MP4 branch (where arnndn is wired) must

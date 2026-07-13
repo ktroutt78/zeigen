@@ -39,6 +39,50 @@ type Annotation = {
 };
 
 type Tool = "text" | "arrow" | "blur" | "spotlight" | null;
+
+// Global per-recording annotation color — one color for all arrows/text on
+// the recording (not per-annotation). White is the pre-feature hardcode, so
+// absent/white means byte-identical legacy behavior. The last-picked color
+// is remembered across recordings (localStorage, like the accordion state);
+// the per-recording value travels to the export via the sidecar.
+const ANNOTATION_COLORS = [
+  { name: "White", hex: "#FFFFFF" },
+  { name: "Black", hex: "#000000" },
+  { name: "Red", hex: "#FF3B30" },
+  { name: "Yellow", hex: "#FFD60A" },
+  { name: "Blue", hex: "#0A84FF" },
+] as const;
+const DEFAULT_ANNOTATION_COLOR = "#FFFFFF";
+const ANNOTATION_COLOR_LS_KEY = "review-annotation-color";
+
+function loadAnnotationColor(): string {
+  try {
+    const raw = localStorage.getItem(ANNOTATION_COLOR_LS_KEY);
+    return ANNOTATION_COLORS.some((c) => c.hex === raw) ? raw! : DEFAULT_ANNOTATION_COLOR;
+  } catch {
+    return DEFAULT_ANNOTATION_COLOR;
+  }
+}
+
+function persistAnnotationColor(hex: string) {
+  try {
+    localStorage.setItem(ANNOTATION_COLOR_LS_KEY, hex);
+  } catch {
+    // Best-effort; the session still works from React state.
+  }
+}
+
+// Dark colors get a light text pill (and vice versa) so the glyphs stay
+// readable — mirrored by edit.rs's rasterize_text luminance flip so preview
+// and export show the same pill.
+function isDarkColor(hex: string): boolean {
+  const n = parseInt(hex.slice(1), 16);
+  const r = (n >> 16) & 0xff;
+  const g = (n >> 8) & 0xff;
+  const b = n & 0xff;
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b < 128;
+}
+
 const DEFAULT_TEXT_SIZE = 36;
 const ANNOTATION_DEFAULT_DURATION = 3;
 const MIN_TEXT_SIZE = 12;
@@ -104,6 +148,10 @@ type SidecarState = {
   // byte-identical to pre-E1, so the slider only writes the field when the
   // user moves it off full circle.
   bubble_roundness?: number | null;
+  // Global color for all text/arrow annotations, "#RRGGBB". null/undefined
+  // = white (the pre-feature hardcode) — only written when annotations
+  // exist and the color is non-white, keeping legacy sidecars unchanged.
+  annotation_color?: string | null;
 };
 
 const EMPTY_STATE: SidecarState = {
@@ -112,7 +160,17 @@ const EMPTY_STATE: SidecarState = {
   bubble_position_log: [],
   thumbnail_time: null,
   bubble_roundness: null,
+  annotation_color: null,
 };
+
+// Effective sidecar color: null unless there are annotations to color AND
+// the color differs from the white default. Keeps color-only state from
+// dirtying a recording or keeping an otherwise-empty sidecar alive.
+function normalizeAnnotationColor(s: SidecarState): string | null {
+  const c = s.annotation_color ?? null;
+  if (!c || s.annotations.length === 0) return null;
+  return c.toUpperCase() === DEFAULT_ANNOTATION_COLOR ? null : c;
+}
 const SIDECAR_DEBOUNCE_MS = 350;
 const TRIM_EPS = 0.05;
 
@@ -245,6 +303,7 @@ function statesEqual(a: SidecarState, b: SidecarState, duration: number | null):
   const brb = b.bubble_roundness ?? null;
   if ((bra == null) !== (brb == null)) return false;
   if (bra != null && brb != null && Math.abs(bra - brb) > 0.001) return false;
+  if (normalizeAnnotationColor(a) !== normalizeAnnotationColor(b)) return false;
   return true;
 }
 
@@ -371,6 +430,14 @@ export default function Review() {
   // edits, empty-state delete path) don't wipe the bubble keyframes.
   const [bubblePositionLog, setBubblePositionLog] = useState<BubblePositionEntry[]>([]);
   const [bubbleRoundness, setBubbleRoundness] = useState<number | null>(null);
+  // Global annotation color. Initialized from the remembered preference;
+  // the sidecar-read effect overrides it for recordings that already have
+  // annotations (so opening an old recording never recolors it).
+  const [annotationColor, setAnnotationColor] = useState<string>(loadAnnotationColor);
+  const onAnnotationColor = useCallback((hex: string) => {
+    setAnnotationColor(hex);
+    persistAnnotationColor(hex);
+  }, []);
   // Original-timeline timestamp for the user's chosen poster frame. null =
   // unset; export-time default (0.5s in) is applied on the Rust side.
   const [thumbnailTime, setThumbnailTime] = useState<number | null>(null);
@@ -609,12 +676,21 @@ export default function Review() {
             bubble_position_log: state.bubble_position_log ?? [],
             thumbnail_time: state.thumbnail_time ?? null,
             bubble_roundness: state.bubble_roundness ?? null,
+            annotation_color: state.annotation_color ?? null,
           });
           if (state.trim) setTrim(state.trim);
           if (state.annotations) setAnnotations(state.annotations);
           if (state.bubble_position_log) setBubblePositionLog(state.bubble_position_log);
           if (state.thumbnail_time != null) setThumbnailTime(state.thumbnail_time);
           if (state.bubble_roundness != null) setBubbleRoundness(state.bubble_roundness);
+          // Recordings with existing annotations keep their own color
+          // (absent = white, the pre-feature behavior) — the remembered
+          // preference only seeds recordings that have no annotations yet.
+          if (state.annotation_color != null) {
+            setAnnotationColor(state.annotation_color);
+          } else if ((state.annotations ?? []).length > 0) {
+            setAnnotationColor(DEFAULT_ANNOTATION_COLOR);
+          }
         } else {
           setSnapshot(EMPTY_STATE);
         }
@@ -710,8 +786,9 @@ export default function Review() {
       bubble_position_log: bubblePositionLog,
       thumbnail_time: thumbnailTime,
       bubble_roundness: bubbleRoundness,
+      annotation_color: annotationColor,
     }),
-    [trim, annotations, bubblePositionLog, thumbnailTime, bubbleRoundness],
+    [trim, annotations, bubblePositionLog, thumbnailTime, bubbleRoundness, annotationColor],
   );
 
   const dirty = useMemo(
@@ -734,6 +811,7 @@ export default function Review() {
         bubble_position_log: currentState.bubble_position_log,
         thumbnail_time: currentState.thumbnail_time ?? null,
         bubble_roundness: currentState.bubble_roundness ?? null,
+        annotation_color: normalizeAnnotationColor(currentState),
       };
       setCommittedMp4Path(null);
       if (empty) {
@@ -1365,6 +1443,7 @@ export default function Review() {
             videoDims,
           }}
           editor={editorApi}
+          annotationColor={annotationColor}
           thumbnailTime={thumbnailTime}
           bubbleRoundness={bubbleRoundness}
         />
@@ -1372,6 +1451,8 @@ export default function Review() {
           sourcePath={sourcePath}
           editor={editorApi}
           thumbnail={thumbnailControls}
+          annotationColor={annotationColor}
+          onAnnotationColor={onAnnotationColor}
           lastSavedPath={lastSavedPath}
           committedMp4Path={committedMp4Path}
           lastSavedAt={lastSavedAt}
@@ -1538,6 +1619,8 @@ type LeftColumnProps = {
   audioStart: number | null;
   watermarkPreview: WatermarkPreview;
   editor: Editor;
+  // Global per-recording annotation color (text glyphs, arrow stroke).
+  annotationColor: string;
   // Timeline marker only — the thumbnail picker itself lives in the right
   // panel's Annotate section.
   thumbnailTime: number | null;
@@ -1578,6 +1661,7 @@ function LeftColumn(props: LeftColumnProps) {
         playbackRate={props.playbackRate}
         watermarkPreview={props.watermarkPreview}
         editor={props.editor}
+        annotationColor={props.annotationColor}
       />
       <Timeline
         assetUrl={props.assetUrl}
@@ -1871,6 +1955,7 @@ type VideoStageProps = {
   playbackRate: number;
   watermarkPreview: WatermarkPreview;
   editor: Editor;
+  annotationColor: string;
 };
 
 function VideoStage(props: VideoStageProps) {
@@ -2061,6 +2146,7 @@ function VideoStage(props: VideoStageProps) {
           stageRef={stageRef}
           videoRef={props.videoRef}
           editor={props.editor}
+          annotationColor={props.annotationColor}
           currentTime={props.currentTime}
           drawingShape={drawingShape}
           videoDims={videoDims}
@@ -2389,6 +2475,7 @@ function AnnotationLayer({
   stageRef,
   videoRef,
   editor,
+  annotationColor,
   currentTime,
   drawingShape,
   videoDims,
@@ -2396,6 +2483,7 @@ function AnnotationLayer({
   stageRef: React.MutableRefObject<HTMLDivElement | null>;
   videoRef: React.MutableRefObject<HTMLVideoElement | null>;
   editor: Editor;
+  annotationColor: string;
   currentTime: number;
   drawingShape: { tool: "arrow" | "blur" | "spotlight"; start: Position; end: Position } | null;
   videoDims: { w: number; h: number } | null;
@@ -2434,6 +2522,7 @@ function AnnotationLayer({
               stageRef={stageRef}
               videoRef={videoRef}
               editor={editor}
+              color={annotationColor}
               isSelected={isSelected}
               isEditing={isEditing}
               videoDims={videoDims}
@@ -2448,6 +2537,7 @@ function AnnotationLayer({
               idx={idx}
               stageRef={stageRef}
               editor={editor}
+              color={annotationColor}
               isSelected={isSelected}
               videoDims={videoDims}
             />
@@ -2486,6 +2576,7 @@ function AnnotationLayer({
           start={drawingShape.start}
           end={drawingShape.end}
           stageRef={stageRef}
+          color={annotationColor}
           videoDims={videoDims}
         />
       )}
@@ -2515,6 +2606,7 @@ function TextAnnotationView({
   stageRef,
   videoRef,
   editor,
+  color,
   isSelected,
   isEditing,
   videoDims,
@@ -2524,6 +2616,7 @@ function TextAnnotationView({
   stageRef: React.MutableRefObject<HTMLDivElement | null>;
   videoRef: React.MutableRefObject<HTMLVideoElement | null>;
   editor: Editor;
+  color: string;
   isSelected: boolean;
   isEditing: boolean;
   videoDims: { w: number; h: number } | null;
@@ -2654,10 +2747,16 @@ function TextAnnotationView({
         left: pos.x,
         top: pos.y,
         padding: `${Math.max(3, sizeCss * 0.15)}px ${Math.max(6, sizeCss * 0.3)}px`,
-        background: "rgba(20,20,22,0.86)",
-        color: "#fff",
+        // Pill luminance flips against dark glyph colors — mirrored by
+        // edit.rs rasterize_text so preview and export match.
+        background: isDarkColor(color)
+          ? "rgba(245,245,247,0.86)"
+          : "rgba(20,20,22,0.86)",
+        color,
         borderRadius: Math.max(3, sizeCss * 0.15),
-        border: "0.5px solid rgba(255,255,255,0.18)",
+        border: isDarkColor(color)
+          ? "0.5px solid rgba(0,0,0,0.18)"
+          : "0.5px solid rgba(255,255,255,0.18)",
         fontFamily: "var(--font-system)",
         fontSize: `${sizeCss}px`,
         lineHeight: 1.2,
@@ -2801,7 +2900,7 @@ function toContentFrac(
   return { x: Math.max(0, Math.min(1, fx)), y: Math.max(0, Math.min(1, fy)) };
 }
 
-function ArrowMarker({ id }: { id: string }) {
+function ArrowMarker({ id, fill }: { id: string; fill: string }) {
   return (
     <marker
       id={id}
@@ -2812,7 +2911,7 @@ function ArrowMarker({ id }: { id: string }) {
       orient="auto"
       markerUnits="strokeWidth"
     >
-      <path d="M0,0 L6,3 L0,6 z" fill="#fff" />
+      <path d="M0,0 L6,3 L0,6 z" fill={fill} />
     </marker>
   );
 }
@@ -2822,6 +2921,7 @@ function ArrowAnnotationView({
   idx,
   stageRef,
   editor,
+  color,
   isSelected,
   videoDims,
 }: {
@@ -2829,6 +2929,7 @@ function ArrowAnnotationView({
   idx: number;
   stageRef: React.MutableRefObject<HTMLDivElement | null>;
   editor: Editor;
+  color: string;
   isSelected: boolean;
   videoDims: { w: number; h: number } | null;
 }) {
@@ -2912,7 +3013,7 @@ function ArrowAnnotationView({
       }}
     >
       <defs>
-        <ArrowMarker id={markerId} />
+        <ArrowMarker id={markerId} fill={color} />
       </defs>
       {/* Visible shaft */}
       <line
@@ -2920,7 +3021,7 @@ function ArrowAnnotationView({
         y1={sy}
         x2={ex}
         y2={ey}
-        stroke="#fff"
+        stroke={color}
         strokeWidth={strokeCss}
         strokeLinecap="round"
         markerEnd={`url(#${markerId})`}
@@ -3135,11 +3236,13 @@ function ArrowPreview({
   start,
   end,
   stageRef,
+  color,
   videoDims,
 }: {
   start: Position;
   end: Position;
   stageRef: React.MutableRefObject<HTMLDivElement | null>;
+  color: string;
   videoDims: { w: number; h: number } | null;
 }) {
   const box = useContentBox(stageRef, videoDims);
@@ -3158,14 +3261,14 @@ function ArrowPreview({
       }}
     >
       <defs>
-        <ArrowMarker id={markerId} />
+        <ArrowMarker id={markerId} fill={color} />
       </defs>
       <line
         x1={p1.x}
         y1={p1.y}
         x2={p2.x}
         y2={p2.y}
-        stroke="#fff"
+        stroke={color}
         strokeOpacity="0.85"
         strokeWidth={4}
         strokeLinecap="round"
@@ -4221,6 +4324,8 @@ function ExportPanel({
   sourcePath,
   editor,
   thumbnail,
+  annotationColor,
+  onAnnotationColor,
   lastSavedPath,
   committedMp4Path,
   lastSavedAt,
@@ -4247,6 +4352,8 @@ function ExportPanel({
   sourcePath: string | null;
   editor: Editor;
   thumbnail: ThumbnailControls;
+  annotationColor: string;
+  onAnnotationColor: (hex: string) => void;
   lastSavedPath: string | null;
   committedMp4Path: string | null;
   lastSavedAt: number;
@@ -4575,6 +4682,46 @@ function ExportPanel({
               active={thumbnail.thumbnailTime != null}
               onClick={onThumbnailClick}
             />
+            {/* One color for ALL arrows/text on this recording — global,
+                not per-annotation. */}
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                padding: "6px 9px",
+              }}
+            >
+              <span
+                style={{
+                  flex: 1,
+                  fontSize: 12,
+                  fontWeight: 500,
+                  color: "var(--fg-secondary)",
+                }}
+              >
+                Color
+              </span>
+              {ANNOTATION_COLORS.map((c) => (
+                <button
+                  key={c.hex}
+                  title={c.name}
+                  onClick={() => onAnnotationColor(c.hex)}
+                  style={{
+                    width: 18,
+                    height: 18,
+                    borderRadius: "50%",
+                    background: c.hex,
+                    border:
+                      annotationColor === c.hex
+                        ? "2px solid var(--accent)"
+                        : "1px solid var(--border-default)",
+                    cursor: "pointer",
+                    padding: 0,
+                  }}
+                />
+              ))}
+            </div>
           </div>
           {popoverOpen && capturedTime != null && (
             <ThumbnailPopover
