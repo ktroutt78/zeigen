@@ -1061,11 +1061,94 @@ export default function Review() {
     }
   }, [trim]);
 
+  // Gated seeking — at most one in-flight seek on the screen video, latest
+  // target wins. Scrub drags deliver pointermove faster than WebKit can
+  // complete seeks; writing currentTime per event churns the seek queue and
+  // the displayed frame updates irregularly. Instead the newest target
+  // lands in a ref and the 'seeked' handler below chases it, so the decoder
+  // always works on the latest position and never on a backlog. Same
+  // off-React pattern as BubbleLayer's rAF position loop.
+  const seekTargetRef = useRef<number | null>(null);
+  const seekPendingRef = useRef(false);
+  // Last value actually written to currentTime. The chase compares target
+  // against this, NOT against v.currentTime — some engines report a frame-
+  // quantized position after the seek settles, and comparing against that
+  // would re-issue the same target forever.
+  const seekIssuedRef = useRef<number | null>(null);
+
   const seek = useCallback((t: number) => {
     const v = videoRef.current;
     if (!v) return;
-    v.currentTime = Math.max(0, Math.min(duration ?? Infinity, t));
+    const clamped = Math.max(0, Math.min(duration ?? Infinity, t));
+    if (v.readyState === 0) {
+      // Pre-metadata there is no seek algorithm — the value just becomes
+      // the default start position and 'seeked' never fires, so arming the
+      // gate here would wedge it.
+      v.currentTime = clamped;
+      return;
+    }
+    seekTargetRef.current = clamped;
+    if (!seekPendingRef.current) {
+      seekPendingRef.current = true;
+      seekIssuedRef.current = clamped;
+      v.currentTime = clamped;
+    }
   }, [duration]);
+
+  // Chase half of the gate. Keyed on playbackUrl so the raw → NR-preview
+  // src swap also resets the gate — a seek that died with the old src must
+  // not leave seekPendingRef stuck true.
+  useEffect(() => {
+    seekPendingRef.current = false;
+    seekTargetRef.current = null;
+    seekIssuedRef.current = null;
+    const v = videoRef.current;
+    if (!v) return;
+    const onSeeked = () => {
+      const target = seekTargetRef.current;
+      const issued = seekIssuedRef.current;
+      if (target != null && (issued == null || Math.abs(target - issued) > 0.001)) {
+        seekIssuedRef.current = target;
+        v.currentTime = target;
+      } else {
+        seekPendingRef.current = false;
+        seekTargetRef.current = null;
+        seekIssuedRef.current = null;
+      }
+    };
+    v.addEventListener("seeked", onSeeked);
+    return () => v.removeEventListener("seeked", onSeeked);
+  }, [playbackUrl]);
+
+  // True while a timeline scrub or trim-handle drag is in flight. Read by
+  // BubbleLayer's sync layer to skip per-seek webcam aligns during the
+  // drag (the second decoder otherwise seeks in lockstep with every scrub
+  // tick); endScrub does the single align that lands the bubble on the
+  // final frame.
+  const scrubbingRef = useRef(false);
+  const beginScrub = useCallback(() => {
+    scrubbingRef.current = true;
+  }, []);
+  const endScrub = useCallback(() => {
+    scrubbingRef.current = false;
+    // One align at pointer-up. Reading s.currentTime is correct even if
+    // the last gated seek is still in flight — currentTime reflects the
+    // assigned value immediately. If the mouse moved past the last issued
+    // seek, the chase seek fires 'seeked' with scrubbing already false and
+    // the sync layer's normal align covers it.
+    const s = videoRef.current;
+    const w = webcamVideoRef.current;
+    if (!s || !w) return;
+    const target = Math.max(0, s.currentTime - webcamLeadSec);
+    if (Math.abs(w.currentTime - target) > 0.05) {
+      try {
+        w.currentTime = target;
+      } catch {
+        // Webcam metadata not loaded yet — the sync layer retries on its
+        // next event.
+      }
+    }
+  }, [webcamLeadSec]);
 
   // Applying playbackRate as a property (not a JSX attribute — HTMLMediaElement
   // has no such DOM attribute). Fires the video's native 'ratechange' event,
@@ -1236,6 +1319,9 @@ export default function Review() {
           togglePlay={togglePlay}
           playbackRate={playbackRate}
           seek={seek}
+          scrubbingRef={scrubbingRef}
+          onScrubStart={beginScrub}
+          onScrubEnd={endScrub}
           trim={trim}
           setTrim={setTrim}
           audioStart={audioStart}
@@ -1410,6 +1496,12 @@ type LeftColumnProps = {
   togglePlay: () => void;
   playbackRate: number;
   seek: (t: number) => void;
+  // Scrub-drag lifecycle (see beginScrub/endScrub in Review). scrubbingRef
+  // reaches BubbleLayer's sync layer; the callbacks reach Timeline's drag
+  // handlers.
+  scrubbingRef: React.MutableRefObject<boolean>;
+  onScrubStart: () => void;
+  onScrubEnd: () => void;
   trim: Trim | null;
   setTrim: React.Dispatch<React.SetStateAction<Trim | null>>;
   audioStart: number | null;
@@ -1447,6 +1539,7 @@ function LeftColumn(props: LeftColumnProps) {
         webcamLeadSec={props.webcamLeadSec}
         bubblePositionLog={props.bubblePositionLog}
         bubbleRoundness={props.bubbleRoundness}
+        scrubbingRef={props.scrubbingRef}
         onLoadedMetadata={props.onLoadedMetadata}
         onTimeUpdate={props.onTimeUpdate}
         onPlay={props.onPlay}
@@ -1468,6 +1561,8 @@ function LeftColumn(props: LeftColumnProps) {
         trim={props.trim}
         setTrim={props.setTrim}
         seek={props.seek}
+        onScrubStart={props.onScrubStart}
+        onScrubEnd={props.onScrubEnd}
         audioStart={props.audioStart}
         editor={props.editor}
         thumbnailTime={props.thumbnail.thumbnailTime}
@@ -1793,6 +1888,7 @@ type VideoStageProps = {
   webcamLeadSec: number;
   bubblePositionLog: BubblePositionEntry[];
   bubbleRoundness: number | null;
+  scrubbingRef: React.MutableRefObject<boolean>;
   onLoadedMetadata: () => void;
   onTimeUpdate: () => void;
   onPlay: () => void;
@@ -1987,6 +2083,7 @@ function VideoStage(props: VideoStageProps) {
           webcamLeadSec={props.webcamLeadSec}
           bubblePositionLog={props.bubblePositionLog}
           bubbleRoundness={props.bubbleRoundness}
+          scrubbingRef={props.scrubbingRef}
           videoDims={props.watermarkPreview.videoDims}
         />
         <AnnotationLayer
@@ -2034,6 +2131,7 @@ function BubbleLayer({
   webcamLeadSec,
   bubblePositionLog,
   bubbleRoundness,
+  scrubbingRef,
   videoDims,
 }: {
   stageRef: React.MutableRefObject<HTMLDivElement | null>;
@@ -2043,6 +2141,11 @@ function BubbleLayer({
   webcamLeadSec: number;
   bubblePositionLog: BubblePositionEntry[];
   bubbleRoundness: number | null;
+  // True during a timeline scrub / trim-handle drag. The sync layer skips
+  // per-seek webcam aligns while set — otherwise the webcam decoder seeks
+  // in lockstep with every completed scrub seek. Review's endScrub does
+  // the one align that matters when the drag ends.
+  scrubbingRef: React.MutableRefObject<boolean>;
   // Phase 15 c3 rAF fix made currentTime obsolete here — the position
   // loop reads screenVideoRef.current.currentTime directly. Accepting
   // it would force callers to keep threading the prop; declining lets
@@ -2071,7 +2174,10 @@ function BubbleLayer({
       }
     };
     const onTimeUpdate = () => {
-      align();
+      // During a scrub drag every completed seek fires timeupdate; aligning
+      // here would seek the webcam decoder in lockstep with the scrub.
+      // endScrub does the single post-drag align instead.
+      if (!scrubbingRef.current) align();
       // Phase 15 c3 fix: webcam needs play() once screen crosses LEAD
       // during ongoing playback. onPlay alone misses this — it fires
       // when the user clicks play (usually at t=0, before LEAD), so
@@ -2103,6 +2209,7 @@ function BubbleLayer({
       w.pause();
     };
     const onSeeked = () => {
+      if (scrubbingRef.current) return; // endScrub aligns once at pointer-up
       align();
       if (!s.paused && s.currentTime >= webcamLeadSec) {
         w.play().catch(() => {});
@@ -3373,6 +3480,11 @@ type TimelineProps = {
   trim: Trim | null;
   setTrim: React.Dispatch<React.SetStateAction<Trim | null>>;
   seek: (t: number) => void;
+  // Bracket every seek-per-pointermove drag (track scrub, trim handles) so
+  // Review can suspend webcam aligns for the duration and do one align at
+  // pointer-up.
+  onScrubStart: () => void;
+  onScrubEnd: () => void;
   audioStart: number | null;
   editor: Editor;
   thumbnailTime: number | null;
@@ -3411,6 +3523,7 @@ function Timeline(props: TimelineProps) {
       const video = props.videoRef.current;
       const wasPlaying = !!video && !video.paused;
       video?.pause();
+      props.onScrubStart();
       const move = (clientX: number) => {
         const t = ((clientX - rect.left) / rect.width) * duration;
         if (side === "in") {
@@ -3427,6 +3540,7 @@ function Timeline(props: TimelineProps) {
       const onUp = () => {
         window.removeEventListener("pointermove", onMove);
         window.removeEventListener("pointerup", onUp);
+        props.onScrubEnd();
         if (wasPlaying) video?.play().catch(() => {});
       };
       window.addEventListener("pointermove", onMove);
@@ -3456,6 +3570,7 @@ function Timeline(props: TimelineProps) {
       if (!movedPastThreshold && Math.abs(ev.clientX - startX) > 3) {
         movedPastThreshold = true;
         if (wasPlaying) props.videoRef.current?.pause();
+        props.onScrubStart();
       }
       if (movedPastThreshold) seekAt(ev.clientX);
       setHover({ time: timeAt(ev.clientX, rect, duration), rect });
@@ -3463,8 +3578,12 @@ function Timeline(props: TimelineProps) {
     const onUp = (ev: PointerEvent) => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
-      if (!movedPastThreshold) seekAt(ev.clientX);
-      else if (wasPlaying) props.videoRef.current?.play().catch(() => {});
+      if (!movedPastThreshold) {
+        seekAt(ev.clientX);
+      } else {
+        props.onScrubEnd();
+        if (wasPlaying) props.videoRef.current?.play().catch(() => {});
+      }
       const overTrack =
         ev.clientX >= rect.left &&
         ev.clientX <= rect.right &&
