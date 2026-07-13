@@ -2429,6 +2429,7 @@ function RoundnessRow({
     <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
       <input
         type="range"
+        className="slider"
         min={0}
         max={100}
         value={pct}
@@ -2437,7 +2438,7 @@ function RoundnessRow({
           const v = Number(e.target.value);
           onChange(v >= 100 ? null : v / 100);
         }}
-        style={{ flex: 1, display: "block" }}
+        style={{ flex: 1, display: "block", "--fill": `${pct}%` } as React.CSSProperties}
       />
       <span
         style={{

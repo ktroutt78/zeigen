@@ -218,6 +218,34 @@
 .toggle.on { background: var(--accent); }
 .toggle.on::after { left: 14px; }
 
+/* Slider (range input) — same family as .toggle: #3a3a3c track, 16px white
+   knob, accent fill. The component sets --fill inline to the value percent
+   so the track reads filled-to-the-thumb like the native macOS slider. */
+.slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 16px;
+  margin: 0;
+  background: transparent;
+}
+.slider::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(to right, var(--accent) var(--fill, 100%), #3a3a3c var(--fill, 100%));
+}
+.slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -6px; /* center 16px knob on the 4px track */
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.4);
+  cursor: pointer;
+}
+.slider:disabled { opacity: 0.4; }
+.slider:disabled::-webkit-slider-thumb { cursor: not-allowed; }
+
 /* Segmented control */
 .segmented { display: inline-flex; background: var(--bg-input); border: 1px solid var(--border-subtle); border-radius: var(--r-sm); padding: 2px; gap: 2px; }
 .segmented > button { background: transparent; border: none; color: var(--fg-secondary); padding: 3px 10px; font: 500 12px var(--font-system); border-radius: 4px; cursor: pointer; }
