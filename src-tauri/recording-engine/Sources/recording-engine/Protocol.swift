@@ -16,9 +16,11 @@ struct Command: Decodable {
     let area_y: Double?
     let area_width: Double?
     let area_height: Double?
-    // V3 Phase A. Default true: SCK's burned-in cursor is disabled
-    // (showsCursor = false) and a cursor telemetry sidecar is written at
-    // stop. false reproduces pre-V3 behavior exactly.
+    // V3 Phase A telemetry, decoupled from cursor rendering for the zoom
+    // layer (2026-07-13). Default true: a cursor telemetry sidecar is
+    // written at stop. The cursor stays burned into the pixels regardless
+    // (showsCursor is always true) — capture output is identical with the
+    // flag on or off; the only difference is the sidecar file.
     let capture_cursor: Bool?
 }
 

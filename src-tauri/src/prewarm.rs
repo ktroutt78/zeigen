@@ -190,6 +190,9 @@ fn run_track_b(
             area_y,
             area_width,
             area_height,
+            // Off for the throwaway warm-up: telemetry has no first-call
+            // cache to warm and its sidecar would be discarded with the
+            // prewarm scratch anyway. The real recording sends true.
             capture_cursor: false,
         })?;
     }

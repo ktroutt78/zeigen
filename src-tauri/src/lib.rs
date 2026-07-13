@@ -189,7 +189,11 @@ fn engine_start(
             area_y: area_y_send,
             area_width: area_w_send,
             area_height: area_h_send,
-            capture_cursor: false,
+            // Telemetry only — the cursor stays burned in (the engine
+            // decoupled these for the zoom layer, ZOOM-LAYER-PLAN.md
+            // step 1). Writes a hidden .cursor.json next to the scratch
+            // mp4; the video path is untouched.
+            capture_cursor: true,
         })?;
 
     *active = Some(ActiveRecording {

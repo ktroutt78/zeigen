@@ -70,10 +70,11 @@ final class RecordingSession: NSObject,
     private let audioQueue: DispatchQueue?
 
     // V3 Phase A cursor telemetry. Non-nil iff capture_cursor is on, in
-    // which case showsCursor is false and a telemetry sidecar is written
-    // at stop. cursorAnchorSet guards the one-shot anchor handoff (first
-    // video frame accepted by the writer) without locking the tracker on
-    // every frame.
+    // which case a telemetry sidecar is written at stop. Telemetry never
+    // touches the pixels — showsCursor stays true either way (zoom-layer
+    // step 1 decoupled them). cursorAnchorSet guards the one-shot anchor
+    // handoff (first video frame accepted by the writer) without locking
+    // the tracker on every frame.
     private let cursorTracker: CursorTracker?
     private var cursorAnchorSet = false
 
@@ -267,10 +268,11 @@ final class RecordingSession: NSObject,
         config.sourceRect = sourceRect
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(maxFPS))
         config.queueDepth = 6
-        // V3 Phase A: with cursor telemetry on, the system cursor must NOT
-        // be burned into the pixels — Phase B composites a synthetic one.
-        // With it off, pre-V3 behavior is preserved exactly.
-        config.showsCursor = !captureCursor
+        // The cursor is always burned into the pixels. Telemetry
+        // (captureCursor) is position/click data only — the zoom layer
+        // (ZOOM-LAYER-PLAN.md) reads it but never alters the raw video,
+        // so capture output is identical with the flag on or off.
+        config.showsCursor = true
         config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         // captureMicrophone deliberately left unset: V2.2 routes mic
         // through AVCaptureSession (Track B).
