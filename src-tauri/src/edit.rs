@@ -31,7 +31,7 @@ fn audio_nr_filter() -> Option<String> {
         .map(|mix| format!("arnndn=m={}:mix={mix:.2}", audio_model_path().display()))
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct SidecarState {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub trim: Option<Trim>,
@@ -59,6 +59,43 @@ pub struct SidecarState {
     // untouched recordings rasterize byte-identically.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub annotation_color: Option<String>,
+    // Zoom layer keyframes (ZOOM-LAYER-PLAN step 2). Empty = no zoom and
+    // serializes to ABSENT — same Vec::is_empty convention as
+    // bubble_position_log — so a no-zoom sidecar stays byte-identical to a
+    // pre-zoom one. Nothing in the export pipeline reads this field yet
+    // (rendering is step 4); a non-empty track is the thing that will pay
+    // the re-encode, an empty one must never leave the -c:v copy path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub zoom: Vec<ZoomKeyframe>,
+}
+
+// One point on the zoom curve (V3-PLAN C.2). Zoom state between keyframes
+// is interpolated per `ease` into the later keyframe.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ZoomKeyframe {
+    // Seconds on the original timeline, same basis as Annotation.start_time.
+    pub t: f64,
+    // 1.0 = no zoom. Detection caps at 2.5 (V3-PLAN C.1 calm rules).
+    pub scale: f64,
+    // Zoom center in video pixel space (telemetry coordinates).
+    pub center_x: f64,
+    pub center_y: f64,
+    #[serde(default)]
+    pub ease: Ease,
+    // true = written by suggestion detection (step 5). Regeneration may
+    // replace only flagged keyframes; user-placed ones are never stomped.
+    #[serde(default)]
+    pub auto_generated: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum Ease {
+    // V3-PLAN C.1: never linear for generated zoom — linear reads as
+    // mechanical. Linear stays available for manual edits.
+    #[default]
+    InOutCubic,
+    Linear,
 }
 
 // Parse "#RRGGBB" → (r, g, b). Anything malformed falls back to white so a
@@ -82,7 +119,7 @@ fn is_dark_color((r, g, b): (u8, u8, u8)) -> bool {
     2126 * (r as u32) + 7152 * (g as u32) + 722 * (b as u32) < 128 * 10000
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct BubblePositionEntry {
     pub t: f64,
     pub x: f64,
@@ -94,14 +131,14 @@ pub struct BubblePositionEntry {
     pub diameter: Option<f64>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Trim {
     #[serde(rename = "in")]
     pub start: f64,
     pub out: f64,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Annotation {
     #[serde(rename = "type")]
     pub kind: String,
@@ -120,7 +157,7 @@ pub struct Annotation {
     pub stroke: Option<f64>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Position {
     pub x: f64,
     pub y: f64,
@@ -1823,6 +1860,268 @@ fn save_recording_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The exact bytes write_sidecar_path produced BEFORE the zoom field
+    // existed (captured from serde_json::to_string_pretty at e29d638) for a
+    // sidecar exercising every pre-zoom field. Byte-equality against this pin
+    // is the step-2 governing invariant: a no-zoom recording's sidecar must
+    // be textually indistinguishable from a pre-zoom one, so it rides the
+    // existing copy path and guards unchanged.
+    const PRE_ZOOM_SIDECAR_PIN: &str = r##"{
+  "trim": {
+    "in": 1.25,
+    "out": 42.5
+  },
+  "annotations": [
+    {
+      "type": "text",
+      "start_time": 2.0,
+      "end_time": 5.0,
+      "position": {
+        "x": 0.25,
+        "y": 0.4
+      },
+      "content": "Look here",
+      "size": 48.0
+    },
+    {
+      "type": "arrow",
+      "start_time": 3.0,
+      "end_time": 6.0,
+      "position": {
+        "x": 0.1,
+        "y": 0.2
+      },
+      "content": "",
+      "endpoint": {
+        "x": 0.6,
+        "y": 0.7
+      },
+      "stroke": 12.0
+    }
+  ],
+  "bubble_position_log": [
+    {
+      "t": 0.0,
+      "x": 0.9,
+      "y": 0.85,
+      "diameter": 240.0
+    }
+  ],
+  "thumbnail_time": 7.5,
+  "bubble_roundness": 0.35,
+  "annotation_color": "#FF3B30"
+}"##;
+
+    fn pre_zoom_populated_state() -> SidecarState {
+        SidecarState {
+            trim: Some(Trim { start: 1.25, out: 42.5 }),
+            annotations: vec![
+                Annotation {
+                    kind: "text".into(),
+                    start_time: 2.0,
+                    end_time: 5.0,
+                    position: Position { x: 0.25, y: 0.4 },
+                    content: "Look here".into(),
+                    size: Some(48.0),
+                    endpoint: None,
+                    stroke: None,
+                },
+                Annotation {
+                    kind: "arrow".into(),
+                    start_time: 3.0,
+                    end_time: 6.0,
+                    position: Position { x: 0.1, y: 0.2 },
+                    content: String::new(),
+                    size: None,
+                    endpoint: Some(Position { x: 0.6, y: 0.7 }),
+                    stroke: Some(12.0),
+                },
+            ],
+            bubble_position_log: vec![BubblePositionEntry {
+                t: 0.0,
+                x: 0.9,
+                y: 0.85,
+                diameter: Some(240.0),
+            }],
+            thumbnail_time: Some(7.5),
+            bubble_roundness: Some(0.35),
+            annotation_color: Some("#FF3B30".into()),
+            zoom: vec![],
+        }
+    }
+
+    // Structural half of the invariant: an empty zoom track cannot
+    // serialize. In memory and through write_sidecar_path, a no-zoom state
+    // produces the pinned pre-zoom bytes exactly.
+    #[test]
+    fn empty_zoom_serializes_absent_byte_identical_to_pre_zoom() {
+        let state = pre_zoom_populated_state();
+        assert_eq!(
+            serde_json::to_string_pretty(&state).unwrap(),
+            PRE_ZOOM_SIDECAR_PIN
+        );
+        // Untouched-recording shape (no sidecar fields at all).
+        assert_eq!(
+            serde_json::to_string_pretty(&SidecarState::default()).unwrap(),
+            "{\n  \"annotations\": []\n}"
+        );
+        // Same through the disk path the app actually uses.
+        let dir = std::env::temp_dir().join(format!("zeigen-zoom-pin-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("recording-pin.mp4");
+        write_sidecar_path(&source, &state).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(sidecar_path(&source)).unwrap(),
+            PRE_ZOOM_SIDECAR_PIN
+        );
+    }
+
+    // A wiped track written as "zoom": [] (hand edit, sloppy writer) parses
+    // and re-serializes with the key gone — not as [] and not as null.
+    #[test]
+    fn zoom_empty_array_input_normalizes_to_absent() {
+        let mut with_empty: serde_json::Value =
+            serde_json::from_str(PRE_ZOOM_SIDECAR_PIN).unwrap();
+        with_empty["zoom"] = serde_json::json!([]);
+        let state: SidecarState = serde_json::from_value(with_empty).unwrap();
+        assert_eq!(state, pre_zoom_populated_state());
+        assert_eq!(
+            serde_json::to_string_pretty(&state).unwrap(),
+            PRE_ZOOM_SIDECAR_PIN
+        );
+    }
+
+    // A non-empty track survives serialize -> parse -> serialize with no
+    // loss, in memory and through the disk path. Omitted per-keyframe
+    // fields default sanely (ease in_out_cubic, auto_generated false).
+    #[test]
+    fn zoom_track_round_trips_losslessly() {
+        let mut state = pre_zoom_populated_state();
+        state.zoom = vec![
+            ZoomKeyframe {
+                t: 4.0,
+                scale: 1.0,
+                center_x: 960.0,
+                center_y: 540.0,
+                ease: Ease::InOutCubic,
+                auto_generated: true,
+            },
+            ZoomKeyframe {
+                t: 4.6,
+                scale: 2.5,
+                center_x: 800.0,
+                center_y: 450.0,
+                ease: Ease::Linear,
+                auto_generated: false,
+            },
+        ];
+        let json = serde_json::to_string_pretty(&state).unwrap();
+        let reparsed: SidecarState = serde_json::from_str(&json).unwrap();
+        assert_eq!(reparsed, state);
+
+        let dir = std::env::temp_dir().join(format!("zeigen-zoom-rt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("recording-rt.mp4");
+        write_sidecar_path(&source, &state).unwrap();
+        assert_eq!(read_sidecar_path(&source).unwrap().unwrap(), state);
+
+        let sparse: ZoomKeyframe = serde_json::from_str(
+            r#"{"t": 1.0, "scale": 1.8, "center_x": 100.0, "center_y": 200.0}"#,
+        )
+        .unwrap();
+        assert_eq!(sparse.ease, Ease::InOutCubic);
+        assert!(!sparse.auto_generated);
+    }
+
+    // Runnable copy-path guard, self-contained (synthesized source — no
+    // dependency on the missing May baseline fixtures, DECISIONS.md
+    // 2026-07-13). Runs the real MP4-Source pipeline and pins the -c:v copy
+    // fast path via video stream md5: a no-zoom sidecar must keep the video
+    // stream bit-exact while audio re-encodes (arnndn + AAC). Also pins that
+    // a NON-empty zoom track is inert to export — step 4 wires rendering and
+    // must flip that half to a re-encode assertion.
+    #[test]
+    fn empty_zoom_stays_on_video_copy_path() {
+        ensure_audio_model_for_tests();
+        let dir =
+            std::env::temp_dir().join(format!("zeigen-zoom-copypath-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.mp4");
+        let synth = Command::new(FFMPEG_PATH)
+            .args([
+                "-y", "-v", "error",
+                "-f", "lavfi", "-i", "testsrc2=duration=2:size=320x240:rate=30",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-shortest",
+            ])
+            .arg(&source)
+            .output()
+            .expect("spawn ffmpeg synth");
+        assert!(
+            synth.status.success(),
+            "synth source failed: {}",
+            String::from_utf8_lossy(&synth.stderr)
+        );
+        let src_v = stream_md5(source.to_str().unwrap(), "0:v");
+        let src_a = stream_md5(source.to_str().unwrap(), "0:a");
+
+        let out_plain = dir.join("out-plain.mp4");
+        run_edit_pipeline(
+            &source,
+            &[],
+            &out_plain,
+            &SidecarState::default(),
+            PipelineMode::Mp4 { resolution: Mp4Resolution::Source },
+            crate::composite::WebcamSize::Medium,
+            crate::composite::Corner::BottomRight,
+            None,
+            |_| {},
+        )
+        .expect("plain save");
+        assert_eq!(
+            stream_md5(out_plain.to_str().unwrap(), "0:v"),
+            src_v,
+            "no-zoom save must stay on -c:v copy (video bit-exact)"
+        );
+        assert_ne!(
+            stream_md5(out_plain.to_str().unwrap(), "0:a"),
+            src_a,
+            "audio should re-encode (arnndn + AAC)"
+        );
+
+        let zoomed = SidecarState {
+            zoom: vec![ZoomKeyframe {
+                t: 0.5,
+                scale: 2.0,
+                center_x: 160.0,
+                center_y: 120.0,
+                ease: Ease::InOutCubic,
+                auto_generated: false,
+            }],
+            ..Default::default()
+        };
+        let out_zoomed = dir.join("out-zoomed.mp4");
+        run_edit_pipeline(
+            &source,
+            &[],
+            &out_zoomed,
+            &zoomed,
+            PipelineMode::Mp4 { resolution: Mp4Resolution::Source },
+            crate::composite::WebcamSize::Medium,
+            crate::composite::Corner::BottomRight,
+            None,
+            |_| {},
+        )
+        .expect("zoomed save");
+        assert_eq!(
+            stream_md5(out_zoomed.to_str().unwrap(), "0:v"),
+            src_v,
+            "zoom rendering is not wired until step 4 — video still copies"
+        );
+    }
 
     #[test]
     fn annotation_color_parses_and_defaults_white() {
