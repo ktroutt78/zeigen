@@ -32,23 +32,46 @@ pub(crate) const FFPROBE_PATH: &str = "/opt/homebrew/bin/ffprobe";
 //   VTCompressionSession, SCK first-capture-call) that ONLY hits the
 //   first recording per process lifetime / long-idle break.
 //
-// - 360 (final, 2026-06-11, this value): set after the pre-warm
-//   integration (commit b906945) closed the cold/warm gap by warming
-//   those framework caches before every real recording. With pre-warm
-//   active, cold and warm pipelines hit the same warm-state webcam-vs-
-//   sck timing, and a single constant works for both. Validated by
-//   clean sharp-clap measurement at 360: cold ~30ms residual, warm
-//   ~10ms — both within one 30fps frame (~33ms), landing TOGETHER.
+// - 360 (2026-06-11): set after the pre-warm integration (commit
+//   b906945) closed the cold/warm gap by warming those framework caches
+//   before every real recording. With pre-warm active, cold and warm
+//   pipelines hit the same warm-state webcam-vs-sck timing, and a single
+//   constant works for both. Validated by clean sharp-clap measurement
+//   at 360: cold ~30ms residual, warm ~10ms. Verified in production use
+//   as late as 2026-06-24 (VizIQ Demo).
+//
+// - 105 (2026-07-12, this value): the environment's camera-open latency
+//   dropped ~270ms sometime between 2026-06-24 and 2026-07-11 — same
+//   boot session, no macOS update, and provably no app change (a rebuilt
+//   June-era app measured the same new offset). 360 then made the bubble
+//   LAG the voice by ~270ms on every export. Recalibrated via four
+//   sharp-clap runs (2 cold + 2 warm, built-in mic + built-in camera,
+//   Mic Mode Standard): true offsets +88/+113/+114/+119ms — a 31ms
+//   spread, inside one 30fps frame, cold == warm. 105 is the midrange
+//   (max residual 17ms). Full investigation: DECISIONS.md 2026-07-12.
 //
 // The real value being approximated is the per-recording wallclock
 // offset between webcam ffmpeg's first encoded frame and SCK's first
 // captured frame on the warm-cache pipeline state. Pre-warm makes
-// this offset stable enough that a constant captures it.
+// this offset stable enough that a constant captures it — until the
+// environment moves it, which has now happened once.
 //
-// Tunable: raise if the bubble still LEADS the audio (mouth moves
-// before the sound), lower if the bubble LAGS. The proper auto-fix
-// would have the engine timestamp each pipeline's first real sample.
-pub(crate) const WEBCAM_LEAD_MS: f64 = 360.0;
+// WARNING — this constant is ENVIRONMENT- and DEVICE-DEPENDENT. It is
+// calibrated for the BUILT-IN mic + BUILT-IN camera only, and silently
+// bakes in both per-device audio-chain latency and per-device camera
+// startup latency:
+//   - a Bluetooth mic (AirPods SCO/HFP) adds ~150-300ms audio latency;
+//   - a Continuity iPhone camera adds large, variable startup latency;
+//   - engine startup-path changes and OS/daemon state shifts move the
+//     SCK term (the 2026-07 drift was environmental camera-open speedup).
+// If you change any of those, re-run the clap protocol (audio clap peak
+// vs webcam motion-energy peak on the raw scratch, 2 cold + 2 warm; see
+// DECISIONS.md 2026-07-12) rather than nudging by ear. Symptom key:
+// bubble LEADS the voice -> raise; bubble LAGS -> lower. The structural
+// fix stays: measure per recording (engine timestamps each pipeline's
+// first real sample; both clocks are already mach-domain) instead of
+// hoping a constant holds still.
+pub(crate) const WEBCAM_LEAD_MS: f64 = 105.0;
 
 // The inline `if(lt(t,...))` chain handles arbitrary log sizes — ffmpeg
 // parses the expression once and walks it per-frame, which is cheap.
@@ -984,8 +1007,8 @@ mod tests {
     // during styling work means the legacy path regressed.
     #[test]
     fn legacy_args_pinned() {
-        let expected_static = "-y\u{1}-hide_banner\u{1}-nostats\u{1}-progress\u{1}pipe:1\u{1}-i\u{1}<TMP>/screen.mp4\u{1}-itsoffset\u{1}-0.020\u{1}-i\u{1}<TMP>/screen.mp4\u{1}-i\u{1}<TMP>/webcam-0.mp4\u{1}-loop\u{1}1\u{1}-framerate\u{1}30\u{1}-t\u{1}10.000\u{1}-i\u{1}<TMP>/mask-240.png\u{1}-loop\u{1}1\u{1}-framerate\u{1}30\u{1}-t\u{1}10.000\u{1}-i\u{1}<TMP>/shadow-240.png\u{1}-filter_complex\u{1}[2:v]tpad=start_duration=0.360:start_mode=clone[wc_full];[wc_full]hflip,crop='min(iw\\,ih)':'min(iw\\,ih)',scale=240:240,format=yuva420p[wc_rgba];[3:v]format=gray[mask_g];[wc_rgba][mask_g]alphamerge[wc];[4:v]format=rgba,gblur=sigma=18,colorchannelmixer=aa=0.22[shadow];[0:v][shadow]overlay=main_w-324:main_h-316:eof_action=pass[shadowed];[shadowed][wc]overlay=main_w-overlay_w-24:main_h-overlay_h-24:eof_action=pass[outv_pre]\u{1}-map\u{1}[outv_pre]\u{1}-map\u{1}1:a?\u{1}-c:v\u{1}h264_videotoolbox\u{1}-b:v\u{1}8M\u{1}-c:a\u{1}copy\u{1}<TMP>/composite.mp4";
-        let expected_keyframe = "-y\u{1}-hide_banner\u{1}-nostats\u{1}-progress\u{1}pipe:1\u{1}-i\u{1}<TMP>/screen.mp4\u{1}-itsoffset\u{1}-0.020\u{1}-i\u{1}<TMP>/screen.mp4\u{1}-i\u{1}<TMP>/webcam-0.mp4\u{1}-loop\u{1}1\u{1}-framerate\u{1}30\u{1}-t\u{1}10.000\u{1}-i\u{1}<TMP>/mask-240.png\u{1}-loop\u{1}1\u{1}-framerate\u{1}30\u{1}-t\u{1}10.000\u{1}-i\u{1}<TMP>/shadow-240.png\u{1}-filter_complex\u{1}[2:v]tpad=start_duration=0.360:start_mode=clone[wc_full];[wc_full]hflip,crop='min(iw\\,ih)':'min(iw\\,ih)',scale=240:240,format=yuva420p[wc_rgba];[3:v]format=gray[mask_g];[wc_rgba][mask_g]alphamerge[wc];[4:v]format=rgba,gblur=sigma=18,colorchannelmixer=aa=0.22[shadow];[0:v][shadow]overlay=x=if(lt(t\\,2.000)\\,main_w*(0.9000+(-0.4000)*max(0\\,(t-0.000)/2.000))-overlay_w/2\\,main_w*0.5000-overlay_w/2):y=(if(lt(t\\,2.000)\\,main_h*(0.8500+(-0.3500)*max(0\\,(t-0.000)/2.000))-overlay_h/2\\,main_h*0.5000-overlay_h/2))+8:enable=if(lt(t\\,2.000)\\,1\\,1):eof_action=pass[shadowed];[shadowed][wc]overlay=x=if(lt(t\\,2.000)\\,main_w*(0.9000+(-0.4000)*max(0\\,(t-0.000)/2.000))-overlay_w/2\\,main_w*0.5000-overlay_w/2):y=if(lt(t\\,2.000)\\,main_h*(0.8500+(-0.3500)*max(0\\,(t-0.000)/2.000))-overlay_h/2\\,main_h*0.5000-overlay_h/2):enable=if(lt(t\\,2.000)\\,1\\,1):eof_action=pass[outv_pre]\u{1}-map\u{1}[outv_pre]\u{1}-map\u{1}1:a?\u{1}-c:v\u{1}h264_videotoolbox\u{1}-b:v\u{1}8M\u{1}-c:a\u{1}copy\u{1}<TMP>/composite.mp4";
+        let expected_static = "-y\u{1}-hide_banner\u{1}-nostats\u{1}-progress\u{1}pipe:1\u{1}-i\u{1}<TMP>/screen.mp4\u{1}-itsoffset\u{1}-0.020\u{1}-i\u{1}<TMP>/screen.mp4\u{1}-i\u{1}<TMP>/webcam-0.mp4\u{1}-loop\u{1}1\u{1}-framerate\u{1}30\u{1}-t\u{1}10.000\u{1}-i\u{1}<TMP>/mask-240.png\u{1}-loop\u{1}1\u{1}-framerate\u{1}30\u{1}-t\u{1}10.000\u{1}-i\u{1}<TMP>/shadow-240.png\u{1}-filter_complex\u{1}[2:v]tpad=start_duration=0.105:start_mode=clone[wc_full];[wc_full]hflip,crop='min(iw\\,ih)':'min(iw\\,ih)',scale=240:240,format=yuva420p[wc_rgba];[3:v]format=gray[mask_g];[wc_rgba][mask_g]alphamerge[wc];[4:v]format=rgba,gblur=sigma=18,colorchannelmixer=aa=0.22[shadow];[0:v][shadow]overlay=main_w-324:main_h-316:eof_action=pass[shadowed];[shadowed][wc]overlay=main_w-overlay_w-24:main_h-overlay_h-24:eof_action=pass[outv_pre]\u{1}-map\u{1}[outv_pre]\u{1}-map\u{1}1:a?\u{1}-c:v\u{1}h264_videotoolbox\u{1}-b:v\u{1}8M\u{1}-c:a\u{1}copy\u{1}<TMP>/composite.mp4";
+        let expected_keyframe = "-y\u{1}-hide_banner\u{1}-nostats\u{1}-progress\u{1}pipe:1\u{1}-i\u{1}<TMP>/screen.mp4\u{1}-itsoffset\u{1}-0.020\u{1}-i\u{1}<TMP>/screen.mp4\u{1}-i\u{1}<TMP>/webcam-0.mp4\u{1}-loop\u{1}1\u{1}-framerate\u{1}30\u{1}-t\u{1}10.000\u{1}-i\u{1}<TMP>/mask-240.png\u{1}-loop\u{1}1\u{1}-framerate\u{1}30\u{1}-t\u{1}10.000\u{1}-i\u{1}<TMP>/shadow-240.png\u{1}-filter_complex\u{1}[2:v]tpad=start_duration=0.105:start_mode=clone[wc_full];[wc_full]hflip,crop='min(iw\\,ih)':'min(iw\\,ih)',scale=240:240,format=yuva420p[wc_rgba];[3:v]format=gray[mask_g];[wc_rgba][mask_g]alphamerge[wc];[4:v]format=rgba,gblur=sigma=18,colorchannelmixer=aa=0.22[shadow];[0:v][shadow]overlay=x=if(lt(t\\,2.000)\\,main_w*(0.9000+(-0.4000)*max(0\\,(t-0.000)/2.000))-overlay_w/2\\,main_w*0.5000-overlay_w/2):y=(if(lt(t\\,2.000)\\,main_h*(0.8500+(-0.3500)*max(0\\,(t-0.000)/2.000))-overlay_h/2\\,main_h*0.5000-overlay_h/2))+8:enable=if(lt(t\\,2.000)\\,1\\,1):eof_action=pass[shadowed];[shadowed][wc]overlay=x=if(lt(t\\,2.000)\\,main_w*(0.9000+(-0.4000)*max(0\\,(t-0.000)/2.000))-overlay_w/2\\,main_w*0.5000-overlay_w/2):y=if(lt(t\\,2.000)\\,main_h*(0.8500+(-0.3500)*max(0\\,(t-0.000)/2.000))-overlay_h/2\\,main_h*0.5000-overlay_h/2):enable=if(lt(t\\,2.000)\\,1\\,1):eof_action=pass[outv_pre]\u{1}-map\u{1}[outv_pre]\u{1}-map\u{1}1:a?\u{1}-c:v\u{1}h264_videotoolbox\u{1}-b:v\u{1}8M\u{1}-c:a\u{1}copy\u{1}<TMP>/composite.mp4";
         for (expected, log) in [
             (expected_static, vec![]),
             (expected_keyframe, log_2_entries()),

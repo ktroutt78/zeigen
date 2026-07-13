@@ -4,6 +4,33 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-12 — WEBCAM_LEAD_MS 360 → 105: environmental drift, measured recalibration
+
+The webcam bubble lagged the voice by ~270ms on every export — noticed 2026-07-11, the first voice+bubble recordings since June. Root-caused by elimination over two days; the constant was recalibrated from a four-clap protocol and verified sub-frame.
+
+### What it was NOT (each disproven with evidence)
+
+- **Not the E1 roundness work:** capture-path diff timing-inert; spawn gaps matched within 4ms; export arg vector pin-proven identical; symptom reproduced on the pre-E1 binary.
+- **Not engine code at all:** a rebuilt June-era app (pre faceless-helper, pre permission-recovery) measured the same new offset (+93ms) as the current build — the decisive control test.
+- **Not macOS:** machine up 75+ days, no reboot, no update in the window.
+- **Not AirPods in the June calibration:** `~/Movies/Zeigen/.sync-measurements.jsonl` (June 9 instrumentation) records `BuiltInMicrophoneDevice` on every calibration take.
+- **Not a mis-calibration:** the June log's raw timings (webcam first frame +733-860ms after spawn vs SCK +232-502ms) show 360 was genuinely right, and VizIQ Demo (June 24, warm, built-in mic, bubble) was in sync in production.
+
+### What it WAS
+
+**The environment's camera-open latency dropped ~270ms between June 24 and July 11** — same boot session, cause unrecoverable (camera daemon state / another process warming the camera stack). The constant encodes environment; the environment moved.
+
+Confounder found en route: **macOS Mic Mode = Voice Isolation** had been silently inherited by the engine (faceless helper can't surface the selector; shows as "Unknown" in Control Center), zeroing inter-speech audio and deleting claps — fixed as a setting (Zeigen camera panel → Mic Mode → Standard) and prerequisite to all measurements below.
+
+### Recalibration (2026-07-12)
+
+Four sharp-clap runs, built-in mic + built-in camera, Standard mic mode, prewarm active: true offsets **+88 (cold) / +113 (warm) / +114 (cold) / +119ms (warm)** — 31ms total spread, inside one 30fps frame, cold == warm. New value **105** (midrange, max residual 17ms). End-to-end verification: re-compositing a protocol take with 105 measured **−19ms** export desync (sub-frame). Measurement method: audio clap peak vs webcam motion-energy peak on the raw scratch; for exports, `fps=30` resample first (composited exports are VFR — frame/30 indexing is wrong on them) and back out the tpad.
+
+### Standing consequences
+
+- The constant is **device- and environment-dependent** (bakes in per-mic audio latency and per-camera startup latency — AirPods ~+150-300ms, Continuity camera large/variable). Calibrated for built-in devices only; re-run the clap protocol on any device or engine-startup change. Full warning at the constant.
+- The structural fix stays queued: per-recording measurement (engine timestamps each pipeline's first real sample — both clocks are mach-domain, feasibility proven) plus per-device audio-latency compensation. This episode — a validated constant silently rotting from environmental drift — is its justification.
+
 ## 2026-07-11 — E1 complete: visual gate passed
 
 Exported bubble matches the recorder-panel live preview across the roundness range, confirmed by eye against real exports (owner's ruling). With the deterministic guards already green (pre-E1 fixture byte-identity, pinned ffmpeg arg vectors, mask geometry tests), E1 is done. Next in the queue, each for its own session: shadow depth strengthening (bubble should read as floating above the background — current shadow calibration is the baseline), E2 export presets (tiers still undecided), and the A/V sync timestamp fix (scoped 2026-07-11; replaces WEBCAM_LEAD_MS with a per-recording measured offset — see that session's plan; the perceived desync that night was primarily the macOS Voice Isolation mic mode gating the engine's audio, a settings fix, plus a real ~270ms bubble lag from the constant).
