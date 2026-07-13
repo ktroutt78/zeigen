@@ -28,6 +28,27 @@ The copy-path claim is also by construction: `zoom` is referenced nowhere outsid
 
 **Fixture-restore urgency unchanged (before step 4, not sooner).** This step adds no video-path behavior for the missing May-fixture guards to catch. The new synth-source test partially covers the `save_recording_baseline` gap (copy-path stream-md5 now has a guard that actually runs), but real-recording baselines are still worth restoring before step 4 introduces genuine re-encoding.
 
+## 2026-07-13 — Zoom step-5 v1 judged: 24/28 keep-worthy; tuning spec locked (owner pass)
+
+First per-zoom eyeball pass on a real ~162s demo recording (28 suggestions; telemetry checked in as fixture `cursor-2026-07-13-105816.json`). Every miss was "too eager," never "wrong place"; long holds landed (a 9.5s and a 6.4s hold both praised); zero requests for center-tracking across all 28 — the fixed-hold model is confirmed and the center-easing hybrid idea stays parked. Verdicts: 20 clean good, 2 hard no (narration dwell on the URL bar; dwell while scrolling a list), 2 would-edit-out (transient "open"-style clicks that earned nothing), 3 too-tight (all mid-screen unclamped centers — edge-clamped zooms never drew one because clamping shows extra context for free), 1 hold-too-short. Structural: three same-spot drags read as click+bogus-mid-drag-dwell and produced out-in-out with the middle drag silently dropped (the merge trim cut a merged window back past click evidence it had absorbed); one "searching for something" episode pulsed in-out-in instead of holding.
+
+**Tuning spec — the next zoom session implements exactly these six, validated against both pinned fixtures, judged by a fresh-recording eyeball pass:**
+
+1. Scale: `SUGGESTED_SCALE` 2.0 -> ~1.7, or interior-aware (shallower for unclamped interior centers).
+2. Scroll vetoes clickless dwells. C.1 already says scroll = hold current zoom (wide counts as current); today scroll only extends, never suppresses.
+3. Transient-click filter: a click the cursor immediately travels away from, with no dwell or follow-up nearby, is fire-and-forget — stay wide.
+4. Drags first-class: pair left_down/left_up; large displacement = one candidate spanning the gesture; drag motion spawns no dwell candidates; the merge trim must never cut past absorbed click evidence.
+5. Patience on same-region re-zooms: a next candidate near in both time and space bridges into one hold instead of out-in (also the hold-too-short fix).
+6. Narration dwells: accept residual misses rather than over-filter — clickless dwells went 4-for-6 and the two good ones are indistinguishable in telemetry from the bad ones.
+
+Fixture #2 has drags and 46 scroll events that fixture #1 lacks; both pins gate the tuning session.
+
+## 2026-07-13 — Known gap: no way to reopen a recording's review window after it closes
+
+Review windows are created only by the recording `stopped` event handler (App.tsx `openReviewWindow`); once a recording's review closes — window closed, app quit, or crash — there is no UI path back to it. The scratch dir survives (the launch sweeper only collects dirs older than 24h) with sidecar, telemetry, and sources intact, so the data outlives its own edit UI: a user who closes review loses access to an unsaved recording's edits even though every byte is still on disk. Surfaced during zoom step-5 suggestion judging, when a dev-app stop closed the review for a recording with a full suggestion lane.
+
+Dev-mode workaround: spawn the review `WebviewWindow` from the recorder window's devtools console with the same label and URL params the `stopped` handler builds (`review-<stamp>`, `path`/`screenPath`/`webcamPath`/`webcamLeadMs`) — the sidecar restores all edits. Real fix is a small product slice (a "recent recordings" or "reopen last recording" entry point on the recorder); not scheduled. Note the interaction: the 24h scratch sweep bounds how long a closed-review recording stays recoverable.
+
 ## 2026-07-13 — Known gap: five stream-md5 fixture guards are non-functional (baseline recordings missing)
 
 Discovered while proving the zoom-layer step 1 gate. `save_recording_baseline`, `mp4_save_baseline`, `probe_audio_track_baseline`, `render_preview_audio_baseline` (edit.rs), and `sprite_smoke` (thumbs.rs) all fail at their first assert — the May 2026 baseline recordings they read from `~/Movies/Zeigen/.scratch-baseline-c1/` (and the sprite test's scratch source) no longer exist on this machine. No pipeline code runs before that assert; the failures are environmental, not regressions. But a byte-identity guard that can't run isn't protecting anything.
