@@ -4,7 +4,11 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
-## 2026-07-12 — WEBCAM_LEAD_MS 360 → 105: environmental drift, measured recalibration
+## 2026-07-13 — Known gap: exported watermark opacity renders lighter than preview (not fixing now)
+
+Observed during watermark size/opacity UAT (feature commit 8d51699): at the same opacity setting, the exported watermark looks noticeably lighter than the stage preview. Likely cause: the two opacity paths differ — preview applies CSS `opacity` on an `<img>` in sRGB compositing; export multiplies the PNG's alpha via ffmpeg `format=rgba,colorchannelmixer=aa=` and then blends inside the yuv420 pipeline. The synthetic pixel check (opaque white logo at aa=0.5 over solid blue) matched preview math exactly, so the mismatch likely involves the real logo's own alpha channel and/or colorspace conversion, not the fraction itself.
+
+Deliberately not fixed now — minor, and the sliders are otherwise correct. When picked up: the fix is making the two paths agree numerically — measure exported vs previewed pixels with the real logo at a few opacity stops, then either adjust the export's alpha curve to match CSS compositing or render the preview through the same math. Size has no such gap (pinned by test + pixel check).
 
 The webcam bubble lagged the voice by ~270ms on every export — noticed 2026-07-11, the first voice+bubble recordings since June. Root-caused by elimination over two days; the constant was recalibrated from a four-clap protocol and verified sub-frame.
 
