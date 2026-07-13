@@ -485,6 +485,37 @@ mod tests {
         );
     }
 
+    // Fixture #2: the ~162s demo recording from the 2026-07-13 owner
+    // judging pass (DECISIONS.md tuning spec). Unlike fixture #1 it has
+    // drags and 46 scroll events — the two behaviors the six-fix tuning
+    // session changes most. Its 28 suggestions scored 24/28 keep-worthy;
+    // the tuning session re-pins both fixtures and should show FEWER,
+    // calmer segments here (the two narration/scroll dwells and the two
+    // transient-click zooms gone, the drag triple bridged).
+    #[test]
+    fn real_recording_2_pinned_suggestions() {
+        let track: CursorTrack = serde_json::from_str(include_str!(
+            "../tests/fixtures/cursor-2026-07-13-105816.json"
+        ))
+        .unwrap();
+        let kfs = detect(&track);
+        let got = fmt_segments(&kfs);
+        println!("real-recording-2 suggestions: {got}");
+        for w in segments(&kfs).windows(2) {
+            assert!(
+                w[1].0 - w[0].1 >= MERGE_GAP_S - 1e-9,
+                "calm rule: {:.2}s gap between {:?} and {:?}",
+                w[1].0 - w[0].1,
+                w[0],
+                w[1]
+            );
+        }
+        assert_eq!(
+            got,
+            "7.88-10.25s @(480,270); 11.45-13.81s @(1274,661); 15.01-21.46s @(933,663); 22.66-26.08s @(480,270); 29.26-32.63s @(480,270); 35.44-37.49s @(480,273); 40.32-43.85s @(480,335); 45.05-48.89s @(480,810); 50.09-59.64s @(558,351); 60.84-63.62s @(480,810); 64.82-68.06s @(480,281); 70.55-74.92s @(480,655); 76.12-78.47s @(1440,810); 79.67-82.85s @(480,270); 85.12-87.16s @(480,465); 88.36-94.24s @(901,703); 95.44-104.09s @(480,731); 106.04-108.29s @(480,345); 110.16-113.19s @(480,482); 114.97-120.60s @(1099,693); 121.80-123.96s @(480,304); 126.24-129.10s @(561,332); 130.30-132.46s @(480,270); 135.64-138.64s @(717,302); 140.30-142.72s @(611,412); 143.92-147.96s @(1356,432); 149.16-154.21s @(480,796); 155.41-161.81s @(1179,294)"
+        );
+    }
+
     #[test]
     fn canonical_keyframe_shape() {
         let track = TrackBuilder::new().travel(400.0, 400.0, 1.0).dwell(3.0).click().park(1.0).build();
