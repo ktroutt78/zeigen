@@ -46,6 +46,13 @@ pub struct WatermarkSettings {
     pub logo_path: Option<String>,
     #[serde(default = "default_corner")]
     pub corner: String,
+    // Logo width as a fraction of video width (0.05..=0.40). None = the
+    // legacy 10%-of-shorter-dimension height sizing, byte-identical filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<f64>,
+    // Alpha multiplier 0.0..=1.0. None = 1.0 (legacy, no filter added).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opacity: Option<f64>,
 }
 
 impl Default for WatermarkSettings {
@@ -53,6 +60,8 @@ impl Default for WatermarkSettings {
         Self {
             logo_path: None,
             corner: default_corner(),
+            scale: None,
+            opacity: None,
         }
     }
 }
@@ -194,6 +203,31 @@ pub fn set_watermark_corner(app: AppHandle, corner: String) -> Result<(), String
     let dir = config_dir(&app)?;
     let mut settings = read_settings_from(&dir);
     settings.watermark.corner = corner;
+    write_settings_to(&dir, &settings)
+}
+
+// Remembered size/opacity for the review's watermark sliders. None resets
+// to the legacy default (scale: 10%-of-shorter-dim height, opacity: 1.0).
+#[tauri::command]
+pub fn set_watermark_style(
+    app: AppHandle,
+    scale: Option<f64>,
+    opacity: Option<f64>,
+) -> Result<(), String> {
+    if let Some(s) = scale {
+        if !(0.05..=0.40).contains(&s) {
+            return Err(format!("invalid watermark scale: {s}"));
+        }
+    }
+    if let Some(o) = opacity {
+        if !(0.0..=1.0).contains(&o) {
+            return Err(format!("invalid watermark opacity: {o}"));
+        }
+    }
+    let dir = config_dir(&app)?;
+    let mut settings = read_settings_from(&dir);
+    settings.watermark.scale = scale;
+    settings.watermark.opacity = opacity;
     write_settings_to(&dir, &settings)
 }
 

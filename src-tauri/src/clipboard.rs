@@ -111,6 +111,8 @@ pub fn clipboard_copy_recording(
     source_path: String,
     watermark_logo: Option<String>,
     watermark_corner: Option<String>,
+    watermark_scale: Option<f64>,
+    watermark_opacity: Option<f64>,
 ) -> Result<(), String> {
     let source = Path::new(&source_path);
     // Phase 15 c3: see save_recording. The scratch logical key has no
@@ -137,7 +139,7 @@ pub fn clipboard_copy_recording(
         },
         crate::composite::WebcamSize::Medium,
         crate::composite::Corner::BottomRight,
-        Watermark::from_args(watermark_logo, watermark_corner),
+        Watermark::from_args(watermark_logo, watermark_corner, watermark_scale, watermark_opacity),
         |_| {},
     )?;
     write_url_to_pasteboard(&temp_file)

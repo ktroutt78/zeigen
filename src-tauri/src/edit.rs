@@ -1690,6 +1690,8 @@ pub fn save_recording(
     fps: Option<u32>,
     watermark_logo: Option<String>,
     watermark_corner: Option<String>,
+    watermark_scale: Option<f64>,
+    watermark_opacity: Option<f64>,
 ) -> Result<SaveResult, String> {
     // Fraction 0.0-1.0 out_time_us progress from the ffmpeg pass(es) run_edit_pipeline
     // drives — the review window's Save button listens for this to show a percent.
@@ -1706,6 +1708,8 @@ pub fn save_recording(
         fps,
         watermark_logo,
         watermark_corner,
+        watermark_scale,
+        watermark_opacity,
         on_progress,
     )
 }
@@ -1721,6 +1725,8 @@ fn save_recording_impl(
     fps: Option<u32>,
     watermark_logo: Option<String>,
     watermark_corner: Option<String>,
+    watermark_scale: Option<f64>,
+    watermark_opacity: Option<f64>,
     on_progress: impl Fn(f64) + Send + Clone + 'static,
 ) -> Result<SaveResult, String> {
     let source = Path::new(&source_path);
@@ -1730,7 +1736,8 @@ fn save_recording_impl(
     // check that matters — does the raw screen capture exist? — runs
     // inside run_edit_pipeline against screen_path, where a genuinely
     // missing screen.mp4 returns "screen capture missing: <path>".
-    let watermark = Watermark::from_args(watermark_logo, watermark_corner);
+    let watermark =
+        Watermark::from_args(watermark_logo, watermark_corner, watermark_scale, watermark_opacity);
 
     let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
     let movies = PathBuf::from(home).join("Movies/Zeigen");
@@ -2400,6 +2407,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
             |_| {},
         )
         .expect("save_recording noop");
@@ -2440,6 +2449,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
             |_| {},
         )
         .expect("save_recording second");
@@ -2465,6 +2476,8 @@ mod tests {
             edited_src.to_string_lossy().into_owned(),
             "mp4".to_string(),
             "720p".to_string(),
+            None,
+            None,
             None,
             None,
             None,
@@ -2494,6 +2507,8 @@ mod tests {
             Some(15),
             None,
             None,
+            None,
+            None,
             |_| {},
         )
         .expect("save_recording gif");
@@ -2512,6 +2527,8 @@ mod tests {
             edited_src.to_string_lossy().into_owned(),
             "gif".to_string(),
             "720p".to_string(),
+            None,
+            None,
             None,
             None,
             None,
@@ -2553,8 +2570,8 @@ mod tests {
             return;
         }
         let sidecar = SidecarState::default();
-        let wm_tr = Watermark::from_args(Some(logo_str.clone()), Some("tr".into()));
-        let wm_bl = Watermark::from_args(Some(logo_str.clone()), Some("bl".into()));
+        let wm_tr = Watermark::from_args(Some(logo_str.clone()), Some("tr".into()), None, None);
+        let wm_bl = Watermark::from_args(Some(logo_str.clone()), Some("bl".into()), None, None);
         let (sw, sh) = probe_dimensions(source).expect("probe source");
 
         let extract_frame = |video: &str, png: &str| {

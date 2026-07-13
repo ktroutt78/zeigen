@@ -820,6 +820,7 @@ pub fn run() {
             settings::get_settings,
             settings::set_watermark_logo,
             settings::set_watermark_corner,
+            settings::set_watermark_style,
             settings::clear_watermark_logo,
             settings::set_noise_reduction,
             settings::set_bubble_roundness,

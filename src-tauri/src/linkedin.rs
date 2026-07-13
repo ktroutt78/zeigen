@@ -137,7 +137,10 @@ pub fn linkedin_export(
     let output = movies.join(format!("recording-{stamp}-linkedin.mp4"));
 
     // Skip a watermark whose logo file is gone — never fail the export.
-    let watermark = Watermark::from_args(watermark_logo, watermark_corner).filter(|wm| {
+    // Size/opacity not threaded here — the review's LinkedIn chain reuses a
+    // committed MP4 baseline (watermark already baked by save_recording), so
+    // this direct-args path keeps legacy sizing.
+    let watermark = Watermark::from_args(watermark_logo, watermark_corner, None, None).filter(|wm| {
         let ok = wm.logo_path.is_file();
         if !ok {
             eprintln!("[watermark] logo missing at {}, skipping", wm.logo_path.display());

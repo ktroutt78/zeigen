@@ -230,23 +230,38 @@ impl Corner {
 }
 
 // Watermark overlay shared by every export path: edit.rs run_edit_pipeline
-// (Save MP4 / GIF / Copy) and linkedin.rs. The logo is scaled to 10% of the
-// shorter source dimension (height, aspect preserved) and padded 2% off the
-// chosen corner. The PNG's own alpha is respected — no extra dimming.
+// (Save MP4 / GIF / Copy) and linkedin.rs. By default the logo is scaled to
+// 10% of the shorter source dimension (height, aspect preserved) and padded
+// 2% off the chosen corner, with the PNG's own alpha respected. scale_frac
+// overrides the size (logo WIDTH as a fraction of video width, so it looks
+// consistent across export resolutions); opacity < 1 multiplies the PNG's
+// alpha. None/1.0 keep the legacy filter string byte-identical.
 #[derive(Clone)]
 pub(crate) struct Watermark {
     pub logo_path: PathBuf,
     pub corner: Corner,
+    pub scale_frac: Option<f64>,
+    pub opacity: f64,
 }
 
 impl Watermark {
     // Build from export-command args. None unless a logo path is given;
-    // corner defaults to top-right.
-    pub(crate) fn from_args(logo: Option<String>, corner: Option<String>) -> Option<Watermark> {
+    // corner defaults to top-right, scale/opacity to legacy behavior.
+    pub(crate) fn from_args(
+        logo: Option<String>,
+        corner: Option<String>,
+        scale: Option<f64>,
+        opacity: Option<f64>,
+    ) -> Option<Watermark> {
         let logo = logo?;
         Some(Watermark {
             logo_path: PathBuf::from(logo),
             corner: corner.as_deref().map(Corner::from_code).unwrap_or(Corner::TopRight),
+            scale_frac: scale.filter(|s| s.is_finite() && *s > 0.0 && *s <= 1.0),
+            opacity: opacity
+                .filter(|o| o.is_finite())
+                .map(|o| o.clamp(0.0, 1.0))
+                .unwrap_or(1.0),
         })
     }
 
@@ -257,7 +272,7 @@ impl Watermark {
         (height, padding)
     }
 
-    // "[{idx}:v]scale=-2:{h}[wm];[{prev}][wm]overlay={xy}[{next}]"
+    // "[{idx}:v]scale=...[wm];[{prev}][wm]overlay={xy}[{next}]"
     // The caller must have already added `-i logo_path` at input `logo_idx`
     // and wires `next_label` into its own tail. overlay's default
     // eof_action=repeat holds the single PNG frame across the whole clip.
@@ -270,8 +285,24 @@ impl Watermark {
         sh: u32,
     ) -> String {
         let (height, padding) = Self::metrics(sw, sh);
+        // Width-based scale when set (mirrors WatermarkPreviewLayer's
+        // cw * scale), legacy shorter-dim height scale otherwise.
+        let scale = match self.scale_frac {
+            Some(frac) => {
+                let w = ((sw as f64 * frac).round() as u32).max(1);
+                format!("scale={w}:-2")
+            }
+            None => format!("scale=-2:{height}"),
+        };
+        // Alpha multiply only when non-default so legacy exports keep the
+        // exact pre-feature filter string.
+        let fade = if self.opacity < 0.999 {
+            format!(",format=rgba,colorchannelmixer=aa={:.3}", self.opacity)
+        } else {
+            String::new()
+        };
         let xy = self.corner.overlay_xy(padding);
-        format!("[{logo_idx}:v]scale=-2:{height}[wm];[{prev_label}][wm]overlay={xy}[{next_label}]")
+        format!("[{logo_idx}:v]{scale}{fade}[wm];[{prev_label}][wm]overlay={xy}[{next_label}]")
     }
 }
 
@@ -915,6 +946,47 @@ fn run_composite_ffmpeg(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Pins the watermark filter strings: untouched sliders (scale None,
+    // opacity 1) must produce the exact pre-feature fragment; styled
+    // watermarks size by width fraction and multiply alpha.
+    #[test]
+    fn watermark_fragment_legacy_and_styled() {
+        let legacy = Watermark {
+            logo_path: std::path::PathBuf::from("/tmp/logo.png"),
+            corner: Corner::TopRight,
+            scale_frac: None,
+            opacity: 1.0,
+        };
+        // 1920x1080: height = 108, padding = 22 — the pre-feature string.
+        assert_eq!(
+            legacy.filter_fragment(3, "a", "b", 1920, 1080),
+            "[3:v]scale=-2:108[wm];[a][wm]overlay=main_w-overlay_w-22:22[b]"
+        );
+
+        let styled = Watermark {
+            logo_path: std::path::PathBuf::from("/tmp/logo.png"),
+            corner: Corner::TopRight,
+            scale_frac: Some(0.25),
+            opacity: 0.5,
+        };
+        // Width-based: 1920 * 0.25 = 480; alpha multiply appended.
+        assert_eq!(
+            styled.filter_fragment(3, "a", "b", 1920, 1080),
+            "[3:v]scale=480:-2,format=rgba,colorchannelmixer=aa=0.500[wm];[a][wm]overlay=main_w-overlay_w-22:22[b]"
+        );
+
+        // from_args defaults keep legacy semantics; out-of-range values
+        // fall back rather than break an export.
+        let wm = Watermark::from_args(Some("/x.png".into()), Some("tr".into()), None, None)
+            .expect("logo set");
+        assert!(wm.scale_frac.is_none());
+        assert_eq!(wm.opacity, 1.0);
+        let clamped =
+            Watermark::from_args(Some("/x.png".into()), None, Some(7.0), Some(3.0)).expect("logo");
+        assert!(clamped.scale_frac.is_none(), "scale > 1 rejected");
+        assert_eq!(clamped.opacity, 1.0, "opacity clamped to 1");
+    }
 
     fn fixture_bytes(name: &str) -> Vec<u8> {
         let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))

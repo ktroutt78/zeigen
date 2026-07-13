@@ -199,27 +199,48 @@ type WmCorner = "tl" | "tr" | "bl" | "br";
 const WM_CORNERS: WmCorner[] = ["tl", "tr", "bl", "br"];
 
 // Mirrors the Rust settings::Settings shape (settings.json).
-type AppSettings = { watermark: { logo_path: string | null; corner: string } };
+type AppSettings = {
+  watermark: {
+    logo_path: string | null;
+    corner: string;
+    // Logo width as a fraction of video width; null = legacy sizing
+    // (10% of the shorter dimension, by height).
+    scale?: number | null;
+    // Alpha multiplier 0..1; null = 1 (legacy, no fade filter).
+    opacity?: number | null;
+  };
+};
 
-// Watermark controls passed to ExportPanel. logoPath/corner persist via
-// settings.json; apply is per-recording (not persisted).
+// Watermark controls passed to ExportPanel. logoPath/corner/scale/opacity
+// persist via settings.json; apply is per-recording (not persisted).
+// `scale` is the raw setting (null = legacy sizing) — what exports receive;
+// `scaleDisplay` is what the slider shows (the legacy-equivalent fraction
+// until the user first drags).
 type WatermarkUI = {
   logoPath: string | null;
   corner: WmCorner;
   apply: boolean;
+  scale: number | null;
+  scaleDisplay: number;
+  opacity: number;
   onPick: () => void;
   onRemove: () => void;
   onCorner: (c: WmCorner) => void;
   onToggleApply: () => void;
+  onScale: (frac: number) => void;
+  onOpacity: (o: number) => void;
 };
 
 // Watermark preview passed to VideoStage. src is the convertFileSrc'd logo
 // (or null when nothing should render); videoDims drives the content-box
 // computation so the overlay tracks the letterboxed video, not the stage.
+// scale/opacity mirror the export semantics (null scale = legacy sizing).
 type WatermarkPreview = {
   src: string | null;
   corner: WmCorner;
   videoDims: { w: number; h: number } | null;
+  scale: number | null;
+  opacity: number;
 };
 
 // Thumbnail controls passed from Review → LeftColumn → Toolbar. The Toolbar
@@ -490,6 +511,12 @@ export default function Review() {
   const [wmLogoPath, setWmLogoPath] = useState<string | null>(null);
   const [wmCorner, setWmCorner] = useState<WmCorner>("tr");
   const [wmApply, setWmApply] = useState(false);
+  // Size/opacity (remembered in settings.json like corner). wmScale null =
+  // legacy sizing; wmOpacity 1 = legacy full opacity — untouched sliders
+  // leave the export filter string byte-identical.
+  const [wmScale, setWmScale] = useState<number | null>(null);
+  const [wmOpacity, setWmOpacity] = useState(1);
+  const wmSettingsLoadedRef = useRef(false);
   const [videoDims, setVideoDims] = useState<{ w: number; h: number } | null>(null);
 
   useEffect(() => {
@@ -500,9 +527,55 @@ export default function Review() {
         setWmLogoPath(lp);
         setWmCorner(WM_CORNERS.includes(c) ? c : "tr");
         setWmApply(!!lp);
+        setWmScale(s.watermark?.scale ?? null);
+        setWmOpacity(s.watermark?.opacity ?? 1);
+        wmSettingsLoadedRef.current = true;
       })
       .catch((err) => console.warn("get_settings failed", err));
   }, []);
+
+  // Debounced persist of the slider values — live drags update state per
+  // tick; settings.json gets one write when the drag settles. Gated on the
+  // initial load so mount doesn't write defaults back.
+  useEffect(() => {
+    if (!wmSettingsLoadedRef.current) return;
+    const t = window.setTimeout(() => {
+      invoke("set_watermark_style", {
+        scale: wmScale,
+        opacity: wmOpacity < 1 ? wmOpacity : null,
+      }).catch((err) => console.warn("set_watermark_style failed", err));
+    }, 350);
+    return () => window.clearTimeout(t);
+  }, [wmScale, wmOpacity]);
+
+  // Logo natural dims — used to position an untouched Size slider at the
+  // legacy sizing's width-equivalent, so the first drag starts from the
+  // watermark's current visual size instead of jumping.
+  const [wmLogoDims, setWmLogoDims] = useState<{ w: number; h: number } | null>(null);
+  useEffect(() => {
+    if (!wmLogoPath) {
+      setWmLogoDims(null);
+      return;
+    }
+    let cancelled = false;
+    const img = new Image();
+    img.onload = () => {
+      if (!cancelled) setWmLogoDims({ w: img.naturalWidth, h: img.naturalHeight });
+    };
+    img.src = convertFileSrc(wmLogoPath);
+    return () => {
+      cancelled = true;
+    };
+  }, [wmLogoPath]);
+
+  // Legacy sizing expressed as width-fraction of THIS recording's video:
+  // logo height = 10% of shorter dim, width follows the logo's aspect.
+  const wmLegacyFrac = useMemo(() => {
+    if (!videoDims || !wmLogoDims || wmLogoDims.h === 0) return 0.15;
+    const logoH = 0.1 * Math.min(videoDims.w, videoDims.h);
+    const frac = (logoH * (wmLogoDims.w / wmLogoDims.h)) / videoDims.w;
+    return Math.min(0.4, Math.max(0.05, frac));
+  }, [videoDims, wmLogoDims]);
 
   const onPickLogo = useCallback(async () => {
     try {
@@ -876,6 +949,8 @@ export default function Review() {
           fps: spec.format === "gif" ? spec.fps : undefined,
           watermarkLogo: wmEffectiveLogo,
           watermarkCorner: wmCorner,
+          watermarkScale: wmScale,
+          watermarkOpacity: wmOpacity < 1 ? wmOpacity : null,
         });
         setLastSavedPath(result.output_path);
         setLastSavedAt(Date.now());
@@ -900,7 +975,7 @@ export default function Review() {
         setSaveProgress(null);
       }
     },
-    [sourcePath, wmEffectiveLogo, wmCorner],
+    [sourcePath, wmEffectiveLogo, wmCorner, wmScale, wmOpacity],
   );
 
   // proceedingRef gates the close-requested handler so an in-flight
@@ -1448,6 +1523,8 @@ export default function Review() {
             src: wmEffectiveLogo ? convertFileSrc(wmEffectiveLogo) : null,
             corner: wmCorner,
             videoDims,
+            scale: wmScale,
+            opacity: wmOpacity,
           }}
           editor={editorApi}
           annotationColor={annotationColor}
@@ -1485,10 +1562,15 @@ export default function Review() {
             logoPath: wmLogoPath,
             corner: wmCorner,
             apply: wmApply,
+            scale: wmScale,
+            scaleDisplay: wmScale ?? wmLegacyFrac,
+            opacity: wmOpacity,
             onPick: onPickLogo,
             onRemove: onRemoveLogo,
             onCorner: onCornerChange,
             onToggleApply,
+            onScale: setWmScale,
+            onOpacity: setWmOpacity,
           }}
         />
       </div>
@@ -2448,6 +2530,13 @@ function WatermarkPreviewLayer({
   const shorter = Math.min(cw, ch);
   const logoH = shorter * 0.1;
   const pad = shorter * 0.02;
+  // Width-fraction sizing when the Size slider has been touched, legacy
+  // 10%-of-shorter-dim height otherwise — mirrors Watermark::filter_fragment
+  // so the preview and the exported file agree.
+  const sizing: React.CSSProperties =
+    preview.scale != null
+      ? { width: cw * preview.scale, height: "auto" }
+      : { height: logoH, width: "auto" };
   const anchor: React.CSSProperties =
     preview.corner === "tl"
       ? { top: pad, left: pad }
@@ -2472,7 +2561,7 @@ function WatermarkPreviewLayer({
         src={preview.src}
         alt=""
         draggable={false}
-        style={{ position: "absolute", height: logoH, width: "auto", ...anchor }}
+        style={{ position: "absolute", opacity: preview.opacity, ...sizing, ...anchor }}
       />
     </div>
   );
@@ -4563,6 +4652,8 @@ function ExportPanel({
         sourcePath,
         watermarkLogo: watermark.apply && watermark.logoPath ? watermark.logoPath : null,
         watermarkCorner: watermark.corner,
+        watermarkScale: watermark.scale,
+        watermarkOpacity: watermark.opacity < 1 ? watermark.opacity : null,
       });
       setCopiedAt(Date.now());
     } catch (err) {
@@ -5041,6 +5132,30 @@ function ExportPanel({
                     </button>
                   ))}
                 </div>
+              </Field>
+              <Field label={`Size — ${Math.round(watermark.scaleDisplay * 100)}% of width`}>
+                <input
+                  type="range"
+                  className="slider"
+                  min={5}
+                  max={40}
+                  step={1}
+                  value={Math.round(watermark.scaleDisplay * 100)}
+                  onChange={(e) => watermark.onScale(Number(e.target.value) / 100)}
+                  style={{ width: "100%" }}
+                />
+              </Field>
+              <Field label={`Opacity — ${Math.round(watermark.opacity * 100)}%`}>
+                <input
+                  type="range"
+                  className="slider"
+                  min={0}
+                  max={100}
+                  step={1}
+                  value={Math.round(watermark.opacity * 100)}
+                  onChange={(e) => watermark.onOpacity(Number(e.target.value) / 100)}
+                  style={{ width: "100%" }}
+                />
               </Field>
             </>
           ) : (
