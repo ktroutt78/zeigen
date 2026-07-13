@@ -9,8 +9,8 @@ import Waveform from "./Waveform";
 import ScrubPreview from "./ScrubPreview";
 
 // Review window. Left column is player + timeline; right column is an
-// accordion panel (Annotate / Export / Share / Watermark sections plus a
-// pinned lifecycle footer). Supersedes the docs/design/surfaces/review.jsx
+// accordion panel (Annotate / Watermark / Export sections plus a pinned
+// lifecycle footer). Supersedes the docs/design/surfaces/review.jsx
 // mock's top-toolbar layout — the toolbar's intrinsic width outgrew the
 // left column as tools were added, and the old label-beside-control rows
 // overflowed the 296px panel (the CSS overflow-y:auto side effect turned
@@ -4419,10 +4419,15 @@ type SaveSpec = {
 // Exclusive accordion — one section open at a time; opening one collapses
 // the rest, and clicking the open section's header closes it. The open
 // section persists so the panel reopens the way the user last left it.
-// First-run default is export-forward; change DEFAULT_OPEN_SECTION if the
-// workflow ranking shifts (e.g. when editing becomes primary).
-type SectionId = "annotate" | "export" | "share" | "watermark";
-const SECTION_IDS: SectionId[] = ["annotate", "export", "share", "watermark"];
+// Order mirrors the working flow (edit, dress up, output): Annotate,
+// Watermark, Export — with Export still the first-run default open.
+// Position and default are independent; change DEFAULT_OPEN_SECTION if the
+// workflow ranking shifts (e.g. when editing becomes primary). The former
+// Share section folded into Export (its rows are export destinations); a
+// persisted "share" from older builds fails the SECTION_IDS check below
+// and falls back to the default.
+type SectionId = "annotate" | "watermark" | "export";
+const SECTION_IDS: SectionId[] = ["annotate", "watermark", "export"];
 const DEFAULT_OPEN_SECTION: SectionId | null = "export";
 // Key versioned away from the old "review-panel-sections" multi-open
 // format (a JSON object) so no migration parsing is needed.
@@ -4865,6 +4870,117 @@ function ExportPanel({
         </Section>
 
         <Section
+          title="Watermark"
+          open={openId === "watermark"}
+          onToggle={() => toggleSection("watermark")}
+        >
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {watermark.logoPath ? (
+            <>
+              <label
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  fontSize: 12.5,
+                  color: "var(--fg-primary)",
+                  cursor: "pointer",
+                }}
+              >
+                <input
+                  type="checkbox"
+                  className="accent-blue"
+                  checked={watermark.apply}
+                  onChange={watermark.onToggleApply}
+                />
+                <span>Apply watermark</span>
+              </label>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span
+                  title={watermark.logoPath}
+                  style={{
+                    flex: 1,
+                    minWidth: 0,
+                    fontSize: 11.5,
+                    color: "var(--fg-secondary)",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {basename(watermark.logoPath)}
+                </span>
+                <button
+                  className="btn-secondary"
+                  style={{ height: 24, padding: "0 8px", fontSize: 11 }}
+                  onClick={watermark.onPick}
+                >
+                  Change…
+                </button>
+                <button
+                  className="btn-secondary"
+                  style={{ height: 24, padding: "0 8px", fontSize: 11 }}
+                  onClick={watermark.onRemove}
+                >
+                  Remove
+                </button>
+              </div>
+              <Field label="Corner">
+                <div className="segmented full">
+                  {WM_CORNERS.map((c) => (
+                    <button
+                      key={c}
+                      className={watermark.corner === c ? "on" : ""}
+                      onClick={() => watermark.onCorner(c)}
+                    >
+                      {c.toUpperCase()}
+                    </button>
+                  ))}
+                </div>
+              </Field>
+              <Field label={`Size — ${Math.round(watermark.scaleDisplay * 100)}% of width`}>
+                <input
+                  type="range"
+                  className="slider"
+                  min={5}
+                  max={40}
+                  step={1}
+                  value={Math.round(watermark.scaleDisplay * 100)}
+                  onChange={(e) => watermark.onScale(Number(e.target.value) / 100)}
+                  style={{ width: "100%" }}
+                />
+              </Field>
+              <Field label={`Opacity — ${Math.round(watermark.opacity * 100)}%`}>
+                <input
+                  type="range"
+                  className="slider"
+                  min={0}
+                  max={100}
+                  step={1}
+                  value={Math.round(watermark.opacity * 100)}
+                  onChange={(e) => watermark.onOpacity(Number(e.target.value) / 100)}
+                  style={{ width: "100%" }}
+                />
+              </Field>
+            </>
+          ) : (
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ flex: 1, fontSize: 11.5, color: "var(--fg-tertiary)" }}>
+                No logo chosen
+              </span>
+              <button
+                className="btn-secondary"
+                style={{ height: 24, padding: "0 10px", fontSize: 11 }}
+                onClick={watermark.onPick}
+              >
+                Choose…
+              </button>
+            </div>
+          )}
+        </div>
+        </Section>
+
+        <Section
           title="Export"
           open={openId === "export"}
           onToggle={() => toggleSection("export")}
@@ -4986,14 +5102,10 @@ function ExportPanel({
             )}
           </span>
         </button>
-        </Section>
 
-        <Section
-          title="Share"
-          open={openId === "share"}
-          onToggle={() => toggleSection("share")}
-        >
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {/* Export destinations — formerly the standalone Share section.
+            Reveal in Finder stays post-save-only. */}
+        <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
         <DestRow
           icon={<Icon d="M5 2h6v3M5 2v9a1 1 0 001 1h7a1 1 0 001-1V6L11 2M3 6h6v8" size={14} stroke={1.4} />}
           title="Copy to Clipboard"
@@ -5061,117 +5173,6 @@ function ExportPanel({
             disabled={busy}
           />
         )}
-        </div>
-        </Section>
-
-        <Section
-          title="Watermark"
-          open={openId === "watermark"}
-          onToggle={() => toggleSection("watermark")}
-        >
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {watermark.logoPath ? (
-            <>
-              <label
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                  fontSize: 12.5,
-                  color: "var(--fg-primary)",
-                  cursor: "pointer",
-                }}
-              >
-                <input
-                  type="checkbox"
-                  className="accent-blue"
-                  checked={watermark.apply}
-                  onChange={watermark.onToggleApply}
-                />
-                <span>Apply watermark</span>
-              </label>
-              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <span
-                  title={watermark.logoPath}
-                  style={{
-                    flex: 1,
-                    minWidth: 0,
-                    fontSize: 11.5,
-                    color: "var(--fg-secondary)",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {basename(watermark.logoPath)}
-                </span>
-                <button
-                  className="btn-secondary"
-                  style={{ height: 24, padding: "0 8px", fontSize: 11 }}
-                  onClick={watermark.onPick}
-                >
-                  Change…
-                </button>
-                <button
-                  className="btn-secondary"
-                  style={{ height: 24, padding: "0 8px", fontSize: 11 }}
-                  onClick={watermark.onRemove}
-                >
-                  Remove
-                </button>
-              </div>
-              <Field label="Corner">
-                <div className="segmented full">
-                  {WM_CORNERS.map((c) => (
-                    <button
-                      key={c}
-                      className={watermark.corner === c ? "on" : ""}
-                      onClick={() => watermark.onCorner(c)}
-                    >
-                      {c.toUpperCase()}
-                    </button>
-                  ))}
-                </div>
-              </Field>
-              <Field label={`Size — ${Math.round(watermark.scaleDisplay * 100)}% of width`}>
-                <input
-                  type="range"
-                  className="slider"
-                  min={5}
-                  max={40}
-                  step={1}
-                  value={Math.round(watermark.scaleDisplay * 100)}
-                  onChange={(e) => watermark.onScale(Number(e.target.value) / 100)}
-                  style={{ width: "100%" }}
-                />
-              </Field>
-              <Field label={`Opacity — ${Math.round(watermark.opacity * 100)}%`}>
-                <input
-                  type="range"
-                  className="slider"
-                  min={0}
-                  max={100}
-                  step={1}
-                  value={Math.round(watermark.opacity * 100)}
-                  onChange={(e) => watermark.onOpacity(Number(e.target.value) / 100)}
-                  style={{ width: "100%" }}
-                />
-              </Field>
-            </>
-          ) : (
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span style={{ flex: 1, fontSize: 11.5, color: "var(--fg-tertiary)" }}>
-                No logo chosen
-              </span>
-              <button
-                className="btn-secondary"
-                style={{ height: 24, padding: "0 10px", fontSize: 11 }}
-                onClick={watermark.onPick}
-              >
-                Choose…
-              </button>
-            </div>
-          )}
         </div>
         </Section>
       </div>
