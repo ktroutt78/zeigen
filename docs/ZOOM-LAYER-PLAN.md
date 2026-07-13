@@ -1,6 +1,6 @@
 # Zoom Layer — click/zoom as an editable export-time layer
 
-**Status (2026-07-13): approved, not started. Step 1 is the next session.**
+**Status (2026-07-13): steps 1-2 done (step 1 `66dc91f`; step 2 sidecar zoom track + guards). Step 3 is the next session.**
 
 Revives V3 Phase C (auto-zoom) in a shape that honors the 2026-07-11 encoder-floor pivot instead of fighting it. Read alongside `V3-PLAN.md` (Phase A telemetry spec §1, Phase C heuristic §3 — both reused here) and `DECISIONS.md` 2026-07-13.
 

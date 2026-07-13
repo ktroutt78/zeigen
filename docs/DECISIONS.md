@@ -4,6 +4,22 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-13 — Zoom step 2 done: sidecar zoom track, absent-when-empty enforced structurally
+
+`SidecarState.zoom: Vec<ZoomKeyframe>` (`t` seconds on the original timeline like `annotation.start_time`; `scale` 1.0 = no zoom; `center_x/y` in video pixel space; `ease` in_out_cubic (default) | linear; `auto_generated`). Nothing reads the field yet — export rendering is step 4, UI is step 3.
+
+**One deviation from the V3-PLAN C.2 sketch: `auto_generated` lives per keyframe, not on the track.** Track-level was specified, but it can't express a track holding both suggested and manual keyframes — the state step 5 + step 3 produce together. Per-keyframe, regeneration replaces only flagged keyframes and manual edits are never stomped, which is the property the flag exists for. It also keeps the track a plain `Vec`, which is what makes the governing invariant structural: `skip_serializing_if = "Vec::is_empty"` (the same convention `bubble_position_log` already uses) means an empty track *cannot* serialize — no normalization code to get wrong. A track-level flag would have forced a wrapper struct with two representations of "empty" and a custom skip.
+
+**Gate results (all runnable, no out-of-repo fixtures):**
+- `empty_zoom_serializes_absent_byte_identical_to_pre_zoom` — a no-zoom sidecar exercising every field serializes (in memory and through `write_sidecar_path`) byte-identical to a pin captured from the pre-change code at `e29d638`.
+- `zoom_empty_array_input_normalizes_to_absent` — a hand-edited `"zoom": []` parses and re-serializes with the key gone.
+- `zoom_track_round_trips_losslessly` — non-empty track survives serialize/parse/disk round-trip; omitted keyframe fields default sanely.
+- `empty_zoom_stays_on_video_copy_path` — end-to-end against a synthesized source: no-zoom save keeps the video stream md5 bit-exact (`-c:v copy`) with audio re-encoded. Also pins that a NON-empty track still copies — correct until step 4, which must flip that half to a re-encode assertion.
+
+The copy-path claim is also by construction: `zoom` is referenced nowhere outside the struct definition and tests (grep-verified), so `needs_filter`/`mp4_video_can_copy` inputs are unchanged.
+
+**Fixture-restore urgency unchanged (before step 4, not sooner).** This step adds no video-path behavior for the missing May-fixture guards to catch. The new synth-source test partially covers the `save_recording_baseline` gap (copy-path stream-md5 now has a guard that actually runs), but real-recording baselines are still worth restoring before step 4 introduces genuine re-encoding.
+
 ## 2026-07-13 — Known gap: five stream-md5 fixture guards are non-functional (baseline recordings missing)
 
 Discovered while proving the zoom-layer step 1 gate. `save_recording_baseline`, `mp4_save_baseline`, `probe_audio_track_baseline`, `render_preview_audio_baseline` (edit.rs), and `sprite_smoke` (thumbs.rs) all fail at their first assert — the May 2026 baseline recordings they read from `~/Movies/Zeigen/.scratch-baseline-c1/` (and the sprite test's scratch source) no longer exist on this machine. No pipeline code runs before that assert; the failures are environmental, not regressions. But a byte-identity guard that can't run isn't protecting anything.
