@@ -5,6 +5,7 @@ import { emit, listen } from "@tauri-apps/api/event";
 import { revealItemInDir, openUrl } from "@tauri-apps/plugin-opener";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { Icon, I, P } from "./components/icons";
+import SegmentTrack from "./components/SegmentTrack";
 import Waveform from "./Waveform";
 import ScrubPreview from "./ScrubPreview";
 
@@ -142,6 +143,145 @@ type BubblePositionEntry = {
   diameter?: number | null;
 };
 
+// Mirror of src-tauri/src/edit.rs::ZoomKeyframe (zoom-layer step 2 schema).
+// t is seconds on the original timeline like annotation.start_time; center
+// is in video pixel space; auto_generated marks step-5 suggestion output
+// (this UI only writes false — editing a suggested segment will clear it).
+type ZoomEase = "in_out_cubic" | "linear";
+type ZoomKeyframe = {
+  t: number;
+  scale: number;
+  center_x: number;
+  center_y: number;
+  ease?: ZoomEase;
+  auto_generated?: boolean;
+};
+
+// UI model — one zoom window the user edits on the timeline. The sidecar
+// stores keyframes; segments<->keyframes conversion below.
+type ZoomSegment = {
+  start: number;
+  end: number;
+  scale: number;
+  center_x: number;
+  center_y: number;
+  auto_generated: boolean;
+};
+
+const ZOOM_DEFAULT_DURATION = 3; // same default window as annotations
+const ZOOM_MIN_DURATION = 0.5;
+// V3-PLAN C.1 calm rules: 600ms ease-in-out ramps, 2.5x scale cap.
+const ZOOM_RAMP_S = 0.6;
+const ZOOM_MIN_SCALE = 1.1;
+const ZOOM_MAX_SCALE = 2.5;
+const ZOOM_DEFAULT_SCALE = 2.0;
+
+// Segment -> canonical keyframe run: 1.0 at the edges, full scale between,
+// ramps ZOOM_RAMP_S long (halved for short segments). All keyframes of a
+// segment share its center and auto_generated flag. Key order matters:
+// statesEqual compares JSON.stringify against sidecar keyframes as Rust
+// serializes them (t, scale, center_x, center_y, ease, auto_generated).
+function zoomSegmentsToKeyframes(segments: ZoomSegment[]): ZoomKeyframe[] {
+  const kfs: ZoomKeyframe[] = [];
+  for (const seg of [...segments].sort((a, b) => a.start - b.start)) {
+    const rest = {
+      center_x: seg.center_x,
+      center_y: seg.center_y,
+      ease: "in_out_cubic" as ZoomEase,
+      auto_generated: seg.auto_generated,
+    };
+    const dur = seg.end - seg.start;
+    const ramp = Math.min(ZOOM_RAMP_S, dur / 2);
+    kfs.push({ t: seg.start, scale: 1, ...rest });
+    if (dur > 2 * ramp) {
+      kfs.push({ t: seg.start + ramp, scale: seg.scale, ...rest });
+      kfs.push({ t: seg.end - ramp, scale: seg.scale, ...rest });
+    } else {
+      kfs.push({ t: seg.start + dur / 2, scale: seg.scale, ...rest });
+    }
+    kfs.push({ t: seg.end, scale: 1, ...rest });
+  }
+  return kfs;
+}
+
+// Keyframes -> editable segments. A segment is a run from a scale-1
+// keyframe through scale>1 interiors to the next scale-1 keyframe — the
+// exact shape zoomSegmentsToKeyframes writes, so round-trip is identity for
+// tracks this UI produced. Tracks from other writers parse best-effort (max
+// interior scale wins) and the next edit canonicalizes them back to this
+// shape on save.
+function zoomKeyframesToSegments(kfs: ZoomKeyframe[]): ZoomSegment[] {
+  const sorted = [...kfs].sort((a, b) => a.t - b.t);
+  const segments: ZoomSegment[] = [];
+  let i = 0;
+  while (i < sorted.length) {
+    if (sorted[i].scale <= 1.001) {
+      i++;
+      continue;
+    }
+    let j = i;
+    while (j < sorted.length && sorted[j].scale > 1.001) j++;
+    let peak = sorted[i];
+    for (let k = i; k < j; k++) if (sorted[k].scale > peak.scale) peak = sorted[k];
+    segments.push({
+      start: i > 0 ? sorted[i - 1].t : sorted[i].t,
+      end: j < sorted.length ? sorted[j].t : sorted[j - 1].t,
+      scale: peak.scale,
+      center_x: peak.center_x,
+      center_y: peak.center_y,
+      auto_generated: peak.auto_generated ?? false,
+    });
+    i = j;
+  }
+  return segments;
+}
+
+function easeInOutCubic(u: number): number {
+  return u < 0.5 ? 4 * u * u * u : 1 - Math.pow(-2 * u + 2, 3) / 2;
+}
+
+// Zoom state at playhead time t — the reference implementation of the
+// sidecar keyframe semantics (600ms in_out_cubic ramps at the segment
+// edges, full scale between) expressed over the canonical segment shape.
+// The step-4 export renderer must reproduce exactly this curve for
+// preview/export parity; do not change one without the other.
+function zoomAt(
+  segments: ZoomSegment[],
+  t: number,
+): { scale: number; center_x: number; center_y: number } | null {
+  for (const seg of segments) {
+    if (t < seg.start || t > seg.end) continue;
+    const dur = seg.end - seg.start;
+    const ramp = Math.min(ZOOM_RAMP_S, dur / 2);
+    let scale: number;
+    if (ramp <= 0) {
+      scale = seg.scale;
+    } else if (t < seg.start + ramp) {
+      scale = 1 + (seg.scale - 1) * easeInOutCubic((t - seg.start) / ramp);
+    } else if (t > seg.end - ramp) {
+      scale = 1 + (seg.scale - 1) * easeInOutCubic((seg.end - t) / ramp);
+    } else {
+      scale = seg.scale;
+    }
+    return { scale, center_x: seg.center_x, center_y: seg.center_y };
+  }
+  return null;
+}
+
+// Timeline + stage + right-panel Zoom section share this, same shape as
+// the annotation Editor api.
+type ZoomEditor = {
+  segments: ZoomSegment[];
+  selectedIndex: number | null;
+  select: (i: number | null) => void;
+  update: (i: number, patch: Partial<ZoomSegment>) => void;
+  remove: (i: number) => void;
+  addAtPlayhead: () => void;
+  // Neighbor-bounded window per segment so zooms can't overlap.
+  bounds: (i: number) => { min: number; max: number };
+  canAdd: boolean;
+};
+
 type SidecarState = {
   trim?: Trim | null;
   annotations: Annotation[];
@@ -159,6 +299,11 @@ type SidecarState = {
   // = white (the pre-feature hardcode) — only written when annotations
   // exist and the color is non-white, keeping legacy sidecars unchanged.
   annotation_color?: string | null;
+  // Zoom layer keyframes (step-2 schema). Undefined/empty = no zoom; the
+  // debounced save writes the field only when non-empty so a no-zoom
+  // sidecar stays byte-identical to a pre-zoom one (the step-2 governing
+  // invariant — Rust's skip_serializing_if enforces the same on its side).
+  zoom?: ZoomKeyframe[];
 };
 
 const EMPTY_STATE: SidecarState = {
@@ -168,6 +313,7 @@ const EMPTY_STATE: SidecarState = {
   thumbnail_time: null,
   bubble_roundness: null,
   annotation_color: null,
+  zoom: [],
 };
 
 // Effective sidecar color: null unless there are annotations to color AND
@@ -332,6 +478,12 @@ function statesEqual(a: SidecarState, b: SidecarState, duration: number | null):
   if ((bra == null) !== (brb == null)) return false;
   if (bra != null && brb != null && Math.abs(bra - brb) > 0.001) return false;
   if (normalizeAnnotationColor(a) !== normalizeAnnotationColor(b)) return false;
+  const za = a.zoom ?? [];
+  const zb = b.zoom ?? [];
+  if (za.length !== zb.length) return false;
+  for (let i = 0; i < za.length; i++) {
+    if (JSON.stringify(za[i]) !== JSON.stringify(zb[i])) return false;
+  }
   return true;
 }
 
@@ -383,12 +535,14 @@ function isLogicallyEmpty(s: SidecarState, duration: number | null): boolean {
   const noBubble = !s.bubble_position_log || s.bubble_position_log.length === 0;
   const noThumb = s.thumbnail_time == null;
   const noRoundness = s.bubble_roundness == null;
+  const noZoom = !s.zoom || s.zoom.length === 0;
   return (
     normalizeTrim(s.trim, duration) == null &&
     s.annotations.length === 0 &&
     noBubble &&
     noThumb &&
-    noRoundness
+    noRoundness &&
+    noZoom
   );
 }
 
@@ -518,6 +672,13 @@ export default function Review() {
   const [wmOpacity, setWmOpacity] = useState(1);
   const wmSettingsLoadedRef = useRef(false);
   const [videoDims, setVideoDims] = useState<{ w: number; h: number } | null>(null);
+
+  // Zoom layer (step 3). UI state is segments; the sidecar stores the
+  // step-2 keyframe schema — converted on read and in currentState below.
+  // Zoom selection is exclusive with annotation selection so Backspace,
+  // Esc, and the stage overlays stay unambiguous.
+  const [zoomSegments, setZoomSegments] = useState<ZoomSegment[]>([]);
+  const [zoomSelectedIndex, setZoomSelectedIndex] = useState<number | null>(null);
 
   useEffect(() => {
     invoke<AppSettings>("get_settings")
@@ -740,6 +901,84 @@ export default function Review() {
     [duration],
   );
 
+  const selectZoom = useCallback((i: number | null) => {
+    setZoomSelectedIndex(i);
+    if (i != null) {
+      setSelectedIndex(null);
+      setEditingIndex(null);
+      setTool(null);
+    }
+  }, []);
+
+  // Any edit marks the segment manual — step-5 regeneration must never
+  // stomp something the user touched.
+  const updateZoom = useCallback((i: number, patch: Partial<ZoomSegment>) => {
+    setZoomSegments((prev) =>
+      prev.map((s, k) => (k === i ? { ...s, ...patch, auto_generated: false } : s)),
+    );
+  }, []);
+
+  const deleteZoom = useCallback((i: number) => {
+    setZoomSegments((prev) => prev.filter((_, k) => k !== i));
+    setZoomSelectedIndex(null);
+  }, []);
+
+  const addZoomAtPlayhead = useCallback(() => {
+    if (duration == null || !videoDims) return;
+    const t = videoRef.current?.currentTime ?? 0;
+    // Fit the new zoom into the free window around the playhead — zoom
+    // segments never overlap. Playhead already inside one selects it
+    // instead of adding.
+    let lo = 0;
+    let hi = duration;
+    for (let i = 0; i < zoomSegments.length; i++) {
+      const seg = zoomSegments[i];
+      if (seg.end <= t) {
+        lo = Math.max(lo, seg.end);
+      } else if (seg.start >= t) {
+        hi = Math.min(hi, seg.start);
+      } else {
+        selectZoom(i);
+        return;
+      }
+    }
+    const start = Math.max(lo, Math.min(t, hi - ZOOM_MIN_DURATION));
+    const end = Math.min(hi, start + ZOOM_DEFAULT_DURATION);
+    if (end - start < ZOOM_MIN_DURATION) {
+      setNotice("No room for a zoom at the playhead");
+      return;
+    }
+    const seg: ZoomSegment = {
+      start,
+      end,
+      scale: ZOOM_DEFAULT_SCALE,
+      center_x: videoDims.w / 2,
+      center_y: videoDims.h / 2,
+      auto_generated: false,
+    };
+    setZoomSegments((prev) => {
+      const next = [...prev, seg].sort((a, b) => a.start - b.start);
+      const idx = next.indexOf(seg);
+      // Defer selection to a microtask so the new index is valid against
+      // the freshly-rendered list (same pattern as placeTextAt).
+      Promise.resolve().then(() => selectZoom(idx));
+      return next;
+    });
+  }, [duration, videoDims, zoomSegments, selectZoom]);
+
+  // Neighbor-bounded window per segment — segments stay sorted and
+  // non-overlapping because drags/resizes can't cross these bounds.
+  const zoomBounds = useCallback(
+    (i: number) => ({
+      min: i > 0 ? zoomSegments[i - 1].end : 0,
+      max:
+        i < zoomSegments.length - 1
+          ? zoomSegments[i + 1].start
+          : (duration ?? Number.MAX_VALUE),
+    }),
+    [zoomSegments, duration],
+  );
+
   const sourceName = sourcePath ? basename(sourcePath) : "Untitled Recording";
 
   // Read sidecar on mount; record snapshot for discard semantics.
@@ -757,12 +996,16 @@ export default function Review() {
             thumbnail_time: state.thumbnail_time ?? null,
             bubble_roundness: state.bubble_roundness ?? null,
             annotation_color: state.annotation_color ?? null,
+            zoom: state.zoom ?? [],
           });
           if (state.trim) setTrim(state.trim);
           if (state.annotations) setAnnotations(state.annotations);
           if (state.bubble_position_log) setBubblePositionLog(state.bubble_position_log);
           if (state.thumbnail_time != null) setThumbnailTime(state.thumbnail_time);
           if (state.bubble_roundness != null) setBubbleRoundness(state.bubble_roundness);
+          if (state.zoom && state.zoom.length > 0) {
+            setZoomSegments(zoomKeyframesToSegments(state.zoom));
+          }
           // Recordings with existing annotations keep their own color
           // (absent = white, the pre-feature behavior) — the remembered
           // preference only seeds recordings that have no annotations yet.
@@ -867,8 +1110,9 @@ export default function Review() {
       thumbnail_time: thumbnailTime,
       bubble_roundness: bubbleRoundness,
       annotation_color: annotationColor,
+      zoom: zoomSegmentsToKeyframes(zoomSegments),
     }),
-    [trim, annotations, bubblePositionLog, thumbnailTime, bubbleRoundness, annotationColor],
+    [trim, annotations, bubblePositionLog, thumbnailTime, bubbleRoundness, annotationColor, zoomSegments],
   );
 
   const dirty = useMemo(
@@ -892,6 +1136,12 @@ export default function Review() {
         thumbnail_time: currentState.thumbnail_time ?? null,
         bubble_roundness: currentState.bubble_roundness ?? null,
         annotation_color: normalizeAnnotationColor(currentState),
+        // Empty zoom track = field absent (undefined drops out of the
+        // invoke payload), preserving the step-2 byte-identity invariant.
+        zoom:
+          currentState.zoom && currentState.zoom.length > 0
+            ? currentState.zoom
+            : undefined,
       };
       setCommittedMp4Path(null);
       if (empty) {
@@ -1354,21 +1604,25 @@ export default function Review() {
         setTool((prev) => (prev === "text" ? null : "text"));
         setSelectedIndex(null);
         setEditingIndex(null);
+        setZoomSelectedIndex(null);
       } else if (key === "r") {
         e.preventDefault();
         setTool((prev) => (prev === "arrow" ? null : "arrow"));
         setSelectedIndex(null);
         setEditingIndex(null);
+        setZoomSelectedIndex(null);
       } else if (key === "b") {
         e.preventDefault();
         setTool((prev) => (prev === "blur" ? null : "blur"));
         setSelectedIndex(null);
         setEditingIndex(null);
+        setZoomSelectedIndex(null);
       } else if (key === "s") {
         e.preventDefault();
         setTool((prev) => (prev === "spotlight" ? null : "spotlight"));
         setSelectedIndex(null);
         setEditingIndex(null);
+        setZoomSelectedIndex(null);
       } else if (e.key === " ") {
         e.preventDefault();
         togglePlay();
@@ -1410,11 +1664,18 @@ export default function Review() {
           setEditingIndex(null);
         } else if (selectedIndex != null) {
           setSelectedIndex(null);
+        } else if (zoomSelectedIndex != null) {
+          setZoomSelectedIndex(null);
         } else if (tool != null) {
           setTool(null);
         }
       } else if (e.key === "Backspace" || e.key === "Delete") {
-        if (selectedIndex != null && editingIndex == null) {
+        // Selections are mutually exclusive (selectZoom/selectAnnotation
+        // clear each other), so at most one branch fires.
+        if (zoomSelectedIndex != null && editingIndex == null) {
+          e.preventDefault();
+          deleteZoom(zoomSelectedIndex);
+        } else if (selectedIndex != null && editingIndex == null) {
           e.preventDefault();
           deleteAnnotation(selectedIndex);
         }
@@ -1427,7 +1688,9 @@ export default function Review() {
     tool,
     selectedIndex,
     editingIndex,
+    zoomSelectedIndex,
     deleteAnnotation,
+    deleteZoom,
     togglePlay,
     seek,
     frameStep,
@@ -1435,12 +1698,20 @@ export default function Review() {
   ]);
 
   // Shared by VideoStage, Timeline, and the right panel's Annotate section.
+  // setTool/setSelectedIndex clear the zoom selection so annotation work
+  // and zoom editing never hold the stage at the same time.
   const editorApi: Editor = {
     tool,
-    setTool,
+    setTool: (t) => {
+      setTool(t);
+      if (t != null) setZoomSelectedIndex(null);
+    },
     annotations,
     selectedIndex,
-    setSelectedIndex,
+    setSelectedIndex: (i) => {
+      setSelectedIndex(i);
+      if (i != null) setZoomSelectedIndex(null);
+    },
     editingIndex,
     setEditingIndex,
     updateAnnotation,
@@ -1449,6 +1720,17 @@ export default function Review() {
     placeArrow,
     placeBlur,
     placeSpotlight,
+  };
+
+  const zoomEditor: ZoomEditor = {
+    segments: zoomSegments,
+    selectedIndex: zoomSelectedIndex,
+    select: selectZoom,
+    update: updateZoom,
+    remove: deleteZoom,
+    addAtPlayhead: addZoomAtPlayhead,
+    bounds: zoomBounds,
+    canAdd: duration != null && videoDims != null,
   };
 
   const thumbnailControls: ThumbnailControls = {
@@ -1527,6 +1809,7 @@ export default function Review() {
             opacity: wmOpacity,
           }}
           editor={editorApi}
+          zoom={zoomEditor}
           annotationColor={annotationColor}
           thumbnailTime={thumbnailTime}
           bubbleRoundness={bubbleRoundness}
@@ -1534,6 +1817,7 @@ export default function Review() {
         <ExportPanel
           sourcePath={sourcePath}
           editor={editorApi}
+          zoom={zoomEditor}
           thumbnail={thumbnailControls}
           annotationColor={annotationColor}
           onAnnotationColor={onAnnotationColor}
@@ -1708,6 +1992,7 @@ type LeftColumnProps = {
   audioStart: number | null;
   watermarkPreview: WatermarkPreview;
   editor: Editor;
+  zoom: ZoomEditor;
   // Global per-recording annotation color (text glyphs, arrow stroke).
   annotationColor: string;
   // Timeline marker only — the thumbnail picker itself lives in the right
@@ -1750,6 +2035,7 @@ function LeftColumn(props: LeftColumnProps) {
         playbackRate={props.playbackRate}
         watermarkPreview={props.watermarkPreview}
         editor={props.editor}
+        zoom={props.zoom}
         annotationColor={props.annotationColor}
       />
       <Timeline
@@ -1765,6 +2051,7 @@ function LeftColumn(props: LeftColumnProps) {
         onScrubEnd={props.onScrubEnd}
         audioStart={props.audioStart}
         editor={props.editor}
+        zoom={props.zoom}
         thumbnailTime={props.thumbnailTime}
       />
     </div>
@@ -2044,6 +2331,7 @@ type VideoStageProps = {
   playbackRate: number;
   watermarkPreview: WatermarkPreview;
   editor: Editor;
+  zoom: ZoomEditor;
   annotationColor: string;
 };
 
@@ -2064,12 +2352,71 @@ function VideoStage(props: VideoStageProps) {
   // how the Rust export interprets position/endpoint fractions.
   const videoDims = props.watermarkPreview.videoDims;
 
+  // Live zoom preview (step 3) — CSS scale+translate on the <video> only,
+  // driven per-frame by the playhead against the interpolated zoom curve
+  // (same rAF-outside-React pattern as BubbleLayer; React never writes
+  // `transform` in the video's style object, so these imperative writes
+  // survive re-renders). The webcam bubble is screen-anchored and must not
+  // zoom; annotation overlays stay untransformed too — content-anchored
+  // overlay ordering is step 4's export design and the preview stays
+  // conservative until then. While a zoom segment is selected the video is
+  // held at identity: edit view shows the full frame with the crop box
+  // (ZoomEditLayer); deselect to watch the applied zoom.
+  const zoomSegs = props.zoom.segments;
+  const zoomEditing = props.zoom.selectedIndex != null;
+  const videoRefForZoom = props.videoRef;
+  useEffect(() => {
+    const video = videoRefForZoom.current;
+    if (!video) return;
+    const reset = () => {
+      video.style.transform = "";
+      video.style.transformOrigin = "";
+    };
+    if (zoomSegs.length === 0 || zoomEditing || !videoDims) {
+      reset();
+      return;
+    }
+    let raf = 0;
+    const tick = () => {
+      raf = requestAnimationFrame(tick);
+      const stage = stageRef.current;
+      if (!stage) return;
+      const z = zoomAt(zoomSegs, video.currentTime);
+      if (!z || z.scale <= 1.001) {
+        video.style.transform = "";
+        return;
+      }
+      // Framing: a crop rect of size content/s centered on the zoom
+      // center, clamped inside the frame, scaled up to fill the content
+      // box. The step-4 export renderer must mirror this math for
+      // preview/export parity.
+      const rect = stage.getBoundingClientRect();
+      const b = contentBox({ width: rect.width, height: rect.height }, videoDims);
+      const s = z.scale;
+      const px = b.x + (z.center_x / videoDims.w) * b.w;
+      const py = b.y + (z.center_y / videoDims.h) * b.h;
+      const qx = Math.min(Math.max(px, b.x + b.w / (2 * s)), b.x + b.w - b.w / (2 * s));
+      const qy = Math.min(Math.max(py, b.y + b.h / (2 * s)), b.y + b.h - b.h / (2 * s));
+      video.style.transformOrigin = "0 0";
+      video.style.transform = `translate(${b.x + b.w / 2 - s * qx}px, ${
+        b.y + b.h / 2 - s * qy
+      }px) scale(${s})`;
+    };
+    tick();
+    return () => {
+      cancelAnimationFrame(raf);
+      reset();
+    };
+  }, [zoomSegs, zoomEditing, videoDims, videoRefForZoom]);
+
   const onStageClick = (e: React.MouseEvent) => {
     if (props.editor.tool !== "text") {
-      // Click on empty stage with no tool active = deselect.
+      // Click on empty stage with no tool active = deselect. Deselecting a
+      // zoom leaves edit view and re-arms the live preview transform.
       if (props.editor.tool == null && (e.target as HTMLElement).dataset.stageBg === "1") {
         props.editor.setSelectedIndex(null);
         props.editor.setEditingIndex(null);
+        props.zoom.select(null);
       }
       return;
     }
@@ -2240,6 +2587,18 @@ function VideoStage(props: VideoStageProps) {
           drawingShape={drawingShape}
           videoDims={videoDims}
         />
+        {props.zoom.selectedIndex != null &&
+          props.zoom.segments[props.zoom.selectedIndex] && (
+            <ZoomEditLayer
+              stageRef={stageRef}
+              videoDims={videoDims}
+              seg={props.zoom.segments[props.zoom.selectedIndex]}
+              onCenter={(cx, cy) => {
+                const i = props.zoom.selectedIndex;
+                if (i != null) props.zoom.update(i, { center_x: cx, center_y: cy });
+              }}
+            />
+          )}
         <PlayerOverlay
           playing={props.playing}
           duration={props.duration}
@@ -2692,6 +3051,92 @@ function AnnotationLayer({
           videoDims={videoDims}
         />
       )}
+    </div>
+  );
+}
+
+// Zoom edit view (step 3) — shown while a zoom segment is selected. The
+// stage holds the full untransformed frame; the dashed rect previews the
+// visible region at the segment's scale (the same clamped framing the live
+// preview transform and the step-4 export use) and the crosshair reticle
+// drags the zoom center. Deselect (Esc or click the stage) to watch the
+// applied zoom.
+function ZoomEditLayer({
+  stageRef,
+  videoDims,
+  seg,
+  onCenter,
+}: {
+  stageRef: React.MutableRefObject<HTMLDivElement | null>;
+  videoDims: { w: number; h: number } | null;
+  seg: ZoomSegment;
+  onCenter: (cx: number, cy: number) => void;
+}) {
+  const box = useContentBox(stageRef, videoDims);
+  if (!videoDims || box.w === 0 || box.h === 0) return null;
+  const p = toStagePx(
+    { x: seg.center_x / videoDims.w, y: seg.center_y / videoDims.h },
+    box,
+  );
+  const cropW = box.w / seg.scale;
+  const cropH = box.h / seg.scale;
+  const qx = Math.min(Math.max(p.x, box.x + cropW / 2), box.x + box.w - cropW / 2);
+  const qy = Math.min(Math.max(p.y, box.y + cropH / 2), box.y + box.h - cropH / 2);
+  const startDrag = (e: React.PointerEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    const move = (ev: { clientX: number; clientY: number }) => {
+      const stage = stageRef.current;
+      if (!stage) return;
+      const rect = stage.getBoundingClientRect();
+      const b = contentBox({ width: rect.width, height: rect.height }, videoDims);
+      const frac = toContentFrac({ x: ev.clientX - rect.left, y: ev.clientY - rect.top }, b);
+      onCenter(frac.x * videoDims.w, frac.y * videoDims.h);
+    };
+    const onMove = (ev: PointerEvent) => move(ev);
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    move(e);
+  };
+  return (
+    <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
+      <div
+        style={{
+          position: "absolute",
+          left: qx - cropW / 2,
+          top: qy - cropH / 2,
+          width: cropW,
+          height: cropH,
+          border: "1.5px dashed var(--accent)",
+          borderRadius: 4,
+          // Oversized shadow dims everything outside the crop rect — the
+          // "what the zoomed export shows" affordance.
+          boxShadow: "0 0 0 9999px rgba(12,13,16,0.45)",
+          pointerEvents: "none",
+        }}
+      />
+      <div
+        onPointerDown={startDrag}
+        style={{
+          position: "absolute",
+          left: p.x,
+          top: p.y,
+          transform: "translate(-50%, -50%)",
+          cursor: "grab",
+          pointerEvents: "auto",
+          touchAction: "none",
+        }}
+      >
+        <svg width={26} height={26} viewBox="0 0 26 26" style={{ display: "block" }} aria-hidden>
+          <circle cx={13} cy={13} r={8} fill="none" stroke="var(--accent)" strokeWidth={2} />
+          <path d="M13 0v6M13 20v6M0 13h6M20 13h6" stroke="var(--accent)" strokeWidth={2} />
+          <circle cx={13} cy={13} r={1.8} fill="var(--accent)" />
+        </svg>
+      </div>
     </div>
   );
 }
@@ -3690,6 +4135,7 @@ type TimelineProps = {
   onScrubEnd: () => void;
   audioStart: number | null;
   editor: Editor;
+  zoom: ZoomEditor;
   thumbnailTime: number | null;
 };
 
@@ -3913,135 +4359,31 @@ function Timeline(props: TimelineProps) {
             highlighted band + two edge handles appear so start/end can be
             resized independently — the video content under a blur region
             can shift take-to-take, so the redaction window needs to track
-            it rather than staying pinned at its creation-time 3s default. */}
-        {props.duration != null &&
-          props.editor.annotations.map((ann, idx) => {
-            const duration = props.duration as number;
-            const mid = (ann.start_time + ann.end_time) / 2;
-            const pct = (mid / duration) * 100;
-            const startPct = (ann.start_time / duration) * 100;
-            const endPct = (ann.end_time / duration) * 100;
-            const selected = props.editor.selectedIndex === idx;
-            const onPipDown = (e: React.PointerEvent) => {
-              e.stopPropagation();
-              e.preventDefault();
-              props.editor.setSelectedIndex(idx);
-              const track = trackRef.current;
-              if (!track || props.duration == null) return;
-              const rect = track.getBoundingClientRect();
-              const startX = e.clientX;
-              const startStart = ann.start_time;
-              const startEnd = ann.end_time;
-              const onMove = (ev: PointerEvent) => {
-                const dx = ((ev.clientX - startX) / rect.width) * duration;
-                const dur = startEnd - startStart;
-                let nextStart = Math.max(0, startStart + dx);
-                let nextEnd = nextStart + dur;
-                if (nextEnd > duration) {
-                  nextEnd = duration;
-                  nextStart = nextEnd - dur;
-                }
-                props.editor.updateAnnotation(idx, {
-                  start_time: nextStart,
-                  end_time: nextEnd,
-                });
-              };
-              const onUp = () => {
-                window.removeEventListener("pointermove", onMove);
-                window.removeEventListener("pointerup", onUp);
-              };
-              window.addEventListener("pointermove", onMove);
-              window.addEventListener("pointerup", onUp);
-            };
-            const onEdgeDown = (side: "start" | "end") => (e: React.PointerEvent) => {
-              e.stopPropagation();
-              e.preventDefault();
-              props.editor.setSelectedIndex(idx);
-              const track = trackRef.current;
-              if (!track || props.duration == null) return;
-              const rect = track.getBoundingClientRect();
-              const fixedStart = ann.start_time;
-              const fixedEnd = ann.end_time;
-              const onMove = (ev: PointerEvent) => {
-                const t = ((ev.clientX - rect.left) / rect.width) * duration;
-                if (side === "start") {
-                  const next = Math.max(0, Math.min(fixedEnd - 0.1, t));
-                  props.editor.updateAnnotation(idx, { start_time: next });
-                } else {
-                  const next = Math.min(duration, Math.max(fixedStart + 0.1, t));
-                  props.editor.updateAnnotation(idx, { end_time: next });
-                }
-              };
-              const onUp = () => {
-                window.removeEventListener("pointermove", onMove);
-                window.removeEventListener("pointerup", onUp);
-              };
-              window.addEventListener("pointermove", onMove);
-              window.addEventListener("pointerup", onUp);
-            };
-            const label =
-              ann.type === "text"
-                ? "T"
-                : ann.type === "arrow"
-                  ? "→"
-                  : ann.type === "blur"
-                    ? "B"
-                    : "S";
-            return (
-              <div key={idx}>
-                {selected && (
-                  <div
-                    style={{
-                      position: "absolute",
-                      left: `${startPct}%`,
-                      width: `${Math.max(0, endPct - startPct)}%`,
-                      top: -2,
-                      height: 14,
-                      background: "rgba(255,255,255,0.12)",
-                      border: "1px solid var(--accent)",
-                      borderRadius: 3,
-                      pointerEvents: "none",
-                    }}
-                  />
-                )}
-                <div
-                  onPointerDown={onPipDown}
-                  style={{
-                    position: "absolute",
-                    left: `${pct}%`,
-                    top: -2,
-                    transform: "translateX(-50%)",
-                    cursor: "grab",
-                  }}
-                >
-                  <span
-                    style={{
-                      display: "inline-block",
-                      width: 14,
-                      height: 14,
-                      borderRadius: 99,
-                      background: selected ? "var(--accent)" : "var(--bg-elevated)",
-                      border: "1px solid var(--accent)",
-                      color: selected ? "#fff" : "var(--accent)",
-                      textAlign: "center",
-                      lineHeight: "12px",
-                      fontSize: 9,
-                      fontWeight: 700,
-                      fontFamily: "var(--font-system)",
-                    }}
-                  >
-                    {label}
-                  </span>
-                </div>
-                {selected && (
-                  <>
-                    <AnnotationEdgeHandle pct={startPct} side="start" onPointerDown={onEdgeDown("start")} />
-                    <AnnotationEdgeHandle pct={endPct} side="end" onPointerDown={onEdgeDown("end")} />
-                  </>
-                )}
-              </div>
-            );
-          })}
+            it rather than staying pinned at its creation-time 3s default.
+            The pip/band/handle machinery lives in SegmentTrack (shared
+            with the zoom lane below). */}
+        {props.duration != null && (
+          <SegmentTrack
+            segments={props.editor.annotations.map((a) => ({
+              start: a.start_time,
+              end: a.end_time,
+            }))}
+            duration={props.duration}
+            selectedIndex={props.editor.selectedIndex}
+            onSelect={props.editor.setSelectedIndex}
+            onChange={(i, p) =>
+              props.editor.updateAnnotation(i, {
+                ...(p.start !== undefined ? { start_time: p.start } : {}),
+                ...(p.end !== undefined ? { end_time: p.end } : {}),
+              })
+            }
+            label={(i) => {
+              const t = props.editor.annotations[i]?.type;
+              return t === "text" ? "T" : t === "arrow" ? "→" : t === "blur" ? "B" : "S";
+            }}
+            style={{ top: -2 }}
+          />
+        )}
 
         {/* Thumbnail tick — sits below the track so it doesn't fight the
             playhead/trim handles visually. Click jumps the scrubber to the
@@ -4128,6 +4470,29 @@ function Timeline(props: TimelineProps) {
         </div>
       </div>
 
+      {/* Zoom lane — second SegmentTrack row under the main track. Only
+          rendered once zooms exist (added via the right panel's Zoom
+          section) so no-zoom recordings keep today's layout. marginTop
+          clears the thumbnail tick that hangs below the track. Bands stay
+          visible unselected (alwaysBand): a zoom is a range the user
+          reasons about, not a point. */}
+      {props.zoom.segments.length > 0 && props.duration != null && (
+        <div style={{ position: "relative", height: 14, marginTop: 16 }}>
+          <SegmentTrack
+            segments={props.zoom.segments}
+            duration={props.duration}
+            selectedIndex={props.zoom.selectedIndex}
+            onSelect={props.zoom.select}
+            onChange={(i, p) => props.zoom.update(i, p)}
+            label={() => "Z"}
+            bounds={props.zoom.bounds}
+            alwaysBand
+            minGap={ZOOM_MIN_DURATION}
+            style={{ top: 0 }}
+          />
+        </div>
+      )}
+
       <ScrubPreview
         assetUrl={props.assetUrl}
         recordingId={stamp}
@@ -4174,38 +4539,6 @@ function TrimHandle({
     >
       <span style={{ width: 1, height: 14, background: "rgba(255,255,255,0.55)" }} />
     </div>
-  );
-}
-
-// Per-annotation start/end resize handle — same ew-resize visual language
-// as TrimHandle, scaled down to sit at the annotation pip's row instead of
-// spanning the full track height.
-function AnnotationEdgeHandle({
-  pct,
-  side,
-  onPointerDown,
-}: {
-  pct: number;
-  side: "start" | "end";
-  onPointerDown: (e: React.PointerEvent) => void;
-}) {
-  return (
-    <div
-      onPointerDown={onPointerDown}
-      style={{
-        position: "absolute",
-        left: `${pct}%`,
-        top: -2,
-        width: 6,
-        height: 14,
-        transform: side === "start" ? "translateX(-100%)" : "translateX(0)",
-        background: "var(--accent)",
-        borderRadius: 2,
-        cursor: "ew-resize",
-        boxShadow: "0 1px 2px rgba(0,0,0,0.4)",
-        touchAction: "none",
-      }}
-    />
   );
 }
 
@@ -4426,8 +4759,8 @@ type SaveSpec = {
 // Share section folded into Export (its rows are export destinations); a
 // persisted "share" from older builds fails the SECTION_IDS check below
 // and falls back to the default.
-type SectionId = "annotate" | "watermark" | "export";
-const SECTION_IDS: SectionId[] = ["annotate", "watermark", "export"];
+type SectionId = "annotate" | "zoom" | "watermark" | "export";
+const SECTION_IDS: SectionId[] = ["annotate", "zoom", "watermark", "export"];
 const DEFAULT_OPEN_SECTION: SectionId | null = "export";
 // Key versioned away from the old "review-panel-sections" multi-open
 // format (a JSON object) so no migration parsing is needed.
@@ -4457,6 +4790,7 @@ function persistOpenSection(id: SectionId | null) {
 function ExportPanel({
   sourcePath,
   editor,
+  zoom,
   thumbnail,
   annotationColor,
   onAnnotationColor,
@@ -4485,6 +4819,7 @@ function ExportPanel({
 }: {
   sourcePath: string | null;
   editor: Editor;
+  zoom: ZoomEditor;
   thumbnail: ThumbnailControls;
   annotationColor: string;
   onAnnotationColor: (hex: string) => void;
@@ -4867,6 +5202,73 @@ function ExportPanel({
               onCancel={() => setPopoverOpen(false)}
             />
           )}
+        </Section>
+
+        <Section
+          title="Zoom"
+          open={openId === "zoom"}
+          onToggle={() => toggleSection("zoom")}
+        >
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <button
+              className="btn-secondary"
+              style={{ height: 26, fontSize: 11.5 }}
+              onClick={zoom.addAtPlayhead}
+              disabled={!zoom.canAdd || busy}
+            >
+              Add zoom at playhead
+            </button>
+            {zoom.selectedIndex != null && zoom.segments[zoom.selectedIndex] ? (
+              <>
+                <Field
+                  label={`Scale — ${zoom.segments[zoom.selectedIndex].scale.toFixed(2)}x`}
+                >
+                  <input
+                    type="range"
+                    className="slider"
+                    min={Math.round(ZOOM_MIN_SCALE * 100)}
+                    max={Math.round(ZOOM_MAX_SCALE * 100)}
+                    step={5}
+                    value={Math.round(zoom.segments[zoom.selectedIndex].scale * 100)}
+                    onChange={(e) => {
+                      const i = zoom.selectedIndex;
+                      if (i != null) zoom.update(i, { scale: Number(e.target.value) / 100 });
+                    }}
+                    style={{ width: "100%" }}
+                  />
+                </Field>
+                <div style={{ fontSize: 11, color: "var(--fg-tertiary)" }}>
+                  Drag the crosshair on the video to set the zoom center. Adjust
+                  timing on the timeline lane. Deselect (Esc) to watch the zoom
+                  in the preview.
+                </div>
+                <button
+                  className="btn-secondary"
+                  style={{ height: 26, fontSize: 11.5 }}
+                  onClick={() => {
+                    const i = zoom.selectedIndex;
+                    if (i != null) zoom.remove(i);
+                  }}
+                >
+                  Delete zoom
+                </button>
+              </>
+            ) : zoom.segments.length > 0 ? (
+              <div style={{ fontSize: 11, color: "var(--fg-tertiary)" }}>
+                {zoom.segments.length === 1
+                  ? "1 zoom"
+                  : `${zoom.segments.length} zooms`}{" "}
+                on the timeline. Select a Z pip to edit scale, center, and
+                timing; playback previews the applied zoom.
+              </div>
+            ) : (
+              <div style={{ fontSize: 11, color: "var(--fg-tertiary)" }}>
+                Add a zoom at the playhead, then set its scale and center.
+                Playback previews it live. Export rendering is not wired up
+                yet — saved files ignore zoom for now.
+              </div>
+            )}
+          </div>
         </Section>
 
         <Section
