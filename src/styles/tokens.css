@@ -248,6 +248,8 @@
 
 /* Segmented control */
 .segmented { display: inline-flex; background: var(--bg-input); border: 1px solid var(--border-subtle); border-radius: var(--r-sm); padding: 2px; gap: 2px; }
+.segmented.full { display: flex; width: 100%; }
+.segmented.full > button { flex: 1; }
 .segmented > button { background: transparent; border: none; color: var(--fg-secondary); padding: 3px 10px; font: 500 12px var(--font-system); border-radius: 4px; cursor: pointer; }
 .segmented > button.on { background: var(--bg-elevated); color: var(--fg-primary); box-shadow: 0 1px 0 rgba(255,255,255,0.06) inset, 0 1px 2px rgba(0,0,0,0.3); }
 

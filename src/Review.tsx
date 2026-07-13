@@ -8,9 +8,13 @@ import { Icon, I, P } from "./components/icons";
 import Waveform from "./Waveform";
 import ScrubPreview from "./ScrubPreview";
 
-// Review window. Layout mirrors docs/design/surfaces/review.jsx — left
-// column is player + timeline + action footer, right column is the Phase
-// 6 export panel rendered at full visual fidelity but inert.
+// Review window. Left column is player + timeline; right column is an
+// accordion panel (Annotate / Export / Share / Watermark sections plus a
+// pinned lifecycle footer). Supersedes the docs/design/surfaces/review.jsx
+// mock's top-toolbar layout — the toolbar's intrinsic width outgrew the
+// left column as tools were added, and the old label-beside-control rows
+// overflowed the 296px panel (the CSS overflow-y:auto side effect turned
+// that into a horizontal scrollbar).
 //
 // Operates against the Phase 5.5 scratch path: Save commits the recording
 // to ~/Movies/Zeigen/ (baking edits if any), Discard destroys the scratch
@@ -1270,6 +1274,35 @@ export default function Review() {
     duration,
   ]);
 
+  // Shared by VideoStage, Timeline, and the right panel's Annotate section.
+  const editorApi: Editor = {
+    tool,
+    setTool,
+    annotations,
+    selectedIndex,
+    setSelectedIndex,
+    editingIndex,
+    setEditingIndex,
+    updateAnnotation,
+    deleteAnnotation,
+    placeTextAt,
+    placeArrow,
+    placeBlur,
+    placeSpotlight,
+  };
+
+  const thumbnailControls: ThumbnailControls = {
+    thumbnailTime,
+    setThumbnailTime,
+    previewUrl: playbackUrl,
+    getCurrentTime: () => videoRef.current?.currentTime ?? 0,
+  };
+
+  // Post-trim length shown in the header (the old toolbar's info strip
+  // merged here when the toolbar moved into the Annotate section).
+  const trimmedLen =
+    trim && duration != null ? Math.max(0, trim.out - trim.in) : duration;
+
   return (
     <main
       className="accent-blue"
@@ -1286,6 +1319,7 @@ export default function Review() {
       <Header
         sourceName={sourceName}
         dirty={dirty}
+        length={trimmedLen}
         previewFailed={previewState.status === "failed"}
       />
       <div
@@ -1330,31 +1364,14 @@ export default function Review() {
             corner: wmCorner,
             videoDims,
           }}
-          editor={{
-            tool,
-            setTool,
-            annotations,
-            selectedIndex,
-            setSelectedIndex,
-            editingIndex,
-            setEditingIndex,
-            updateAnnotation,
-            deleteAnnotation,
-            placeTextAt,
-            placeArrow,
-            placeBlur,
-            placeSpotlight,
-          }}
-          thumbnail={{
-            thumbnailTime,
-            setThumbnailTime,
-            previewUrl: playbackUrl,
-            getCurrentTime: () => videoRef.current?.currentTime ?? 0,
-          }}
+          editor={editorApi}
+          thumbnailTime={thumbnailTime}
           bubbleRoundness={bubbleRoundness}
         />
         <ExportPanel
           sourcePath={sourcePath}
+          editor={editorApi}
+          thumbnail={thumbnailControls}
           lastSavedPath={lastSavedPath}
           committedMp4Path={committedMp4Path}
           lastSavedAt={lastSavedAt}
@@ -1406,10 +1423,14 @@ export default function Review() {
 function Header({
   sourceName,
   dirty,
+  length,
   previewFailed,
 }: {
   sourceName: string;
   dirty: boolean;
+  // Post-trim clip length. Lived in the old toolbar's info strip; the
+  // header is the only remaining info strip.
+  length: number | null;
   previewFailed: boolean;
 }) {
   return (
@@ -1448,6 +1469,16 @@ function Header({
         title={sourceName}
       >
         Screen Recording{dirty ? " — edited" : ""}
+      </span>
+      <span style={{ color: "var(--fg-tertiary)", fontSize: 12 }}>·</span>
+      <span
+        style={{
+          fontFamily: "var(--font-mono)",
+          fontSize: 11,
+          color: "var(--fg-tertiary)",
+        }}
+      >
+        {fmt(length)} · .mp4
       </span>
       <span style={{ color: "var(--fg-tertiary)", fontSize: 12 }}>·</span>
       <span style={{ color: "var(--fg-tertiary)", fontSize: 12 }}>just now</span>
@@ -1507,7 +1538,9 @@ type LeftColumnProps = {
   audioStart: number | null;
   watermarkPreview: WatermarkPreview;
   editor: Editor;
-  thumbnail: ThumbnailControls;
+  // Timeline marker only — the thumbnail picker itself lives in the right
+  // panel's Annotate section.
+  thumbnailTime: number | null;
   // Read-only: stamped into the sidecar at record time (recorder UI owns
   // the control); Review only previews it via BubbleLayer's border-radius.
   bubbleRoundness: number | null;
@@ -1525,12 +1558,6 @@ function LeftColumn(props: LeftColumnProps) {
         overflow: "hidden",
       }}
     >
-      <Toolbar
-        duration={props.duration}
-        trim={props.trim}
-        editor={props.editor}
-        thumbnail={props.thumbnail}
-      />
       <VideoStage
         assetUrl={props.playbackUrl}
         videoRef={props.videoRef}
@@ -1565,146 +1592,14 @@ function LeftColumn(props: LeftColumnProps) {
         onScrubEnd={props.onScrubEnd}
         audioStart={props.audioStart}
         editor={props.editor}
-        thumbnailTime={props.thumbnail.thumbnailTime}
+        thumbnailTime={props.thumbnailTime}
       />
     </div>
   );
 }
 
-function Toolbar({
-  duration,
-  trim,
-  editor,
-  thumbnail,
-}: {
-  duration: number | null;
-  trim: Trim | null;
-  editor: Editor;
-  thumbnail: ThumbnailControls;
-}) {
-  const len =
-    trim && duration != null
-      ? Math.max(0, trim.out - trim.in)
-      : duration != null
-      ? duration
-      : null;
-  const [popoverOpen, setPopoverOpen] = useState(false);
-  // Captured at click time so the preview <video> seeks to the exact frame
-  // the user had on screen, even if they scrub while the popover is open.
-  const [capturedTime, setCapturedTime] = useState<number | null>(null);
-
-  const onSetClick = useCallback(() => {
-    const t = thumbnail.getCurrentTime();
-    setCapturedTime(t);
-    setPopoverOpen(true);
-  }, [thumbnail]);
-
-  // Escape closes the popover. Click-outside is handled by the backdrop layer.
-  useEffect(() => {
-    if (!popoverOpen) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setPopoverOpen(false);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [popoverOpen]);
-
-  // Keyboard shortcut M opens the popover (skips when typing in inputs).
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "m" && e.key !== "M") return;
-      const target = e.target as HTMLElement | null;
-      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) {
-        return;
-      }
-      if (popoverOpen) return;
-      e.preventDefault();
-      onSetClick();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [popoverOpen, onSetClick]);
-
-  const useFrame = () => {
-    if (capturedTime != null) thumbnail.setThumbnailTime(capturedTime);
-    setPopoverOpen(false);
-  };
-
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        padding: "10px 14px",
-        borderBottom: "1px solid var(--border-faint)",
-        color: "var(--fg-secondary)",
-        fontSize: 12,
-        position: "relative",
-      }}
-    >
-      <div style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-        <span style={{ color: "var(--fg-primary)", fontWeight: 500, fontSize: 12.5 }}>
-          Untitled Recording
-        </span>
-        <span style={{ color: "var(--fg-tertiary)" }}>·</span>
-        <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--fg-tertiary)" }}>
-          {fmt(len)} · .mp4
-        </span>
-      </div>
-      <div
-        style={{ display: "inline-flex", alignItems: "center", gap: 4, position: "relative" }}
-      >
-        <ToolButton icon={P.edit} label="Trim" kbd="T" active={false} disabled />
-        <ToolButton
-          icon="M2 13h12M5 10l3-7 3 7M6.5 8h3"
-          label="Text"
-          kbd="A"
-          active={editor.tool === "text"}
-          onClick={() => editor.setTool(editor.tool === "text" ? null : "text")}
-        />
-        <ToolButton
-          icon="M3 8h9M9 5l3 3-3 3"
-          label="Arrow"
-          kbd="R"
-          active={editor.tool === "arrow"}
-          onClick={() => editor.setTool(editor.tool === "arrow" ? null : "arrow")}
-        />
-        <ToolButton
-          icon="M2 3h12v10H2z M2 3l12 10M14 3L2 13"
-          label="Blur"
-          kbd="B"
-          active={editor.tool === "blur"}
-          onClick={() => editor.setTool(editor.tool === "blur" ? null : "blur")}
-        />
-        <ToolButton
-          icon="M8 3a5 5 0 100 10 5 5 0 000-10z M8 0.5v2M8 13.5v2M0.5 8h2M13.5 8h2"
-          label="Spotlight"
-          kbd="S"
-          active={editor.tool === "spotlight"}
-          onClick={() => editor.setTool(editor.tool === "spotlight" ? null : "spotlight")}
-        />
-        <ToolButton
-          icon="M5 2h6v11l-3-2.5L5 13z"
-          label="Thumbnail"
-          kbd="M"
-          active={thumbnail.thumbnailTime != null}
-          onClick={onSetClick}
-        />
-        {popoverOpen && capturedTime != null && (
-          <ThumbnailPopover
-            previewUrl={thumbnail.previewUrl}
-            time={capturedTime}
-            onUse={useFrame}
-            onCancel={() => setPopoverOpen(false)}
-          />
-        )}
-      </div>
-    </div>
-  );
-}
-
-// Anchored under the Thumbnail button. Renders a paused <video> seeked to
+// Anchored to the right panel's Annotate section (fixed position, left of
+// the panel so it floats over the video). Renders a paused <video> seeked to
 // the captured currentTime so the user confirms the exact frame. The
 // preview does NOT show the composited bubble/annotations/watermark — those
 // are overlays in the main player — so the popover spells that out so the
@@ -1738,9 +1633,13 @@ function ThumbnailPopover({
       />
       <div
         style={{
-          position: "absolute",
-          top: "calc(100% + 6px)",
-          right: 0,
+          // Fixed, just left of the 296px panel and below the header —
+          // deterministic anchor that works whether the popover was opened
+          // by click or by the M shortcut (which may have just expanded a
+          // collapsed Annotate section, so no row rect exists yet).
+          position: "fixed",
+          top: 56,
+          right: 308,
           width: 280,
           background: "var(--bg-elevated)",
           border: "1px solid var(--border-default)",
@@ -1831,7 +1730,10 @@ function ThumbnailPopover({
   );
 }
 
-function ToolButton({
+// Full-width row inside the Annotate section. Same states as the old
+// toolbar's ToolButton, but stacked vertically the rows can never outgrow
+// the panel width.
+function ToolRow({
   icon,
   label,
   kbd,
@@ -1854,11 +1756,12 @@ function ToolButton({
       disabled={disabled}
       title={title}
       style={{
-        display: "inline-flex",
+        display: "flex",
         alignItems: "center",
-        gap: 6,
+        gap: 8,
+        width: "100%",
         padding: "5px 9px",
-        height: 26,
+        height: 28,
         background: active ? "var(--accent-soft)" : "transparent",
         border: `1px solid ${active ? "var(--accent)" : "transparent"}`,
         borderRadius: 6,
@@ -1871,11 +1774,79 @@ function ToolButton({
       }}
     >
       <Icon d={icon} size={12} stroke={1.4} />
-      <span>{label}</span>
-      {kbd && (
-        <span style={{ marginLeft: 4, color: "var(--fg-tertiary)", fontSize: 10.5 }}>{kbd}</span>
-      )}
+      <span style={{ flex: 1, textAlign: "left" }}>{label}</span>
+      {kbd && <span className="kbd">{kbd}</span>}
     </button>
+  );
+}
+
+// Accordion section in the right panel. Header row is always visible;
+// content renders only while open. Plain conditional render — no
+// animation machinery.
+function Section({
+  title,
+  open,
+  onToggle,
+  children,
+}: {
+  title: string;
+  open: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div style={{ borderBottom: "1px solid var(--border-faint)" }}>
+      <button
+        onClick={onToggle}
+        style={{
+          width: "100%",
+          display: "flex",
+          alignItems: "center",
+          gap: 7,
+          padding: "10px 14px",
+          background: "transparent",
+          border: "none",
+          cursor: "pointer",
+          fontFamily: "var(--font-system)",
+        }}
+      >
+        <span
+          style={{
+            display: "inline-flex",
+            color: "var(--fg-tertiary)",
+            transform: open ? "rotate(90deg)" : "none",
+          }}
+        >
+          <Icon d={P.chevronRight} size={10} stroke={1.6} />
+        </span>
+        <span
+          style={{
+            fontSize: 10.5,
+            color: "var(--fg-tertiary)",
+            letterSpacing: "0.06em",
+            textTransform: "uppercase",
+            fontWeight: 600,
+          }}
+        >
+          {title}
+        </span>
+      </button>
+      {open && <div style={{ padding: "0 14px 12px" }}>{children}</div>}
+    </div>
+  );
+}
+
+// Label-above-control row. Replaces the old label-beside-control ChipsRow,
+// whose side-by-side layout was what pushed 4-segment controls past the
+// panel width.
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div style={{ marginBottom: 8 }}>
+      <div style={{ fontSize: 11.5, color: "var(--fg-secondary)", marginBottom: 4 }}>
+        {label}
+      </div>
+      {children}
+    </div>
   );
 }
 
@@ -4213,8 +4184,43 @@ type SaveSpec = {
   fps?: number;
 };
 
+// Exclusive accordion — one section open at a time; opening one collapses
+// the rest, and clicking the open section's header closes it. The open
+// section persists so the panel reopens the way the user last left it.
+// First-run default is export-forward; change DEFAULT_OPEN_SECTION if the
+// workflow ranking shifts (e.g. when editing becomes primary).
+type SectionId = "annotate" | "export" | "share" | "watermark";
+const SECTION_IDS: SectionId[] = ["annotate", "export", "share", "watermark"];
+const DEFAULT_OPEN_SECTION: SectionId | null = "export";
+// Key versioned away from the old "review-panel-sections" multi-open
+// format (a JSON object) so no migration parsing is needed.
+const SECTIONS_LS_KEY = "review-panel-open-section";
+
+function loadOpenSection(): SectionId | null {
+  try {
+    const raw = localStorage.getItem(SECTIONS_LS_KEY);
+    if (raw == null) return DEFAULT_OPEN_SECTION;
+    if (raw === "") return null; // user left everything collapsed
+    return SECTION_IDS.includes(raw as SectionId)
+      ? (raw as SectionId)
+      : DEFAULT_OPEN_SECTION;
+  } catch {
+    return DEFAULT_OPEN_SECTION;
+  }
+}
+
+function persistOpenSection(id: SectionId | null) {
+  try {
+    localStorage.setItem(SECTIONS_LS_KEY, id ?? "");
+  } catch {
+    // Best-effort; the session still works from React state.
+  }
+}
+
 function ExportPanel({
   sourcePath,
+  editor,
+  thumbnail,
   lastSavedPath,
   committedMp4Path,
   lastSavedAt,
@@ -4239,6 +4245,8 @@ function ExportPanel({
   watermark,
 }: {
   sourcePath: string | null;
+  editor: Editor;
+  thumbnail: ThumbnailControls;
   lastSavedPath: string | null;
   committedMp4Path: string | null;
   lastSavedAt: number;
@@ -4276,6 +4284,80 @@ function ExportPanel({
     const t = window.setTimeout(() => setSavedFlashAt(0), 1500);
     return () => window.clearTimeout(t);
   }, [savedFlashAt]);
+
+  // Which section is open (exclusive), persisted so the panel reopens the
+  // way the user last left it (same remembered-preference idea as bubble
+  // roundness, but pure UI chrome — localStorage, not settings.json).
+  const [openId, setOpenId] = useState<SectionId | null>(loadOpenSection);
+  const toggleSection = useCallback((id: SectionId) => {
+    setOpenId((prev) => {
+      const next = prev === id ? null : id;
+      persistOpenSection(next);
+      return next;
+    });
+  }, []);
+  const openSection = useCallback((id: SectionId) => {
+    setOpenId((prev) => {
+      if (prev === id) return prev;
+      persistOpenSection(id);
+      return id;
+    });
+  }, []);
+
+  // Activating a tool (row click or T/A/R/B/S shortcut) auto-expands
+  // Annotate so the active-tool highlight is never hidden inside a
+  // collapsed section.
+  useEffect(() => {
+    if (editor.tool != null) openSection("annotate");
+  }, [editor.tool, openSection]);
+
+  // Thumbnail popover — moved here from the old top toolbar. capturedTime
+  // is grabbed at open so the preview shows the exact frame the user had
+  // on screen even if playback moves while the popover is open.
+  const [popoverOpen, setPopoverOpen] = useState(false);
+  const [capturedTime, setCapturedTime] = useState<number | null>(null);
+  const onThumbnailClick = useCallback(() => {
+    setCapturedTime(thumbnail.getCurrentTime());
+    setPopoverOpen(true);
+  }, [thumbnail]);
+
+  // Escape closes the popover. Click-outside is handled by the backdrop.
+  useEffect(() => {
+    if (!popoverOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setPopoverOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [popoverOpen]);
+
+  // M opens the popover, expanding Annotate first so the thumbnail row is
+  // visible behind it.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "m" && e.key !== "M") return;
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      if (popoverOpen) return;
+      e.preventDefault();
+      openSection("annotate");
+      onThumbnailClick();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [popoverOpen, openSection, onThumbnailClick]);
+
+  const useFrame = () => {
+    if (capturedTime != null) thumbnail.setThumbnailTime(capturedTime);
+    setPopoverOpen(false);
+  };
 
   const buildSpec = useCallback(
     (): SaveSpec =>
@@ -4437,27 +4519,80 @@ function ExportPanel({
         flexDirection: "column",
         background: "var(--bg-sidebar)",
         minHeight: 0,
-        overflowY: "auto",
+        overflow: "hidden",
       }}
     >
-      {/* SAVE block */}
-      <div style={{ padding: "12px 14px 8px" }}>
-        <span
-          style={{
-            fontSize: 10.5,
-            color: "var(--fg-tertiary)",
-            letterSpacing: "0.06em",
-            textTransform: "uppercase",
-            fontWeight: 600,
-          }}
+      {/* Sections scroll vertically if the window is short; horizontal
+          overflow is impossible by construction (full-width rows only). */}
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden" }}>
+        <Section
+          title="Annotate"
+          open={openId === "annotate"}
+          onToggle={() => toggleSection("annotate")}
         >
-          Save
-        </span>
-      </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+            {/* Trim row stays (disabled) until timeline trim passes the
+                functional checklist — docs/REVIEW-PANEL-CHECKLIST.md. */}
+            <ToolRow
+              icon={P.edit}
+              label="Trim"
+              active={false}
+              disabled
+              title="Trim with the timeline handles below, or press I / O"
+            />
+            <ToolRow
+              icon="M2 13h12M5 10l3-7 3 7M6.5 8h3"
+              label="Text"
+              kbd="A"
+              active={editor.tool === "text"}
+              onClick={() => editor.setTool(editor.tool === "text" ? null : "text")}
+            />
+            <ToolRow
+              icon="M3 8h9M9 5l3 3-3 3"
+              label="Arrow"
+              kbd="R"
+              active={editor.tool === "arrow"}
+              onClick={() => editor.setTool(editor.tool === "arrow" ? null : "arrow")}
+            />
+            <ToolRow
+              icon="M2 3h12v10H2z M2 3l12 10M14 3L2 13"
+              label="Blur"
+              kbd="B"
+              active={editor.tool === "blur"}
+              onClick={() => editor.setTool(editor.tool === "blur" ? null : "blur")}
+            />
+            <ToolRow
+              icon="M8 3a5 5 0 100 10 5 5 0 000-10z M8 0.5v2M8 13.5v2M0.5 8h2M13.5 8h2"
+              label="Spotlight"
+              kbd="S"
+              active={editor.tool === "spotlight"}
+              onClick={() => editor.setTool(editor.tool === "spotlight" ? null : "spotlight")}
+            />
+            <ToolRow
+              icon="M5 2h6v11l-3-2.5L5 13z"
+              label="Thumbnail"
+              kbd="M"
+              active={thumbnail.thumbnailTime != null}
+              onClick={onThumbnailClick}
+            />
+          </div>
+          {popoverOpen && capturedTime != null && (
+            <ThumbnailPopover
+              previewUrl={thumbnail.previewUrl}
+              time={capturedTime}
+              onUse={useFrame}
+              onCancel={() => setPopoverOpen(false)}
+            />
+          )}
+        </Section>
 
-      <div style={{ padding: "0 14px 12px" }}>
-        <ChipsRow label="Format">
-          <div className="segmented">
+        <Section
+          title="Export"
+          open={openId === "export"}
+          onToggle={() => toggleSection("export")}
+        >
+        <Field label="Format">
+          <div className="segmented full">
             {(["mp4", "gif"] as const).map((f) => (
               <button
                 key={f}
@@ -4469,11 +4604,11 @@ function ExportPanel({
               </button>
             ))}
           </div>
-        </ChipsRow>
+        </Field>
 
         {format === "mp4" ? (
-          <ChipsRow label="Resolution">
-            <div className="segmented">
+          <Field label="Resolution">
+            <div className="segmented full">
               {mp4ResOptions.map((r) => (
                 <button
                   key={r}
@@ -4485,10 +4620,10 @@ function ExportPanel({
                 </button>
               ))}
             </div>
-          </ChipsRow>
+          </Field>
         ) : (
-          <ChipsRow label="Resolution">
-            <div className="segmented">
+          <Field label="Resolution">
+            <div className="segmented full">
               {gifResOptions.map((r) => (
                 <button
                   key={r}
@@ -4500,12 +4635,12 @@ function ExportPanel({
                 </button>
               ))}
             </div>
-          </ChipsRow>
+          </Field>
         )}
 
         {format === "gif" && (
-          <ChipsRow label="FPS">
-            <div className="segmented">
+          <Field label="FPS">
+            <div className="segmented full">
               {([10, 15, 20] as const).map((f) => (
                 <button
                   key={f}
@@ -4517,7 +4652,7 @@ function ExportPanel({
                 </button>
               ))}
             </div>
-          </ChipsRow>
+          </Field>
         )}
 
         <button
@@ -4573,124 +4708,14 @@ function ExportPanel({
             )}
           </span>
         </button>
-      </div>
+        </Section>
 
-      <div className="hairline" style={{ margin: "0 14px" }} />
-
-      {/* WATERMARK block */}
-      <div style={{ padding: "10px 14px 6px" }}>
-        <span
-          style={{
-            fontSize: 10.5,
-            color: "var(--fg-tertiary)",
-            letterSpacing: "0.06em",
-            textTransform: "uppercase",
-            fontWeight: 600,
-          }}
+        <Section
+          title="Share"
+          open={openId === "share"}
+          onToggle={() => toggleSection("share")}
         >
-          Watermark
-        </span>
-      </div>
-
-      <div style={{ padding: "0 14px 12px", display: "flex", flexDirection: "column", gap: 8 }}>
-        {watermark.logoPath ? (
-          <>
-            <label
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                fontSize: 12.5,
-                color: "var(--fg-primary)",
-                cursor: "pointer",
-              }}
-            >
-              <input
-                type="checkbox"
-                className="accent-blue"
-                checked={watermark.apply}
-                onChange={watermark.onToggleApply}
-              />
-              <span>Apply watermark</span>
-            </label>
-            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <span
-                title={watermark.logoPath}
-                style={{
-                  flex: 1,
-                  minWidth: 0,
-                  fontSize: 11.5,
-                  color: "var(--fg-secondary)",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {basename(watermark.logoPath)}
-              </span>
-              <button
-                className="btn-secondary"
-                style={{ height: 24, padding: "0 8px", fontSize: 11 }}
-                onClick={watermark.onPick}
-              >
-                Change…
-              </button>
-              <button
-                className="btn-secondary"
-                style={{ height: 24, padding: "0 8px", fontSize: 11 }}
-                onClick={watermark.onRemove}
-              >
-                Remove
-              </button>
-            </div>
-            <ChipsRow label="Corner">
-              <div className="segmented">
-                {WM_CORNERS.map((c) => (
-                  <button
-                    key={c}
-                    className={watermark.corner === c ? "on" : ""}
-                    onClick={() => watermark.onCorner(c)}
-                  >
-                    {c.toUpperCase()}
-                  </button>
-                ))}
-              </div>
-            </ChipsRow>
-          </>
-        ) : (
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span style={{ flex: 1, fontSize: 11.5, color: "var(--fg-tertiary)" }}>
-              No logo chosen
-            </span>
-            <button
-              className="btn-secondary"
-              style={{ height: 24, padding: "0 10px", fontSize: 11 }}
-              onClick={watermark.onPick}
-            >
-              Choose…
-            </button>
-          </div>
-        )}
-      </div>
-
-      <div className="hairline" style={{ margin: "0 14px" }} />
-
-      {/* OR EXPORT TO… block */}
-      <div style={{ padding: "10px 14px 6px" }}>
-        <span
-          style={{
-            fontSize: 10.5,
-            color: "var(--fg-tertiary)",
-            letterSpacing: "0.06em",
-            textTransform: "uppercase",
-            fontWeight: 600,
-          }}
-        >
-          Or export to…
-        </span>
-      </div>
-
-      <div style={{ padding: "0 12px 10px", display: "flex", flexDirection: "column", gap: 6 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
         <DestRow
           icon={<Icon d="M5 2h6v3M5 2v9a1 1 0 001 1h7a1 1 0 001-1V6L11 2M3 6h6v8" size={14} stroke={1.4} />}
           title="Copy to Clipboard"
@@ -4758,13 +4783,102 @@ function ExportPanel({
             disabled={busy}
           />
         )}
+        </div>
+        </Section>
+
+        <Section
+          title="Watermark"
+          open={openId === "watermark"}
+          onToggle={() => toggleSection("watermark")}
+        >
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {watermark.logoPath ? (
+            <>
+              <label
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  fontSize: 12.5,
+                  color: "var(--fg-primary)",
+                  cursor: "pointer",
+                }}
+              >
+                <input
+                  type="checkbox"
+                  className="accent-blue"
+                  checked={watermark.apply}
+                  onChange={watermark.onToggleApply}
+                />
+                <span>Apply watermark</span>
+              </label>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span
+                  title={watermark.logoPath}
+                  style={{
+                    flex: 1,
+                    minWidth: 0,
+                    fontSize: 11.5,
+                    color: "var(--fg-secondary)",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {basename(watermark.logoPath)}
+                </span>
+                <button
+                  className="btn-secondary"
+                  style={{ height: 24, padding: "0 8px", fontSize: 11 }}
+                  onClick={watermark.onPick}
+                >
+                  Change…
+                </button>
+                <button
+                  className="btn-secondary"
+                  style={{ height: 24, padding: "0 8px", fontSize: 11 }}
+                  onClick={watermark.onRemove}
+                >
+                  Remove
+                </button>
+              </div>
+              <Field label="Corner">
+                <div className="segmented full">
+                  {WM_CORNERS.map((c) => (
+                    <button
+                      key={c}
+                      className={watermark.corner === c ? "on" : ""}
+                      onClick={() => watermark.onCorner(c)}
+                    >
+                      {c.toUpperCase()}
+                    </button>
+                  ))}
+                </div>
+              </Field>
+            </>
+          ) : (
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ flex: 1, fontSize: 11.5, color: "var(--fg-tertiary)" }}>
+                No logo chosen
+              </span>
+              <button
+                className="btn-secondary"
+                style={{ height: 24, padding: "0 10px", fontSize: 11 }}
+                onClick={watermark.onPick}
+              >
+                Choose…
+              </button>
+            </div>
+          )}
+        </div>
+        </Section>
       </div>
 
-      <div className="hairline" style={{ margin: "0 14px" }} />
-
-      {/* Lifecycle block */}
+      {/* Pinned lifecycle footer — always visible, not part of the
+          accordion. */}
       <div
         style={{
+          borderTop: "1px solid var(--border-faint)",
           padding: "10px 14px 14px",
           display: "flex",
           flexDirection: "column",
@@ -4821,25 +4935,6 @@ function ExportPanel({
           <span>Discard recording</span>
         </button>
       </div>
-
-      <div style={{ flex: 1 }} />
-    </div>
-  );
-}
-
-function ChipsRow({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        gap: 8,
-        marginBottom: 6,
-      }}
-    >
-      <span style={{ fontSize: 11.5, color: "var(--fg-secondary)" }}>{label}</span>
-      {children}
     </div>
   );
 }
