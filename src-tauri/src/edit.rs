@@ -571,18 +571,29 @@ fn rasterize_arrow(
     paint.set_color_rgba8(color.0, color.1, color.2, 255);
     paint.anti_alias = true;
 
-    // Shaft
-    if shaft_len > 0.5 {
+    // Contrasting outline under the fill — light arrows get a dark rim,
+    // dark arrows a light one (same luma rule and tones as the text pill),
+    // so the arrow stays visible on any background. Drawn as: outline
+    // passes first (wider shaft stroke + stroked head triangle), fill
+    // passes on top, leaving `outline_t` of rim outside the silhouette.
+    let outline_t = (stroke_w * 0.25).clamp(1.5, 4.0);
+    let mut outline_paint = Paint::default();
+    if is_dark_color(color) {
+        outline_paint.set_color_rgba8(245, 245, 247, 255);
+    } else {
+        outline_paint.set_color_rgba8(20, 20, 22, 255);
+    }
+    outline_paint.anti_alias = true;
+
+    // Shaft path (shared by outline and fill passes).
+    let shaft_path = if shaft_len > 0.5 {
         let mut pb = PathBuilder::new();
         pb.move_to(sx, sy);
         pb.line_to(shaft_ex, shaft_ey);
-        let path = pb.finish().ok_or("empty shaft path")?;
-        let mut s = Stroke::default();
-        s.width = stroke_w;
-        s.line_cap = LineCap::Round;
-        s.line_join = LineJoin::Round;
-        pixmap.stroke_path(&path, &paint, &s, Transform::identity(), None);
-    }
+        Some(pb.finish().ok_or("empty shaft path")?)
+    } else {
+        None
+    };
 
     // Arrowhead — triangle with apex at (ex, ey), base perpendicular to
     // the line direction, base width head_w.
@@ -601,6 +612,34 @@ fn rasterize_arrow(
     pb.line_to(bx2, by2);
     pb.close();
     let head = pb.finish().ok_or("empty head path")?;
+
+    // Outline passes.
+    if let Some(path) = &shaft_path {
+        let mut s = Stroke::default();
+        s.width = stroke_w + 2.0 * outline_t;
+        s.line_cap = LineCap::Round;
+        s.line_join = LineJoin::Round;
+        pixmap.stroke_path(path, &outline_paint, &s, Transform::identity(), None);
+    }
+    {
+        // Stroking the triangle edge (centered) leaves outline_t outside;
+        // the head fill below covers the inner half.
+        let mut s = Stroke::default();
+        s.width = 2.0 * outline_t;
+        s.line_cap = LineCap::Round;
+        s.line_join = LineJoin::Round;
+        pixmap.stroke_path(&head, &outline_paint, &s, Transform::identity(), None);
+    }
+
+    // Fill passes. The shaft's round cap extends stroke_w/2 past the head
+    // base center, covering the outline segment at the shaft-head joint.
+    if let Some(path) = &shaft_path {
+        let mut s = Stroke::default();
+        s.width = stroke_w;
+        s.line_cap = LineCap::Round;
+        s.line_join = LineJoin::Round;
+        pixmap.stroke_path(path, &paint, &s, Transform::identity(), None);
+    }
     pixmap.fill_path(&head, &paint, FillRule::Winding, Transform::identity(), None);
 
     let png = pixmap
@@ -1787,20 +1826,22 @@ mod tests {
         assert_eq!(parse_annotation_color(Some("#FFF")), (255, 255, 255));
     }
 
-    // Arrow PNG renders in the sidecar color: rasterize a fat horizontal
-    // red arrow and check a mid-shaft pixel is (unpremultiplied) red.
-    #[test]
-    fn arrow_rasterizes_in_annotation_color() {
+    // Arrow PNG renders in the sidecar color with a contrasting outline:
+    // rasterize a fat horizontal arrow and check a mid-shaft pixel is the
+    // fill color and a just-outside-the-shaft pixel is the opposite-luma
+    // rim. Geometry: 200x100, stroke 10 → fill spans y 45..55, outline_t
+    // = 2.5 → rim band y 55..57.5, so (80, 56) sits mid-rim.
+    fn assert_arrow_fill_and_outline(color: (u8, u8, u8), expected_outline: (u8, u8, u8)) {
         let dir = std::env::temp_dir().join("zeigen-ann-color-test");
         std::fs::create_dir_all(&dir).unwrap();
-        let p = dir.join("arrow-red.png");
+        let p = dir.join(format!("arrow-{}-{}-{}.png", color.0, color.1, color.2));
         rasterize_arrow(
             200,
             100,
             &Position { x: 0.1, y: 0.5 },
             &Position { x: 0.9, y: 0.5 },
             10.0,
-            (255, 59, 48),
+            color,
             &p,
         )
         .expect("rasterize arrow");
@@ -1810,9 +1851,33 @@ mod tests {
         assert_eq!(px.alpha(), 255, "shaft pixel should be opaque");
         assert_eq!(
             (px.red(), px.green(), px.blue()),
-            (255, 59, 48),
-            "shaft pixel should be the sidecar red"
+            color,
+            "shaft pixel should be the sidecar color"
         );
+        let rim = pixmap.pixel(80, 56).expect("rim pixel in bounds");
+        assert_eq!(rim.alpha(), 255, "rim pixel should be opaque");
+        assert_eq!(
+            (rim.red(), rim.green(), rim.blue()),
+            expected_outline,
+            "rim pixel should be the contrast outline"
+        );
+        assert_ne!(
+            is_dark_color(color),
+            is_dark_color((rim.red(), rim.green(), rim.blue())),
+            "outline luma should be opposite the fill luma"
+        );
+    }
+
+    #[test]
+    fn arrow_rasterizes_in_annotation_color() {
+        // Red is dark by Rec.709 luma → light rim.
+        assert_arrow_fill_and_outline((255, 59, 48), (245, 245, 247));
+    }
+
+    #[test]
+    fn arrow_outline_contrasts_light_fill() {
+        // White fill → dark rim.
+        assert_arrow_fill_and_outline((255, 255, 255), (20, 20, 22));
     }
 
     // Text PNG: red glyphs land red-dominant pixels on the dark pill, and

@@ -83,6 +83,13 @@ function isDarkColor(hex: string): boolean {
   return 0.2126 * r + 0.7152 * g + 0.0722 * b < 128;
 }
 
+// Contrasting outline drawn under the arrow so it stays visible on any
+// background — same luma rule and tones as the text pill flip, mirrored by
+// edit.rs rasterize_arrow so preview and export match.
+function contrastOutline(hex: string): string {
+  return isDarkColor(hex) ? "#F5F5F7" : "#141416";
+}
+
 const DEFAULT_TEXT_SIZE = 36;
 const ANNOTATION_DEFAULT_DURATION = 3;
 const MIN_TEXT_SIZE = 12;
@@ -2910,8 +2917,20 @@ function ArrowMarker({ id, fill }: { id: string; fill: string }) {
       refY="3"
       orient="auto"
       markerUnits="strokeWidth"
+      // The contrast outline strokes past the 6x6 marker box; without this
+      // the marker viewport clips it.
+      style={{ overflow: "visible" }}
     >
-      <path d="M0,0 L6,3 L0,6 z" fill={fill} />
+      <path
+        d="M0,0 L6,3 L0,6 z"
+        fill={fill}
+        stroke={contrastOutline(fill)}
+        strokeWidth={0.7}
+        strokeLinejoin="round"
+        // Stroke under fill — the rim sits outside the head silhouette,
+        // matching the export's outline-then-fill paint order.
+        paintOrder="stroke"
+      />
     </marker>
   );
 }
@@ -3015,6 +3034,17 @@ function ArrowAnnotationView({
       <defs>
         <ArrowMarker id={markerId} fill={color} />
       </defs>
+      {/* Contrast outline under the shaft (head outline lives in the
+          marker via paint-order) */}
+      <line
+        x1={sx}
+        y1={sy}
+        x2={ex}
+        y2={ey}
+        stroke={contrastOutline(color)}
+        strokeWidth={strokeCss + 2}
+        strokeLinecap="round"
+      />
       {/* Visible shaft */}
       <line
         x1={sx}
@@ -3263,6 +3293,16 @@ function ArrowPreview({
       <defs>
         <ArrowMarker id={markerId} fill={color} />
       </defs>
+      <line
+        x1={p1.x}
+        y1={p1.y}
+        x2={p2.x}
+        y2={p2.y}
+        stroke={contrastOutline(color)}
+        strokeOpacity="0.85"
+        strokeWidth={6}
+        strokeLinecap="round"
+      />
       <line
         x1={p1.x}
         y1={p1.y}
