@@ -1,6 +1,6 @@
 # Zoom Layer — click/zoom as an editable export-time layer
 
-**Status (2026-07-13): steps 1-2 done (step 1 `66dc91f`; step 2 sidecar zoom track + guards). Step 3 is the next session.**
+**Status (2026-07-13): steps 1-3 done (step 1 `66dc91f`; step 2 `8fb58ae`; step 3 `4de72c4`). REORDERED (owner, 2026-07-13): step 5 detection runs next, BEFORE step 4 export rendering — detection is the feature, manual zoom editing is cleanup and its UX stays intentionally basic. The heuristic is per-recording and needs no accumulated corpus; step-3's live preview makes suggestions judgeable without export. v1 detection ships behind an explicit "Suggest zooms" button — auto-run at review-open is decided only once the detector is trusted, because after step 4 an auto-written track would silently move saves off the copy path.**
 
 Revives V3 Phase C (auto-zoom) in a shape that honors the 2026-07-11 encoder-floor pivot instead of fighting it. Read alongside `V3-PLAN.md` (Phase A telemetry spec §1, Phase C heuristic §3 — both reused here) and `DECISIONS.md` 2026-07-13.
 

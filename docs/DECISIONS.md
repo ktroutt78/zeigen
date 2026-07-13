@@ -4,6 +4,14 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-13 — Zoom step 3 done; step 5 detection pulled ahead of step 4 export rendering
+
+Step 3 (`4de72c4`): annotation pip/band/handle machinery extracted into the shared `SegmentTrack` component and annotations migrated onto it (owner hand-verified identical behavior); manual zoom lane, Zoom panel section (add at playhead, 1.1–2.5x scale, delete), stage crosshair center picker with crop-box edit view, live preview via rAF-driven clamped crop-center CSS transform on the video element only. Segments serialize to the step-2 keyframe schema; empty track stays absent (invariant guards green: cargo 18 passed, tsc/vite clean, segment<->keyframe round-trip harness identity). The TS `zoomAt` interpolation + framing math in Review.tsx is the reference the step-4 export renderer must mirror. Known preview-only gaps, judged acceptable: annotation overlays don't transform during zoomed playback (overlay ordering is step 4's design), and zoomed video can bleed into letterbox bars on non-16:9 sources.
+
+**Reorder (owner):** detection is the actual feature — auto-place zooms from clicks/movement; manual editing is cleanup, and its UX intentionally stays basic. Step 5 runs next, before step 4. This is safe: detection only writes the sidecar zoom track and exports ignore zoom until step 4, so the byte-identity invariant is untouched. Grounding: the C.1 heuristic is a stateless per-recording function — "tune against accumulated telemetry" calibrates thresholds and feeds the C.4 ten-recording gate, but a first pass runs on any post-step-1 recording (verified: today's `.cursor.json` files carry 120 Hz positions, click events with position, video_size, PTS anchor). Expected v1 quality: clicks/travel solid, dwell noisy (parked-cursor false positives — add an activity-recency guard), boundaries approximate; roughly a third to half of suggestions will need cleanup.
+
+**v1 detection ships behind an explicit "Suggest zooms" button.** Auto-run at review-open is a deliberate later decision, made only once the detector is trusted — after step 4, an auto-written track would silently move every save off the `-c:v copy` path. Re-running replaces only `auto_generated` keyframes; any user edit clears the flag (step-2/3 semantics), so regeneration never stomps manual work.
+
 ## 2026-07-13 — Zoom step 2 done: sidecar zoom track, absent-when-empty enforced structurally
 
 `SidecarState.zoom: Vec<ZoomKeyframe>` (`t` seconds on the original timeline like `annotation.start_time`; `scale` 1.0 = no zoom; `center_x/y` in video pixel space; `ease` in_out_cubic (default) | linear; `auto_generated`). Nothing reads the field yet — export rendering is step 4, UI is step 3.
