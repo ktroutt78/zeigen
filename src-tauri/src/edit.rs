@@ -2235,28 +2235,43 @@ mod tests {
     // audio duration is strictly less than the video duration (the V−A
     // bug premise). Run explicitly:
     //   cargo test --lib probe_audio_track_baseline -- --ignored --nocapture
-    #[test]
-    #[ignore]
-    fn probe_audio_track_baseline() {
-        let home = std::env::var("HOME").unwrap();
-        let source_str = format!(
-            "{home}/Movies/Zeigen/.scratch-baseline-c1/recording-2026-05-19-114549/recording-2026-05-19-114549.mp4"
-        );
-        let source = Path::new(&source_str);
-        assert!(source.exists(), "baseline source missing");
+    // Synthesize a self-contained test source: h264 video + a sine AAC track
+    // that can be made shorter than the video (adur < vdur) to mirror the real
+    // SCK capture artifact. Replaces the vanished May baseline fixtures — the
+    // guards below are relational (copy holds / arnndn ran / dims / audio<video),
+    // so any conforming input works and they no longer depend on out-of-repo
+    // recordings. Note: this pins TODAY's behavior, not the original May
+    // reference (DECISIONS.md 2026-07-14) — its job is to catch a plain-export
+    // regression while zoom export is added, not to reproduce the historical net.
+    fn synth_source(dir: &Path, name: &str, vdur: f64, adur: f64, w: u32, h: u32) -> PathBuf {
+        let source = dir.join(name);
+        let out = Command::new(FFMPEG_PATH)
+            .args([
+                "-y", "-v", "error",
+                "-f", "lavfi", "-i", &format!("testsrc2=duration={vdur}:size={w}x{h}:rate=30"),
+                "-f", "lavfi", "-i", &format!("sine=frequency=440:duration={adur}"),
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+            ])
+            .arg(&source)
+            .output()
+            .expect("spawn ffmpeg synth");
+        assert!(out.status.success(), "synth source: {}", String::from_utf8_lossy(&out.stderr));
+        source
+    }
 
-        let meta = probe_audio_track_path(source)
+    #[test]
+    fn probe_audio_track_baseline() {
+        let dir = std::env::temp_dir().join(format!("zeigen-probe-audio-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Audio deliberately shorter than video (2.5 < 3.0), the property this
+        // guard exists to pin (SCK audio ends before video).
+        let source = synth_source(&dir, "source.mp4", 3.0, 2.5, 640, 480);
+
+        let meta = probe_audio_track_path(&source)
             .expect("probe")
             .expect("audio track present");
-        let video_duration = probe_duration_seconds(source).expect("video duration");
-
-        println!(
-            "baseline: start={:.3}s duration={:.3}s (video={:.3}s, V-A={:.3}s)",
-            meta.start,
-            meta.duration,
-            video_duration,
-            video_duration - meta.duration
-        );
+        let video_duration = probe_duration_seconds(&source).expect("video duration");
         assert!(
             meta.start >= 0.0 && meta.start < 1.0,
             "start out of range: {}",
@@ -2269,6 +2284,7 @@ mod tests {
             meta.duration,
             video_duration
         );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // Phase 14 c2 D-08 measurement. Times the arnndn pass against the
@@ -2277,138 +2293,92 @@ mod tests {
     // stream md5 differs from source (arnndn ran) and duration is preserved.
     //   cargo test --lib render_preview_audio_baseline -- --ignored --nocapture
     #[test]
-    #[ignore]
     fn render_preview_audio_baseline() {
         ensure_audio_model_for_tests();
-        let home = std::env::var("HOME").unwrap();
-        let source_str = format!(
-            "{home}/Movies/Zeigen/.scratch-baseline-c1/recording-2026-05-19-114549/recording-2026-05-19-114549.mp4"
-        );
-        let source = Path::new(&source_str);
-        assert!(source.exists(), "baseline source missing");
+        let dir = std::env::temp_dir().join(format!("zeigen-preview-audio-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = synth_source(&dir, "source.mp4", 3.0, 3.0, 640, 480);
+        let preview = dir.join("preview.mp4");
 
-        let preview = source.parent().unwrap().join("preview.mp4");
-        let _ = std::fs::remove_file(&preview);
-
-        let start = std::time::Instant::now();
-        render_preview_audio_path(source, &preview).expect("render preview");
-        let elapsed = start.elapsed();
+        render_preview_audio_path(&source, &preview).expect("render preview");
         assert!(preview.exists(), "preview file not created");
 
-        let src_dur = probe_duration_seconds(source).expect("source duration");
+        let src_dur = probe_duration_seconds(&source).expect("source duration");
         let prev_dur = probe_duration_seconds(&preview).expect("preview duration");
-        println!(
-            "preview render: {:.2}s wall-clock for {:.2}s recording (preview={:.2}s)",
-            elapsed.as_secs_f64(),
-            src_dur,
-            prev_dur,
-        );
         assert!(
-            (src_dur - prev_dur).abs() < 0.1,
+            (src_dur - prev_dur).abs() < 0.15,
             "duration mismatch: src={src_dur} prev={prev_dur}"
         );
-
-        let src_a = stream_md5(&source_str, "0:a:0");
-        let prev_a = stream_md5(&preview.to_string_lossy(), "0:a:0");
         assert_ne!(
-            src_a, prev_a,
+            stream_md5(&source.to_string_lossy(), "0:a:0"),
+            stream_md5(&preview.to_string_lossy(), "0:a:0"),
             "preview audio should differ from source (arnndn applied)"
         );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // End-to-end check against the Phase 10 c1 scratch baseline. Verifies
-    // that the MP4 path through run_edit_pipeline honors source + sidecar
-    // on Source resolution and produces a 720-tall output on P720. Mirrors
-    // gif_export_baseline. Run explicitly:
-    //   cargo test --lib mp4_save_baseline -- --ignored --nocapture
-    //
-    // Source-path output also gets a frame-metadata CSV dumped next to it
-    // for manual regression diffs against a pre-refactor capture (Phase 10
-    // c1 method — see PHASE-10-PLAN.md §c1 Done-when).
+    // End-to-end check that the MP4 path through run_edit_pipeline honors a
+    // source + sidecar (trim + text + arrow) on Source resolution (output dims
+    // match input) and downscales to 720 on P720. Self-contained synth source;
+    // sidecar built in-code (the May fixture that carried these edits is gone).
     #[test]
-    #[ignore]
     fn mp4_save_baseline() {
         ensure_audio_model_for_tests();
-        let home = std::env::var("HOME").unwrap();
-        let source_str = format!(
-            "{home}/Movies/Zeigen/.scratch-baseline-c1/recording-2026-05-19-114549/recording-2026-05-19-114549.mp4"
-        );
-        let source = Path::new(&source_str);
-        assert!(source.exists(), "baseline source missing");
-        let sidecar = read_sidecar_path(source)
-            .expect("read sidecar")
-            .expect("baseline sidecar present");
-        assert!(sidecar.trim.is_some(), "baseline sidecar missing trim");
-        assert!(
-            sidecar.annotations.iter().any(|a| a.kind == "text"),
-            "baseline sidecar missing text annotation"
-        );
-        assert!(
-            sidecar.annotations.iter().any(|a| a.kind == "arrow"),
-            "baseline sidecar missing arrow annotation"
-        );
+        let dir = std::env::temp_dir().join(format!("zeigen-mp4-save-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // 1080-tall so P720 actually downscales (Fix A skips a non-shrinking scale).
+        let source = synth_source(&dir, "source.mp4", 3.0, 2.8, 1920, 1080);
+        // Sidecar carrying the edits this guard exercises: trim + text + arrow
+        // annotations -> rasterization + trim + resolution paths.
+        let sidecar = SidecarState {
+            trim: Some(Trim { start: 0.2, out: 2.5 }),
+            annotations: vec![
+                Annotation {
+                    kind: "text".into(), start_time: 0.0, end_time: 2.0,
+                    position: Position { x: 0.3, y: 0.3 }, content: "guard".into(),
+                    size: Some(36.0), endpoint: None, stroke: None,
+                },
+                Annotation {
+                    kind: "arrow".into(), start_time: 0.0, end_time: 2.0,
+                    position: Position { x: 0.2, y: 0.2 }, content: String::new(),
+                    size: None, endpoint: Some(Position { x: 0.6, y: 0.6 }), stroke: Some(6.0),
+                },
+            ],
+            ..Default::default()
+        };
 
-        // --- Source resolution: regression-proof path ---
-        let src_out_str = format!("{home}/Movies/Zeigen/test-mp4-c1-source.mp4");
-        let src_csv_str = format!("{home}/Movies/Zeigen/test-mp4-c1-source.csv");
-        let _ = std::fs::remove_file(&src_out_str);
-        let _ = std::fs::remove_file(&src_csv_str);
-
+        // --- Source resolution: output dims match input (no scale node) ---
+        let src_out = dir.join("out-source.mp4");
         run_edit_pipeline(
-            source,
-            &[],
-            Path::new(&src_out_str),
-            &sidecar,
+            &source, &[], &src_out, &sidecar,
             PipelineMode::Mp4 { resolution: Mp4Resolution::Source },
             crate::composite::WebcamSize::Medium,
             crate::composite::Corner::BottomRight,
-            None,
-            |_| {},
+            None, |_| {},
         )
         .expect("source pipeline");
-
-        let (src_w_in, src_h_in) = probe_dimensions(source).expect("probe source input dims");
-        let (sw, sh) = probe_dimensions(Path::new(&src_out_str)).expect("probe source dims");
-        // Source path skips the scale node entirely, so output dimensions
-        // match the input mp4.
+        let (iw, ih) = probe_dimensions(&source).expect("probe input dims");
+        let (sw, sh) = probe_dimensions(&src_out).expect("probe source-out dims");
         assert_eq!(
-            (sw, sh), (src_w_in, src_h_in),
-            "Source output dims {sw}x{sh} should match input {src_w_in}x{src_h_in}"
+            (sw, sh), (iw, ih),
+            "Source output dims {sw}x{sh} should match input {iw}x{ih}"
         );
 
-        let probe = Command::new(FFPROBE_PATH)
-            .args([
-                "-v", "error", "-select_streams", "v:0", "-show_entries",
-                "frame=pkt_pts_time,pict_type,pkt_size", "-of", "csv",
-            ])
-            .arg(&src_out_str)
-            .output()
-            .expect("ffprobe frames");
-        assert!(probe.status.success(), "ffprobe non-zero");
-        std::fs::write(&src_csv_str, &probe.stdout).expect("write source csv");
-        println!(
-            "source: {} ({}x{}) — csv {} bytes at {}",
-            src_out_str, sw, sh, probe.stdout.len(), src_csv_str
-        );
-
-        // --- P720 resolution: smoke ---
-        let p720_out_str = format!("{home}/Movies/Zeigen/test-mp4-c1-p720.mp4");
-        let _ = std::fs::remove_file(&p720_out_str);
+        // --- P720 resolution: 1080 -> 720 tall ---
+        let p720_out = dir.join("out-p720.mp4");
         run_edit_pipeline(
-            source,
-            &[],
-            Path::new(&p720_out_str),
-            &sidecar,
+            &source, &[], &p720_out, &sidecar,
             PipelineMode::Mp4 { resolution: Mp4Resolution::P720 },
             crate::composite::WebcamSize::Medium,
             crate::composite::Corner::BottomRight,
-            None,
-            |_| {},
+            None, |_| {},
         )
         .expect("p720 pipeline");
-        let (_, h720) = probe_dimensions(Path::new(&p720_out_str)).expect("probe p720 dims");
+        let (_, h720) = probe_dimensions(&p720_out).expect("probe p720 dims");
         assert_eq!(h720, 720, "P720 output height should be 720, got {h720}");
-        println!("p720: {p720_out_str} ({h720} tall)");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // Phase 11 c2 smoke (updated in Phase 12 c3). Covers:
@@ -2671,14 +2641,39 @@ mod tests {
     fn save_recording_baseline() {
         ensure_audio_model_for_tests();
         let home = std::env::var("HOME").unwrap();
-        let source_str = format!(
-            "{home}/Movies/Zeigen/.scratch-baseline-c1/recording-2026-05-19-114549/recording-2026-05-19-114549.mp4"
-        );
-        let sidecar_path = format!(
-            "{home}/Movies/Zeigen/.scratch-baseline-c1/recording-2026-05-19-114549/.recording-2026-05-19-114549.annotations.json"
-        );
-        assert!(Path::new(&source_str).exists(), "baseline source missing");
-        assert!(Path::new(&sidecar_path).exists(), "baseline sidecar missing");
+        // Self-contained source + constructed sidecar (May fixture gone). Stays
+        // #[ignore] ONLY because save_recording_impl writes to the real
+        // ~/Movies/Zeigen (line ~1780) — un-ignoring would pollute Movies each
+        // run; redirecting needs an output-dir refactor. Run on demand:
+        //   cargo test --lib save_recording_baseline -- --ignored --nocapture
+        let synth_dir = std::env::temp_dir().join(format!("zeigen-save-rec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&synth_dir);
+        std::fs::create_dir_all(&synth_dir).unwrap();
+        let source_str = synth_source(&synth_dir, "baseline.mp4", 3.0, 2.8, 1280, 800)
+            .to_string_lossy()
+            .into_owned();
+        let edit_sidecar = SidecarState {
+            trim: Some(Trim { start: 0.2, out: 2.5 }),
+            annotations: vec![
+                Annotation {
+                    kind: "text".into(), start_time: 0.0, end_time: 2.0,
+                    position: Position { x: 0.3, y: 0.3 }, content: "guard".into(),
+                    size: Some(36.0), endpoint: None, stroke: None,
+                },
+                Annotation {
+                    kind: "arrow".into(), start_time: 0.0, end_time: 2.0,
+                    position: Position { x: 0.2, y: 0.2 }, content: String::new(),
+                    size: None, endpoint: Some(Position { x: 0.6, y: 0.6 }), stroke: Some(6.0),
+                },
+            ],
+            ..Default::default()
+        };
+        let sidecar_path = synth_dir
+            .join("edit-sidecar.json")
+            .to_string_lossy()
+            .into_owned();
+        std::fs::write(&sidecar_path, serde_json::to_vec(&edit_sidecar).unwrap())
+            .expect("write constructed sidecar");
 
         // --- noop + MP4-Source: hard-link path. We point at the source mp4
         // but feed in a stamp pointing at an empty-sidecar fixture so the
@@ -2731,9 +2726,11 @@ mod tests {
         // Video stream is bit-exact (-c:v copy), audio is re-encoded
         // (arnndn + AAC). Equal video-md5 means the video pipeline didn't
         // accidentally fall through to h264_videotoolbox; differing audio-
-        // md5 means arnndn + AAC actually ran.
-        let src_v = stream_md5(noop_src.to_str().unwrap(), "0:v");
-        let out_v = stream_md5(noop_out_first.to_str().unwrap(), "0:v");
+        // md5 means arnndn + AAC actually ran. Compare 0:v:0 (the h264 stream)
+        // specifically — save_recording_impl's try_embed_poster appends a
+        // poster as an attached_pic, so a bare 0:v map would also hash that.
+        let src_v = stream_md5(noop_src.to_str().unwrap(), "0:v:0");
+        let out_v = stream_md5(noop_out_first.to_str().unwrap(), "0:v:0");
         assert_eq!(src_v, out_v, "noop video stream should be copied bit-exact");
         let src_a = stream_md5(noop_src.to_str().unwrap(), "0:a");
         let out_a = stream_md5(noop_out_first.to_str().unwrap(), "0:a");

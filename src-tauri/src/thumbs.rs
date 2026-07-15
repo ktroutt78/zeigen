@@ -150,18 +150,29 @@ mod tests {
     use super::*;
     use std::process::Command as StdCommand;
 
-    // Smoke against a live scratch recording. Run explicitly:
-    //   cargo test --lib sprite_smoke -- --ignored --nocapture
+    // Self-contained sprite-grid guard: synthesize a source, extract the
+    // sprite, pin the grid math + PNG dimensions. No dependency on the vanished
+    // May scratch recording (DECISIONS.md 2026-07-14).
     #[test]
-    #[ignore]
     fn sprite_smoke() {
+        let dir = std::env::temp_dir().join(format!("zeigen-sprite-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let source_pb = dir.join("source.mp4");
+        let synth = StdCommand::new(crate::composite::FFMPEG_PATH)
+            .args([
+                "-y", "-v", "error",
+                "-f", "lavfi", "-i", "testsrc2=duration=4:size=640x360:rate=30",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            ])
+            .arg(&source_pb)
+            .output()
+            .expect("spawn ffmpeg synth");
+        assert!(synth.status.success(), "synth: {}", String::from_utf8_lossy(&synth.stderr));
+        let source = source_pb.to_string_lossy().into_owned();
+
         let home = std::env::var("HOME").unwrap();
         let stamp = "smoke-c3";
-        let source = format!(
-            "{home}/Movies/Zeigen/.scratch/recording-2026-05-19-225852/recording-2026-05-19-225852.mp4"
-        );
-        assert!(Path::new(&source).exists(), "scratch source missing");
-
         let expected_out = format!("{home}/Library/Caches/com.zeigen.app/thumbs/{stamp}.png");
         let _ = std::fs::remove_file(&expected_out);
 

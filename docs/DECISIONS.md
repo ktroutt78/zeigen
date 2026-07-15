@@ -4,6 +4,14 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-15 — V2 prerequisite: five stream-md5 guards restored (synthesize + un-ignore); a rotted assertion surfaced
+
+Restored the five `#[ignore]`d guards whose May baseline recordings are gone. They're relational/structural (copy holds / arnndn ran / dims / audio<video / sprite grid), not golden-output pins, so they never needed the exact May files — just a conforming input. Rewrote each to **synthesize its own source** (a shared `synth_source` helper: lavfi testsrc2 video + sine AAC, audio optionally shorter than video) and **un-ignored four** (`probe_audio_track_baseline`, `render_preview_audio_baseline`, `mp4_save_baseline`, `sprite_smoke`) so they run in the default suite (35 → 39 passed). `save_recording_baseline` stays `#[ignore]` (runnable on demand) because `save_recording_impl` hardcodes `~/Movies/Zeigen` output — un-ignoring would write test artifacts into the real Movies folder each run; an output-dir refactor is a someday cleanup, not prerequisite scope.
+
+Explicit: these pin **today's** behavior, not the original May safety net (unrecoverable). Their job is forward regression-catching — does adding zoom break plain (non-zoomed) exports — which the four un-ignored ones now do automatically.
+
+**Proof that ignored guards rot silently.** Re-running `save_recording_baseline` after years dormant surfaced a stale assertion: it checked the noop `-c:v copy` via `stream_md5(out, "0:v")`, but `save_recording_impl` runs `try_embed_poster`, which appends a poster as an `attached_pic` **video** stream — so `"0:v"` hashed the poster too and the copy check failed. The assertion predated the poster feature and **would have failed on current code even with the real fixture**; it was just never re-run (ignored + fixture gone). Fixed to `"0:v:0"` (the h264 stream `-c:v copy` keeps bit-exact). Lesson banked: a guard that can't run isn't a guard, and un-ignoring is how you find that out.
+
 ## 2026-07-14 — Zoom export split into V2 (ffmpeg now) + V3 (CI compositor branch); supersedes "Swift ruled out"
 
 After the ffmpeg gate was resolved (entry below), a hardware-variance question reopened it and a GPU spike changed the shape. **Decision: finish V2 on ffmpeg (owner's daily driver for weeks), then branch for a Swift/Core-Image V3.** This supersedes the "Swift compositor is OFF the table" line in the entry below — Swift/CI is not off the table, it is V3.
