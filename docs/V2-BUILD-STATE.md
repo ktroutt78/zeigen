@@ -120,7 +120,7 @@ cost (~2.5 min for 6 min / 30 zooms) is accepted as-is.
 `docs/v3-ci-compositor/` (README + `gpuzoom.swift` + measured cost structure) and DECISIONS.md
 2026-07-14. V3's bar (must NOT regress V2 on performance OR quality): beat V2 on the FULL
 pipeline (not isolated zoom — the 33-vs-79s win was zoom-only); the spike was ~8-11 Mbps
-bilinear vs ffmpeg 24 Mbps lanczos, so GPU output quality **must actually be tuned**; the
+bilinear vs V2's shipping 8M ABR + lanczos (the earlier "24 Mbps" was a no-`-b:v` scratch test, not the export path — `edit.rs:1654`), so GPU output quality **must actually be tuned**; the
 owner's real V2 exports are now the A/B reference and gate.
 
 Other V2 open items (not blocking, left as-is): watermark + webcam + zoom together is UNTESTED

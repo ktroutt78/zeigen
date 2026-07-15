@@ -10,7 +10,7 @@ Step 3 landed (commit `f728fa2`): zooms render into exported mp4s. Two increment
 
 **Per-zoomed-span oversample: SKIPPED (owner).** The whole timeline is oversampled whenever any zoom is present, so non-zoomed spans are re-encoded (roundtrip softens ~40.7 dB PSNR / 0.995 SSIM — slight, below perception in motion, but real) and the recording pays the 4x cost end-to-end (~2.5 min for 6 min / 30 zooms). Per-span oversample would fix cost + softening and keep non-zoomed spans on `-c:v copy`, but **V2 is a temporary daily driver and the owner is spending the next cycles on V3, not on optimizing V2.** Accepted as-is. (`3x oversample` — a single `ZOOM_OVERSAMPLE` constant — remains a validated-later A/B if V2 ever needs it.) UNTESTED combo left as-is: watermark + webcam + zoom together.
 
-**Next effort: V3** (Core Image / Metal compositor) — see the 2026-07-14 entry below and `docs/v3-ci-compositor/`. V3's bar stands: must NOT regress V2 on performance OR quality (full-pipeline, not isolated zoom; GPU output quality must be tuned — spike was ~8-11 Mbps bilinear vs ffmpeg 24 Mbps lanczos); the owner's real V2 exports are now the A/B reference.
+**Next effort: V3** (Core Image / Metal compositor) — see the 2026-07-14 entry below and `docs/v3-ci-compositor/`. V3's bar stands: must NOT regress V2 on performance OR quality (full-pipeline, not isolated zoom; GPU output quality must be tuned — spike was ~8-11 Mbps bilinear vs V2's shipping 8M ABR + lanczos (the earlier "24 Mbps" was a no-`-b:v` scratch test, not the export path — `edit.rs:1654`)); the owner's real V2 exports are now the A/B reference.
 
 ## 2026-07-15 — V2 prerequisite: five stream-md5 guards restored (synthesize + un-ignore); a rotted assertion surfaced
 
@@ -34,7 +34,7 @@ After the ffmpeg gate was resolved (entry below), a hardware-variance question r
 
 **Zone-based bubble simplifies BOTH paths** and carries forward to V3 unchanged (constant CI layer, no position animation to port). It's a real product improvement independent of render path — solves "the bubble is covering something" by letting the owner pick the least-bad constant zone post-hoc.
 
-**V3's bar — must NOT regress V2 on performance OR quality:** (a) beat V2 measured on the FULL pipeline (zoom + bubble + annotations + blur/spotlight + watermark), not isolated zoom — the 33-vs-79 win was zoom-only; (b) tune the GPU output quality (spike was ~8-11 Mbps bilinear vs ffmpeg 24 Mbps lanczos — tunable, must actually be tuned); (c) once V2 is daily-driven, the owner's real exports become the A/B reference and the gate. See `docs/v3-ci-compositor/README.md`.
+**V3's bar — must NOT regress V2 on performance OR quality:** (a) beat V2 measured on the FULL pipeline (zoom + bubble + annotations + blur/spotlight + watermark), not isolated zoom — the 33-vs-79 win was zoom-only; (b) tune the GPU output quality (spike was ~8-11 Mbps bilinear vs V2's shipping 8M ABR + lanczos (the earlier "24 Mbps" was a no-`-b:v` scratch test, not the export path — `edit.rs:1654`) — tunable, must actually be tuned); (c) once V2 is daily-driven, the owner's real exports become the A/B reference and the gate. See `docs/v3-ci-compositor/README.md`.
 
 ## 2026-07-14 — Step 4 design gate resolved: ffmpeg zoompan + 4x oversample (Swift ruled out), measured
 
