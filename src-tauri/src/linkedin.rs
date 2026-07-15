@@ -106,7 +106,7 @@ pub fn linkedin_export(
             &segments,
             &tmp,
             crate::composite::WebcamSize::Medium,
-            crate::composite::Corner::BottomRight,
+            sidecar.bubble_zone,
             &sidecar.bubble_position_log,
             sidecar.bubble_roundness,
             // None: the LinkedIn path applies its watermark in its own custom

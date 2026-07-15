@@ -2,6 +2,8 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use serde::{Deserialize, Serialize};
+
 use crate::edit::BubblePositionEntry;
 
 pub(crate) const FFMPEG_PATH: &str = "/opt/homebrew/bin/ffmpeg";
@@ -72,66 +74,6 @@ pub(crate) const FFPROBE_PATH: &str = "/opt/homebrew/bin/ffprobe";
 // first real sample; both clocks are already mach-domain) instead of
 // hoping a constant holds still.
 pub(crate) const WEBCAM_LEAD_MS: f64 = 105.0;
-
-// The inline `if(lt(t,...))` chain handles arbitrary log sizes — ffmpeg
-// parses the expression once and walks it per-frame, which is cheap.
-// The chained-split alternative was catastrophically slow: `split=N`
-// forces N parallel buffer copies per frame and the chained overlay
-// pipeline does N enable-checks per frame, so a 3-min clip with ~500
-// samples could take longer than the recording itself. Set the threshold
-// high enough that the split path is effectively dead while still serving
-// as a safety net for absurd logs.
-const POSITION_LOG_MAX_INLINE: usize = 100_000;
-
-// ffmpeg's expression parser hits a hard recursion limit on nested `if()`
-// calls — measured empirically at ~94 entries on the bundled ffmpeg.
-// "Missing ')' or too many args" fires before evaluation. Cap simplified
-// logs at 80 with margin. Most static recordings collapse below this via
-// run-length encoding; only continuous-drag clips hit the thinning path
-// and lose some intermediate-frame fidelity.
-const POSITION_LOG_MAX_SIMPLIFIED: usize = 80;
-
-// Drop interior samples in static runs (positions that match both neighbors)
-// then thin uniformly to fit ffmpeg's expression-depth budget. Preserves
-// motion fidelity since boundary samples of every static run are kept.
-fn simplify_position_log(log: &[BubblePositionEntry]) -> Vec<BubblePositionEntry> {
-    if log.len() <= 2 {
-        return log.to_vec();
-    }
-    let eps = 0.001;
-    let mut compacted: Vec<BubblePositionEntry> = Vec::with_capacity(log.len());
-    compacted.push(log[0].clone());
-    for i in 1..log.len() - 1 {
-        let prev = &log[i - 1];
-        let curr = &log[i];
-        let next = &log[i + 1];
-        let same_as_prev = (curr.x - prev.x).abs() < eps && (curr.y - prev.y).abs() < eps;
-        let same_as_next = (curr.x - next.x).abs() < eps && (curr.y - next.y).abs() < eps;
-        if !(same_as_prev && same_as_next) {
-            compacted.push(curr.clone());
-        }
-    }
-    compacted.push(log[log.len() - 1].clone());
-
-    if compacted.len() > POSITION_LOG_MAX_SIMPLIFIED {
-        // Stride keeps endpoints and roughly-evenly samples between them.
-        let stride =
-            (compacted.len() as f64 / POSITION_LOG_MAX_SIMPLIFIED as f64).ceil() as usize;
-        let mut thinned: Vec<BubblePositionEntry> = compacted
-            .iter()
-            .step_by(stride.max(1))
-            .cloned()
-            .collect();
-        // Always keep the final sample so the post-end static segment lines
-        // up with where the bubble actually was at end-of-recording.
-        if thinned.last().map(|e| e.t) != compacted.last().map(|e| e.t) {
-            thinned.push(compacted.last().unwrap().clone());
-        }
-        thinned
-    } else {
-        compacted
-    }
-}
 
 fn probe_duration_seconds(path: &Path) -> Result<f64, String> {
     let output = Command::new(FFPROBE_PATH)
@@ -308,74 +250,123 @@ impl Watermark {
 
 const PADDING_PX: u32 = 24;
 
-fn entry_in_bounds(e: &BubblePositionEntry) -> bool {
-    e.x >= 0.0 && e.x <= 1.0 && e.y >= 0.0 && e.y <= 1.0
+// V2 Step 2: export bakes ONE constant bubble position (a zone) picked in
+// Review. The old PTS-keyed f(t) position (build_inline_position_expr /
+// simplify_position_log, plus the multi-monitor out-of-bounds `enable`
+// suppression) is gone from the export path — a zone is always on the
+// recorded display, so there is nothing to interpolate and nothing to
+// suppress. bubble_position_log survives only as preview/legacy data (and
+// as the diameter source); export ignores its positions. See
+// docs/V2-BUILD-STATE.md.
+//
+// Six zones on a 2x3 grid: top/bottom row x left/center/right column.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BubbleZone {
+    TopLeft,
+    TopCenter,
+    TopRight,
+    BottomLeft,
+    BottomCenter,
+    BottomRight,
 }
 
-fn segment_in_bounds(log: &[BubblePositionEntry], i: usize) -> bool {
-    let a_ok = entry_in_bounds(&log[i]);
-    if i + 1 < log.len() {
-        a_ok && entry_in_bounds(&log[i + 1])
-    } else {
-        a_ok
+enum HAlign {
+    Left,
+    Center,
+    Right,
+}
+
+enum VAlign {
+    Top,
+    Bottom,
+}
+
+impl BubbleZone {
+    fn halign(self) -> HAlign {
+        match self {
+            Self::TopLeft | Self::BottomLeft => HAlign::Left,
+            Self::TopCenter | Self::BottomCenter => HAlign::Center,
+            Self::TopRight | Self::BottomRight => HAlign::Right,
+        }
+    }
+
+    fn valign(self) -> VAlign {
+        match self {
+            Self::TopLeft | Self::TopCenter | Self::TopRight => VAlign::Top,
+            Self::BottomLeft | Self::BottomCenter | Self::BottomRight => VAlign::Bottom,
+        }
+    }
+
+    // Bubble overlay x:y, centered on the free axis with `padding` off the
+    // pinned edges. Uses overlay_w/overlay_h (the bubble input's own size).
+    // The four corners reproduce the pre-Step-2 `Corner::overlay_xy` strings
+    // byte-for-byte — the legacy args pin depends on it.
+    fn overlay_xy(self, padding: u32) -> String {
+        let x = match self.halign() {
+            HAlign::Left => format!("{padding}"),
+            HAlign::Center => "(main_w-overlay_w)/2".to_string(),
+            HAlign::Right => format!("main_w-overlay_w-{padding}"),
+        };
+        let y = match self.valign() {
+            VAlign::Top => format!("{padding}"),
+            VAlign::Bottom => format!("main_h-overlay_h-{padding}"),
+        };
+        format!("{x}:{y}")
+    }
+
+    // Shadow overlay x:y. The shadow canvas is (target + 2*shadow_padding);
+    // its top-left = bubble_top_left + (-shadow_padding, offset_y -
+    // shadow_padding). Literal `target` arithmetic (not overlay_w) because the
+    // shadow input's own width differs from the bubble's. Corners reproduce
+    // the pre-Step-2 `shadow_overlay_xy_for_corner` strings byte-for-byte.
+    fn shadow_overlay_xy(
+        self,
+        padding: u32,
+        target: u32,
+        shadow_padding: u32,
+        offset_y: u32,
+    ) -> String {
+        let p = padding as i32;
+        let sp = shadow_padding as i32;
+        let oy = offset_y as i32;
+        let t = target as i32;
+        let x = match self.halign() {
+            HAlign::Left => format!("{}", p - sp),
+            HAlign::Center => format!("(main_w-{t})/2-{sp}"),
+            HAlign::Right => format!("main_w-{}", t + p + sp),
+        };
+        let y = match self.valign() {
+            VAlign::Top => format!("{}", p + oy - sp),
+            VAlign::Bottom => format!("main_h-{}", t + p - oy + sp),
+        };
+        format!("{x}:{y}")
     }
 }
 
-// Per-segment 0/1 enable expression mirroring `build_inline_position_expr`.
-// Suppresses overlay rendering for any segment whose endpoints fall outside
-// the recorded display's [0,1] frame — bubble drawn on a different monitor
-// must not leak into the recording.
-fn build_inline_enable_expr(log: &[BubblePositionEntry]) -> String {
-    let n = log.len();
-    if n == 1 {
-        return if segment_in_bounds(log, 0) { "1".into() } else { "0".into() };
+// The zone export bakes: an explicit zone from the sidecar wins; otherwise
+// migrate an old recording to the nearest corner of its position-log
+// centroid; an empty log (screen-only or pre-bubble) falls back to the
+// legacy default corner. Review mirrors this rule for its picker default;
+// keep the two in sync.
+pub(crate) fn resolve_zone(zone: Option<BubbleZone>, log: &[BubblePositionEntry]) -> BubbleZone {
+    if let Some(z) = zone {
+        return z;
     }
-    let mut expr = if segment_in_bounds(log, n - 1) { "1".to_string() } else { "0".to_string() };
-    for i in (0..n - 1).rev() {
-        let next_t = log[i + 1].t;
-        let val = if segment_in_bounds(log, i) { "1" } else { "0" };
-        expr = format!("if(lt(t\\,{:.3})\\,{}\\,{})", next_t, val, expr);
+    if log.is_empty() {
+        return BubbleZone::BottomRight;
     }
-    expr
-}
-
-// Linear-interpolated overlay position between samples.
-// For samples 0..N-1 (N >= 2):
-//   t < t_1                → segment 0: interpolate from (X_0, Y_0) toward (X_1, Y_1)
-//   t in [t_i, t_{i+1})    → segment i: interpolate from sample i to sample i+1
-//   t >= t_{N-1}           → static at (X_{N-1}, Y_{N-1})
-// max(0, ...) on the ratio prevents extrapolation in the implicit
-// pre-first-sample window if t_0 > 0.
-fn build_inline_position_expr(log: &[BubblePositionEntry]) -> (String, String) {
-    debug_assert!(!log.is_empty());
-    let n = log.len();
-    let last = &log[n - 1];
-    let mut x_expr = format!("main_w*{:.4}-overlay_w/2", last.x);
-    let mut y_expr = format!("main_h*{:.4}-overlay_h/2", last.y);
-    for i in (0..n.saturating_sub(1)).rev() {
-        let a = &log[i];
-        let b = &log[i + 1];
-        let dt = (b.t - a.t).max(0.001);
-        x_expr = format!(
-            "if(lt(t\\,{next_t:.3})\\,main_w*({x0:.4}+({dx:.4})*max(0\\,(t-{t0:.3})/{dt:.3}))-overlay_w/2\\,{rest})",
-            next_t = b.t,
-            x0 = a.x,
-            dx = b.x - a.x,
-            t0 = a.t,
-            dt = dt,
-            rest = x_expr,
-        );
-        y_expr = format!(
-            "if(lt(t\\,{next_t:.3})\\,main_h*({y0:.4}+({dy:.4})*max(0\\,(t-{t0:.3})/{dt:.3}))-overlay_h/2\\,{rest})",
-            next_t = b.t,
-            y0 = a.y,
-            dy = b.y - a.y,
-            t0 = a.t,
-            dt = dt,
-            rest = y_expr,
-        );
+    let n = log.len() as f64;
+    let cx: f64 = log.iter().map(|e| e.x).sum::<f64>() / n;
+    let cy: f64 = log.iter().map(|e| e.y).sum::<f64>() / n;
+    // Nearest of the four corners only (mid-edges are user-pick-only). Ties at
+    // exactly 0.5 resolve toward right/bottom, matching the BottomRight default.
+    match (cx >= 0.5, cy >= 0.5) {
+        (false, false) => BubbleZone::TopLeft,
+        (true, false) => BubbleZone::TopRight,
+        (false, true) => BubbleZone::BottomLeft,
+        (true, true) => BubbleZone::BottomRight,
     }
-    (x_expr, y_expr)
 }
 
 // Rounded-square path: side `size`, corner radius `radius`, top-left at
@@ -504,37 +495,12 @@ const SHADOW_SIGMA_FRAC: f64 = 0.075;
 const SHADOW_OFFSET_FRAC: f64 = 1.0 / 30.0;
 const SHADOW_ALPHA: f64 = 0.22;
 
-// Where the shadow's top-left lands when the bubble is statically placed at
-// a corner (no position log). Shadow canvas is (target + 2*shadow_padding),
-// centered on the bubble's center then shifted down by offset_y — so its
-// top-left is bubble_top_left + (-shadow_padding, offset_y - shadow_padding).
-// Literal arithmetic (not `overlay_w`) because the bubble's corner formula
-// uses its own overlay_w which differs from the shadow's.
-fn shadow_overlay_xy_for_corner(
-    corner: Corner,
-    padding: u32,
-    target: u32,
-    shadow_padding: u32,
-    offset_y: u32,
-) -> String {
-    let p = padding as i32;
-    let sp = shadow_padding as i32;
-    let oy = offset_y as i32;
-    let t = target as i32;
-    match corner {
-        Corner::TopLeft => format!("{}:{}", p - sp, p + oy - sp),
-        Corner::TopRight => format!("main_w-{}:{}", t + p + sp, p + oy - sp),
-        Corner::BottomLeft => format!("{}:main_h-{}", p - sp, t + p - oy + sp),
-        Corner::BottomRight => format!("main_w-{}:main_h-{}", t + p + sp, t + p - oy + sp),
-    }
-}
-
 pub fn composite(
     screen_path: &Path,
     webcam_segments: &[PathBuf],
     output_path: &Path,
     size: WebcamSize,
-    corner: Corner,
+    bubble_zone: Option<BubbleZone>,
     bubble_position_log: &[BubblePositionEntry],
     bubble_roundness: Option<f64>,
     watermark: Option<Watermark>,
@@ -561,7 +527,7 @@ pub fn composite(
         webcam_segments,
         output_path,
         size,
-        corner,
+        bubble_zone,
         bubble_position_log,
         bubble_roundness,
         watermark,
@@ -580,7 +546,7 @@ fn build_composite_args(
     webcam_segments: &[PathBuf],
     output_path: &Path,
     size: WebcamSize,
-    corner: Corner,
+    bubble_zone: Option<BubbleZone>,
     bubble_position_log: &[BubblePositionEntry],
     bubble_roundness: Option<f64>,
     watermark: Option<Watermark>,
@@ -734,103 +700,19 @@ format=yuva420p[wc_rgba];\
 [{shadow_idx}:v]format=rgba,gblur=sigma={shadow_sigma},colorchannelmixer=aa={SHADOW_ALPHA}[shadow];"
     ));
 
-    // Position the overlay. Empty log → static corner. Otherwise a single
-    // overlay with nested if(lt(t,...)) x/y expressions; the split-and-chain
-    // path is retained only as a safety net (see POSITION_LOG_MAX_INLINE).
-    //
-    // Simplified log feeds the expression builders so ffmpeg's expression
-    // parser doesn't blow its recursion limit. The original log still goes
-    // to the sidecar via lib.rs for re-composite during edit.
-    let simplified_log = simplify_position_log(bubble_position_log);
-    let log_n = simplified_log.len();
-    if log_n == 0 {
-        let overlay_xy = corner.overlay_xy(PADDING_PX);
-        let shadow_xy = shadow_overlay_xy_for_corner(
-            corner,
-            PADDING_PX,
-            target,
-            shadow_padding,
-            shadow_offset_y,
-        );
-        filter.push_str(&format!(
-            "[0:v][shadow]overlay={shadow_xy}:eof_action=pass[shadowed];\
+    // Position the overlay at ONE constant zone (V2 Step 2). The zone comes
+    // from the sidecar, or is migrated from an old recording's position-log
+    // centroid, or defaults to the legacy corner — see `resolve_zone`. No
+    // time-keyed expression and no `enable` gate: a zone is always on the
+    // recorded display. For the four corners this reproduces the pre-Step-2
+    // empty-log filter string byte-for-byte (the legacy args pin).
+    let zone = resolve_zone(bubble_zone, bubble_position_log);
+    let overlay_xy = zone.overlay_xy(PADDING_PX);
+    let shadow_xy = zone.shadow_overlay_xy(PADDING_PX, target, shadow_padding, shadow_offset_y);
+    filter.push_str(&format!(
+        "[0:v][shadow]overlay={shadow_xy}:eof_action=pass[shadowed];\
 [shadowed][wc]overlay={overlay_xy}:eof_action=pass[outv_pre]"
-        ));
-    } else if log_n <= POSITION_LOG_MAX_INLINE {
-        let (x_expr, y_expr) = build_inline_position_expr(&simplified_log);
-        let enable_expr = build_inline_enable_expr(&simplified_log);
-        // Shadow shares the bubble's x/y expressions because both expressions
-        // use `overlay_w/2`-style centering — applied to each overlay's own
-        // size, the centers land on the same bubble position. The shadow's y
-        // gets `+shadow_offset_y` for the downward drop.
-        filter.push_str(&format!(
-            "[0:v][shadow]overlay=x={x_expr}:y=({y_expr})+{shadow_offset_y}:enable={enable_expr}:eof_action=pass[shadowed];\
-[shadowed][wc]overlay=x={x_expr}:y={y_expr}:enable={enable_expr}:eof_action=pass[outv_pre]"
-        ));
-    } else {
-        // Dead path in practice — `simplify_position_log` caps at
-        // POSITION_LOG_MAX_SIMPLIFIED (80) before this branch's threshold
-        // (100_000) is ever crossed. Skip shadow here rather than thread it
-        // through the per-segment chain.
-        filter.push_str(&format!("[wc]split={log_n}"));
-        for i in 0..log_n {
-            filter.push_str(&format!("[wc_{i}]"));
-        }
-        filter.push(';');
-        for i in 0..log_n {
-            let entry = &simplified_log[i];
-            let prev = if i == 0 {
-                "0:v".to_string()
-            } else {
-                format!("v_{}", i - 1)
-            };
-            let in_bounds = segment_in_bounds(&simplified_log, i);
-            let (enable, x_expr, y_expr) = if i + 1 < log_n {
-                let b = &simplified_log[i + 1];
-                let dt = (b.t - entry.t).max(0.001);
-                let enable = if in_bounds {
-                    format!("between(t\\,{:.3}\\,{:.3})", entry.t, b.t)
-                } else {
-                    "0".to_string()
-                };
-                let x = format!(
-                    "main_w*({:.4}+({:.4})*(t-{:.3})/{:.3})-overlay_w/2",
-                    entry.x,
-                    b.x - entry.x,
-                    entry.t,
-                    dt
-                );
-                let y = format!(
-                    "main_h*({:.4}+({:.4})*(t-{:.3})/{:.3})-overlay_h/2",
-                    entry.y,
-                    b.y - entry.y,
-                    entry.t,
-                    dt
-                );
-                (enable, x, y)
-            } else {
-                let enable = if in_bounds {
-                    format!("gte(t\\,{:.3})", entry.t)
-                } else {
-                    "0".to_string()
-                };
-                let x = format!("main_w*{:.4}-overlay_w/2", entry.x);
-                let y = format!("main_h*{:.4}-overlay_h/2", entry.y);
-                (enable, x, y)
-            };
-            let next_label = if i + 1 == log_n {
-                "outv_pre".to_string()
-            } else {
-                format!("v_{i}")
-            };
-            filter.push_str(&format!(
-                "[{prev}][wc_{i}]overlay=x={x_expr}:y={y_expr}:enable={enable}:eof_action=pass[{next_label}]"
-            ));
-            if i + 1 < log_n {
-                filter.push(';');
-            }
-        }
-    }
+    ));
 
     // Fix B: bake the watermark as one final overlay over the composited frame.
     // All three position-log branches above terminate in [outv_pre]; this is the
@@ -1010,6 +892,7 @@ mod tests {
 
     fn build_args_for_test(
         dir: &Path,
+        zone: Option<BubbleZone>,
         log: &[BubblePositionEntry],
         roundness: Option<f64>,
     ) -> Vec<String> {
@@ -1018,7 +901,7 @@ mod tests {
             &[dir.join("webcam-0.mp4")],
             &dir.join("composite.mp4"),
             WebcamSize::Medium,
-            Corner::BottomRight,
+            zone,
             log,
             roundness,
             None,
@@ -1061,7 +944,7 @@ mod tests {
                 std::slice::from_ref(&webcam),
                 &out,
                 WebcamSize::Medium,
-                Corner::BottomRight,
+                sidecar.bubble_zone,
                 &sidecar.bubble_position_log,
                 roundness,
                 None,
@@ -1072,21 +955,30 @@ mod tests {
         }
     }
 
-    // E1 regression guard: the full ffmpeg argument vector for a
-    // roundness-less sidecar is pinned (pre-E1 behavior, both live filter
-    // branches). Paths are normalized to <TMP>. If this fails because you
-    // intentionally changed the composite graph, re-pin — but a failure
-    // during styling work means the legacy path regressed.
+    // Args pin. The four corners keep the pre-Step-2 CONSTANT-overlay string
+    // byte-for-byte, so this pins three things at once:
+    //   1. the legacy empty-log default (BottomRight),
+    //   2. the V2 Step 2 migration — a non-empty position log no longer bakes
+    //      a time-keyed f(t) overlay; it collapses to the nearest-corner zone
+    //      (log_2_entries centroid (0.7, 0.675) -> BottomRight), yielding the
+    //      SAME string as the empty-log default. (Pre-Step-2 this second case
+    //      pinned the now-deleted nested if(lt(t,...)) expression + enable
+    //      gate — that was re-baselined here when zoom-export Step 2 landed.)
+    //   3. an explicit centered zone (TopCenter), which has no pre-Step-2
+    //      analog — pins the new `(main_w-overlay_w)/2` centering geometry.
+    // Paths normalized to <TMP>. A failure during styling work means the
+    // legacy path regressed; an intentional graph change means re-pin.
     #[test]
     fn legacy_args_pinned() {
-        let expected_static = "-y\u{1}-hide_banner\u{1}-nostats\u{1}-progress\u{1}pipe:1\u{1}-i\u{1}<TMP>/screen.mp4\u{1}-itsoffset\u{1}-0.020\u{1}-i\u{1}<TMP>/screen.mp4\u{1}-i\u{1}<TMP>/webcam-0.mp4\u{1}-loop\u{1}1\u{1}-framerate\u{1}30\u{1}-t\u{1}10.000\u{1}-i\u{1}<TMP>/mask-240.png\u{1}-loop\u{1}1\u{1}-framerate\u{1}30\u{1}-t\u{1}10.000\u{1}-i\u{1}<TMP>/shadow-240.png\u{1}-filter_complex\u{1}[2:v]tpad=start_duration=0.105:start_mode=clone[wc_full];[wc_full]hflip,crop='min(iw\\,ih)':'min(iw\\,ih)',scale=240:240,format=yuva420p[wc_rgba];[3:v]format=gray[mask_g];[wc_rgba][mask_g]alphamerge[wc];[4:v]format=rgba,gblur=sigma=18,colorchannelmixer=aa=0.22[shadow];[0:v][shadow]overlay=main_w-324:main_h-316:eof_action=pass[shadowed];[shadowed][wc]overlay=main_w-overlay_w-24:main_h-overlay_h-24:eof_action=pass[outv_pre]\u{1}-map\u{1}[outv_pre]\u{1}-map\u{1}1:a?\u{1}-c:v\u{1}h264_videotoolbox\u{1}-b:v\u{1}8M\u{1}-c:a\u{1}copy\u{1}<TMP>/composite.mp4";
-        let expected_keyframe = "-y\u{1}-hide_banner\u{1}-nostats\u{1}-progress\u{1}pipe:1\u{1}-i\u{1}<TMP>/screen.mp4\u{1}-itsoffset\u{1}-0.020\u{1}-i\u{1}<TMP>/screen.mp4\u{1}-i\u{1}<TMP>/webcam-0.mp4\u{1}-loop\u{1}1\u{1}-framerate\u{1}30\u{1}-t\u{1}10.000\u{1}-i\u{1}<TMP>/mask-240.png\u{1}-loop\u{1}1\u{1}-framerate\u{1}30\u{1}-t\u{1}10.000\u{1}-i\u{1}<TMP>/shadow-240.png\u{1}-filter_complex\u{1}[2:v]tpad=start_duration=0.105:start_mode=clone[wc_full];[wc_full]hflip,crop='min(iw\\,ih)':'min(iw\\,ih)',scale=240:240,format=yuva420p[wc_rgba];[3:v]format=gray[mask_g];[wc_rgba][mask_g]alphamerge[wc];[4:v]format=rgba,gblur=sigma=18,colorchannelmixer=aa=0.22[shadow];[0:v][shadow]overlay=x=if(lt(t\\,2.000)\\,main_w*(0.9000+(-0.4000)*max(0\\,(t-0.000)/2.000))-overlay_w/2\\,main_w*0.5000-overlay_w/2):y=(if(lt(t\\,2.000)\\,main_h*(0.8500+(-0.3500)*max(0\\,(t-0.000)/2.000))-overlay_h/2\\,main_h*0.5000-overlay_h/2))+8:enable=if(lt(t\\,2.000)\\,1\\,1):eof_action=pass[shadowed];[shadowed][wc]overlay=x=if(lt(t\\,2.000)\\,main_w*(0.9000+(-0.4000)*max(0\\,(t-0.000)/2.000))-overlay_w/2\\,main_w*0.5000-overlay_w/2):y=if(lt(t\\,2.000)\\,main_h*(0.8500+(-0.3500)*max(0\\,(t-0.000)/2.000))-overlay_h/2\\,main_h*0.5000-overlay_h/2):enable=if(lt(t\\,2.000)\\,1\\,1):eof_action=pass[outv_pre]\u{1}-map\u{1}[outv_pre]\u{1}-map\u{1}1:a?\u{1}-c:v\u{1}h264_videotoolbox\u{1}-b:v\u{1}8M\u{1}-c:a\u{1}copy\u{1}<TMP>/composite.mp4";
-        for (expected, log) in [
-            (expected_static, vec![]),
-            (expected_keyframe, log_2_entries()),
+        let expected_br = "-y\u{1}-hide_banner\u{1}-nostats\u{1}-progress\u{1}pipe:1\u{1}-i\u{1}<TMP>/screen.mp4\u{1}-itsoffset\u{1}-0.020\u{1}-i\u{1}<TMP>/screen.mp4\u{1}-i\u{1}<TMP>/webcam-0.mp4\u{1}-loop\u{1}1\u{1}-framerate\u{1}30\u{1}-t\u{1}10.000\u{1}-i\u{1}<TMP>/mask-240.png\u{1}-loop\u{1}1\u{1}-framerate\u{1}30\u{1}-t\u{1}10.000\u{1}-i\u{1}<TMP>/shadow-240.png\u{1}-filter_complex\u{1}[2:v]tpad=start_duration=0.105:start_mode=clone[wc_full];[wc_full]hflip,crop='min(iw\\,ih)':'min(iw\\,ih)',scale=240:240,format=yuva420p[wc_rgba];[3:v]format=gray[mask_g];[wc_rgba][mask_g]alphamerge[wc];[4:v]format=rgba,gblur=sigma=18,colorchannelmixer=aa=0.22[shadow];[0:v][shadow]overlay=main_w-324:main_h-316:eof_action=pass[shadowed];[shadowed][wc]overlay=main_w-overlay_w-24:main_h-overlay_h-24:eof_action=pass[outv_pre]\u{1}-map\u{1}[outv_pre]\u{1}-map\u{1}1:a?\u{1}-c:v\u{1}h264_videotoolbox\u{1}-b:v\u{1}8M\u{1}-c:a\u{1}copy\u{1}<TMP>/composite.mp4";
+        let expected_tc = "-y\u{1}-hide_banner\u{1}-nostats\u{1}-progress\u{1}pipe:1\u{1}-i\u{1}<TMP>/screen.mp4\u{1}-itsoffset\u{1}-0.020\u{1}-i\u{1}<TMP>/screen.mp4\u{1}-i\u{1}<TMP>/webcam-0.mp4\u{1}-loop\u{1}1\u{1}-framerate\u{1}30\u{1}-t\u{1}10.000\u{1}-i\u{1}<TMP>/mask-240.png\u{1}-loop\u{1}1\u{1}-framerate\u{1}30\u{1}-t\u{1}10.000\u{1}-i\u{1}<TMP>/shadow-240.png\u{1}-filter_complex\u{1}[2:v]tpad=start_duration=0.105:start_mode=clone[wc_full];[wc_full]hflip,crop='min(iw\\,ih)':'min(iw\\,ih)',scale=240:240,format=yuva420p[wc_rgba];[3:v]format=gray[mask_g];[wc_rgba][mask_g]alphamerge[wc];[4:v]format=rgba,gblur=sigma=18,colorchannelmixer=aa=0.22[shadow];[0:v][shadow]overlay=(main_w-240)/2-60:-28:eof_action=pass[shadowed];[shadowed][wc]overlay=(main_w-overlay_w)/2:24:eof_action=pass[outv_pre]\u{1}-map\u{1}[outv_pre]\u{1}-map\u{1}1:a?\u{1}-c:v\u{1}h264_videotoolbox\u{1}-b:v\u{1}8M\u{1}-c:a\u{1}copy\u{1}<TMP>/composite.mp4";
+        for (expected, zone, log) in [
+            (expected_br, None, vec![]),
+            (expected_br, None, log_2_entries()),
+            (expected_tc, Some(BubbleZone::TopCenter), vec![]),
         ] {
             let dir = temp_dir("pin");
-            let args = build_args_for_test(&dir, &log, None);
+            let args = build_args_for_test(&dir, zone, &log, None);
             let joined = args
                 .join("\u{1}")
                 .replace(&dir.to_string_lossy().into_owned(), "<TMP>");
@@ -1155,5 +1047,33 @@ mod tests {
         assert_eq!(mask_file_name("mask", 240, None), "mask-240.png");
         assert_eq!(mask_file_name("mask", 240, Some(0.35)), "mask-240-r035.png");
         assert_eq!(mask_file_name("shadow", 240, Some(1.0)), "shadow-240-r100.png");
+    }
+
+    // V2 Step 2 migration rule. Review mirrors this in TS (nearestCornerZone);
+    // keep the two in sync.
+    #[test]
+    fn resolve_zone_migration_and_defaults() {
+        fn e(x: f64, y: f64) -> BubblePositionEntry {
+            BubblePositionEntry { t: 0.0, x, y, diameter: Some(240.0) }
+        }
+        // Explicit zone always wins, log ignored (mid-edges included).
+        assert_eq!(
+            resolve_zone(Some(BubbleZone::TopCenter), &[e(0.9, 0.9)]),
+            BubbleZone::TopCenter
+        );
+        // Empty log -> legacy default corner.
+        assert_eq!(resolve_zone(None, &[]), BubbleZone::BottomRight);
+        // Centroid migrates to the nearest of the FOUR corners only.
+        assert_eq!(resolve_zone(None, &[e(0.1, 0.1)]), BubbleZone::TopLeft);
+        assert_eq!(resolve_zone(None, &[e(0.9, 0.1)]), BubbleZone::TopRight);
+        assert_eq!(resolve_zone(None, &[e(0.1, 0.9)]), BubbleZone::BottomLeft);
+        assert_eq!(resolve_zone(None, &[e(0.9, 0.9)]), BubbleZone::BottomRight);
+        // Centroid is the mean; the pin's log_2_entries -> (0.7, 0.675) -> BR.
+        assert_eq!(
+            resolve_zone(None, &[e(0.9, 0.85), e(0.5, 0.5)]),
+            BubbleZone::BottomRight
+        );
+        // Exact-0.5 ties resolve toward right/bottom (BottomRight flavor).
+        assert_eq!(resolve_zone(None, &[e(0.5, 0.5)]), BubbleZone::BottomRight);
     }
 }

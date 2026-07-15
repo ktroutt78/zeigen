@@ -126,8 +126,9 @@ pub fn clipboard_copy_recording(
     let temp_file = temp_dir.join(file_name);
     let sidecar = edit::read_sidecar_path(source)?.unwrap_or_default();
     // Phase 15 c2: composite-at-export. See edit::run_edit_pipeline
-    // header for the screen-only vs webcam branching; defaults mirror
-    // save_recording (engine_start uses Medium/BottomRight).
+    // header for the screen-only vs webcam branching; size defaults to
+    // Medium (engine_start default + diameter fallback). Bubble position
+    // comes from sidecar.bubble_zone inside composite (V2 Step 2).
     let (screen_path, segments) = edit::export_inputs_from_source(source);
     edit::run_edit_pipeline(
         &screen_path,
@@ -138,7 +139,6 @@ pub fn clipboard_copy_recording(
             resolution: edit::Mp4Resolution::Source,
         },
         crate::composite::WebcamSize::Medium,
-        crate::composite::Corner::BottomRight,
         Watermark::from_args(watermark_logo, watermark_corner, watermark_scale, watermark_opacity),
         |_| {},
     )?;

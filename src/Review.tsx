@@ -297,10 +297,63 @@ type ZoomEditor = {
   looping: boolean;
 };
 
+// V2 Step 2: the ONE constant zone the export bakes the webcam bubble at.
+// Wire values are the snake_case serde names of composite.rs's BubbleZone.
+type BubbleZone =
+  | "top_left"
+  | "top_center"
+  | "top_right"
+  | "bottom_left"
+  | "bottom_center"
+  | "bottom_right";
+
+// The 6 zones in 2x3 row-major order (top row, then bottom row) for the
+// picker grid.
+const BUBBLE_ZONES: BubbleZone[] = [
+  "top_left",
+  "top_center",
+  "top_right",
+  "bottom_left",
+  "bottom_center",
+  "bottom_right",
+];
+
+// Screen-pixel padding the export bakes the bubble off each pinned edge.
+// Mirrors composite.rs PADDING_PX; used to offset the parked preview.
+const BUBBLE_ZONE_PADDING_PX = 24;
+
+function zoneHAlign(z: BubbleZone): "left" | "center" | "right" {
+  if (z === "top_left" || z === "bottom_left") return "left";
+  if (z === "top_center" || z === "bottom_center") return "center";
+  return "right";
+}
+
+function zoneVAlign(z: BubbleZone): "top" | "bottom" {
+  return z.startsWith("top") ? "top" : "bottom";
+}
+
+// Mirror of composite.rs resolve_zone's migration path: nearest of the FOUR
+// corners to the position-log centroid; empty log -> bottom_right default.
+// Keep this rule in sync with the Rust side — export re-derives it whenever
+// bubble_zone is absent, so the preview and the exported file must agree.
+function nearestCornerZone(log: BubblePositionEntry[]): BubbleZone {
+  if (log.length === 0) return "bottom_right";
+  const n = log.length;
+  const cx = log.reduce((s, e) => s + e.x, 0) / n;
+  const cy = log.reduce((s, e) => s + e.y, 0) / n;
+  const right = cx >= 0.5;
+  const bottom = cy >= 0.5;
+  return bottom ? (right ? "bottom_right" : "bottom_left") : right ? "top_right" : "top_left";
+}
+
 type SidecarState = {
   trim?: Trim | null;
   annotations: Annotation[];
   bubble_position_log?: BubblePositionEntry[];
+  // V2 Step 2: constant bubble zone picked in Review. null/undefined = no
+  // explicit pick; export migrates from the position-log centroid (nearest
+  // corner) via composite::resolve_zone. Only written once the user picks.
+  bubble_zone?: BubbleZone | null;
   // Original-timeline timestamp picked via the Thumbnail tool. null/undefined
   // means "use the export-time default" (0.5s in) applied on the Rust side.
   // Stored in original-timeline coords like annotation.start_time.
@@ -327,6 +380,7 @@ const EMPTY_STATE: SidecarState = {
   bubble_position_log: [],
   thumbnail_time: null,
   bubble_roundness: null,
+  bubble_zone: null,
   annotation_color: null,
   zoom: [],
 };
@@ -492,6 +546,7 @@ function statesEqual(a: SidecarState, b: SidecarState, duration: number | null):
   const brb = b.bubble_roundness ?? null;
   if ((bra == null) !== (brb == null)) return false;
   if (bra != null && brb != null && Math.abs(bra - brb) > 0.001) return false;
+  if ((a.bubble_zone ?? null) !== (b.bubble_zone ?? null)) return false;
   if (normalizeAnnotationColor(a) !== normalizeAnnotationColor(b)) return false;
   const za = a.zoom ?? [];
   const zb = b.zoom ?? [];
@@ -502,46 +557,12 @@ function statesEqual(a: SidecarState, b: SidecarState, duration: number | null):
   return true;
 }
 
-// Phase 15 c3 bubble keyframe interpolation. Mirror of composite.rs's
-// inline-expression logic — given the sidecar's bubble_position_log and
-// a current playback time, return where the bubble should sit. x/y are
-// normalized [0..1] within the recorded display frame; diameter is in
-// physical pixels (matched against the screen video's natural width to
-// derive a CSS pixel size). Returns null when there's no log (screen-
-// only or pre-Phase-8 recordings) — caller renders no bubble.
-//
-// Linear interpolation between keyframes is the same shape composite.rs
-// uses via `overlay=x=...:y=...` expressions at export time, so preview
-// and saved file place the bubble at the same fractional coords.
+// V2 Step 2: the bubble no longer animates along the position log. It's
+// parked at ONE constant zone (BubbleLayer computes the parked CSS transform
+// from the effective zone). The log survives only as the diameter source and
+// as the migration input for the zone default. DEFAULT_BUBBLE_DIAMETER_PX is
+// the fallback when a sidecar logged no diameter.
 const DEFAULT_BUBBLE_DIAMETER_PX = 240; // mirrors WebcamSize::Medium
-function bubbleAt(
-  log: BubblePositionEntry[],
-  t: number,
-): { x: number; y: number; diameter: number } | null {
-  if (log.length === 0) return null;
-  const diameter = log[0].diameter ?? DEFAULT_BUBBLE_DIAMETER_PX;
-  if (t <= log[0].t) {
-    return { x: log[0].x, y: log[0].y, diameter };
-  }
-  for (let i = 1; i < log.length; i++) {
-    if (t <= log[i].t) {
-      const a = log[i - 1];
-      const b = log[i];
-      const dt = b.t - a.t;
-      if (dt <= 0) return { x: b.x, y: b.y, diameter };
-      const frac = (t - a.t) / dt;
-      return {
-        x: a.x + (b.x - a.x) * frac,
-        y: a.y + (b.y - a.y) * frac,
-        diameter,
-      };
-    }
-  }
-  // Past last keyframe — hold at the last logged position. Matches
-  // composite.rs's final `gte(t,T)` branch which keeps the bubble fixed.
-  const last = log[log.length - 1];
-  return { x: last.x, y: last.y, diameter };
-}
 
 function isLogicallyEmpty(s: SidecarState, duration: number | null): boolean {
   // Bubble keyframes are finalize-time data the review must preserve —
@@ -550,6 +571,7 @@ function isLogicallyEmpty(s: SidecarState, duration: number | null): boolean {
   const noBubble = !s.bubble_position_log || s.bubble_position_log.length === 0;
   const noThumb = s.thumbnail_time == null;
   const noRoundness = s.bubble_roundness == null;
+  const noZone = s.bubble_zone == null;
   const noZoom = !s.zoom || s.zoom.length === 0;
   return (
     normalizeTrim(s.trim, duration) == null &&
@@ -557,6 +579,7 @@ function isLogicallyEmpty(s: SidecarState, duration: number | null): boolean {
     noBubble &&
     noThumb &&
     noRoundness &&
+    noZone &&
     noZoom
   );
 }
@@ -635,6 +658,12 @@ export default function Review() {
   // edits, empty-state delete path) don't wipe the bubble keyframes.
   const [bubblePositionLog, setBubblePositionLog] = useState<BubblePositionEntry[]>([]);
   const [bubbleRoundness, setBubbleRoundness] = useState<number | null>(null);
+  // V2 Step 2: explicit bubble zone. null until the user picks one — the
+  // effective zone for preview + picker highlight falls back to the
+  // migration default (nearest corner to the log centroid). Only a real pick
+  // dirties the sidecar; untouched recordings keep bubble_zone absent and the
+  // export re-derives the same default.
+  const [bubbleZone, setBubbleZone] = useState<BubbleZone | null>(null);
   // Global annotation color. Initialized from the remembered preference;
   // the sidecar-read effect overrides it for recordings that already have
   // annotations (so opening an old recording never recolors it).
@@ -1059,6 +1088,7 @@ export default function Review() {
             bubble_position_log: state.bubble_position_log ?? [],
             thumbnail_time: state.thumbnail_time ?? null,
             bubble_roundness: state.bubble_roundness ?? null,
+            bubble_zone: state.bubble_zone ?? null,
             annotation_color: state.annotation_color ?? null,
             zoom: state.zoom ?? [],
           });
@@ -1067,6 +1097,7 @@ export default function Review() {
           if (state.bubble_position_log) setBubblePositionLog(state.bubble_position_log);
           if (state.thumbnail_time != null) setThumbnailTime(state.thumbnail_time);
           if (state.bubble_roundness != null) setBubbleRoundness(state.bubble_roundness);
+          if (state.bubble_zone != null) setBubbleZone(state.bubble_zone);
           if (state.zoom && state.zoom.length > 0) {
             setZoomSegments(zoomKeyframesToSegments(state.zoom));
           }
@@ -1173,16 +1204,29 @@ export default function Review() {
       bubble_position_log: bubblePositionLog,
       thumbnail_time: thumbnailTime,
       bubble_roundness: bubbleRoundness,
+      bubble_zone: bubbleZone,
       annotation_color: annotationColor,
       zoom: zoomSegmentsToKeyframes(zoomSegments),
     }),
-    [trim, annotations, bubblePositionLog, thumbnailTime, bubbleRoundness, annotationColor, zoomSegments],
+    [trim, annotations, bubblePositionLog, thumbnailTime, bubbleRoundness, bubbleZone, annotationColor, zoomSegments],
   );
 
   const dirty = useMemo(
     () => !statesEqual(currentState, snapshot, duration),
     [currentState, snapshot, duration],
   );
+
+  // V2 Step 2: the zone actually used for the parked preview + picker
+  // highlight. An explicit pick wins; otherwise the migration default
+  // (nearest corner to the log centroid) — the same rule composite::resolve_zone
+  // applies at export when bubble_zone is absent.
+  const effectiveZone: BubbleZone = useMemo(
+    () => bubbleZone ?? nearestCornerZone(bubblePositionLog),
+    [bubbleZone, bubblePositionLog],
+  );
+  // Only offer the picker for webcam recordings — a zone is meaningless with
+  // no bubble.
+  const hasBubble = bubblePositionLog.length > 0;
 
   // Debounced sidecar persistence on edit. Empty states are deleted to keep
   // the sources area tidy; non-empty states are written. Any sidecar change
@@ -1199,6 +1243,10 @@ export default function Review() {
         bubble_position_log: currentState.bubble_position_log,
         thumbnail_time: currentState.thumbnail_time ?? null,
         bubble_roundness: currentState.bubble_roundness ?? null,
+        // Absent until the user picks a zone (undefined drops out of the
+        // invoke payload) so untouched/pre-Step-2 sidecars stay byte-identical
+        // and the export keeps re-deriving the migration default.
+        bubble_zone: currentState.bubble_zone ?? undefined,
         annotation_color: normalizeAnnotationColor(currentState),
         // Empty zoom track = field absent (undefined drops out of the
         // invoke payload), preserving the step-2 byte-identity invariant.
@@ -1986,6 +2034,7 @@ export default function Review() {
           annotationColor={annotationColor}
           thumbnailTime={thumbnailTime}
           bubbleRoundness={bubbleRoundness}
+          bubbleZone={effectiveZone}
         />
         <ExportPanel
           sourcePath={sourcePath}
@@ -1994,6 +2043,9 @@ export default function Review() {
           thumbnail={thumbnailControls}
           annotationColor={annotationColor}
           onAnnotationColor={onAnnotationColor}
+          bubbleZone={effectiveZone}
+          onBubbleZone={setBubbleZone}
+          hasBubble={hasBubble}
           lastSavedPath={lastSavedPath}
           committedMp4Path={committedMp4Path}
           lastSavedAt={lastSavedAt}
@@ -2174,6 +2226,8 @@ type LeftColumnProps = {
   // Read-only: stamped into the sidecar at record time (recorder UI owns
   // the control); Review only previews it via BubbleLayer's border-radius.
   bubbleRoundness: number | null;
+  // V2 Step 2: resolved bubble zone for the parked preview.
+  bubbleZone: BubbleZone;
 };
 
 function LeftColumn(props: LeftColumnProps) {
@@ -2196,6 +2250,7 @@ function LeftColumn(props: LeftColumnProps) {
         webcamLeadSec={props.webcamLeadSec}
         bubblePositionLog={props.bubblePositionLog}
         bubbleRoundness={props.bubbleRoundness}
+        bubbleZone={props.bubbleZone}
         scrubbingRef={props.scrubbingRef}
         onLoadedMetadata={props.onLoadedMetadata}
         onTimeUpdate={props.onTimeUpdate}
@@ -2492,6 +2547,7 @@ type VideoStageProps = {
   webcamLeadSec: number;
   bubblePositionLog: BubblePositionEntry[];
   bubbleRoundness: number | null;
+  bubbleZone: BubbleZone;
   scrubbingRef: React.MutableRefObject<boolean>;
   onLoadedMetadata: () => void;
   onTimeUpdate: () => void;
@@ -2751,6 +2807,7 @@ function VideoStage(props: VideoStageProps) {
           webcamLeadSec={props.webcamLeadSec}
           bubblePositionLog={props.bubblePositionLog}
           bubbleRoundness={props.bubbleRoundness}
+          bubbleZone={props.bubbleZone}
           scrubbingRef={props.scrubbingRef}
           videoDims={props.watermarkPreview.videoDims}
         />
@@ -2797,9 +2854,10 @@ function VideoStage(props: VideoStageProps) {
 // via timeupdate/play/pause/seeking/seeked/ratechange — webcam.currentTime
 // stays at max(0, screen.currentTime - LEAD_S) so the first ~280ms of
 // playback shows the webcam's frozen first frame (mirroring composite.rs's
-// tpad=start_mode=clone). Position + diameter come from the sidecar's
-// bubble_position_log via bubbleAt(); fall back to nothing when no log
-// (screen-only recordings or no webcam).
+// tpad=start_mode=clone). V2 Step 2: position is the constant `bubbleZone`
+// (parked, not animated); diameter comes from the sidecar's
+// bubble_position_log. Falls back to nothing when no log (screen-only
+// recordings or no webcam).
 //
 // CSS treatments mirror composite.rs's filter graph: transform scaleX(-1)
 // for hflip, object-fit cover on a square element for crop='min(iw,ih)',
@@ -2813,6 +2871,7 @@ function BubbleLayer({
   webcamLeadSec,
   bubblePositionLog,
   bubbleRoundness,
+  bubbleZone,
   scrubbingRef,
   videoDims,
 }: {
@@ -2823,6 +2882,10 @@ function BubbleLayer({
   webcamLeadSec: number;
   bubblePositionLog: BubblePositionEntry[];
   bubbleRoundness: number | null;
+  // V2 Step 2: the resolved zone the bubble is parked at (never null — the
+  // caller falls back to the migration default). Only the position is
+  // constant; the webcam <video> still plays via the sync layer.
+  bubbleZone: BubbleZone;
   // True during a timeline scrub / trim-handle drag. The sync layer skips
   // per-seek webcam aligns while set — otherwise the webcam decoder seeks
   // in lockstep with every completed scrub seek. Review's endScrub does
@@ -2959,36 +3022,41 @@ function BubbleLayer({
     const cssDiameter = (diameter / vw) * cw;
 
     // Size is constant per recording — bubble resize was removed in
-    // phase 14 (be4aa02). Set once per effect run; rAF only mutates
-    // transform.
+    // phase 14 (be4aa02). Set once per effect run.
     w.style.width = `${cssDiameter}px`;
     w.style.height = `${cssDiameter}px`;
     w.style.visibility = "visible";
 
-    let rafId = 0;
-    const tick = () => {
-      const t = s.currentTime;
-      const bubble = bubbleAt(bubblePositionLog, t);
-      if (bubble) {
-        const centerX = cx + bubble.x * cw;
-        const centerY = cy + bubble.y * ch;
-        const tx = centerX - cssDiameter / 2;
-        const ty = centerY - cssDiameter / 2;
-        // transform order is right-to-left: scaleX(-1) flips around the
-        // element's center first (default transform-origin 50% 50%),
-        // then translate(...) shifts the flipped result. Same final
-        // placement as the prior left/top + scaleX(-1) form.
-        w.style.transform = `translate(${tx}px, ${ty}px) scaleX(-1)`;
-      }
-      rafId = requestAnimationFrame(tick);
-    };
-    rafId = requestAnimationFrame(tick);
-
-    return () => cancelAnimationFrame(rafId);
+    // V2 Step 2: park the bubble at the constant zone (no rAF position loop —
+    // position no longer follows playback time). Mirrors composite.rs's
+    // constant overlay: PADDING off the pinned edges, centered on the free
+    // axis. Padding scales by width (== by height under letterboxing). The
+    // webcam <video> still plays via the sync layer; only its screen position
+    // is fixed — exactly what the export bakes.
+    const cssPad = (BUBBLE_ZONE_PADDING_PX / vw) * cw;
+    const h = zoneHAlign(bubbleZone);
+    const v = zoneVAlign(bubbleZone);
+    const centerX =
+      h === "left"
+        ? cx + cssPad + cssDiameter / 2
+        : h === "right"
+          ? cx + cw - cssPad - cssDiameter / 2
+          : cx + cw / 2;
+    const centerY =
+      v === "top"
+        ? cy + cssPad + cssDiameter / 2
+        : cy + ch - cssPad - cssDiameter / 2;
+    const tx = centerX - cssDiameter / 2;
+    const ty = centerY - cssDiameter / 2;
+    // transform order is right-to-left: scaleX(-1) flips around the element's
+    // center first (default transform-origin 50% 50%), then translate(...)
+    // shifts the flipped result.
+    w.style.transform = `translate(${tx}px, ${ty}px) scaleX(-1)`;
   }, [
     screenVideoRef,
     webcamVideoRef,
     bubblePositionLog,
+    bubbleZone,
     videoDims,
     stage.width,
     stage.height,
@@ -4949,8 +5017,8 @@ type SaveSpec = {
 // Share section folded into Export (its rows are export destinations); a
 // persisted "share" from older builds fails the SECTION_IDS check below
 // and falls back to the default.
-type SectionId = "annotate" | "zoom" | "watermark" | "export";
-const SECTION_IDS: SectionId[] = ["annotate", "zoom", "watermark", "export"];
+type SectionId = "annotate" | "bubble" | "zoom" | "watermark" | "export";
+const SECTION_IDS: SectionId[] = ["annotate", "bubble", "zoom", "watermark", "export"];
 const DEFAULT_OPEN_SECTION: SectionId | null = "export";
 // Key versioned away from the old "review-panel-sections" multi-open
 // format (a JSON object) so no migration parsing is needed.
@@ -4977,6 +5045,62 @@ function persistOpenSection(id: SectionId | null) {
   }
 }
 
+// V2 Step 2 zone picker: a 2x3 grid (4 corners + top/bottom mid-edges). Each
+// cell is a mini 16:9 frame with a dot at that zone; the export bakes the
+// bubble there and the preview parks it there. `value` is the effective zone
+// (explicit pick or migration default), so the grid always shows a selection.
+function ZonePicker({
+  value,
+  onChange,
+}: {
+  value: BubbleZone;
+  onChange: (z: BubbleZone) => void;
+}) {
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6 }}>
+      {BUBBLE_ZONES.map((z) => {
+        const selected = z === value;
+        const h = zoneHAlign(z);
+        const v = zoneVAlign(z);
+        const justifyContent =
+          h === "left" ? "flex-start" : h === "right" ? "flex-end" : "center";
+        const alignItems = v === "top" ? "flex-start" : "flex-end";
+        return (
+          <button
+            key={z}
+            title={z.replace("_", " ")}
+            aria-label={z.replace("_", " ")}
+            aria-pressed={selected}
+            onClick={() => onChange(z)}
+            style={{
+              aspectRatio: "16 / 9",
+              display: "flex",
+              justifyContent,
+              alignItems,
+              padding: 5,
+              borderRadius: 5,
+              cursor: "pointer",
+              background: "var(--bg-input)",
+              border: selected
+                ? "1.5px solid var(--accent)"
+                : "1px solid var(--border-default)",
+            }}
+          >
+            <span
+              style={{
+                width: 9,
+                height: 9,
+                borderRadius: "50%",
+                background: selected ? "var(--accent)" : "var(--fg-tertiary)",
+              }}
+            />
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function ExportPanel({
   sourcePath,
   editor,
@@ -4984,6 +5108,9 @@ function ExportPanel({
   thumbnail,
   annotationColor,
   onAnnotationColor,
+  bubbleZone,
+  onBubbleZone,
+  hasBubble,
   lastSavedPath,
   committedMp4Path,
   lastSavedAt,
@@ -5013,6 +5140,12 @@ function ExportPanel({
   thumbnail: ThumbnailControls;
   annotationColor: string;
   onAnnotationColor: (hex: string) => void;
+  // V2 Step 2: effective bubble zone (explicit pick or migration default),
+  // the setter for an explicit pick, and whether this recording has a webcam
+  // bubble at all (the section is hidden otherwise).
+  bubbleZone: BubbleZone;
+  onBubbleZone: (z: BubbleZone) => void;
+  hasBubble: boolean;
   lastSavedPath: string | null;
   committedMp4Path: string | null;
   lastSavedAt: number;
@@ -5393,6 +5526,21 @@ function ExportPanel({
             />
           )}
         </Section>
+
+        {hasBubble && (
+          <Section
+            title="Bubble"
+            open={openId === "bubble"}
+            onToggle={() => toggleSection("bubble")}
+          >
+            <Field label="Position">
+              <ZonePicker value={bubbleZone} onChange={onBubbleZone} />
+            </Field>
+            <div style={{ fontSize: 11, color: "var(--fg-tertiary)", lineHeight: 1.35 }}>
+              The webcam bubble is baked at this fixed spot on export.
+            </div>
+          </Section>
+        )}
 
         <Section
           title="Zoom"

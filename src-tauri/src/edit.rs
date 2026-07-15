@@ -53,6 +53,14 @@ pub struct SidecarState {
     // Review.tsx's border-radius for preview parity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bubble_roundness: Option<f64>,
+    // V2 Step 2: the ONE constant zone the export bakes the webcam bubble at,
+    // picked in Review. None = no explicit pick; the export migrates from the
+    // position-log centroid (nearest corner) or falls back to the default
+    // corner via composite::resolve_zone. Skipped when None so untouched and
+    // pre-Step-2 sidecars stay byte-identical. bubble_position_log is now
+    // preview/legacy data — export reads it only for the bubble diameter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bubble_zone: Option<crate::composite::BubbleZone>,
     // Global color for all text/arrow annotations, "#RRGGBB". None = white
     // (the pre-feature hardcode) — the review only writes the field when
     // annotations exist and the color is non-white, so legacy sidecars and
@@ -863,7 +871,6 @@ pub(crate) fn run_edit_pipeline(
     sidecar: &SidecarState,
     mode: PipelineMode,
     webcam_size: crate::composite::WebcamSize,
-    webcam_corner: crate::composite::Corner,
     watermark: Option<Watermark>,
     on_progress: impl Fn(f64) + Send + Clone + 'static,
 ) -> Result<(), String> {
@@ -923,7 +930,7 @@ pub(crate) fn run_edit_pipeline(
         webcam_segments,
         &composite_tmp,
         webcam_size,
-        webcam_corner,
+        sidecar.bubble_zone,
         &sidecar.bubble_position_log,
         sidecar.bubble_roundness,
         composite_watermark,
@@ -1786,14 +1793,13 @@ fn save_recording_impl(
     // Phase 15 c2: route through the composite-at-export wrapper. For
     // webcam recordings this composites screen+segments fresh; for
     // screen-only recordings the wrapper delegates to the single-input
-    // pipeline against source directly. webcam_size/corner default to
-    // Medium/BottomRight — the values engine_start uses today (UI
-    // controls removed in phase 8). Per-recording settings would land
-    // in the sidecar; c2 doesn't need that since defaults match every
-    // current recording.
+    // pipeline against source directly. webcam_size defaults to Medium — the
+    // value engine_start uses today (UI controls removed in phase 8) and the
+    // diameter fallback for sidecars with no logged diameter. The bubble
+    // position is no longer a corner here: composite resolves the zone from
+    // sidecar.bubble_zone (V2 Step 2).
     let (screen_path, segments) = export_inputs_from_source(source);
     let webcam_size = crate::composite::WebcamSize::Medium;
-    let webcam_corner = crate::composite::Corner::BottomRight;
 
     let output = match format.as_str() {
         "mp4" => {
@@ -1812,7 +1818,6 @@ fn save_recording_impl(
                 &sidecar,
                 PipelineMode::Mp4 { resolution: res },
                 webcam_size,
-                webcam_corner,
                 watermark,
                 on_progress,
             )?;
@@ -1834,7 +1839,6 @@ fn save_recording_impl(
                 &sidecar,
                 PipelineMode::Gif { resolution: res, fps },
                 webcam_size,
-                webcam_corner,
                 watermark,
                 on_progress,
             )?;
@@ -1946,6 +1950,7 @@ mod tests {
             }],
             thumbnail_time: Some(7.5),
             bubble_roundness: Some(0.35),
+            bubble_zone: None,
             annotation_color: Some("#FF3B30".into()),
             zoom: vec![],
         }
@@ -2076,7 +2081,6 @@ mod tests {
             &SidecarState::default(),
             PipelineMode::Mp4 { resolution: Mp4Resolution::Source },
             crate::composite::WebcamSize::Medium,
-            crate::composite::Corner::BottomRight,
             None,
             |_| {},
         )
@@ -2111,7 +2115,6 @@ mod tests {
             &zoomed,
             PipelineMode::Mp4 { resolution: Mp4Resolution::Source },
             crate::composite::WebcamSize::Medium,
-            crate::composite::Corner::BottomRight,
             None,
             |_| {},
         )
@@ -2355,7 +2358,6 @@ mod tests {
             &source, &[], &src_out, &sidecar,
             PipelineMode::Mp4 { resolution: Mp4Resolution::Source },
             crate::composite::WebcamSize::Medium,
-            crate::composite::Corner::BottomRight,
             None, |_| {},
         )
         .expect("source pipeline");
@@ -2372,7 +2374,6 @@ mod tests {
             &source, &[], &p720_out, &sidecar,
             PipelineMode::Mp4 { resolution: Mp4Resolution::P720 },
             crate::composite::WebcamSize::Medium,
-            crate::composite::Corner::BottomRight,
             None, |_| {},
         )
         .expect("p720 pipeline");
@@ -2562,7 +2563,6 @@ mod tests {
                 &sidecar,
                 PipelineMode::Mp4 { resolution: Mp4Resolution::Source },
                 crate::composite::WebcamSize::Medium,
-                crate::composite::Corner::BottomRight,
                 None,
                 |_| {},
             )
@@ -2884,7 +2884,7 @@ mod tests {
         let out_src = "/tmp/zeigen-wm-mp4-source-tr.mp4";
         run_edit_pipeline(source, &[], Path::new(out_src), &sidecar,
             PipelineMode::Mp4 { resolution: Mp4Resolution::Source },
-            crate::composite::WebcamSize::Medium, crate::composite::Corner::BottomRight,
+            crate::composite::WebcamSize::Medium,
             wm_tr.clone(), |_| {})
             .expect("mp4 source + watermark");
         assert_eq!(probe_dimensions(Path::new(out_src)).unwrap(), (sw, sh), "source res preserved");
@@ -2894,7 +2894,7 @@ mod tests {
         let out_bl = "/tmp/zeigen-wm-mp4-source-bl.mp4";
         run_edit_pipeline(source, &[], Path::new(out_bl), &sidecar,
             PipelineMode::Mp4 { resolution: Mp4Resolution::Source },
-            crate::composite::WebcamSize::Medium, crate::composite::Corner::BottomRight,
+            crate::composite::WebcamSize::Medium,
             wm_bl, |_| {})
             .expect("mp4 source + watermark bl");
         extract_frame(out_bl, "/tmp/zeigen-wm-frame-pipeline-bl.png");
@@ -2903,7 +2903,7 @@ mod tests {
         let out_720 = "/tmp/zeigen-wm-mp4-720.mp4";
         run_edit_pipeline(source, &[], Path::new(out_720), &sidecar,
             PipelineMode::Mp4 { resolution: Mp4Resolution::P720 },
-            crate::composite::WebcamSize::Medium, crate::composite::Corner::BottomRight,
+            crate::composite::WebcamSize::Medium,
             wm_tr.clone(), |_| {})
             .expect("mp4 720 + watermark");
         assert_eq!(probe_dimensions(Path::new(out_720)).unwrap().1, 720, "720 tall");
@@ -2912,7 +2912,7 @@ mod tests {
         let out_gif = "/tmp/zeigen-wm.gif";
         run_edit_pipeline(source, &[], Path::new(out_gif), &sidecar,
             PipelineMode::Gif { resolution: GifResolution::P480, fps: 12 },
-            crate::composite::WebcamSize::Medium, crate::composite::Corner::BottomRight,
+            crate::composite::WebcamSize::Medium,
             wm_tr.clone(), |_| {})
             .expect("gif + watermark");
         let gif_bytes = std::fs::read(out_gif).expect("read gif");
@@ -2932,7 +2932,7 @@ mod tests {
         let noop = "/tmp/zeigen-wm-noop.mp4";
         run_edit_pipeline(source, &[], Path::new(noop), &sidecar,
             PipelineMode::Mp4 { resolution: Mp4Resolution::Source },
-            crate::composite::WebcamSize::Medium, crate::composite::Corner::BottomRight,
+            crate::composite::WebcamSize::Medium,
             None, |_| {})
             .expect("noop");
         assert_eq!(
