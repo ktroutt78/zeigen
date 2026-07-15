@@ -104,18 +104,25 @@ step at ~2 sessions / 2–4 rounds once the zone bubble removes the `f(t)` compl
 - Zoom export (Step 3): `f728fa2`.
 - Branch: `capture-engine-v2`.
 
-## V2 core complete. Next optimization: per-zoomed-span oversample
-Zoom now reaches exports; V2's core is done. The whole timeline is currently oversampled
-(the measured pessimistic ceiling) whenever any zoom is present — so a zoomed recording
-pays the 4x cost end-to-end AND its non-zoomed spans are re-encoded (oversample roundtrip
-softens them ~40.7 dB PSNR / 0.995 SSIM — slight, below perception in motion, but real).
+## V2 core COMPLETE and in daily use. Next: V3.
+Zoom reaches exports; zone bubble, zoom, and the export chain are done and owner-verified
+end-to-end on a real 6-min recording. V2 is now the owner's daily driver.
 
-**Per-zoomed-span oversample** is the next optimization (owner-prioritized): oversample +
-re-encode ONLY the spans that contain a zoom, and keep non-zoomed spans on `-c:v copy`.
-This fixes three things at once — export cost (only zoomed spans pay), the softening, and
-non-zoomed spans stay pristine (byte-identical copy). Requires splitting the timeline at
-zoom-span boundaries, processing spans separately, and concatenating. `3x oversample`
-(single-constant change, `ZOOM_OVERSAMPLE`) remains a separate validated-later A/B.
+**Per-zoomed-span oversample — SKIPPED (owner decision, 2026-07-15).** The whole timeline is
+oversampled whenever any zoom is present, so a zoomed recording pays the 4x cost end-to-end
+and its non-zoomed spans are re-encoded (oversample roundtrip softens them ~40.7 dB PSNR /
+0.995 SSIM — slight, below perception in motion, but real). Per-span oversample would fix
+cost + softening and keep non-zoomed spans on `-c:v copy`, but the owner is **not** spending
+cycles on it: **V2 is a temporary daily driver; the next effort goes to V3.** The whole-timeline
+cost (~2.5 min for 6 min / 30 zooms) is accepted as-is.
 
-Other open items: watermark + webcam + zoom together is UNTESTED (marked, not verified).
-V3 (Core Image compositor) stays a decided-but-not-started branch — `docs/v3-ci-compositor/`.
+**Next effort: V3** (Core Image / Metal compositor) — decided-but-not-started branch,
+`docs/v3-ci-compositor/` (README + `gpuzoom.swift` + measured cost structure) and DECISIONS.md
+2026-07-14. V3's bar (must NOT regress V2 on performance OR quality): beat V2 on the FULL
+pipeline (not isolated zoom — the 33-vs-79s win was zoom-only); the spike was ~8-11 Mbps
+bilinear vs ffmpeg 24 Mbps lanczos, so GPU output quality **must actually be tuned**; the
+owner's real V2 exports are now the A/B reference and gate.
+
+Other V2 open items (not blocking, left as-is): watermark + webcam + zoom together is UNTESTED
+(marked, not verified); `3x oversample` (single `ZOOM_OVERSAMPLE` constant) is a
+validated-later A/B if V2 ever needs it.
