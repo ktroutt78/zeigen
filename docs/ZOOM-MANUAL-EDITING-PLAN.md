@@ -1,8 +1,15 @@
 # Zoom manual-editing WYSIWYG plan ("Thread B")
 
-Status: **scoped, not started** (as of 2026-07-14). Captured from the July 2026 zoom
-work where it was called "Thread B" — the complement to the conservative auto-suggestion
-detector ("Thread A", committed `7e9e87c`; see DECISIONS.md 2026-07-14).
+Status (as of 2026-07-14): **Slice 1 done** (`9ff7aea`), **Slice 1.5 done** (`8854413`),
+**Slice 2 not started**, **Slice 3 likely unnecessary — reassess first**. Captured from the
+July 2026 zoom work where it was called "Thread B" — the complement to the conservative
+auto-suggestion detector ("Thread A", committed `7e9e87c`; see DECISIONS.md 2026-07-14).
+
+Slice 1.5 (looped slow preview, not in the original three-slice scope) was added mid-stream
+and it time-multiplexes Slice 3's design problem away: paused/selected shows the crop box,
+playing the loop shows the zoomed motion, never both at once — so the split-view question
+Slice 3 existed to answer no longer needs answering. Before building Slice 3, reassess
+whether any of it is still wanted. See DECISIONS.md 2026-07-14 (Thread B).
 
 ## Why this exists (the complementarity)
 
