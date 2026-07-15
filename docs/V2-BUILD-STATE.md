@@ -18,9 +18,18 @@ measured evidence: `docs/ZOOM-EXPORT-STEP4.md` and DECISIONS.md 2026-07-14 / 202
      to assert a re-encode as part of step 3** (it goes green exactly when zoom export lands;
      flipping earlier = red commit).
 
-2. **Zone-based bubble — NEXT.** (scope below)
+2. **Zone-based bubble — DONE.** Commit `5159a22`. Export bakes ONE constant zone
+   (`composite::resolve_zone`); the PTS-keyed `f(t)` overlay + `simplify_position_log` /
+   `build_inline_position_expr` / enable-gate / split-chain are deleted. `SidecarState.bubble_zone`
+   carries the pick (skipped when `None` → untouched + pre-Step-2 sidecars byte-identical);
+   `bubble_position_log` is now preview/legacy + the diameter source. Review has a 2x3 zone
+   picker (webcam recordings only) and parks the preview bubble at the zone (preview == export).
+   Four corners reproduce the pre-Step-2 filter string byte-for-byte; `legacy_args_pinned`
+   re-baselined (non-empty log → migrated constant, was the `f(t)` string) + a TopCenter pin
+   added. Live recording untouched. Verified in-app: pick parks the bubble and the exported mp4
+   matches. `cargo test --lib`: 40 passed, 4 ignored.
 
-3. **Zoom export — after zone bubble.** Tripwire flips here. (scope below)
+3. **Zoom export — NEXT.** Tripwire flips here. (scope below)
 
 ## Step 2 scope — zone-based bubble
 
@@ -69,4 +78,12 @@ step at ~2 sessions / 2–4 rounds once the zone bubble removes the `f(t)` compl
 - V2/V3 decision + `gpuzoom.swift` + measured cost structure: commit `03607f6`
   (`docs/v3-ci-compositor/`, `docs/ZOOM-EXPORT-STEP4.md`, DECISIONS.md).
 - Guards: `42c9cae`.
+- Zone-based bubble (Step 2): `5159a22`.
 - Branch: `capture-engine-v2`.
+
+## Step 3 starting point (zoom export)
+The `f(t)` complication is now gone, so the constant webcam overlay is a trivial
+`overlay=x:y` appended AFTER the zoom (see Step 3 scope). The zoom keyframes still
+serialize but nothing in the export reads `SidecarState.zoom` yet — the tripwire
+`empty_zoom_stays_on_video_copy_path` (edit.rs) still pins that a non-empty zoom track
+copies the video; flip its non-empty half to a re-encode assertion when zoompan lands.
