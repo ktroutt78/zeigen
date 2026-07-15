@@ -1,9 +1,30 @@
 // Zoom suggestion detection (ZOOM-LAYER-PLAN step 5). Pure function from a
-// .cursor.json telemetry track to auto_generated ZoomKeyframes implementing
-// the V3-PLAN C.1 heuristic: dwell and click zoom in, travel separates,
-// scroll holds, calm rules bound everything. Runs only from the review's
-// "Suggest zooms" button — never at review-open — and only ever proposes;
-// the UI replaces auto_generated segments and never touches manual ones.
+// .cursor.json telemetry track to auto_generated ZoomKeyframes.
+//
+// CONSERVATIVE TRIGGER POLICY (Thread A). Telemetry cannot read intent — a
+// click for local detail and a click that cross-filters the whole screen are
+// one identical left_down. So a bare click never starts a zoom: it can only
+// CORROBORATE a dwell (shaping that dwell's center and window). The three
+// confident, self-intending signals are the only triggers:
+//   - right-click menus  (menu appears, selection follows)
+//   - drags              (deliberate, and self-framing by their span)
+//   - dwells             (cursor settled = sustained attention)
+// A click stop where the user then reads still zooms — via the dwell it sits
+// in. A drive-by click with no dwell and no gesture proposes nothing; those
+// (the cross-filter-ambiguous cases) are dropped by design and added back by
+// hand in the review lane. Runs only from the review's "Suggest zooms" button.
+//
+// POST-CLICK INTENT (rule 1). What the cursor does AFTER a click reveals
+// intent the click alone can't. If the cursor goes STILL after a click, the
+// user is watching a consequence that rendered elsewhere (a popup, a new
+// window, a map animating) — attention moved to the screen, not the cursor —
+// so that dwell is vetoed to wide, inverting the naive "settled = attention"
+// read. If instead the cursor follows through with LOCAL motion (menu items,
+// nudging in place) the dwell holds. A CLICKLESS dwell (arrived and settled =
+// reading in place) is untouched and still zooms. Known accepted tradeoff: a
+// click whose consequence is LOCAL (a tooltip/inline expand at the click
+// point) also goes wide — a missed zoom the user adds by hand beats a wrong
+// zoom that crops a screen-wide change.
 //
 // Emitted keyframes use the exact canonical run shape Review.tsx's
 // zoomSegmentsToKeyframes writes (scale-1 edges, 600ms ramps, one shared
@@ -18,7 +39,7 @@ use crate::edit::{Ease, ZoomKeyframe};
 
 // ---- Tuning surface ----------------------------------------------------
 // Every threshold the heuristic uses, in one place. The real-recording
-// snapshot test below prints and pins detector output; retune by editing
+// snapshot tests below print and pin detector output; retune by editing
 // these and reading the new pin off the test failure.
 
 // C.1 dwell: cursor stays within a small region for >800ms. Implemented as
@@ -26,36 +47,76 @@ use crate::edit::{Ease, ZoomKeyframe};
 const DWELL_RADIUS_PX: f64 = 150.0;
 const DWELL_MIN_S: f64 = 0.8;
 
-// Parked-cursor guard. A dwell with no click whose bounding box is
-// essentially a point is an abandoned mouse, not attention — no zoom. And
-// after the last sign of life (click or >JITTER_STEP_PX movement) a zoom
-// holds only PARK_TAIL_S before letting go, so a click followed by minutes
-// of parked cursor doesn't pin the zoom forever.
+// Parked-cursor guard. A clickless dwell whose bounding box is essentially a
+// point is an abandoned mouse, not attention — no zoom. And after the last
+// sign of life (click or >JITTER_STEP_PX movement) a zoom holds only
+// PARK_TAIL_S before letting go, so a click followed by minutes of parked
+// cursor doesn't pin the zoom forever.
 const PARKED_BBOX_PX: f64 = 8.0;
 const JITTER_STEP_PX: f64 = 5.0;
 const PARK_TAIL_S: f64 = 2.0;
 
-// C.1 click: strong zoom-in signal. Window opens before the click so the
-// 600ms ramp is done by the moment of the click.
+// The zoom-in ramp opens CLICK_LEAD_S before the first sign of activity so
+// the 600ms ramp is done by the moment the user acts.
 const CLICK_LEAD_S: f64 = 1.0;
-const CLICK_TAIL_S: f64 = 2.0;
 
-// C.1 calm rule: minimum 1.2s between zoom changes. Candidates closer than
-// this either merge (centers near — one wider zoom) or the weaker one is
-// dropped (centers far — stay wide when in doubt).
+// Rule 1 post-click stillness veto. After the last click inside a dwell, if
+// the cursor's whole remaining stretch stays within a POST_CLICK_STILL_PX
+// bounding box for at least POST_CLICK_WATCH_S, the user is watching a
+// consequence elsewhere — suppress the zoom. Measured over the whole stretch,
+// not the first instant, so a click-then-pause-then-local-move (menu) reads as
+// motion (its box overflows the still threshold) and holds.
+const POST_CLICK_STILL_PX: f64 = 60.0;
+const POST_CLICK_WATCH_S: f64 = 0.6;
+
+// C.1 calm rule: minimum gap between distinct zooms. Confident candidates
+// closer than this either bridge (co-located — one hold) or, if distinct, get
+// their padding clipped to restore the gap.
 const MERGE_GAP_S: f64 = 1.2;
 const CENTER_MERGE_PX: f64 = 300.0;
 
-// C.1 scroll: reading — hold the current zoom, never pan with the scroll.
-// A scroll run near a segment's end extends the hold.
+// C.1 scroll: reading — hold the current zoom, never pan with the scroll. A
+// scroll run near a segment's end extends the hold; a scroll over a clickless
+// dwell vetoes it (the wide view is the view the reader is using).
 const SCROLL_NEAR_S: f64 = 1.2;
 const SCROLL_TAIL_S: f64 = 1.5;
+const SCROLL_VETO_PAD_S: f64 = 0.5;
 
-// Shape of the output. Fixed 2.0x (under the 2.5x C.1 cap) with the same
-// 600ms in_out_cubic ramps as manual zooms; segments shorter than
-// MIN_ZOOM_S after trimming are too twitchy to keep.
+// A left_down/left_up pair whose endpoints are more than DRAG_MIN_PX apart is
+// a drag, not a click: one candidate spanning the whole gesture, and the drag
+// motion is excluded from dwell detection so it never spawns a mid-drag dwell.
+const DRAG_MIN_PX: f64 = 60.0;
+
+// Gestures (drags and right-click menus) are framed by their span, not a
+// point: the zoom centers on the midpoint and its scale is chosen so the span
+// occupies at most GESTURE_FILL of the viewport (both ends stay in frame). A
+// span so wide the fitted scale drops below GESTURE_FLOOR can't be framed
+// usefully — stay wide. A right-click's span runs to the selection click that
+// follows it within MENU_WINDOW_S (the menu item the cursor travels to).
+const GESTURE_FILL: f64 = 0.85;
+const GESTURE_FLOOR: f64 = 1.2;
+const MENU_WINDOW_S: f64 = 4.0;
+
+// Fresh merge/bridge policy (Thread A — designed under the demoted-clicks
+// model, NOT ported). Two confident candidates bridge into one continuous
+// hold only when they are genuinely co-located: their centers are within
+// CENTER_MERGE_PX AND the union of their boxes still frames at a real zoom
+// depth (>= MERGE_MIN_SCALE, not merely above the floor) AND they are within
+// BRIDGE_GAP_S of each other in evidence time. A pair that would only fit by
+// zooming out toward the floor is a pan across the screen, not a lingering
+// hold — it stays two separate zooms. This answers the over-merge / corner-
+// to-corner canary by construction: far-apart candidates never bridge.
+const BRIDGE_GAP_S: f64 = 3.0;
+const MERGE_MIN_SCALE: f64 = 1.7;
+
+// Shape of the output. Interior-aware scale: unclamped mid-frame centers zoom
+// shallower (INTERIOR_SCALE) since they show less surrounding context, while
+// edge-clamped centers keep the deeper SUGGESTED_SCALE (clamping already
+// reveals extra context for free). Same 600ms in_out_cubic ramps as manual
+// zooms; segments shorter than MIN_ZOOM_S after trimming are too twitchy.
 const MIN_ZOOM_S: f64 = 2.0;
 const SUGGESTED_SCALE: f64 = 2.0;
+const INTERIOR_SCALE: f64 = 1.7;
 const RAMP_S: f64 = 0.6;
 
 // ---- Telemetry parsing -------------------------------------------------
@@ -104,14 +165,60 @@ pub fn cursor_track_path(source: &Path) -> PathBuf {
 
 // ---- Detection ---------------------------------------------------------
 
-// One proposed zoom window before keyframe emission.
+// One proposed zoom window before keyframe emission. The zoom must keep the
+// evidence bounding box [minx,maxx]x[miny,maxy] in frame: the emitted center
+// is that box's center and the scale is chosen so the box fits. A dwell is a
+// point box (no scale constraint); a gesture's box spans its endpoints;
+// bridging unions the boxes. `ev0`/`ev1` bracket the hard evidence the padded
+// [start,end] window wraps — the merge pass may clip the padding but never
+// cut inside the evidence.
 #[derive(Clone, Debug)]
 struct Candidate {
     start: f64,
     end: f64,
-    cx: f64,
-    cy: f64,
+    minx: f64,
+    maxx: f64,
+    miny: f64,
+    maxy: f64,
     clicks: u32,
+    ev0: f64,
+    ev1: f64,
+}
+
+impl Candidate {
+    fn cx(&self) -> f64 {
+        (self.minx + self.maxx) / 2.0
+    }
+    fn cy(&self) -> f64 {
+        (self.miny + self.maxy) / 2.0
+    }
+    fn absorb(&mut self, o: &Candidate) {
+        self.minx = self.minx.min(o.minx);
+        self.maxx = self.maxx.max(o.maxx);
+        self.miny = self.miny.min(o.miny);
+        self.maxy = self.maxy.max(o.maxy);
+    }
+}
+
+// Deepest scale that keeps a `span`-wide box inside `frame` at GESTURE_FILL of
+// the viewport; INFINITY when the span is a point (no constraint).
+fn fit_scale(span: f64, frame: f64) -> f64 {
+    if span > 0.0 {
+        GESTURE_FILL * frame / span
+    } else {
+        f64::INFINITY
+    }
+}
+
+// A press-to-release drag or a right-click-to-selection menu: framed by its
+// endpoints (x0,y0)->(x1,y1), not a single point.
+struct Gesture {
+    t0: f64,
+    t1: f64,
+    x0: f64,
+    y0: f64,
+    x1: f64,
+    y1: f64,
 }
 
 fn dist(ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
@@ -124,19 +231,60 @@ pub fn detect(track: &CursorTrack) -> Vec<ZoomKeyframe> {
         return Vec::new();
     }
     let track_end = samples.last().unwrap().t;
-    let clicks: Vec<&CursorEvent> = track
-        .events
-        .iter()
-        .filter(|e| e.kind == "left_down" || e.kind == "right_down")
-        .collect();
+    let (w, h) = (track.video_size.width, track.video_size.height);
+
+    let mut events: Vec<&CursorEvent> = track.events.iter().collect();
+    events.sort_by(|a, b| a.t.total_cmp(&b.t));
     let scrolls: Vec<&CursorEvent> =
-        track.events.iter().filter(|e| e.kind == "scroll").collect();
+        events.iter().copied().filter(|e| e.kind == "scroll").collect();
+    let ups: Vec<&CursorEvent> =
+        events.iter().copied().filter(|e| e.kind == "left_up").collect();
+
+    // ---- Confident triggers: gestures first ----------------------------
+    // Right-click menus: a right_down whose span runs to the selection click
+    // that follows it within MENU_WINDOW_S is a gesture. That selection click
+    // is consumed so it spawns no bare-click of its own; a right_down with no
+    // follow-up is just a bare click. Then left_downs: a large-displacement
+    // press/release is a drag gesture, a small one is a bare click.
+    //
+    // `clicks` here is the BARE-CLICK set — clicks that are not a gesture.
+    // Under the conservative policy they never trigger; they only corroborate
+    // a dwell they fall inside (shaping its center and window below).
+    let mut gestures: Vec<Gesture> = Vec::new();
+    let mut clicks: Vec<&CursorEvent> = Vec::new();
+    let mut consumed: Vec<f64> = Vec::new();
+    for e in events.iter().copied().filter(|e| e.kind == "right_down") {
+        match events
+            .iter()
+            .copied()
+            .find(|o| o.kind == "left_down" && o.t > e.t && o.t - e.t <= MENU_WINDOW_S)
+        {
+            Some(sel) => {
+                gestures.push(Gesture { t0: e.t, t1: sel.t, x0: e.x, y0: e.y, x1: sel.x, y1: sel.y });
+                consumed.push(sel.t);
+            }
+            None => clicks.push(e),
+        }
+    }
+    for e in events.iter().copied().filter(|e| e.kind == "left_down") {
+        if consumed.contains(&e.t) {
+            continue;
+        }
+        match ups.iter().find(|u| u.t >= e.t) {
+            Some(u) if dist(e.x, e.y, u.x, u.y) > DRAG_MIN_PX => {
+                gestures.push(Gesture { t0: e.t, t1: u.t, x0: e.x, y0: e.y, x1: u.x, y1: u.y });
+            }
+            _ => clicks.push(e),
+        }
+    }
 
     let mut candidates: Vec<Candidate> = Vec::new();
 
-    // Dwell runs: greedy maximal runs whose bbox diagonal stays under
-    // DWELL_RADIUS_PX. Travel never dwells (bbox overflows immediately),
-    // so travel separates candidates by construction.
+    // Dwell candidates: greedy maximal sample runs whose bbox diagonal stays
+    // under DWELL_RADIUS_PX. Travel never dwells (bbox overflows immediately),
+    // so travel separates candidates by construction. A run overlapping a
+    // gesture spawns no dwell (the gesture provides one). A clickless dwell is
+    // vetoed by an overlapping scroll (reading) or rejected as parked.
     let mut i = 0;
     while i < samples.len() {
         let (mut minx, mut maxx) = (samples[i].x, samples[i].x);
@@ -155,16 +303,44 @@ pub fn detect(track: &CursorTrack) -> Vec<ZoomKeyframe> {
             j += 1;
         }
         let (t0, t1) = (samples[i].t, samples[j].t);
-        if t1 - t0 >= DWELL_MIN_S {
+        let over_gesture = gestures.iter().any(|g| g.t0 <= t1 && g.t1 >= t0);
+        if t1 - t0 >= DWELL_MIN_S && !over_gesture {
             let in_dwell: Vec<&&CursorEvent> =
                 clicks.iter().filter(|c| c.t >= t0 && c.t <= t1).collect();
+            let scroll_vetoed = in_dwell.is_empty()
+                && scrolls.iter().any(|s| {
+                    s.t >= t0 - SCROLL_VETO_PAD_S && s.t <= t1 + SCROLL_VETO_PAD_S
+                });
             let parked =
                 in_dwell.is_empty() && dist(minx, miny, maxx, maxy) < PARKED_BBOX_PX;
-            if !parked {
-                // Signs of life inside the dwell: clicks, or movement
-                // beyond jitter from the last resting position. The zoom
-                // window hugs [first, last] activity — a cursor parked for
-                // a stretch before or after doesn't drag the zoom with it.
+            // Rule 1: a clicked dwell whose whole post-click stretch stays
+            // still is watching a consequence elsewhere — veto to wide. Third
+            // sibling of the parked/scroll vetoes; scoped to clicked dwells so
+            // clickless reading-in-place is untouched.
+            let post_click_still = match in_dwell
+                .iter()
+                .map(|c| c.t)
+                .max_by(|a, b| a.total_cmp(b))
+            {
+                Some(last_click) if t1 - last_click >= POST_CLICK_WATCH_S => {
+                    let post = samples[i..=j].iter().filter(|s| s.t >= last_click);
+                    let (mut nx, mut xx, mut ny, mut xy) =
+                        (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+                    for s in post {
+                        nx = nx.min(s.x);
+                        xx = xx.max(s.x);
+                        ny = ny.min(s.y);
+                        xy = xy.max(s.y);
+                    }
+                    xx >= nx && dist(nx, ny, xx, xy) < POST_CLICK_STILL_PX
+                }
+                _ => false,
+            };
+            if !parked && !scroll_vetoed && !post_click_still {
+                // Signs of life inside the dwell: clicks, or movement beyond
+                // jitter from the last resting position. The zoom window hugs
+                // [first, last] activity — a cursor parked for a stretch
+                // before or after doesn't drag the zoom with it.
                 let mut first_act: Option<f64> = None;
                 let mut last_act = t0;
                 let (mut rx, mut ry) = (samples[i].x, samples[i].y);
@@ -182,11 +358,10 @@ pub fn detect(track: &CursorTrack) -> Vec<ZoomKeyframe> {
                 let start = t0.max(first_act.unwrap_or(t0) - CLICK_LEAD_S);
                 let end = t1.min(last_act + PARK_TAIL_S);
                 if end - start >= DWELL_MIN_S {
-                    // Attention centers on the clicks when there are any,
-                    // else on where the cursor actually sat. Median, not
-                    // mean: the run's edges include the entry/exit travel
-                    // tails that fit inside the bbox, and a mean drags the
-                    // center toward them.
+                    // Attention centers on the corroborating clicks when there
+                    // are any, else on where the cursor actually sat. Median,
+                    // not mean: the run's edges include entry/exit travel tails
+                    // that fit inside the bbox, and a mean drags toward them.
                     let (cx, cy) = if in_dwell.is_empty() {
                         let median = |mut v: Vec<f64>| {
                             v.sort_by(f64::total_cmp);
@@ -207,9 +382,13 @@ pub fn detect(track: &CursorTrack) -> Vec<ZoomKeyframe> {
                     candidates.push(Candidate {
                         start,
                         end,
-                        cx,
-                        cy,
+                        minx: cx,
+                        maxx: cx,
+                        miny: cy,
+                        maxy: cy,
                         clicks: in_dwell.len() as u32,
+                        ev0: first_act.unwrap_or(start),
+                        ev1: last_act,
                     });
                 }
             }
@@ -217,51 +396,84 @@ pub fn detect(track: &CursorTrack) -> Vec<ZoomKeyframe> {
         i = j + 1;
     }
 
-    // Click windows. Clicks inside dwells produce a second overlapping
-    // candidate; the merge pass folds them together.
-    for c in &clicks {
+    // Gesture candidates: one candidate whose evidence box spans the drag or
+    // menu endpoints, so framing keeps both in view. A gesture whose own span
+    // is too wide to frame above GESTURE_FLOOR earns no candidate — stay wide.
+    // The gesture's motion already suppressed overlapping dwells above.
+    for g in &gestures {
+        let (dx, dy) = ((g.x1 - g.x0).abs(), (g.y1 - g.y0).abs());
+        if fit_scale(dx, w).min(fit_scale(dy, h)).min(SUGGESTED_SCALE) < GESTURE_FLOOR {
+            continue;
+        }
         candidates.push(Candidate {
-            start: (c.t - CLICK_LEAD_S).max(0.0),
-            end: (c.t + CLICK_TAIL_S).min(track_end),
-            cx: c.x,
-            cy: c.y,
+            start: (g.t0 - CLICK_LEAD_S).max(0.0),
+            end: (g.t1 + RAMP_S).min(track_end),
+            minx: g.x0.min(g.x1),
+            maxx: g.x0.max(g.x1),
+            miny: g.y0.min(g.y1),
+            maxy: g.y0.max(g.y1),
             clicks: 1,
+            ev0: g.t0,
+            ev1: g.t1,
         });
     }
 
+    // NOTE: no bare-click candidates. The conservative policy demotes a lone
+    // click to a corroborator only; it shaped the dwell it sits in above, and
+    // a click in no dwell and no gesture proposes nothing.
+
     candidates.sort_by(|a, b| a.start.total_cmp(&b.start));
 
-    // Calm pass: anything closer than MERGE_GAP_S merges when the centers
-    // are near enough to share one 2x window. Far-apart neighbors (a demo
-    // hopping between click stops) instead shorten the earlier zoom to
-    // restore the calm gap; only when nothing usable would remain does the
-    // weaker candidate get dropped — a wrong zoom is worse than a missed
-    // one.
+    // ---- Fresh merge/bridge pass (designed, not ported) ----------------
+    // Index-based so a co-located bridge (mutate last) and a distinct split
+    // (mutate last, then push) never fight the borrow checker.
     let mut merged: Vec<Candidate> = Vec::new();
     for c in candidates {
-        let Some(last) = merged.last_mut() else {
+        if merged.is_empty() {
             merged.push(c);
             continue;
-        };
-        if c.start >= last.end + MERGE_GAP_S {
-            merged.push(c);
-        } else if dist(last.cx, last.cy, c.cx, c.cy) <= CENTER_MERGE_PX {
-            let (w1, w2) = ((1 + last.clicks) as f64, (1 + c.clicks) as f64);
-            last.cx = (last.cx * w1 + c.cx * w2) / (w1 + w2);
-            last.cy = (last.cy * w1 + c.cy * w2) / (w1 + w2);
-            last.end = last.end.max(c.end);
-            last.clicks += c.clicks;
-        } else if c.start - MERGE_GAP_S - last.start >= MIN_ZOOM_S {
-            last.end = last.end.min(c.start - MERGE_GAP_S);
-            merged.push(c);
-        } else if (c.clicks, c.end - c.start) > (last.clicks, last.end - last.start) {
-            *last = c;
         }
+        let li = merged.len() - 1;
+        let centers_near =
+            dist(merged[li].cx(), merged[li].cy(), c.cx(), c.cy()) <= CENTER_MERGE_PX;
+        let union_w = merged[li].maxx.max(c.maxx) - merged[li].minx.min(c.minx);
+        let union_h = merged[li].maxy.max(c.maxy) - merged[li].miny.min(c.miny);
+        let union_scale =
+            fit_scale(union_w, w).min(fit_scale(union_h, h)).min(SUGGESTED_SCALE);
+        let colocated = centers_near && union_scale >= MERGE_MIN_SCALE;
+        let ev_gap = c.ev0 - merged[li].ev1;
+        if colocated && ev_gap <= BRIDGE_GAP_S {
+            // Same region, close in time — one continuous hold.
+            merged[li].absorb(&c);
+            merged[li].end = merged[li].end.max(c.end);
+            merged[li].ev1 = merged[li].ev1.max(c.ev1);
+            merged[li].clicks += c.clicks;
+        } else if c.start >= merged[li].end + MERGE_GAP_S {
+            // Already calm-separated — keep both as-is.
+            merged.push(c);
+        } else if ev_gap >= MERGE_GAP_S {
+            // Distinct actions crowded only by padding: split the padding at
+            // the evidence-gap midpoint, never cutting either evidence, so
+            // both survive as separate zooms a calm gap apart. (This is what
+            // keeps two far-apart back-to-back drags from fusing into one
+            // corner-to-corner pan.)
+            let midpoint = (merged[li].ev1 + c.ev0) / 2.0;
+            merged[li].end = merged[li].end.min((midpoint - MERGE_GAP_S / 2.0).max(merged[li].ev1));
+            let mut c = c;
+            c.start = c.start.max((midpoint + MERGE_GAP_S / 2.0).min(c.ev0));
+            merged.push(c);
+        } else if (c.clicks, c.ev1 - c.ev0) > (merged[li].clicks, merged[li].ev1 - merged[li].ev0) {
+            // Evidence itself conflicts (near-overlapping) and they are not
+            // co-located — can't show both. Keep the stronger; a wrong zoom is
+            // worse than a missed one.
+            merged[li] = c;
+        }
+        // else: drop c (weaker of a conflicting pair).
     }
 
-    // Scroll holds: a scroll run at a segment's edge means reading — keep
-    // the zoom up through it (plus a tail), but never into the next
-    // segment's calm gap.
+    // Scroll holds: a scroll run at a segment's edge means reading — keep the
+    // zoom up through it (plus a tail), but never into the next segment's calm
+    // gap. Also the final guarantor of the MERGE_GAP between neighbors.
     for k in 0..merged.len() {
         loop {
             let end = merged[k].end;
@@ -279,17 +491,29 @@ pub fn detect(track: &CursorTrack) -> Vec<ZoomKeyframe> {
         }
     }
 
-    // Final shape: drop twitchy shorts, clamp centers so the 2x window
-    // stays inside the frame, emit the canonical keyframe run.
-    let (w, h) = (track.video_size.width, track.video_size.height);
-    let (half_w, half_h) = (w / (2.0 * SUGGESTED_SCALE), h / (2.0 * SUGGESTED_SCALE));
+    // Final shape: drop twitchy shorts, center on the evidence box, pick the
+    // scale — shallower for boxes that sit inside the frame at full depth,
+    // deeper for edge-clamped ones, but never deeper than keeps the whole box
+    // in frame. A box too wide to frame above the floor stays wide. Clamp the
+    // center to the chosen scale's window, emit the canonical run.
+    let (edge_w, edge_h) = (w / (2.0 * SUGGESTED_SCALE), h / (2.0 * SUGGESTED_SCALE));
     let mut kfs: Vec<ZoomKeyframe> = Vec::new();
     for c in merged {
         if c.end - c.start < MIN_ZOOM_S {
             continue;
         }
-        let cx = c.cx.clamp(half_w, w - half_w);
-        let cy = c.cy.clamp(half_h, h - half_h);
+        let (cx0, cy0) = (c.cx(), c.cy());
+        let interior = cx0 >= edge_w && cx0 <= w - edge_w && cy0 >= edge_h && cy0 <= h - edge_h;
+        let base = if interior { INTERIOR_SCALE } else { SUGGESTED_SCALE };
+        let scale = base
+            .min(fit_scale(c.maxx - c.minx, w))
+            .min(fit_scale(c.maxy - c.miny, h));
+        if scale < GESTURE_FLOOR {
+            continue;
+        }
+        let (half_w, half_h) = (w / (2.0 * scale), h / (2.0 * scale));
+        let cx = cx0.clamp(half_w, w - half_w);
+        let cy = cy0.clamp(half_h, h - half_h);
         let kf = |t: f64, scale: f64| ZoomKeyframe {
             t,
             scale,
@@ -302,10 +526,10 @@ pub fn detect(track: &CursorTrack) -> Vec<ZoomKeyframe> {
         let ramp = RAMP_S.min(dur / 2.0);
         kfs.push(kf(c.start, 1.0));
         if dur > 2.0 * ramp {
-            kfs.push(kf(c.start + ramp, SUGGESTED_SCALE));
-            kfs.push(kf(c.end - ramp, SUGGESTED_SCALE));
+            kfs.push(kf(c.start + ramp, scale));
+            kfs.push(kf(c.end - ramp, scale));
         } else {
-            kfs.push(kf(c.start + dur / 2.0, SUGGESTED_SCALE));
+            kfs.push(kf(c.start + dur / 2.0, scale));
         }
         kfs.push(kf(c.end, 1.0));
     }
@@ -398,6 +622,7 @@ mod tests {
             self
         }
 
+        // A bare left-click at the current position.
         fn click(mut self) -> Self {
             self.track.events.push(CursorEvent {
                 t: self.t,
@@ -430,7 +655,8 @@ mod tests {
 
     // Segments reconstructed from the canonical keyframe run — mirrors
     // Review.tsx zoomKeyframesToSegments for assertion readability.
-    fn segments(kfs: &[ZoomKeyframe]) -> Vec<(f64, f64, f64, f64)> {
+    // (start, end, center_x, center_y, peak_scale).
+    fn segments(kfs: &[ZoomKeyframe]) -> Vec<(f64, f64, f64, f64, f64)> {
         let mut out = Vec::new();
         let mut i = 0;
         while i < kfs.len() {
@@ -442,7 +668,7 @@ mod tests {
             while j < kfs.len() && kfs[j].scale > 1.001 {
                 j += 1;
             }
-            out.push((kfs[i - 1].t, kfs[j].t, kfs[i].center_x, kfs[i].center_y));
+            out.push((kfs[i - 1].t, kfs[j].t, kfs[i].center_x, kfs[i].center_y, kfs[i].scale));
             i = j;
         }
         out
@@ -451,7 +677,7 @@ mod tests {
     fn fmt_segments(kfs: &[ZoomKeyframe]) -> String {
         segments(kfs)
             .iter()
-            .map(|(s, e, x, y)| format!("{s:.2}-{e:.2}s @({x:.0},{y:.0})"))
+            .map(|(s, e, x, y, sc)| format!("{s:.2}-{e:.2}s @({x:.0},{y:.0}) {sc:.1}x"))
             .collect::<Vec<_>>()
             .join("; ")
     }
@@ -479,19 +705,15 @@ mod tests {
                 w[1]
             );
         }
-        assert_eq!(
-            got,
-            "1.05-3.28s @(368,435); 4.48-6.52s @(823,666); 7.72-9.87s @(368,717); 12.49-16.21s @(1102,717)"
-        );
+        // Rule 1 vetoes the 1.30-4.26 post-click-still dwell; only the drag
+        // survives (down from 2 pre-rule-1, 4 at the committed baseline).
+        assert_eq!(got, "13.67-15.73s @(1102,717) 2.0x");
     }
 
-    // Fixture #2: the ~162s demo recording from the 2026-07-13 owner
-    // judging pass (DECISIONS.md tuning spec). Unlike fixture #1 it has
-    // drags and 46 scroll events — the two behaviors the six-fix tuning
-    // session changes most. Its 28 suggestions scored 24/28 keep-worthy;
-    // the tuning session re-pins both fixtures and should show FEWER,
-    // calmer segments here (the two narration/scroll dwells and the two
-    // transient-click zooms gone, the drag triple bridged).
+    // Fixture #2: the ~162s demo recording from the 2026-07-13 owner judging
+    // pass (drags + 46 scroll events). Conservative policy: menus/drags/dwells
+    // trigger, bare clicks only corroborate; the fresh merge keeps far-apart
+    // back-to-back gestures separate (the corner-to-corner canary).
     #[test]
     fn real_recording_2_pinned_suggestions() {
         let track: CursorTrack = serde_json::from_str(include_str!(
@@ -512,13 +734,47 @@ mod tests {
         }
         assert_eq!(
             got,
-            "7.88-10.25s @(480,270); 11.45-13.81s @(1274,661); 15.01-21.46s @(933,663); 22.66-26.08s @(480,270); 29.26-32.63s @(480,270); 35.44-37.49s @(480,273); 40.32-43.85s @(480,335); 45.05-48.89s @(480,810); 50.09-59.64s @(558,351); 60.84-63.62s @(480,810); 64.82-68.06s @(480,281); 70.55-74.92s @(480,655); 76.12-78.47s @(1440,810); 79.67-82.85s @(480,270); 85.12-87.16s @(480,465); 88.36-94.24s @(901,703); 95.44-104.09s @(480,731); 106.04-108.29s @(480,345); 110.16-113.19s @(480,482); 114.97-120.60s @(1099,693); 121.80-123.96s @(480,304); 126.24-129.10s @(561,332); 130.30-132.46s @(480,270); 135.64-138.64s @(717,302); 140.30-142.72s @(611,412); 143.92-147.96s @(1356,432); 149.16-154.21s @(480,796); 155.41-161.81s @(1179,294)"
+            "7.88-10.55s @(480,270) 2.0x; 15.01-20.91s @(869,638) 1.7x; 22.66-26.08s @(480,270) 2.0x; 30.38-42.17s @(497,314) 1.9x; 47.67-51.36s @(664,590) 1.4x; 61.52-65.49s @(684,604) 1.4x; 70.55-75.39s @(480,621) 2.0x; 80.34-83.64s @(480,413) 2.0x; 85.42-88.12s @(480,528) 2.0x; 89.32-93.52s @(952,686) 1.7x; 95.44-98.67s @(480,729) 2.0x; 108.86-113.74s @(480,644) 2.0x; 117.85-120.96s @(1146,662) 1.7x; 132.19-135.96s @(480,298) 2.0x; 143.92-148.76s @(1355,430) 1.7x; 149.96-152.22s @(565,530) 1.7x; 153.68-156.94s @(643,534) 1.5x; 158.14-161.14s @(1131,318) 1.7x"
+        );
+    }
+
+    // Fixture #3: the 2026-07-13-220817 clip with right-click menus + drags
+    // wider than the viewport. Right-click gestures center on the menu-
+    // selection midpoint; drags fit their scale to the span; spans too wide to
+    // frame stay wide. Every emitted zoom stays within [GESTURE_FLOOR,
+    // SUGGESTED_SCALE].
+    #[test]
+    fn real_recording_3_pinned_suggestions() {
+        let track: CursorTrack = serde_json::from_str(include_str!(
+            "../tests/fixtures/cursor-2026-07-13-220817.json"
+        ))
+        .unwrap();
+        let kfs = detect(&track);
+        let got = fmt_segments(&kfs);
+        println!("real-recording-3 suggestions: {got}");
+        for w in segments(&kfs).windows(2) {
+            assert!(
+                w[1].0 - w[0].1 >= MERGE_GAP_S - 1e-9,
+                "calm rule: {:.2}s gap between {:?} and {:?}",
+                w[1].0 - w[0].1,
+                w[0],
+                w[1]
+            );
+        }
+        for (_, _, _, _, sc) in segments(&kfs) {
+            assert!(sc >= GESTURE_FLOOR - 1e-9 && sc <= SUGGESTED_SCALE + 1e-9, "scale {sc}");
+        }
+        assert_eq!(
+            got,
+            "6.72-11.26s @(434,246) 2.0x; 14.39-20.65s @(378,303) 2.0x; 23.72-27.25s @(472,315) 1.6x; 30.41-33.85s @(378,477) 2.0x; 36.00-39.36s @(506,554) 1.7x; 40.56-43.43s @(797,693) 1.7x; 47.35-49.40s @(1134,662) 2.0x; 51.37-55.20s @(1134,707) 2.0x; 56.94-62.02s @(378,619) 2.0x; 67.56-72.29s @(489,542) 1.5x; 90.81-99.60s @(378,246) 2.0x; 103.11-105.30s @(1134,736) 2.0x"
         );
     }
 
     #[test]
     fn canonical_keyframe_shape() {
-        let track = TrackBuilder::new().travel(400.0, 400.0, 1.0).dwell(3.0).click().park(1.0).build();
+        // Clickless dwell (unaffected by rule 1) — this test is about the
+        // emitted keyframe shape, not the trigger policy.
+        let track = TrackBuilder::new().travel(400.0, 400.0, 1.0).dwell(3.0).travel(600.0, 500.0, 1.0).park(0.5).build();
         let kfs = detect(&track);
         assert!(!kfs.is_empty());
         assert!((kfs.first().unwrap().scale - 1.0).abs() < 1e-9);
@@ -537,15 +793,43 @@ mod tests {
     }
 
     #[test]
-    fn parked_cursor_with_click_zooms() {
+    fn bare_click_alone_does_not_zoom() {
+        // Conservative policy: a lone click the cursor arrives at and leaves,
+        // with no sustained dwell, is the ambiguous cross-filter case — no
+        // zoom. (Travel in, single click, travel out; nowhere still >800ms.)
+        let track = TrackBuilder::new()
+            .travel(400.0, 400.0, 0.5)
+            .click()
+            .travel(1000.0, 700.0, 0.5)
+            .build();
+        assert_eq!(detect(&track).len(), 0, "a bare click with no dwell must not zoom");
+    }
+
+    #[test]
+    fn post_click_stillness_goes_wide() {
+        // Rule 1 inversion: a click followed by sustained stillness is the
+        // user watching a consequence that rendered elsewhere (popup, new
+        // window, map animating) — attention moved to the screen, not the
+        // cursor. It must go WIDE, not zoom into the click point. (Pre-rule-1
+        // this same track zoomed; the inversion is the whole point.)
         let track = TrackBuilder::new().park(5.0).click().park(5.0).build();
-        let kfs = detect(&track);
-        let segs = segments(&kfs);
-        assert_eq!(segs.len(), 1, "a click is attention even when parked");
-        // Zoom covers the click at t=5 and lets go PARK_TAIL_S after it,
-        // not at track end.
-        assert!(segs[0].0 <= 5.0 && segs[0].1 >= 5.0);
-        assert!(segs[0].1 < 9.0, "trailing park must trim the hold, got {:?}", segs[0]);
+        assert_eq!(detect(&track).len(), 0, "post-click stillness must go wide");
+    }
+
+    #[test]
+    fn post_click_local_motion_holds() {
+        // Rule 2: a click followed by LOCAL follow-through motion (menu items,
+        // nudging in place) is genuine navigation — the dwell holds. The
+        // post-click box overflows the stillness threshold, so rule 1 leaves
+        // it alone.
+        let track = TrackBuilder::new()
+            .travel(500.0, 400.0, 1.0)
+            .click()
+            .travel(590.0, 460.0, 1.5) // ~108px local follow-through, inside the dwell region
+            .park(0.5)
+            .build();
+        let segs = segments(&detect(&track));
+        assert_eq!(segs.len(), 1, "click + local follow-through holds the zoom, got {segs:?}");
     }
 
     #[test]
@@ -578,51 +862,73 @@ mod tests {
     }
 
     #[test]
-    fn nearby_quick_candidates_merge() {
+    fn nearby_dwells_bridge() {
+        // Two close, co-located dwell stops fold into one continuous hold.
         let track = TrackBuilder::new()
             .travel(400.0, 400.0, 1.0)
+            .dwell(1.2)
             .click()
-            .park(0.8)
-            .travel(480.0, 430.0, 0.3)
+            .travel(470.0, 430.0, 0.3)
+            .dwell(2.0)
             .click()
-            .park(2.0)
+            .park(0.5)
             .build();
         let segs = segments(&detect(&track));
-        assert_eq!(segs.len(), 1, "two close clicks inside the calm gap = one zoom");
+        assert_eq!(segs.len(), 1, "two close co-located dwells = one zoom, got {segs:?}");
     }
 
     #[test]
-    fn distant_quick_candidates_do_not_merge_centers() {
+    fn distant_dwells_do_not_merge_centers() {
+        // Two far-apart dwell stops crowded in time never smear to a midpoint
+        // center — one stays, on one real target.
         let track = TrackBuilder::new()
             .travel(200.0, 200.0, 1.0)
-            .click()
-            .park(0.4)
+            .dwell(2.5)
             .travel(1300.0, 850.0, 0.3)
-            .click()
-            .park(2.0)
+            .dwell(2.5)
+            .park(1.0)
             .build();
         let segs = segments(&detect(&track));
-        // Under the calm gap with far-apart centers one candidate is
-        // dropped — never a smeared midpoint center.
-        assert_eq!(segs.len(), 1);
+        assert_eq!(segs.len(), 1, "{segs:?}");
         let near_a = dist(segs[0].2, segs[0].3, 200.0, 200.0) < CENTER_MERGE_PX;
         let near_b = dist(segs[0].2, segs[0].3, 1300.0, 850.0) < CENTER_MERGE_PX;
         assert!(near_a || near_b, "center must stay on one target, got {:?}", segs[0]);
     }
 
     #[test]
+    fn distant_back_to_back_gestures_stay_separate() {
+        // The canary in miniature: two wide drags to opposite corners, 1.3s
+        // apart, must stay TWO zooms — never one corner-to-corner pan.
+        let mut tb = TrackBuilder::new().travel(200.0, 200.0, 0.5);
+        // drag 1: (200,200) -> (500,300)
+        tb.track.events.push(CursorEvent { t: tb.t, kind: "left_down".into(), x: 200.0, y: 200.0 });
+        tb = tb.travel(500.0, 300.0, 1.5);
+        tb.track.events.push(CursorEvent { t: tb.t, kind: "left_up".into(), x: 500.0, y: 300.0 });
+        tb = tb.park(1.5).travel(1200.0, 800.0, 0.3);
+        // drag 2: (1200,800) -> (1400,900)
+        tb.track.events.push(CursorEvent { t: tb.t, kind: "left_down".into(), x: 1200.0, y: 800.0 });
+        tb = tb.travel(1400.0, 900.0, 1.5);
+        tb.track.events.push(CursorEvent { t: tb.t, kind: "left_up".into(), x: 1400.0, y: 900.0 });
+        tb = tb.park(0.5);
+        let segs = segments(&detect(&tb.build()));
+        assert_eq!(segs.len(), 2, "far back-to-back drags must not fuse, got {segs:?}");
+    }
+
+    #[test]
     fn scroll_extends_hold() {
+        // Click + local follow-through (so rule 1 holds it, not vetoes it),
+        // then a scroll run at the edge that should extend the hold.
         let with_scroll = TrackBuilder::new()
             .travel(700.0, 480.0, 1.0)
             .click()
-            .park(1.5)
+            .travel(780.0, 520.0, 1.2)
             .scroll_run(3.0)
             .park(4.0)
             .build();
         let without = TrackBuilder::new()
             .travel(700.0, 480.0, 1.0)
             .click()
-            .park(1.5)
+            .travel(780.0, 520.0, 1.2)
             .park(3.0)
             .park(4.0)
             .build();
@@ -635,11 +941,25 @@ mod tests {
     }
 
     #[test]
+    fn scroll_vetoes_clickless_dwell() {
+        // A clickless dwell with a scroll over it is reading — the wide view
+        // is the view in use, so no zoom.
+        let track = TrackBuilder::new()
+            .travel(700.0, 480.0, 1.0)
+            .dwell(0.4)
+            .scroll_run(3.0)
+            .dwell(0.4)
+            .build();
+        assert_eq!(detect(&track).len(), 0, "scroll over a clickless dwell vetoes it");
+    }
+
+    #[test]
     fn centers_clamp_to_frame_at_scale() {
+        // Clickless corner dwell (unaffected by rule 1) so it zooms and we can
+        // check the center clamps inside the 2x window.
         let track = TrackBuilder::new()
             .travel(20.0, 20.0, 1.0)
-            .click()
-            .park(3.0)
+            .dwell(3.0)
             .build();
         let kfs = detect(&track);
         assert!(!kfs.is_empty());
