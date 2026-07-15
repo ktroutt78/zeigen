@@ -197,11 +197,20 @@ def main():
     tw, th, tn = probe_res(args.test)
     result = {"ref": args.ref, "test": args.test,
               "res": [rw, rh], "res_match": (rw, rh) == (tw, th),
+              "frames": [rn, tn], "frames_match": rn == tn,
               "global": {}, "signalstats": {}, "regions": {}}
     if (rw, rh) != (tw, th):
         result["error"] = f"resolution mismatch {rw}x{rh} vs {tw}x{th}"
         print(json.dumps(result, indent=2))
         sys.exit(1)
+    # Frame-count mismatch silently invalidates the PSNR/SSIM (ffmpeg's PTS-based
+    # framesync pairs offset frames -> false catastrophic per-frame values that
+    # tank the average). This is the "24 dB scare" from Phase 1: 180 vs 181 frames
+    # made a clean re-encode look like a 24 dB regression. Warn loudly; the caller
+    # must align frame counts (and start PTS) before trusting these numbers.
+    if rn != tn:
+        result["warning"] = (f"FRAME COUNT MISMATCH {rn} vs {tn}: PSNR/SSIM are "
+                             f"unreliable (framesync misalignment). Align first.")
 
     result["global"]["ssim"] = ffmpeg_ssim(args.ref, args.test)
     result["global"]["psnr"] = ffmpeg_psnr(args.ref, args.test)
