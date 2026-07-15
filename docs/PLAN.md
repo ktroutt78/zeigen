@@ -227,6 +227,7 @@ Background noise was clearly audible in real recordings during Phase 11 testing 
 
 Items that were considered but didn't earn a phase. Pull from here when a real need surfaces.
 
+- **Zoom manual-editing WYSIWYG ("Thread B")** — scoped, not started. Makes hand-editing auto-suggested zooms painless (the complement to the conservative detector shipped 2026-07-14). Three complaints: blind start position, guessy duration, unintuitive bounding box. Three slices: timeline frame-feedback (SMALL–MEDIUM, do first), box-resize handles (MEDIUM), edit-time zoom preview (MEDIUM). Overall MEDIUM, all frontend. Full scope + code anchors: `docs/ZOOM-MANUAL-EDITING-PLAN.md`.
 - **Settings persistence across app restarts** — hotkey, countdown duration, length cap, bubble size/corner all reset to defaults on launch. Tauri store plugin or localStorage if/when this becomes annoying.
 - **Error surface for common failures** — device disappeared mid-record, disk full, permission revoked. Existing StatusStrip handles engine errors but coverage hasn't been audited end-to-end. Survey gaps when a real failure surprises a recording.
 - **Recording preset picker (16:9 / 1:1 / 9:16)** — would require composite + export pipeline changes. YAGNI for the current use case (analytics demos are 16:9); reconsider only if a non-16:9 demand appears.
