@@ -495,6 +495,214 @@ const SHADOW_SIGMA_FRAC: f64 = 0.075;
 const SHADOW_OFFSET_FRAC: f64 = 1.0 / 30.0;
 const SHADOW_ALPHA: f64 = 0.22;
 
+// The webcam prep + masked/shadowed overlay filter, from `base_label` (the
+// screen video to draw onto) to `out_label`. Shared by `composite()` (draws
+// onto the raw screen [0:v]) and the V2 Step 3 zoom+webcam path (draws onto the
+// zoomed screen). The `legacy_args_pinned` test pins composite's exact string,
+// so this must reproduce it byte-for-byte for the identity case
+// (pad_lead=WEBCAM_LEAD_MS/1000, wc_skip=0).
+//
+// Webcam-vs-screen alignment on the merged (trimmed) path: `pad_lead` frozen
+// first-frame is prepended (tpad) and `wc_skip` seconds of the webcam are
+// dropped, so at output t=0 the webcam shows content (trim_in - LEAD). For an
+// untrimmed export that reduces to composite's plain tpad=LEAD.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn webcam_overlay_filter(
+    base_label: &str,
+    out_label: &str,
+    n: usize,
+    wc0: usize,
+    mask_idx: usize,
+    shadow_idx: usize,
+    target: u32,
+    pad_lead: f64,
+    shadow_sigma: f64,
+    shadow_padding: u32,
+    shadow_offset_y: u32,
+    zone: BubbleZone,
+) -> String {
+    webcam_overlay_filter_trimmed(
+        base_label, out_label, n, wc0, mask_idx, shadow_idx, target, pad_lead, 0.0, shadow_sigma,
+        shadow_padding, shadow_offset_y, zone,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn webcam_overlay_filter_trimmed(
+    base_label: &str,
+    out_label: &str,
+    n: usize,
+    wc0: usize,
+    mask_idx: usize,
+    shadow_idx: usize,
+    target: u32,
+    pad_lead: f64,
+    wc_skip: f64,
+    shadow_sigma: f64,
+    shadow_padding: u32,
+    shadow_offset_y: u32,
+    zone: BubbleZone,
+) -> String {
+    // start_mode=clone freezes the first webcam frame across the LEAD (bubble
+    // visible from t=0 despite AVCaptureSession lagging SCK); the trim drops
+    // wc_skip on the merged trimmed path (nothing on the untrimmed identity).
+    let head_pad = if pad_lead > 0.001 {
+        format!(",tpad=start_duration={pad_lead:.3}:start_mode=clone")
+    } else {
+        String::new()
+    };
+    let skip = if wc_skip > 0.001 {
+        format!(",trim=start={wc_skip:.3},setpts=PTS-STARTPTS")
+    } else {
+        String::new()
+    };
+    let extra = format!("{head_pad}{skip}");
+    let mut filter = String::new();
+    if n > 1 {
+        for i in 0..n {
+            filter.push_str(&format!("[{}:v]", wc0 + i));
+        }
+        filter.push_str(&format!("concat=n={n}:v=1:a=0{extra}[wc_full];"));
+    } else if extra.is_empty() {
+        filter.push_str(&format!("[{wc0}:v]copy[wc_full];"));
+    } else {
+        // Strip the leading ',' — these filters lead the chain for a single seg.
+        let inline = extra.strip_prefix(',').unwrap_or(&extra);
+        filter.push_str(&format!("[{wc0}:v]{inline}[wc_full];"));
+    }
+    // hflip mirrors the preview's CSS scaleX(-1); alphamerge applies the
+    // pre-rendered mask PNG; the shadow PNG is blurred + alpha-scaled. See the
+    // composite module notes for the A/V-sync rationale (no fps conform here).
+    filter.push_str(&format!(
+        "[wc_full]hflip,crop='min(iw\\,ih)':'min(iw\\,ih)',\
+scale={target}:{target},\
+format=yuva420p[wc_rgba];\
+[{mask_idx}:v]format=gray[mask_g];\
+[wc_rgba][mask_g]alphamerge[wc];\
+[{shadow_idx}:v]format=rgba,gblur=sigma={shadow_sigma},colorchannelmixer=aa={SHADOW_ALPHA}[shadow];"
+    ));
+    let overlay_xy = zone.overlay_xy(PADDING_PX);
+    let shadow_xy = zone.shadow_overlay_xy(PADDING_PX, target, shadow_padding, shadow_offset_y);
+    filter.push_str(&format!(
+        "[{base_label}][shadow]overlay={shadow_xy}:eof_action=pass[shadowed];\
+[shadowed][wc]overlay={overlay_xy}:eof_action=pass[{out_label}]"
+    ));
+    filter
+}
+
+// V2 Step 3 webcam seam. The full webcam overlay bundle for the single-input
+// zoom+webcam path: renders the mask/shadow PNGs into `out_dir`, builds the
+// `-i` args for the webcam segments + looped mask + looped shadow (at
+// `input_base`..), and packages the filter call. The caller appends
+// `input_args` to its command and, once it knows the label of the (zoomed)
+// screen to draw onto, calls `.filter(base, out)`. Reuses the exact renderers,
+// diameter/shadow math, and overlay filter that `composite()` uses.
+pub(crate) struct WebcamOverlay {
+    pub input_args: Vec<String>,
+    n: usize,
+    input_base: usize,
+    mask_idx: usize,
+    shadow_idx: usize,
+    target: u32,
+    pad_lead: f64,
+    wc_skip: f64,
+    shadow_sigma: f64,
+    shadow_padding: u32,
+    shadow_offset_y: u32,
+    zone: BubbleZone,
+}
+
+impl WebcamOverlay {
+    pub(crate) fn filter(&self, base_label: &str, out_label: &str) -> String {
+        webcam_overlay_filter_trimmed(
+            base_label,
+            out_label,
+            self.n,
+            self.input_base,
+            self.mask_idx,
+            self.shadow_idx,
+            self.target,
+            self.pad_lead,
+            self.wc_skip,
+            self.shadow_sigma,
+            self.shadow_padding,
+            self.shadow_offset_y,
+            self.zone,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_webcam_overlay(
+    out_dir: &Path,
+    webcam_segments: &[PathBuf],
+    bubble_zone: Option<BubbleZone>,
+    bubble_position_log: &[BubblePositionEntry],
+    bubble_roundness: Option<f64>,
+    size: WebcamSize,
+    loop_dur: f64,
+    input_base: usize,
+    trim_in: f64,
+) -> Result<WebcamOverlay, String> {
+    // Same diameter source + shadow math as build_composite_args.
+    let target = bubble_position_log
+        .first()
+        .and_then(|e| e.diameter)
+        .map(|d| d.round().max(1.0) as u32)
+        .unwrap_or_else(|| size.px());
+    let mask_path = out_dir.join(mask_file_name("mask", target, bubble_roundness));
+    render_alpha_mask(target, bubble_roundness, &mask_path)?;
+    let shadow_padding = ((target as f64) * SHADOW_PADDING_FRAC).round() as u32;
+    let shadow_sigma = ((target as f64) * SHADOW_SIGMA_FRAC).round();
+    let shadow_offset_y = ((target as f64) * SHADOW_OFFSET_FRAC).round() as u32;
+    let shadow_path = out_dir.join(mask_file_name("shadow", target, bubble_roundness));
+    render_shadow_source(target, shadow_padding, bubble_roundness, &shadow_path)?;
+
+    let n = webcam_segments.len();
+    let mut input_args: Vec<String> = Vec::new();
+    for seg in webcam_segments {
+        input_args.push("-i".into());
+        input_args.push(seg.to_string_lossy().into_owned());
+    }
+    // Mask + shadow looped stills, same treatment composite gives them.
+    for p in [&mask_path, &shadow_path] {
+        input_args.push("-loop".into());
+        input_args.push("1".into());
+        input_args.push("-framerate".into());
+        input_args.push("30".into());
+        input_args.push("-t".into());
+        input_args.push(format!("{loop_dur:.3}"));
+        input_args.push("-i".into());
+        input_args.push(p.to_string_lossy().into_owned());
+    }
+    let mask_idx = input_base + n;
+    let shadow_idx = mask_idx + 1;
+
+    // Webcam-vs-screen alignment on a -ss-trimmed screen: prepend max(0,
+    // LEAD - trim_in) frozen first-frame and drop max(0, trim_in - LEAD) of
+    // webcam, so at output t=0 the webcam shows content (trim_in - LEAD).
+    // Untrimmed -> plain tpad=LEAD (composite's identity case).
+    let lead = WEBCAM_LEAD_MS / 1000.0;
+    let pad_lead = (lead - trim_in).max(0.0);
+    let wc_skip = (trim_in - lead).max(0.0);
+    let zone = resolve_zone(bubble_zone, bubble_position_log);
+
+    Ok(WebcamOverlay {
+        input_args,
+        n,
+        input_base,
+        mask_idx,
+        shadow_idx,
+        target,
+        pad_lead,
+        wc_skip,
+        shadow_sigma,
+        shadow_padding,
+        shadow_offset_y,
+        zone,
+    })
+}
+
 pub fn composite(
     screen_path: &Path,
     webcam_segments: &[PathBuf],
@@ -651,68 +859,25 @@ fn build_composite_args(
     //   to yuva420p; alphamerge with the pre-rendered circle mask.
     // - Overlay onto screen with eof_action=pass so the screen continues
     //   uncovered after the webcam track ends.
-    let n = webcam_segments.len();
-    let mut filter = String::new();
-    // Pad the head of the webcam track so the bubble is visible from t=0
-    // even when ffmpeg's AVCaptureSession lagged behind SCK. start_mode=clone
-    // duplicates the first decoded frame; threshold matches the previous
-    // -itsoffset gate so we don't insert a 0s tpad on aligned recordings.
-    let head_pad = if lead_in > 0.001 {
-        format!(",tpad=start_duration={lead_in:.3}:start_mode=clone")
-    } else {
-        String::new()
-    };
-    let wc0 = wc_input_base; // first webcam segment input index
-    if n > 1 {
-        for i in 0..n {
-            filter.push_str(&format!("[{}:v]", wc0 + i));
-        }
-        filter.push_str(&format!("concat=n={n}:v=1:a=0{head_pad}[wc_full];"));
-    } else if head_pad.is_empty() {
-        filter.push_str(&format!("[{wc0}:v]copy[wc_full];"));
-    } else {
-        // tpad sits inline on the segment input — copy is unnecessary when
-        // we're applying any filter at all.
-        filter.push_str(&format!(
-            "[{wc0}:v]tpad=start_duration={lead_in:.3}:start_mode=clone[wc_full];"
-        ));
-    }
-    // hflip matches the preview's CSS `transform: scaleX(-1)` (WebcamBubble.tsx).
-    // The invariant is preview-matches-recording; absolute orientation then
-    // depends on whether the camera pre-mirrors (Continuity does, FaceTime HD
-    // does not). See DECISIONS.md 2026-04-25.
-    //
-    // alphamerge replaces the previous inline `geq` circular-mask expression.
-    // geq evaluates per-pixel-per-frame in software and was the dominant cost
-    // in composite — for a 5-min clip it added tens of seconds. The mask PNG
-    // is rendered once via tiny_skia and pulled in as a looping still input.
-    // Note: fps=30 was previously applied here to conform the VFR screen
-    // video to CFR before overlay. Dropped per A/B testing — user perception
-    // of A/V sync was consistently better without it. The overlay filter
-    // copes with VFR main input fine; bubble position expressions interpolate
-    // off `t` (PTS) which is correct either way.
-    filter.push_str(&format!(
-        "[wc_full]hflip,crop='min(iw\\,ih)':'min(iw\\,ih)',\
-scale={target}:{target},\
-format=yuva420p[wc_rgba];\
-[{mask_idx}:v]format=gray[mask_g];\
-[wc_rgba][mask_g]alphamerge[wc];\
-[{shadow_idx}:v]format=rgba,gblur=sigma={shadow_sigma},colorchannelmixer=aa={SHADOW_ALPHA}[shadow];"
-    ));
-
-    // Position the overlay at ONE constant zone (V2 Step 2). The zone comes
-    // from the sidecar, or is migrated from an old recording's position-log
-    // centroid, or defaults to the legacy corner — see `resolve_zone`. No
-    // time-keyed expression and no `enable` gate: a zone is always on the
-    // recorded display. For the four corners this reproduces the pre-Step-2
-    // empty-log filter string byte-for-byte (the legacy args pin).
+    // Webcam prep + masked/shadowed overlay at the constant zone, onto the raw
+    // screen [0:v]. Shared with the V2 Step 3 zoom+webcam path (which overlays
+    // onto the zoomed screen instead) via webcam_overlay_filter — the legacy
+    // args pin guarantees this stays byte-identical.
     let zone = resolve_zone(bubble_zone, bubble_position_log);
-    let overlay_xy = zone.overlay_xy(PADDING_PX);
-    let shadow_xy = zone.shadow_overlay_xy(PADDING_PX, target, shadow_padding, shadow_offset_y);
-    filter.push_str(&format!(
-        "[0:v][shadow]overlay={shadow_xy}:eof_action=pass[shadowed];\
-[shadowed][wc]overlay={overlay_xy}:eof_action=pass[outv_pre]"
-    ));
+    let mut filter = webcam_overlay_filter(
+        "0:v",
+        "outv_pre",
+        webcam_segments.len(),
+        wc_input_base,
+        mask_idx,
+        shadow_idx,
+        target,
+        lead_in,
+        shadow_sigma,
+        shadow_padding,
+        shadow_offset_y,
+        zone,
+    );
 
     // Fix B: bake the watermark as one final overlay over the composited frame.
     // All three position-log branches above terminate in [outv_pre]; this is the

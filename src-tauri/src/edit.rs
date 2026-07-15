@@ -883,7 +883,36 @@ pub(crate) fn run_edit_pipeline(
     }
 
     if webcam_segments.is_empty() {
-        return run_edit_pipeline_single_input(screen_path, output, sidecar, mode, watermark, on_progress);
+        // Screen-only: single pass renders annotations + zoom (no webcam).
+        return run_edit_pipeline_single_input(
+            screen_path,
+            output,
+            sidecar,
+            mode,
+            &[],
+            webcam_size,
+            watermark,
+            on_progress,
+        );
+    }
+
+    // V2 Step 3 merged path: a webcam recording WITH an effective zoom goes
+    // through a single pass (annotations -> zoom -> webcam bubble -> watermark),
+    // because the bubble must land AFTER the zoom (screen-anchored) and the
+    // annotations BEFORE it. The two-pass composite below can't express that
+    // order (it bakes the bubble first), so it's used only for no-zoom webcam
+    // exports, which keeps their existing byte output unchanged.
+    if !zoom_keyframes_to_segments(&sidecar.zoom).is_empty() {
+        return run_edit_pipeline_single_input(
+            screen_path,
+            output,
+            sidecar,
+            mode,
+            webcam_segments,
+            webcam_size,
+            watermark,
+            on_progress,
+        );
     }
 
     // Temp composite file. Lives under the scratch's .sources sibling
@@ -939,9 +968,19 @@ pub(crate) fn run_edit_pipeline(
 
     // Watermark already baked into composite_tmp above — pass None so pass 2
     // doesn't re-apply it (and doesn't trip needs_filter into a re-encode).
+    // This branch is no-zoom-only (the zoom+webcam case took the merged path
+    // above), so pass 2 has no zoom to render onto the already-composited frame.
     let single_progress = move |frac: f64| on_progress(0.5 + frac * 0.5);
-    let result =
-        run_edit_pipeline_single_input(&composite_tmp, output, sidecar, mode, None, single_progress);
+    let result = run_edit_pipeline_single_input(
+        &composite_tmp,
+        output,
+        sidecar,
+        mode,
+        &[],
+        webcam_size,
+        None,
+        single_progress,
+    );
 
     // Best-effort cleanup either way — leave the temp for inspection on
     // failure isn't worth the disk vs. the simpler always-clean rule.
@@ -949,6 +988,167 @@ pub(crate) fn run_edit_pipeline(
     let _ = std::fs::remove_dir(&temp_dir);
 
     result
+}
+
+// ---------------------------------------------------------------------------
+// Zoom render (V2 Step 3). Mirrors Review.tsx zoomAt / gpuzoom.swift EXACTLY:
+// per-frame scale s(t) with 600ms in_out_cubic ramps at the segment edges and
+// full scale between; a crop window of size W/s x H/s centered on the zoom
+// center (clamped inside the frame), scaled to fill. Rendered on a 4x
+// lanczos-oversampled frame so the crop's integer pixel offsets are 1/4 source
+// px — the fix for naive-zoompan stutter (DECISIONS.md 2026-07-14).
+//
+// `crop` (not `zoompan`) because the curve is PTS-`t`-driven: faithful on the
+// VFR screen source, where zoompan's frame-count model is not, and it needs no
+// CFR conform. Whole-timeline oversample is the measured pessimistic ceiling;
+// per-zoomed-span is a later optimization. center_x/center_y are source video
+// pixels (telemetry space), so `w`/`h` are the source dims.
+const ZOOM_OVERSAMPLE: u32 = 4;
+const ZOOM_RENDER_RAMP_S: f64 = 0.6;
+
+#[derive(Clone, Copy, Debug)]
+struct ZoomSeg {
+    start: f64,
+    end: f64,
+    scale: f64,
+    cx: f64,
+    cy: f64,
+}
+
+// Mirror of Review.tsx zoomKeyframesToSegments: a segment runs from a scale~1
+// keyframe through scale>1 interiors to the next scale~1 keyframe; the peak
+// interior scale and its center define it. Non-canonical tracks parse
+// best-effort (peak wins), same as the preview.
+fn zoom_keyframes_to_segments(kfs: &[ZoomKeyframe]) -> Vec<ZoomSeg> {
+    let mut sorted: Vec<&ZoomKeyframe> = kfs.iter().collect();
+    sorted.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap_or(std::cmp::Ordering::Equal));
+    let mut segs = Vec::new();
+    let mut i = 0;
+    while i < sorted.len() {
+        if sorted[i].scale <= 1.001 {
+            i += 1;
+            continue;
+        }
+        let mut j = i;
+        while j < sorted.len() && sorted[j].scale > 1.001 {
+            j += 1;
+        }
+        let mut peak = sorted[i];
+        for k in i..j {
+            if sorted[k].scale > peak.scale {
+                peak = sorted[k];
+            }
+        }
+        let start = if i > 0 { sorted[i - 1].t } else { sorted[i].t };
+        let end = if j < sorted.len() { sorted[j].t } else { sorted[j - 1].t };
+        segs.push(ZoomSeg { start, end, scale: peak.scale, cx: peak.center_x, cy: peak.center_y });
+        i = j;
+    }
+    segs
+}
+
+// easeInOutCubic(u) as an ffmpeg expr; u is inlined (a small sub-expression).
+fn zoom_ease_expr(u: &str) -> String {
+    format!("if(lt({u},0.5),4*({u})*({u})*({u}),1-pow(-2*({u})+2,3)/2)")
+}
+
+// s(t) over the segments in FILTER time (t == original time - `off`). Defaults
+// to 1 outside every segment. Callers on a -ss-trimmed input pass off=trim_in;
+// untrimmed callers pass 0.
+fn zoom_scale_expr(segs: &[ZoomSeg], off: f64, tv: &str) -> String {
+    let mut expr = String::from("1");
+    for s in segs {
+        let a = s.start - off;
+        let b = s.end - off;
+        let dur = (b - a).max(0.0);
+        let ramp = ZOOM_RENDER_RAMP_S.min(dur / 2.0);
+        let seg = if ramp <= 0.001 {
+            format!("{:.4}", s.scale)
+        } else {
+            let uin = format!("({tv}-{a:.4})/{ramp:.4}");
+            let uout = format!("({b:.4}-{tv})/{ramp:.4}");
+            format!(
+                "if(lt({tv},{ain:.4}),1+{amp:.4}*{ein},if(gt({tv},{bout:.4}),1+{amp:.4}*{eout},{sc:.4}))",
+                ain = a + ramp,
+                bout = b - ramp,
+                amp = s.scale - 1.0,
+                ein = zoom_ease_expr(&uin),
+                eout = zoom_ease_expr(&uout),
+                sc = s.scale,
+            )
+        };
+        expr = format!("if(between({tv},{a:.4},{b:.4}),{seg},{expr})");
+    }
+    expr
+}
+
+// Piecewise center coordinate (constant within a segment; `default` elsewhere,
+// where the view is the full frame so the value is inert). `pick` selects cx/cy.
+fn zoom_center_expr(
+    segs: &[ZoomSeg],
+    off: f64,
+    default: f64,
+    tv: &str,
+    pick: impl Fn(&ZoomSeg) -> f64,
+) -> String {
+    let mut expr = format!("{default:.4}");
+    for s in segs {
+        let a = s.start - off;
+        let b = s.end - off;
+        expr = format!("if(between({tv},{a:.4},{b:.4}),{c:.4},{expr})", c = pick(s));
+    }
+    expr
+}
+
+// Output framerate zoompan conforms the zoomed span to. The recorder targets
+// 30; zoompan has no VFR passthrough, so the re-encoded video is CFR here.
+const ZOOM_OUTPUT_FPS: u32 = 30;
+
+// Zoom filter chain [in]->[out], or None when there is no effective zoom.
+//
+// zoompan does the per-frame variable-size crop `crop` cannot: on the NWxNH
+// 4x-lanczos-oversampled frame it shows a window of size NW/z x NH/z (== the
+// source window W/s x H/s), driven by the input timestamp `it`. z == s(it); the
+// window is centered on the clamped pixel center, then the NWxNH output is
+// downscaled to WxH. Because the crop is always taken from the constant 4x
+// frame, its integer pan offset is 1/(4s) source px — the smoothness fix.
+fn zoom_filter_fragment(
+    in_label: &str,
+    out_label: &str,
+    zoom: &[ZoomKeyframe],
+    trim_in: f64,
+    w: u32,
+    h: u32,
+) -> Option<String> {
+    let segs = zoom_keyframes_to_segments(zoom);
+    if segs.is_empty() {
+        return None;
+    }
+    let n = ZOOM_OVERSAMPLE;
+    let nw = n * w;
+    let nh = n * h;
+    let fps = ZOOM_OUTPUT_FPS;
+    // zoompan drives z/x/y off `it` (input timestamp, trim-relative because
+    // input 0 is -ss trimmed). x/y reference `zoom` (the just-computed z).
+    let z = zoom_scale_expr(&segs, trim_in, "it");
+    let cx = zoom_center_expr(&segs, trim_in, w as f64 / 2.0, "it", |g| g.cx);
+    let cy = zoom_center_expr(&segs, trim_in, h as f64 / 2.0, "it", |g| g.cy);
+    // zoompan x/y are the top-left of the shown window in INPUT (NWxNH) pixel
+    // coords; the window is NW/z x NH/z. qx = clip(cx, W/2z, W-W/2z);
+    // x = N*qx - NW/2z. st(0) holds the piecewise center.
+    let panx = format!(
+        "st(0,{cx});{n}*clip(ld(0),{w}/(2*zoom),{w}-{w}/(2*zoom))-{nw}/(2*zoom)"
+    );
+    let pany = format!(
+        "st(0,{cy});{n}*clip(ld(0),{h}/(2*zoom),{h}-{h}/(2*zoom))-{nh}/(2*zoom)"
+    );
+    // Single quotes protect the commas inside if()/between()/clip() from the
+    // filtergraph parser; the expression evaluator still splits on them.
+    Some(format!(
+        "[{in_label}]scale={nw}:{nh}:flags=lanczos,\
+zoompan=z='{z}':x='{panx}':y='{pany}':d=1:s={nw}x{nh}:fps={fps},\
+scale={w}:{h}:flags=lanczos[{out_label}]"
+    ))
 }
 
 // Single-pass edit pipeline. Trim via -ss/-to before -i; text and arrow
@@ -962,6 +1162,13 @@ fn run_edit_pipeline_single_input(
     output: &Path,
     sidecar: &SidecarState,
     mode: PipelineMode,
+    // V2 Step 3 webcam seam: when non-empty, the webcam bubble is overlaid
+    // AFTER the zoom (screen-anchored, fixed) in this single pass — the merged
+    // zoom+webcam path. Empty for screen-only recordings and for the no-zoom
+    // two-pass (where composite already baked the bubble). Rendered only
+    // alongside an effective zoom track.
+    webcam_segments: &[std::path::PathBuf],
+    webcam_size: crate::composite::WebcamSize,
     watermark: Option<Watermark>,
     on_progress: impl Fn(f64) + Send + 'static,
 ) -> Result<(), String> {
@@ -1026,7 +1233,12 @@ fn run_edit_pipeline_single_input(
         .map(|t| (t.out - t.start).max(0.0))
         .unwrap_or(duration);
 
-    // Allocate temp dir for any sidecar artifacts (text files, arrow PNGs).
+    // V2 Step 3 merged zoom+webcam path: overlay the webcam bubble after the
+    // zoom in this pass. Needs the temp dir for its mask/shadow PNGs.
+    let has_webcam = !webcam_segments.is_empty();
+
+    // Allocate temp dir for any sidecar artifacts (text files, arrow PNGs,
+    // webcam mask/shadow).
     let temp_dir = temp_dir_for(source);
     let text_anns: Vec<(usize, &Annotation)> = sidecar
         .annotations
@@ -1055,7 +1267,7 @@ fn run_edit_pipeline_single_input(
         .enumerate()
         .filter(|(_, a)| a.kind == "spotlight" && a.endpoint.is_some())
         .collect();
-    let need_temp = !text_anns.is_empty() || !arrow_anns.is_empty();
+    let need_temp = !text_anns.is_empty() || !arrow_anns.is_empty() || has_webcam;
     if need_temp {
         std::fs::create_dir_all(&temp_dir)
             .map_err(|e| format!("create {}: {}", temp_dir.display(), e))?;
@@ -1079,10 +1291,17 @@ fn run_edit_pipeline_single_input(
     // Probe source dims once — arrow PNGs are source-sized, blur regions
     // need pixel rects, and the watermark scales relative to the shorter
     // source dimension.
+    // V2 Step 3: an EFFECTIVE zoom track (at least one scale>1 segment) ->
+    // render it (this is the screen-anchored single-input path; the webcam
+    // seam lands separately). A degenerate all-scale-1 track stays on the copy
+    // path. Zoom needs the source dims for its crop math and forces a re-encode.
+    let has_zoom = !zoom_keyframes_to_segments(&sidecar.zoom).is_empty();
+
     let src_dims: Option<(u32, u32)> = if !arrow_anns.is_empty()
         || !blur_anns.is_empty()
         || !spotlight_anns.is_empty()
         || watermark.is_some()
+        || has_zoom
     {
         Some(probe_dimensions(source)?)
     } else {
@@ -1102,6 +1321,28 @@ fn run_edit_pipeline_single_input(
             arrow_paths.push((*idx, p, ann));
         }
     }
+
+    // V2 Step 3 webcam seam: render the mask/shadow + build the webcam input
+    // args. Inputs are laid out source(0), text PNGs, arrow PNGs, watermark
+    // logo (if any), then webcam segments + mask + shadow — so the webcam base
+    // index sits past the watermark logo and the watermark's own input index is
+    // unchanged. The looped mask/shadow span the full source `duration`.
+    let webcam = if has_webcam {
+        let webcam_base = 1 + text_paths.len() + arrow_paths.len() + watermark.is_some() as usize;
+        Some(crate::composite::build_webcam_overlay(
+            &temp_dir,
+            webcam_segments,
+            sidecar.bubble_zone,
+            &sidecar.bubble_position_log,
+            sidecar.bubble_roundness,
+            webcam_size,
+            duration,
+            webcam_base,
+            trim_in,
+        )?)
+    } else {
+        None
+    };
 
     let mut args: Vec<String> = vec![
         "-y".into(),
@@ -1135,10 +1376,15 @@ fn run_edit_pipeline_single_input(
         args.push("-i".into());
         args.push(path.to_string_lossy().into_owned());
     }
-    // Watermark logo is the last input (after source, text PNGs, arrow PNGs).
+    // Watermark logo input (after source, text PNGs, arrow PNGs).
     if let Some(wm) = &watermark {
         args.push("-i".into());
         args.push(wm.logo_path.to_string_lossy().into_owned());
+    }
+    // Webcam seam inputs (segments + looped mask + looped shadow) sit past the
+    // watermark logo, matching the webcam_base index computed above.
+    if let Some(wc) = &webcam {
+        args.extend(wc.input_args.iter().cloned());
     }
 
     // Force-build the filter graph in Gif mode (so the palettegen/paletteuse
@@ -1148,6 +1394,8 @@ fn run_edit_pipeline_single_input(
         || !blur_anns.is_empty()
         || !spotlight_anns.is_empty()
         || watermark.is_some()
+        || has_zoom
+        || has_webcam
         || gif_mode
         || mp4_scale.is_some();
     if needs_filter {
@@ -1179,6 +1427,7 @@ fn run_edit_pipeline_single_input(
                 || !spotlight_anns.is_empty()
                 || !text_paths.is_empty()
                 || !arrow_paths.is_empty()
+                || has_zoom
                 || watermark.is_some()
                 || gif_mode
                 || mp4_scale.is_some()
@@ -1215,6 +1464,7 @@ fn run_edit_pipeline_single_input(
             if i + 1 < spotlight_anns.len()
                 || !text_paths.is_empty()
                 || !arrow_paths.is_empty()
+                || has_zoom
                 || watermark.is_some()
                 || gif_mode
                 || mp4_scale.is_some()
@@ -1245,6 +1495,7 @@ fn run_edit_pipeline_single_input(
             ));
             if i + 1 < text_paths.len()
                 || !arrow_paths.is_empty()
+                || has_zoom
                 || watermark.is_some()
                 || gif_mode
                 || mp4_scale.is_some()
@@ -1269,12 +1520,50 @@ fn run_edit_pipeline_single_input(
                 end = end,
                 next_label = next_label,
             ));
-            if i + 1 < arrow_paths.len() || watermark.is_some() || gif_mode || mp4_scale.is_some()
+            if i + 1 < arrow_paths.len()
+                || has_zoom
+                || watermark.is_some()
+                || gif_mode
+                || mp4_scale.is_some()
             {
                 filter.push(';');
             }
             prev_label = next_label;
             input_idx += 1;
+        }
+
+        // V2 Step 3 zoom — AFTER content-anchored annotations (they zoom with
+        // the content) and BEFORE the webcam bubble + watermark (screen-
+        // anchored, must not zoom). Keyframe times shift by -trim_in because
+        // input 0 is -ss trimmed, so filter `t` is trim-relative (same basis
+        // the annotation enable=between(t,..) uses).
+        if has_zoom {
+            let (sw, sh) = src_dims.expect("src_dims set when zoom present");
+            let next_label = format!("v{step}");
+            step += 1;
+            if let Some(frag) =
+                zoom_filter_fragment(&prev_label, &next_label, &sidecar.zoom, trim_in, sw, sh)
+            {
+                filter.push_str(&frag);
+                if has_webcam || watermark.is_some() || gif_mode || mp4_scale.is_some() {
+                    filter.push(';');
+                }
+                prev_label = next_label;
+            }
+        }
+
+        // V2 Step 3 webcam seam — the constant bubble overlaid AFTER the zoom
+        // (screen-anchored, does not zoom), reusing composite's exact webcam
+        // prep + overlay via the shared helper. Input indices were fixed when
+        // the overlay was built, so this doesn't touch input_idx.
+        if let Some(wc) = &webcam {
+            let next_label = format!("v{step}");
+            step += 1;
+            filter.push_str(&wc.filter(&prev_label, &next_label));
+            if watermark.is_some() || gif_mode || mp4_scale.is_some() {
+                filter.push(';');
+            }
+            prev_label = next_label;
         }
 
         // Watermark overlay — sits on top of annotations, before the scale/
@@ -2043,9 +2332,11 @@ mod tests {
     // dependency on the missing May baseline fixtures, DECISIONS.md
     // 2026-07-13). Runs the real MP4-Source pipeline and pins the -c:v copy
     // fast path via video stream md5: a no-zoom sidecar must keep the video
-    // stream bit-exact while audio re-encodes (arnndn + AAC). Also pins that
-    // a NON-empty zoom track is inert to export — step 4 wires rendering and
-    // must flip that half to a re-encode assertion.
+    // stream bit-exact while audio re-encodes (arnndn + AAC). The second half
+    // is the V2 Step 3 tripwire, now FLIPPED: an effective zoom track leaves
+    // the copy path and re-encodes the video (screen-anchored single-input
+    // path). Also doubles as a smoke test that the crop/oversample zoom
+    // expression is valid ffmpeg (a malformed expr fails the export).
     #[test]
     fn empty_zoom_stays_on_video_copy_path() {
         ensure_audio_model_for_tests();
@@ -2096,15 +2387,19 @@ mod tests {
             "audio should re-encode (arnndn + AAC)"
         );
 
+        // Canonical zoom segment [0.3, 1.7] -> scale 2.0 centered (160,120):
+        // 1.0 at the edges, 2.0 between, 0.6s in_out_cubic ramps. Exercises the
+        // full crop/oversample expression, not a zero-width instant.
+        let kf = |t: f64, scale: f64| ZoomKeyframe {
+            t,
+            scale,
+            center_x: 160.0,
+            center_y: 120.0,
+            ease: Ease::InOutCubic,
+            auto_generated: false,
+        };
         let zoomed = SidecarState {
-            zoom: vec![ZoomKeyframe {
-                t: 0.5,
-                scale: 2.0,
-                center_x: 160.0,
-                center_y: 120.0,
-                ease: Ease::InOutCubic,
-                auto_generated: false,
-            }],
+            zoom: vec![kf(0.3, 1.0), kf(0.9, 2.0), kf(1.1, 2.0), kf(1.7, 1.0)],
             ..Default::default()
         };
         let out_zoomed = dir.join("out-zoomed.mp4");
@@ -2119,11 +2414,117 @@ mod tests {
             |_| {},
         )
         .expect("zoomed save");
-        assert_eq!(
+        assert_ne!(
             stream_md5(out_zoomed.to_str().unwrap(), "0:v"),
             src_v,
-            "zoom rendering is not wired until step 4 — video still copies"
+            "V2 Step 3: an effective zoom track must re-encode the video (leave -c:v copy)"
         );
+    }
+
+    // V2 Step 3 webcam seam smoke test: a webcam recording WITH a zoom track
+    // takes the merged single pass (annotations -> zoom -> bubble -> watermark).
+    // Exercises the whole graph end to end — a malformed filter or a wrong input
+    // index fails the export. Asserts a valid mp4 at screen dims with A/V. The
+    // visual bubble placement / A/V sync are owner-judged (no fixture eyeball).
+    #[test]
+    fn webcam_zoom_seam_produces_valid_mp4() {
+        ensure_audio_model_for_tests();
+        let dir = std::env::temp_dir().join(format!("zeigen-wc-zoom-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let screen = synth_source(&dir, "screen.mp4", 2.0, 2.0, 320, 240);
+        // Webcam segment: video-only synth, a different pattern so the overlay
+        // is a real distinct source.
+        let webcam = dir.join("webcam-00.mp4");
+        let wc = Command::new(FFMPEG_PATH)
+            .args([
+                "-y", "-v", "error",
+                "-f", "lavfi", "-i", "testsrc=duration=2:size=160x160:rate=30",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            ])
+            .arg(&webcam)
+            .output()
+            .expect("spawn webcam synth");
+        assert!(wc.status.success(), "webcam synth: {}", String::from_utf8_lossy(&wc.stderr));
+
+        let kf = |t: f64, scale: f64| ZoomKeyframe {
+            t, scale, center_x: 160.0, center_y: 120.0, ease: Ease::InOutCubic,
+            auto_generated: false,
+        };
+        let sidecar = SidecarState {
+            zoom: vec![kf(0.3, 1.0), kf(0.9, 2.0), kf(1.1, 2.0), kf(1.7, 1.0)],
+            bubble_position_log: vec![BubblePositionEntry {
+                t: 0.0, x: 0.9, y: 0.85, diameter: Some(120.0),
+            }],
+            bubble_zone: Some(crate::composite::BubbleZone::BottomRight),
+            ..Default::default()
+        };
+        let out = dir.join("out.mp4");
+        run_edit_pipeline(
+            &screen,
+            std::slice::from_ref(&webcam),
+            &out,
+            &sidecar,
+            PipelineMode::Mp4 { resolution: Mp4Resolution::Source },
+            crate::composite::WebcamSize::Medium,
+            None,
+            |_| {},
+        )
+        .expect("webcam+zoom merged save");
+
+        assert!(out.is_file(), "output exists");
+        assert_eq!(
+            probe_dimensions(&out).expect("probe out dims"),
+            (320, 240),
+            "output keeps screen dims (zoom crops+scales back, bubble overlaid)"
+        );
+        // Both streams survive the merged pass.
+        assert!(
+            probe_audio_track_path(&out).expect("probe audio").is_some(),
+            "audio stream present"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Segment reconstruction must mirror Review.tsx zoomKeyframesToSegments so
+    // the exported curve matches the preview. Keep in sync with the TS side.
+    #[test]
+    fn zoom_segments_mirror_preview() {
+        let kf = |t: f64, scale: f64, cx: f64| ZoomKeyframe {
+            t,
+            scale,
+            center_x: cx,
+            center_y: 50.0,
+            ease: Ease::InOutCubic,
+            auto_generated: false,
+        };
+        // Canonical single window: span is edge-scale-1 keyframe to the next;
+        // peak interior scale + its center define it.
+        let segs = zoom_keyframes_to_segments(&[
+            kf(0.3, 1.0, 100.0),
+            kf(0.9, 2.0, 160.0),
+            kf(1.1, 2.0, 160.0),
+            kf(1.7, 1.0, 100.0),
+        ]);
+        assert_eq!(segs.len(), 1);
+        assert!((segs[0].start - 0.3).abs() < 1e-9 && (segs[0].end - 1.7).abs() < 1e-9);
+        assert!((segs[0].scale - 2.0).abs() < 1e-9 && (segs[0].cx - 160.0).abs() < 1e-9);
+
+        // Two windows stay separate.
+        let two = zoom_keyframes_to_segments(&[
+            kf(0.0, 1.0, 0.0),
+            kf(0.5, 1.5, 20.0),
+            kf(1.0, 1.0, 0.0),
+            kf(2.0, 1.0, 0.0),
+            kf(2.5, 2.5, 90.0),
+            kf(3.0, 1.0, 0.0),
+        ]);
+        assert_eq!(two.len(), 2);
+        assert!((two[0].scale - 1.5).abs() < 1e-9 && (two[1].scale - 2.5).abs() < 1e-9);
+
+        // No effective zoom -> no segments (stays on the copy path).
+        assert!(zoom_keyframes_to_segments(&[]).is_empty());
+        assert!(zoom_keyframes_to_segments(&[kf(0.0, 1.0, 0.0), kf(1.0, 1.0, 0.0)]).is_empty());
     }
 
     #[test]

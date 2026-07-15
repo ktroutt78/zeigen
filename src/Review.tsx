@@ -2566,6 +2566,9 @@ type VideoStageProps = {
 
 function VideoStage(props: VideoStageProps) {
   const stageRef = useRef<HTMLDivElement | null>(null);
+  // V2 Step 3: wrapper around video + annotations that carries the zoom
+  // transform (see the zoom rAF below).
+  const zoomLayerRef = useRef<HTMLDivElement | null>(null);
   // Shared drag-to-draw state for the arrow, blur, and spotlight tools — all
   // three are "two points, drag from start to end" gestures; only the
   // placement callback and the live preview shape differ.
@@ -2599,10 +2602,14 @@ function VideoStage(props: VideoStageProps) {
   const videoRefForZoom = props.videoRef;
   useEffect(() => {
     const video = videoRefForZoom.current;
-    if (!video) return;
+    // V2 Step 3: the transform now drives the wrapper (video + annotations),
+    // not the bare video, so content-anchored annotations zoom with the
+    // content. The webcam bubble / watermark are outside the wrapper (fixed).
+    const layer = zoomLayerRef.current;
+    if (!video || !layer) return;
     const reset = () => {
-      video.style.transform = "";
-      video.style.transformOrigin = "";
+      layer.style.transform = "";
+      layer.style.transformOrigin = "";
     };
     if (zoomSegs.length === 0 || (zoomEditing && !zoomLooping) || !videoDims) {
       reset();
@@ -2615,13 +2622,13 @@ function VideoStage(props: VideoStageProps) {
       if (!stage) return;
       const z = zoomAt(zoomSegs, video.currentTime);
       if (!z || z.scale <= 1.001) {
-        video.style.transform = "";
+        layer.style.transform = "";
         return;
       }
       // Framing: a crop rect of size content/s centered on the zoom
       // center, clamped inside the frame, scaled up to fill the content
-      // box. The step-4 export renderer must mirror this math for
-      // preview/export parity.
+      // box. The export renderer (edit.rs zoom_filter_fragment) mirrors this
+      // math for preview/export parity — change one, change the other.
       const rect = stage.getBoundingClientRect();
       const b = contentBox({ width: rect.width, height: rect.height }, videoDims);
       const s = z.scale;
@@ -2629,8 +2636,8 @@ function VideoStage(props: VideoStageProps) {
       const py = b.y + (z.center_y / videoDims.h) * b.h;
       const qx = Math.min(Math.max(px, b.x + b.w / (2 * s)), b.x + b.w - b.w / (2 * s));
       const qy = Math.min(Math.max(py, b.y + b.h / (2 * s)), b.y + b.h - b.h / (2 * s));
-      video.style.transformOrigin = "0 0";
-      video.style.transform = `translate(${b.x + b.w / 2 - s * qx}px, ${
+      layer.style.transformOrigin = "0 0";
+      layer.style.transform = `translate(${b.x + b.w / 2 - s * qx}px, ${
         b.y + b.h / 2 - s * qy
       }px) scale(${s})`;
     };
@@ -2766,39 +2773,57 @@ function VideoStage(props: VideoStageProps) {
           cursor,
         }}
       >
-        {props.assetUrl ? (
-          <video
-            ref={props.videoRef}
-            src={props.assetUrl}
-            onLoadedMetadata={props.onLoadedMetadata}
-            onTimeUpdate={props.onTimeUpdate}
-            onPlay={props.onPlay}
-            onPause={props.onPause}
-            playsInline
-            preload="auto"
-            style={{
-              width: "100%",
-              height: "100%",
-              objectFit: "contain",
-              background: "#000",
-              pointerEvents: "none",
-            }}
+        {/* V2 Step 3: the screen video AND content-anchored annotations share
+            the zoom transform (applied to this wrapper by the zoom rAF) so
+            annotations zoom WITH the content. The webcam bubble + watermark
+            stay OUTSIDE (screen-anchored) — and rendering the bubble after this
+            wrapper matches the export layer order (annotations -> zoom ->
+            webcam). AnnotationLayer's geometry keys off the untransformed
+            stageRef, so the wrapper transform is the only thing that scales. */}
+        <div ref={zoomLayerRef} style={{ position: "absolute", inset: 0 }}>
+          {props.assetUrl ? (
+            <video
+              ref={props.videoRef}
+              src={props.assetUrl}
+              onLoadedMetadata={props.onLoadedMetadata}
+              onTimeUpdate={props.onTimeUpdate}
+              onPlay={props.onPlay}
+              onPause={props.onPause}
+              playsInline
+              preload="auto"
+              style={{
+                width: "100%",
+                height: "100%",
+                objectFit: "contain",
+                background: "#000",
+                pointerEvents: "none",
+              }}
+            />
+          ) : (
+            <div
+              style={{
+                position: "absolute",
+                inset: 0,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                color: "var(--fg-tertiary)",
+                fontSize: 12,
+              }}
+            >
+              No source path
+            </div>
+          )}
+          <AnnotationLayer
+            stageRef={stageRef}
+            videoRef={props.videoRef}
+            editor={props.editor}
+            annotationColor={props.annotationColor}
+            currentTime={props.currentTime}
+            drawingShape={drawingShape}
+            videoDims={videoDims}
           />
-        ) : (
-          <div
-            style={{
-              position: "absolute",
-              inset: 0,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              color: "var(--fg-tertiary)",
-              fontSize: 12,
-            }}
-          >
-            No source path
-          </div>
-        )}
+        </div>
         <BubbleLayer
           stageRef={stageRef}
           screenVideoRef={props.videoRef}
@@ -2810,15 +2835,6 @@ function VideoStage(props: VideoStageProps) {
           bubbleZone={props.bubbleZone}
           scrubbingRef={props.scrubbingRef}
           videoDims={props.watermarkPreview.videoDims}
-        />
-        <AnnotationLayer
-          stageRef={stageRef}
-          videoRef={props.videoRef}
-          editor={props.editor}
-          annotationColor={props.annotationColor}
-          currentTime={props.currentTime}
-          drawingShape={drawingShape}
-          videoDims={videoDims}
         />
         {props.zoom.selectedIndex != null &&
           !props.zoom.looping &&
