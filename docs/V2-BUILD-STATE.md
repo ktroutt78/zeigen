@@ -29,7 +29,29 @@ measured evidence: `docs/ZOOM-EXPORT-STEP4.md` and DECISIONS.md 2026-07-14 / 202
    added. Live recording untouched. Verified in-app: pick parks the bubble and the exported mp4
    matches. `cargo test --lib`: 40 passed, 4 ignored.
 
-3. **Zoom export — NEXT.** Tripwire flips here. (scope below)
+3. **Zoom export — DONE.** Commit `f728fa2`. Zooms reach the exported mp4 (were preview-only).
+   Shipped as two increments:
+   - **Screen-only + preview.** Shared zoom builder in `edit.rs` (`zoom_filter_fragment`):
+     keyframes→segments mirroring `zoomKeyframesToSegments`, eased `s(t)` (in_out_cubic,
+     `ramp=min(0.6,dur/2)`), crop window `W/s × H/s` on the clamped pixel center, on a 4x
+     lanczos oversample. **As-built deviation:** uses `zoompan` driven by `it` (input time),
+     NOT `crop` — ffmpeg 8.1 `crop` has no `eval` and can't vary crop *size* per frame; zoompan
+     is PTS-accurate on the VFR source. Validated **PSNR 50 dB** vs a reference center-crop.
+     Wired AFTER content annotations, BEFORE the watermark; keyframe times shifted by `−trim_in`.
+     Gates re-encode (non-zoom keeps `-c:v copy`); **tripwire flipped**. **Preview fixed** to
+     match parity: `AnnotationLayer` nested in the zoom transform so content annotations zoom
+     WITH content (the scope's "annotations before zoom" — the old preview was the bug);
+     `BubbleLayer` stays a sibling (webcam fixed).
+   - **Webcam seam.** composite's webcam-overlay filter extracted into a shared helper;
+     `composite()` refactored to use it (`legacy_args_pinned` byte-identity holds), so webcam+zoom
+     reuses the exact proven bubble prep. `run_edit_pipeline` routes webcam+zoom to a single pass
+     (annotations → zoom → bubble → watermark); webcam+no-zoom keeps the untouched two-pass.
+     Trim-start webcam alignment via `pad_lead`/`wc_skip` (untrimmed = composite-identical).
+   - **Owner-verified** on a real 6-min/30-zoom recording: zoom matches preview, A/V in sync
+     through front+end trims, softening below perception; ~2.5min export (whole-timeline
+     oversample), accepted for V2. **UNTESTED combo:** watermark + webcam + zoom together.
+   - `cargo test --lib`: 42 passed, 4 ignored (byte-identity pin + flipped tripwire +
+     webcam+zoom smoke test).
 
 ## Step 2 scope — zone-based bubble
 
@@ -79,11 +101,21 @@ step at ~2 sessions / 2–4 rounds once the zone bubble removes the `f(t)` compl
   (`docs/v3-ci-compositor/`, `docs/ZOOM-EXPORT-STEP4.md`, DECISIONS.md).
 - Guards: `42c9cae`.
 - Zone-based bubble (Step 2): `5159a22`.
+- Zoom export (Step 3): `f728fa2`.
 - Branch: `capture-engine-v2`.
 
-## Step 3 starting point (zoom export)
-The `f(t)` complication is now gone, so the constant webcam overlay is a trivial
-`overlay=x:y` appended AFTER the zoom (see Step 3 scope). The zoom keyframes still
-serialize but nothing in the export reads `SidecarState.zoom` yet — the tripwire
-`empty_zoom_stays_on_video_copy_path` (edit.rs) still pins that a non-empty zoom track
-copies the video; flip its non-empty half to a re-encode assertion when zoompan lands.
+## V2 core complete. Next optimization: per-zoomed-span oversample
+Zoom now reaches exports; V2's core is done. The whole timeline is currently oversampled
+(the measured pessimistic ceiling) whenever any zoom is present — so a zoomed recording
+pays the 4x cost end-to-end AND its non-zoomed spans are re-encoded (oversample roundtrip
+softens them ~40.7 dB PSNR / 0.995 SSIM — slight, below perception in motion, but real).
+
+**Per-zoomed-span oversample** is the next optimization (owner-prioritized): oversample +
+re-encode ONLY the spans that contain a zoom, and keep non-zoomed spans on `-c:v copy`.
+This fixes three things at once — export cost (only zoomed spans pay), the softening, and
+non-zoomed spans stay pristine (byte-identical copy). Requires splitting the timeline at
+zoom-span boundaries, processing spans separately, and concatenating. `3x oversample`
+(single-constant change, `ZOOM_OVERSAMPLE`) remains a separate validated-later A/B.
+
+Other open items: watermark + webcam + zoom together is UNTESTED (marked, not verified).
+V3 (Core Image compositor) stays a decided-but-not-started branch — `docs/v3-ci-compositor/`.
