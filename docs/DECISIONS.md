@@ -4,6 +4,22 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-14 — Zoom export split into V2 (ffmpeg now) + V3 (CI compositor branch); supersedes "Swift ruled out"
+
+After the ffmpeg gate was resolved (entry below), a hardware-variance question reopened it and a GPU spike changed the shape. **Decision: finish V2 on ffmpeg (owner's daily driver for weeks), then branch for a Swift/Core-Image V3.** This supersedes the "Swift compositor is OFF the table" line in the entry below — Swift/CI is not off the table, it is V3.
+
+**Why the split (measured, owner's M5).** ffmpeg 4x oversample is **~100% CPU/bandwidth-bound** — filter-only 79.3s ≈ with-encode 78.7s, so the hardware encoder is NOT the bottleneck at 4x. That degrades worst on M1/older-Intel and could thermal-throttle a fanless Air on battery. A throwaway GPU spike (`gpuzoom.swift`, preserved in `docs/v3-ci-compositor/`) rendered the same zooms via Core Image (Metal, sub-pixel, no oversample) and measured decisively better: **~33s vs 79s** for a 5-min export; **encoder-bound at CPU/wall 0.6 vs ffmpeg's 3.6**; **zoom essentially free** (GPU identity re-encode 34s ≈ GPU zoom 33s); peak RSS 113 vs 223 MB. The media engine varies far less across Macs than CPU+bandwidth, so V3 is fast, smooth, AND hardware-uniform.
+
+**V2 ships with the known CPU tax anyway** because the sole user is on an M5 and needs a working recorder now. V2 is a proper daily driver, not a throwaway stepping stone — bugs hit while cutting real demos get fixed in V2, not deferred to the rewrite.
+
+**V2 scope (ffmpeg, ~2 sessions / 2-4 rounds):** (1) prerequisites — guard restoration + flip the non-empty-zoom tripwire to assert re-encode; (2) **zone-based bubble** — constant export position picked in Review, live bubble stays draggable during recording (ephemeral), `bubble_position_log` becomes preview/legacy data export ignores, old recordings default to nearest corner of the log centroid; (3) zoom export — reuse `single_input`'s annotation+trim graph, insert oversample+zoompan, append constant webcam overlay + watermark AFTER the zoom, shift zoom keyframe times by −trim.in, 4x default (3x = validated-later optimization).
+
+**Guard-restoration caveat (owner-acknowledged):** the May baseline recordings are gone (not in git, no LFS, disk dirs absent). "Restoring" the five stream-md5 guards means re-pinning against TODAY's output/a current source — enough to catch whether zoom breaks plain exports, but **explicitly NOT the original May safety net**. (The guards are relational/structural — copy-path holds, arnndn ran, dims, audio<video — not golden-output pins, so re-pointing keeps most regression value; the lost piece is the exact May reference.)
+
+**Zone-based bubble simplifies BOTH paths** and carries forward to V3 unchanged (constant CI layer, no position animation to port). It's a real product improvement independent of render path — solves "the bubble is covering something" by letting the owner pick the least-bad constant zone post-hoc.
+
+**V3's bar — must NOT regress V2 on performance OR quality:** (a) beat V2 measured on the FULL pipeline (zoom + bubble + annotations + blur/spotlight + watermark), not isolated zoom — the 33-vs-79 win was zoom-only; (b) tune the GPU output quality (spike was ~8-11 Mbps bilinear vs ffmpeg 24 Mbps lanczos — tunable, must actually be tuned); (c) once V2 is daily-driven, the owner's real exports become the A/B reference and the gate. See `docs/v3-ci-compositor/README.md`.
+
 ## 2026-07-14 — Step 4 design gate resolved: ffmpeg zoompan + 4x oversample (Swift ruled out), measured
 
 Spiked the deferred Swift-vs-ffmpeg export-rendering decision risky-measurement-first (like B0), on the real 2026-07-14-201245 recording (1080p). Throwaway spike — scratchpad only, nothing in the tree, prerequisites and real export path untouched. `docs/ZOOM-EXPORT-STEP4.md` updated to RESOLVED.

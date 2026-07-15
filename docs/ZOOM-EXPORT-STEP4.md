@@ -36,28 +36,23 @@ re-encode.
    tripwire: nobody reaches export rendering without consciously acknowledging that zoomed
    exports leave the fast path.
 
-## Design decision RESOLVED (2026-07-14): ffmpeg zoompan + 4x oversample
+## Design decision RESOLVED (2026-07-14): V2 = ffmpeg zoompan + 4x oversample; V3 = CI compositor
 
-Spiked risky-measurement-first (like B0) and owner-judged on real footage; the spike was
-throwaway (scratchpad only, nothing in the tree). See DECISIONS.md 2026-07-14. Outcome:
+Spiked risky-measurement-first (like B0) and owner-judged on real footage; all spikes throwaway
+(scratchpad only). See DECISIONS.md 2026-07-14 and **`docs/v3-ci-compositor/`** for the V3 branch.
 
+**Smoothness gate (settled):**
 - **Naive ffmpeg `zoompan` stutters** on slow pans (it truncates crop x/y to integer pixels),
   confirmed visually on a deliberately-slow 2.5s ramp. Rejected — the bar is buttery-smooth.
-- **Oversampling fixes it and is mandatory, not optional.** Pre-scale the frame Nx (lanczos),
-  run `zoompan` on the upscaled frame so its integer offsets are 1/N source px, downscale to
-  the 1080p output.
-- **4x is the committed default** — buttery on both the 2.5s stress ramp and the real 600ms
-  default (`ZOOM_RAMP_S`), isolated and in a multi-zoom sequence. 2x and 3x still showed slight
-  stutter on the stress ramp; 3x looked good at the real 600ms speed but was not committed on
-  15s of synthetic footage.
-- **3x is a validated-later optimization, NOT a blocker.** The oversample factor is a single
-  constant in the render path; once real zoomed exports exist, A/B 3x vs 4x on real varied
-  footage and flip the constant if 3x holds (nearly halves the tax: ~44s vs ~79s per 5-min).
-- **Swift compositor is OFF the table for smoothness.** The "if oversampling blows up,
-  reconsider Swift" branch never triggered — see the measured cost.
+- **Oversampling fixes it and is mandatory.** Pre-scale the frame Nx (lanczos), run `zoompan` on
+  the upscaled frame so integer offsets are 1/N source px, downscale to 1080p output.
+- **4x is the V2 default** — buttery on the 2.5s stress ramp and the real 600ms default
+  (`ZOOM_RAMP_S`), isolated and in a multi-zoom sequence. 2x/3x showed slight stutter on the
+  stress ramp; 3x looked good at 600ms but not committed on synthetic footage. **3x recorded as
+  a validated-later optimization** (single constant; A/B on real exports, flip if it holds).
 
-**Measured cost** (300s / 1080p / `h264_videotoolbox`, this machine; whole-timeline oversampled
-= pessimistic ceiling; real exports oversample only zoomed spans so run under this):
+**Measured ffmpeg cost** (300s / 1080p / `h264_videotoolbox`, owner's M5; whole-timeline
+oversampled = pessimistic ceiling — real exports oversample only zoomed spans):
 
 | Path | Wall (5 min) | vs baseline | Peak RSS |
 |---|---|---|---|
@@ -66,16 +61,25 @@ throwaway (scratchpad only, nothing in the tree). See DECISIONS.md 2026-07-14. O
 | 3x oversample (5760x3240) | 44.3s | 1.3x | 188 MB |
 | 4x oversample (7680x4320) | 78.7s | 2.3x | 223 MB |
 
-No memory or thermal blowup at the 8x intermediate (peak RSS flat; `pmset -g therm` clean after
-all runs). 2x is free because videotoolbox encode is the bottleneck and the 2x CPU scale hides
-under it; 4x is where CPU lanczos on 8K frames becomes the bottleneck. The 34.5s baseline
-validates the ~29s figure below.
+**The hardware caveat that splits V2 from V3.** ffmpeg 4x is **~100% CPU/bandwidth-bound** (filter-
+only 79.3s ≈ with-encode 78.7s; the hardware encoder is NOT the bottleneck at 4x). It degrades
+worst on M1/older-Intel and could thermal-throttle a fanless Air on battery. A GPU-native CI
+compositor measured **decisively better and encoder-bound** (see `docs/v3-ci-compositor/`). So
+Swift/CI is **NOT off the table** — it is the **V3** plan. **V2 ships ffmpeg + 4x with this known
+CPU tax**, accepted because the only user is on an M5 and needs a working daily driver now; V3's
+CI compositor removes the tax.
 
-**Still OPEN (not settled by this spike): overlay ordering.** Content-anchored overlays (arrows,
-blur, spotlight) must zoom **WITH** the content; screen-anchored ones (webcam bubble, watermark)
-must **NOT**. This is a Step 4 build question the smoothness spike did not touch. It no longer
-bears on Swift-vs-ffmpeg (ffmpeg won on smoothness + cost); it's now purely "get the
-`filter_complex` layer order right."
+**Overlay ordering (V2 build task).** Content-anchored overlays (arrows, blur, spotlight) zoom
+**WITH** the content; screen-anchored (webcam bubble, watermark) must **NOT**. Investigated the
+seam (`edit.rs` two-pass, `composite.rs`): the reorder is bounded once the **zone-based bubble**
+(constant position, below) removes the webcam's PTS-keyed position — see the zone note. Copy-path/
+byte-identity stays safe by gating (non-zoomed exports keep the existing untouched path).
+
+**Zone-based bubble (V2, simplifies both paths).** Export bakes ONE constant bubble zone chosen in
+Review (live bubble stays draggable during recording, ephemeral). This deletes the `f(t)` position
+interpolation from the export path, collapsing the trim/reorder cascade to a constant overlay
+appended after the zoom. `bubble_position_log` becomes preview/legacy data export ignores. Carries
+forward to V3 unchanged.
 
 ## The encoder reality that makes this acceptable
 
