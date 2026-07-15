@@ -4,6 +4,27 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-14 — Step 4 design gate resolved: ffmpeg zoompan + 4x oversample (Swift ruled out), measured
+
+Spiked the deferred Swift-vs-ffmpeg export-rendering decision risky-measurement-first (like B0), on the real 2026-07-14-201245 recording (1080p). Throwaway spike — scratchpad only, nothing in the tree, prerequisites and real export path untouched. `docs/ZOOM-EXPORT-STEP4.md` updated to RESOLVED.
+
+**Chain of evidence.** (1) Naive `zoompan` truncates crop x/y to integer pixels and **visibly stutters** on a slow pan (owner-judged on a deliberately-slow 2.5s ramp against dense right-edge fine text). Rejected — bar is buttery. (2) The fix is **oversampling** (pre-scale Nx lanczos → zoompan on the upscaled frame → downscale), which makes integer offsets 1/N source px. Mandatory, not optional. (3) Owner judged the oversample ladder on both the stress ramp and the real 600ms default (`ZOOM_RAMP_S`), isolated and as a 3-zoom sequence: naive ✗, 2x slightly stuttery ✗, 3x slightly stuttery on the stress ramp (looked good at 600ms but not committed on 15s of synthetic), **4x buttery everywhere ✓**.
+
+**Decision: ffmpeg `zoompan` + 4x oversample is the committed default; Swift compositor is off the table for smoothness.** 3x is a **validated-later optimization** (single-constant change; A/B on real exports once they exist — halves the tax if it holds), not a blocker.
+
+**Measured cost ladder** (300s / 1080p / `h264_videotoolbox`, whole-timeline oversampled = ceiling):
+
+| Path | Wall (5 min) | vs baseline | Peak RSS |
+|---|---|---|---|
+| Baseline re-encode | 34.5s | 1.0x | 188 MB |
+| 2x oversample | 33.9s | 1.0x (free) | 209 MB |
+| 3x oversample | 44.3s | 1.3x | 188 MB |
+| 4x oversample | 78.7s | 2.3x | 223 MB |
+
+No memory/thermal blowup at the 7680x4320 intermediate (peak RSS flat; `pmset -g therm` clean). 2x is free (videotoolbox encode is the bottleneck, the 2x CPU scale hides under it); 4x is where CPU lanczos on 8K frames dominates. Baseline 34.5s validates the prior ~29s estimate. Only zoomed recordings pay this, and only zoomed spans need oversampling, so real exports run under the ceiling.
+
+**Still open (not this spike):** overlay ordering — content-anchored (arrows/blur/spotlight) must zoom with content, screen-anchored (webcam/watermark) must not. A Step 4 build question, no longer bearing on Swift-vs-ffmpeg. **Next:** the two prerequisites (restore the five stream-md5 guards; flip the non-empty-zoom tripwire to assert re-encode) before real render work.
+
 ## 2026-07-14 — Thread B closed: Slices 2 + 3 dropped as unnecessary (supersedes the earlier same-day entry)
 
 Owner call after judging Slice 1.5: **Thread B is done and closed at Slice 1 + Slice 1.5.** Slices 2 (box-resize handles) and 3 (edit-time zoom preview) are dropped, not deferred. The earlier 2026-07-14 entry below said Slice 2 "still stands on its own" — this supersedes that.
