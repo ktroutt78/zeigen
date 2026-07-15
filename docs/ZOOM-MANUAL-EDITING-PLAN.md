@@ -1,15 +1,24 @@
 # Zoom manual-editing WYSIWYG plan ("Thread B")
 
-Status (as of 2026-07-14): **Slice 1 done** (`9ff7aea`), **Slice 1.5 done** (`8854413`),
-**Slice 2 not started**, **Slice 3 likely unnecessary — reassess first**. Captured from the
-July 2026 zoom work where it was called "Thread B" — the complement to the conservative
-auto-suggestion detector ("Thread A", committed `7e9e87c`; see DECISIONS.md 2026-07-14).
+Status (as of 2026-07-14): **DONE and CLOSED. Thread B = Slice 1 + Slice 1.5.** Slices 2
+and 3 are **closed as unnecessary** (not deferred — dropped). Captured from the July 2026
+zoom work where it was called "Thread B" — the complement to the conservative auto-suggestion
+detector ("Thread A", committed `7e9e87c`; see DECISIONS.md 2026-07-14).
 
-Slice 1.5 (looped slow preview, not in the original three-slice scope) was added mid-stream
-and it time-multiplexes Slice 3's design problem away: paused/selected shows the crop box,
-playing the loop shows the zoomed motion, never both at once — so the split-view question
-Slice 3 existed to answer no longer needs answering. Before building Slice 3, reassess
-whether any of it is still wanted. See DECISIONS.md 2026-07-14 (Thread B).
+- **Slice 1 done** (`9ff7aea`) — timeline frame-feedback + ramp shading. Owner-judged good.
+- **Slice 1.5 done** (`8854413`, added mid-stream, not in the original three-slice scope) —
+  looped slow preview of the selected zoom + in-loop 0.5x/1x speed toggle. Owner-judged good.
+
+**Why Slices 2 and 3 are closed (owner call 2026-07-14).** Slice 1.5's loop preview dissolved
+the problem both remaining slices were solving. The real pain was never the Scale slider or
+the crop box per se — it was **editing blind**: adjusting size/framing without seeing the
+zoomed result. Once you can loop-and-watch the effect while dragging the Scale slider, the
+slider is fine, so **Slice 2 (box-resize handles) is not needed** — the "leave the video to
+drag a slider" complaint (3a) only stung while editing blind. And **Slice 3 (edit-time zoom
+preview)** was already redundant for the same reason: Slice 1.5 time-multiplexes its design
+problem (paused/selected = crop box, playing the loop = zoomed motion, never both at once),
+so the split-view question it existed to answer no longer needs answering. Both complaints
+collapsed to one root cause, and the loop preview solved that root cause.
 
 ## Why this exists (the complementarity)
 
@@ -55,30 +64,33 @@ as you drag, plus a small time/duration readout on the band. This is wiring drag
 a label; the extraction already exists. This slice alone kills "editing blind" and stands on
 its own.
 
-### Slice 2 — Box-resize handles. MEDIUM.
-Add corner handles to `ZoomEditLayer` mapping corner-drag → scale (inverse of the crop rect
-size). New interaction, but the coordinate math (`contentBox` / `toContentFrac`, the crop
-rect) is all already in that component. Removes the "leave the video to drag a slider" step
-of complaint 3(a).
+### Slice 2 — Box-resize handles. CLOSED — NOT NEEDED (2026-07-14).
+~~Add corner handles to `ZoomEditLayer` mapping corner-drag → scale.~~ Dropped: with the
+Slice 1.5 loop preview you can watch the zoomed result while dragging the Scale slider, so
+the slider is fine. Complaint 3(a) ("leave the video to drag a slider") only stung while
+editing blind, which the loop preview solved. Not deferred — closed.
 
-### Slice 3 — Edit-time zoom preview. MEDIUM. Design call.
-The live-preview transform already exists (the rAF tick in `VideoStage` that CSS-scales the
-`<video>`) — it's *deliberately suppressed* while a zoom is selected (video held at identity
-so the crop box is visible). Un-suppress it, or show a "full frame + zoomed inset" split.
-Solves complaint 3(b). This is a design decision (how to show both the crop box and the
-zoomed result at once), not just wiring.
+### Slice 3 — Edit-time zoom preview. CLOSED — REDUNDANT (2026-07-14).
+~~Un-suppress the `VideoStage` live transform while a zoom is selected, or show a
+"full frame + zoomed inset" split.~~ Dropped: Slice 1.5 time-multiplexes the design problem
+this slice existed to solve — paused/selected shows the crop box, playing the loop shows the
+zoomed motion, never both at once — so the "show both the crop box and the zoomed result"
+question no longer needs answering. Not deferred — closed.
 
-## Overall sizing
+## Overall sizing (historical)
 
-**MEDIUM.** All frontend — no backend/pipeline/schema work. The two hardest pieces
-(thumbnail extraction, live zoom transform) already exist and just need to be pointed at the
-edit flow. Not "polish" (several coordinated stage + lane interactions), not a "real project."
+Originally scoped **MEDIUM** across three frontend slices. Actual outcome: Slice 1 + the
+mid-stream Slice 1.5 delivered the whole value; Slices 2 and 3 were closed as unnecessary
+(see status block). All frontend — no backend/pipeline/schema work, byte-identity invariant
+untouched throughout.
 
-## Recommended sequence
+## What shipped (final)
 
-1. Slice 1 (timeline frame-feedback) — enabling UX, small, immediate win.
-2. Slice 2 (box-resize handles).
-3. Slice 3 (edit-time zoom preview) — the design-heaviest.
+1. Slice 1 (timeline frame-feedback + ramp shading) — `9ff7aea`.
+2. Slice 1.5 (looped slow preview + speed toggle) — `8854413`.
+
+Slices 2 and 3: closed, not built. The loop preview made blind-editing the actual problem,
+and solving that closed both.
 
 ## Code anchors (July 2026 state; line numbers approximate — grep the symbols)
 

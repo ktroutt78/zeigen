@@ -4,6 +4,12 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-14 — Thread B closed: Slices 2 + 3 dropped as unnecessary (supersedes the earlier same-day entry)
+
+Owner call after judging Slice 1.5: **Thread B is done and closed at Slice 1 + Slice 1.5.** Slices 2 (box-resize handles) and 3 (edit-time zoom preview) are dropped, not deferred. The earlier 2026-07-14 entry below said Slice 2 "still stands on its own" — this supersedes that.
+
+**Both remaining slices had one root cause, and Slice 1.5 solved it.** The real pain was never the Scale slider or the crop box — it was **editing blind** (adjusting size/framing without seeing the zoomed result). Once the loop preview lets you watch the effect while dragging the Scale slider, the slider is fine, so Slice 2's "leave the video to drag a slider" complaint (3a) evaporates. Slice 3 was already flagged redundant here for the same reason (the loop time-multiplexes its crop-box-vs-zoomed-result design question). Two complaints, one cause, one fix. `docs/ZOOM-MANUAL-EDITING-PLAN.md` updated to closed.
+
 ## 2026-07-14 — Zoom manual-editing WYSIWYG: Slices 1 + 1.5 shipped; Slice 1.5 collapses Slice 3 (Thread B, judged & committed)
 
 Built and owner-judged the first two slices of Thread B (`docs/ZOOM-MANUAL-EDITING-PLAN.md`), the hand-editing complement to Thread A's conservative detector. Frontend only — no backend/pipeline/schema/export change, byte-identity invariant untouched. tsc clean, cargo 35/35 for both.
