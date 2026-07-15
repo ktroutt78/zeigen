@@ -175,6 +175,13 @@ const ZOOM_RAMP_S = 0.6;
 const ZOOM_MIN_SCALE = 1.1;
 const ZOOM_MAX_SCALE = 2.5;
 const ZOOM_DEFAULT_SCALE = 2.0;
+// Looped slow preview of the selected zoom (Slice 1.5). Half speed so the
+// 600ms ramps read as motion; a short pre-roll to see the ramp-in enter and
+// a longer tail to see it settle. The window is clamped inside the trim
+// range so the loop's own wrap never collides with the trim-out wrap.
+const ZOOM_PREVIEW_RATE = 0.5;
+const ZOOM_PREVIEW_PRE_S = 0.5;
+const ZOOM_PREVIEW_POST_S = 1.0;
 
 // Segment -> canonical keyframe run: 1.0 at the edges, full scale between,
 // ramps ZOOM_RAMP_S long (halved for short segments). All keyframes of a
@@ -284,6 +291,10 @@ type ZoomEditor = {
   // telemetry. Replaces previous suggestions; manual segments are kept.
   suggest: () => void;
   suggesting: boolean;
+  // True while a looped slow preview of the selected zoom is playing. Drives
+  // the stage: un-suppresses the live zoom transform (so the motion is
+  // visible) and hides the crop-box edit layer for the duration.
+  looping: boolean;
 };
 
 type SidecarState = {
@@ -1528,6 +1539,95 @@ export default function Review() {
     }
   }, [trim]);
 
+  // Looped slow preview of the selected zoom (Slice 1.5). Stop is driven off
+  // the video's own 'pause' event (see onPause below), so every exit path —
+  // spacebar, the transport button, Escape, deselecting — funnels through one
+  // teardown. loopingRef mirrors the state so those non-React callbacks can
+  // read "are we looping?" synchronously. savedRateRef stashes the user's
+  // global speed so it survives the forced half-speed. loopWindowRef holds
+  // the clamped [start,end] the rAF below wraps within.
+  const [loopingZoom, setLoopingZoom] = useState(false);
+  const loopingRef = useRef(false);
+  const savedRateRef = useRef(1);
+  const loopWindowRef = useRef<{ start: number; end: number } | null>(null);
+
+  const endZoomLoop = useCallback(() => {
+    if (!loopingRef.current) return;
+    loopingRef.current = false;
+    loopWindowRef.current = null;
+    setLoopingZoom(false);
+    setPlaybackRate(savedRateRef.current);
+    const v = videoRef.current;
+    if (v) v.playbackRate = savedRateRef.current;
+  }, []);
+
+  const startZoomLoop = useCallback(() => {
+    const v = videoRef.current;
+    if (!v || duration == null) return;
+    const i = zoomSelectedIndex;
+    if (i == null) return;
+    const seg = zoomSegments[i];
+    if (!seg) return;
+    const loMin = trim?.in ?? 0;
+    const loMax = trim?.out ?? duration;
+    const start = Math.max(loMin, seg.start - ZOOM_PREVIEW_PRE_S);
+    const end = Math.min(loMax, seg.end + ZOOM_PREVIEW_POST_S);
+    if (end <= start) return;
+    loopWindowRef.current = { start, end };
+    savedRateRef.current = playbackRate;
+    loopingRef.current = true;
+    setLoopingZoom(true);
+    // Set the rate on the element directly too — the state effect applies a
+    // frame later, and we don't want the first loop iteration at full speed.
+    setPlaybackRate(ZOOM_PREVIEW_RATE);
+    v.playbackRate = ZOOM_PREVIEW_RATE;
+    v.currentTime = start;
+    v.play().catch(() => {});
+  }, [duration, zoomSelectedIndex, zoomSegments, trim, playbackRate]);
+
+  const toggleZoomLoop = useCallback(() => {
+    if (loopingRef.current) {
+      // Let the pause event own teardown (endZoomLoop).
+      videoRef.current?.pause();
+    } else {
+      startZoomLoop();
+    }
+  }, [startZoomLoop]);
+
+  // Live rate change during a loop. Deliberately does NOT touch savedRateRef,
+  // so cycling slow<->real while judging never leaks into the global speed —
+  // endZoomLoop still restores whatever was set before the loop began.
+  const setLoopPreviewRate = useCallback((rate: number) => {
+    setPlaybackRate(rate);
+    const v = videoRef.current;
+    if (v) v.playbackRate = rate;
+  }, []);
+
+  // Wrap the loop within its window. One seek per cycle (only when the tail
+  // is reached), so no seek-queue churn — a direct currentTime write is fine
+  // and frame-accurate here. Runs only while looping.
+  useEffect(() => {
+    if (!loopingZoom) return;
+    const v = videoRef.current;
+    if (!v) return;
+    let raf = 0;
+    const tick = () => {
+      raf = requestAnimationFrame(tick);
+      const w = loopWindowRef.current;
+      if (!w) return;
+      if (v.currentTime >= w.end) v.currentTime = w.start;
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [loopingZoom]);
+
+  // Changing (or clearing) the zoom selection while a preview loops ends it —
+  // pausing routes through endZoomLoop. Auto-move-only-on-play means selecting
+  // a different zoom shouldn't silently keep looping the old one.
+  useEffect(() => {
+    if (loopingRef.current) videoRef.current?.pause();
+  }, [zoomSelectedIndex]);
+
   // Gated seeking — at most one in-flight seek on the screen video, latest
   // target wins. Scrub drags deliver pointermove faster than WebKit can
   // complete seeks; writing currentTime per event churns the seek queue and
@@ -1678,7 +1778,10 @@ export default function Review() {
         setZoomSelectedIndex(null);
       } else if (e.key === " ") {
         e.preventDefault();
-        togglePlay();
+        // A selected zoom turns Space into its looped slow preview; otherwise
+        // it's the normal transport toggle.
+        if (zoomSelectedIndex != null) toggleZoomLoop();
+        else togglePlay();
       } else if (e.key === "ArrowLeft") {
         e.preventDefault();
         seek((videoRef.current?.currentTime ?? 0) - SEEK_SECONDS);
@@ -1693,10 +1796,15 @@ export default function Review() {
         frameStep(1);
       } else if (e.key === "<") {
         e.preventDefault();
-        setPlaybackRate((r) => cyclePlaybackRate(r, -1));
+        // In a zoom loop </> toggle slow<->real only: the global 1/1.5/2
+        // cycle omits 0.5x and can't return to it, so reusing it would strand
+        // the preview off the judging speed. < = slow, > = real.
+        if (loopingRef.current) setLoopPreviewRate(ZOOM_PREVIEW_RATE);
+        else setPlaybackRate((r) => cyclePlaybackRate(r, -1));
       } else if (e.key === ">") {
         e.preventDefault();
-        setPlaybackRate((r) => cyclePlaybackRate(r, 1));
+        if (loopingRef.current) setLoopPreviewRate(1);
+        else setPlaybackRate((r) => cyclePlaybackRate(r, 1));
       } else if (key === "i" && duration != null) {
         e.preventDefault();
         const t = videoRef.current?.currentTime ?? 0;
@@ -1713,7 +1821,11 @@ export default function Review() {
         });
       } else if (e.key === "Escape") {
         e.preventDefault();
-        if (editingIndex != null) {
+        if (loopingRef.current) {
+          // Stop the preview first; keep the zoom selected so it can be
+          // re-previewed or edited without re-selecting.
+          videoRef.current?.pause();
+        } else if (editingIndex != null) {
           setEditingIndex(null);
         } else if (selectedIndex != null) {
           setSelectedIndex(null);
@@ -1745,6 +1857,8 @@ export default function Review() {
     deleteAnnotation,
     deleteZoom,
     togglePlay,
+    toggleZoomLoop,
+    setLoopPreviewRate,
     seek,
     frameStep,
     duration,
@@ -1786,6 +1900,7 @@ export default function Review() {
     canAdd: duration != null && videoDims != null,
     suggest: suggestZooms,
     suggesting,
+    looping: loopingZoom,
   };
 
   const thumbnailControls: ThumbnailControls = {
@@ -1843,7 +1958,10 @@ export default function Review() {
           onLoadedMetadata={onLoadedMetadata}
           onTimeUpdate={onTimeUpdate}
           onPlay={() => setPlaying(true)}
-          onPause={() => setPlaying(false)}
+          onPause={() => {
+            setPlaying(false);
+            endZoomLoop();
+          }}
           duration={duration}
           currentTime={currentTime}
           playing={playing}
@@ -2416,9 +2534,12 @@ function VideoStage(props: VideoStageProps) {
   // overlay ordering is step 4's export design and the preview stays
   // conservative until then. While a zoom segment is selected the video is
   // held at identity: edit view shows the full frame with the crop box
-  // (ZoomEditLayer); deselect to watch the applied zoom.
+  // (ZoomEditLayer); deselect to watch the applied zoom. The exception is the
+  // looped slow preview (zoom.looping) — it un-suppresses the transform while
+  // selected so the motion is visible, time-multiplexing edit vs. watch.
   const zoomSegs = props.zoom.segments;
   const zoomEditing = props.zoom.selectedIndex != null;
+  const zoomLooping = props.zoom.looping;
   const videoRefForZoom = props.videoRef;
   useEffect(() => {
     const video = videoRefForZoom.current;
@@ -2427,7 +2548,7 @@ function VideoStage(props: VideoStageProps) {
       video.style.transform = "";
       video.style.transformOrigin = "";
     };
-    if (zoomSegs.length === 0 || zoomEditing || !videoDims) {
+    if (zoomSegs.length === 0 || (zoomEditing && !zoomLooping) || !videoDims) {
       reset();
       return;
     }
@@ -2462,7 +2583,7 @@ function VideoStage(props: VideoStageProps) {
       cancelAnimationFrame(raf);
       reset();
     };
-  }, [zoomSegs, zoomEditing, videoDims, videoRefForZoom]);
+  }, [zoomSegs, zoomEditing, zoomLooping, videoDims, videoRefForZoom]);
 
   const onStageClick = (e: React.MouseEvent) => {
     if (props.editor.tool !== "text") {
@@ -2643,6 +2764,7 @@ function VideoStage(props: VideoStageProps) {
           videoDims={videoDims}
         />
         {props.zoom.selectedIndex != null &&
+          !props.zoom.looping &&
           props.zoom.segments[props.zoom.selectedIndex] && (
             <ZoomEditLayer
               stageRef={stageRef}
