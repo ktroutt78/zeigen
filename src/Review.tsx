@@ -4539,10 +4539,23 @@ function Timeline(props: TimelineProps) {
             selectedIndex={props.zoom.selectedIndex}
             onSelect={props.zoom.select}
             onChange={(i, p) => props.zoom.update(i, p)}
+            onDragHover={(t) => {
+              const track = trackRef.current;
+              if (t == null || !track) {
+                setHover(null);
+                return;
+              }
+              // Reuse the main-track scrub preview: show the dragged zoom time's
+              // frame above the timeline at that x. The main track isn't hovered
+              // during a zoom-lane drag, so borrowing its rect + hover state is
+              // safe and needs no second ScrubPreview.
+              setHover({ time: t, rect: track.getBoundingClientRect() });
+            }}
             label={() => "Z"}
             bounds={props.zoom.bounds}
             alwaysBand
             minGap={ZOOM_MIN_DURATION}
+            ramp={ZOOM_RAMP_S}
             style={{ top: 0 }}
           />
         </div>

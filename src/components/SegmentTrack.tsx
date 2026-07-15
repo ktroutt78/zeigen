@@ -17,7 +17,17 @@ type SegmentTrackProps = {
   selectedIndex: number | null;
   onSelect: (i: number) => void;
   onChange: (i: number, patch: { start?: number; end?: number }) => void;
+  // Live frame-feedback hook. Fired during a pip/edge drag with the time the
+  // user is positioning against (start frame for whole-window moves, the moving
+  // edge for resizes) so the caller can drive a scrub thumbnail; null on drag
+  // end. Only the zoom lane wires this today — annotations leave it undefined.
+  onDragHover?: (time: number | null) => void;
   label: (i: number) => string;
+  // Zoom-lane ramp duration (seconds). When set, each band paints a brighter
+  // held-at-full-scale core (dur - 2*ramp) against dimmer ramp shoulders, and
+  // the selected band shows a dur/held readout — making the otherwise-invisible
+  // ramp reality visible. Annotations pass nothing and render unchanged.
+  ramp?: number;
   // Allowed [min, max] window a segment may occupy. Default is the whole
   // timeline (annotation behavior); the zoom track passes neighbor bounds so
   // segments can't overlap.
@@ -37,10 +47,12 @@ export default function SegmentTrack({
   selectedIndex,
   onSelect,
   onChange,
+  onDragHover,
   label,
   bounds,
   alwaysBand = false,
   minGap = 0.1,
+  ramp,
   style,
 }: SegmentTrackProps) {
   const rowRef = useRef<HTMLDivElement | null>(null);
@@ -63,6 +75,14 @@ export default function SegmentTrack({
         const startPct = (seg.start / duration) * 100;
         const endPct = (seg.end / duration) * 100;
         const selected = selectedIndex === idx;
+        // Ramp reality (zoom lane only): the eased ramps eat `r` off each end,
+        // so the window actually held at full scale is `dur - 2*r`. `r` halves
+        // for windows shorter than 2*ramp, where held collapses to 0.
+        const dur = seg.end - seg.start;
+        const r = ramp != null ? Math.min(ramp, dur / 2) : 0;
+        const held = Math.max(0, dur - 2 * r);
+        const heldStartPct = ((seg.start + r) / duration) * 100;
+        const heldEndPct = ((seg.end - r) / duration) * 100;
         const segBounds = () => (bounds ? bounds(idx) : { min: 0, max: duration });
         const onPipDown = (e: React.PointerEvent) => {
           e.stopPropagation();
@@ -85,10 +105,14 @@ export default function SegmentTrack({
               nextStart = nextEnd - dur;
             }
             onChange(idx, { start: nextStart, end: nextEnd });
+            // Whole-window move: preview the start frame — that's the blind
+            // anchor the user is placing.
+            onDragHover?.(nextStart);
           };
           const onUp = () => {
             window.removeEventListener("pointermove", onMove);
             window.removeEventListener("pointerup", onUp);
+            onDragHover?.(null);
           };
           window.addEventListener("pointermove", onMove);
           window.addEventListener("pointerup", onUp);
@@ -106,14 +130,19 @@ export default function SegmentTrack({
           const onMove = (ev: PointerEvent) => {
             const t = ((ev.clientX - rect.left) / rect.width) * duration;
             if (side === "start") {
-              onChange(idx, { start: Math.max(b.min, Math.min(fixedEnd - minGap, t)) });
+              const ns = Math.max(b.min, Math.min(fixedEnd - minGap, t));
+              onChange(idx, { start: ns });
+              onDragHover?.(ns);
             } else {
-              onChange(idx, { end: Math.min(b.max, Math.max(fixedStart + minGap, t)) });
+              const ne = Math.min(b.max, Math.max(fixedStart + minGap, t));
+              onChange(idx, { end: ne });
+              onDragHover?.(ne);
             }
           };
           const onUp = () => {
             window.removeEventListener("pointermove", onMove);
             window.removeEventListener("pointerup", onUp);
+            onDragHover?.(null);
           };
           window.addEventListener("pointermove", onMove);
           window.addEventListener("pointerup", onUp);
@@ -136,6 +165,49 @@ export default function SegmentTrack({
                   pointerEvents: "none",
                 }}
               />
+            )}
+            {/* Held-at-full-scale core: brighter accent fill spanning the
+                window minus both ramp shoulders, so the dim band ends read as
+                "ramping" and the bright middle as "full zoom". */}
+            {ramp != null && held > 0 && (selected || alwaysBand) && (
+              <div
+                style={{
+                  position: "absolute",
+                  left: `${heldStartPct}%`,
+                  width: `${Math.max(0, heldEndPct - heldStartPct)}%`,
+                  top: 0,
+                  height: 14,
+                  background: "var(--accent)",
+                  opacity: selected ? 0.38 : 0.18,
+                  borderRadius: 2,
+                  pointerEvents: "none",
+                }}
+              />
+            )}
+            {/* Duration / held readout — selected band only, so the lane isn't
+                cluttered. Updates live as the band is dragged/resized. */}
+            {ramp != null && selected && (
+              <div
+                style={{
+                  position: "absolute",
+                  left: `${pct}%`,
+                  top: -17,
+                  transform: "translateX(-50%)",
+                  pointerEvents: "none",
+                  whiteSpace: "nowrap",
+                  fontSize: 10,
+                  fontFamily: "var(--font-mono)",
+                  fontVariantNumeric: "tabular-nums",
+                  color: "var(--fg-secondary)",
+                  background: "var(--bg-elevated)",
+                  border: "1px solid var(--border-faint)",
+                  borderRadius: 4,
+                  padding: "1px 5px",
+                  boxShadow: "0 1px 3px rgba(0,0,0,0.4)",
+                }}
+              >
+                {dur.toFixed(1)}s · full {held.toFixed(1)}s
+              </div>
             )}
             <div
               onPointerDown={onPipDown}
