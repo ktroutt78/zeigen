@@ -596,6 +596,14 @@ export default function Review() {
   // thumbnail pick fell outside the trim range and the backend used the
   // clamped fallback. Distinct from `error` (red, destructive styling).
   const [notice, setNotice] = useState<string | null>(null);
+  // Notices are transient (e.g. "10 zooms suggested") — auto-dismiss after a
+  // few seconds so the strip never lingers over the zoom lane. The × on the
+  // strip still dismisses immediately.
+  useEffect(() => {
+    if (notice == null) return;
+    const id = setTimeout(() => setNotice(null), 5000);
+    return () => clearTimeout(id);
+  }, [notice]);
   // S — audio-stream start_time in seconds, fetched once at review-open.
   // Threaded into Waveform alongside the video duration so peaks map onto the
   // video-time timeline instead of audio-time. Null until probe_audio_track
