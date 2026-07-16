@@ -4,6 +4,20 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-16 — Phase 6 perf gate: AGREED BARS (locked with owner before running)
+
+The gate V3 must clear to switch over. All hard unless noted. Scope: re-encode exports only (zoom/overlay recordings); plain non-zoomed saves keep V2's `-c:v copy` fast path and are out of scope.
+
+1. **CPU / thermal proxy (hard):** V3 video-stage CPU-time (user+sys, `/usr/bin/time -l`) **≤ 60% of V2's**. This is the real reason to switch (V2's 4x lanczos oversample is CPU-heavy; V3 is GPU + VideoToolbox).
+2. **Wall-time (hard, with a judgment band):** V3 video-stage wall-time **≤ 60% of V2 = pass**. **60–100% = report, owner judges** whether the CPU win carries it (NOT an automatic fail). **≥ 100% = fail.** 0.98x does NOT count as a pass — a rewrite that isn't materially faster on zoomed content is a CPU-only rewrite, which is not the claim.
+3. **Air thermal test (hard, OWNER-RUN, not optional — it is the point):** owner exports a LONG recording on the fanless Air with V3 (and V2 for comparison) and reports fan spin-up / throttle. If V3 spins the fans the way V2 does today, the CPU-time number didn't buy what it claimed. **Sequenced AFTER the standalone numbers look good**, so it's only spent on something already promising on paper.
+4. **Quality (hard, owner eye):** blind real-export A/B, **V3 ≥ V2**, no visible regression (cleaner zoom edges expected).
+5. **Correctness tripwires (hard, mechanical — all must pass):** color atoms 709/tv/yuv420p; bubble+watermark bboxes within floors (dE ~1.1 / 0.55); zoom trajectory aligned; frame count matches; audio present + synced.
+
+**Sequence:** standalone measurement (1, 2, 5) + quality A/B (4) FIRST → owner judges → Air thermal (3) → only if ALL pass, wire V3 into the Rust export path behind the flag and flip the default in one commit. **Do NOT wire or flip before the owner has seen the numbers and judged quality.**
+
+**Test recording:** CONSTRUCTED fresh (not one of the owner's old recordings — owner wants to know exactly what's in it), shown to owner for approval BEFORE building: screen + webcam, a couple of zooms, bubble + watermark on.
+
 ## 2026-07-16 — Phase 4 DONE (webcam bubble + watermark). Next = Phase 6 (perf gate + switchover)
 
 Both screen-anchored overlays ported to V3 and owner-judged **pass** (blind A/B, indistinguishable from V2). Watermark dE 0.55; bubble dE 1.09 after a color fix (below). Both hold screen-anchored under 2x zoom. V3 still standalone; V2 remains the default export path until the Phase 6 switchover.
