@@ -4,6 +4,17 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-16 — Phase 6 ALL GATES PASS → switch V3 to default
+
+Sustained thermal run (205s non-repeating clip, 36 varied zooms + bubble + watermark, 3 reps), owner-measured:
+- **V2: ~90s wall, ~355s CPU, 366MB** (consistent across 3 reps).
+- **V3: ~23s wall, ~18s CPU, 56MB** (consistent across 3 reps).
+- V3 = **~5% of V2 CPU, 3.9x faster wall, 6.5x less memory.**
+
+**Caveat (owner, important): the sustained thermal test ran on the MacBook Pro, NOT the fanless Air.** The Pro has fans (V2 barely audible, V3 quieter), so fan/throttle behavior on the *target* fanless machine is technically UNTESTED. The ~20x CPU delta makes the thermal claim near-certain, but if a fanless-Air throttle issue ever appears, this is the untested assumption to revisit.
+
+**Gate verdict (owner): ALL PASS** — CPU (5% << 60%), wall-time (26% << 60%), tripwires green, quality (V3 visibly cleaner on edges), thermal (near-certain via CPU delta, Pro-not-Air caveat noted). → Wire V3 into the Rust export path behind a runtime flag and flip the default to V3. V2 path stays intact as the escape hatch.
+
 ## 2026-07-16 — Phase 6 standalone gate PASS; found a V2 export tagging bug
 
 Standalone perf gate (21.4s 1080p dashboard, 3 zooms + bubble + watermark), median of 3:
