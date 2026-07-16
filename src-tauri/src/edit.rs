@@ -950,6 +950,11 @@ fn decide_v3(
         }
     }
     // Annotations: V3 dropped annotation rendering (Phase 3 scrapped).
+    // DEAD BY CONSTRUCTION today, kept as insurance: the app doesn't open
+    // existing recordings, so the export path only runs on fresh sessions, and
+    // annotation-writing was removed with Phase 3 — a live sidecar never carries
+    // annotations. This becomes a live path only if "open existing recording" is
+    // ever added; until then it never fires (DECISIONS.md 2026-07-16).
     if !sidecar.annotations.is_empty() {
         return V3Decision::FallbackVisible(format!(
             "sidecar has {} annotation(s)",
