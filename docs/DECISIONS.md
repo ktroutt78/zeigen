@@ -4,6 +4,18 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-16 — Phase 6 standalone gate PASS; found a V2 export tagging bug
+
+Standalone perf gate (21.4s 1080p dashboard, 3 zooms + bubble + watermark), median of 3:
+- **CPU-time V3 = 4.3% of V2** (1.50s vs 34.73s) — clears the <=60% bar hugely (the thermal thesis on paper).
+- **Wall-time V3 = 31.9% of V2** (2.55s vs 7.99s) — clears the <=60% bar (3.1x faster).
+- Tripwires green: frame count matches; V3 atoms 709/tv/yuv420p complete; bubble box dE 0.60, watermark dE 0.41 (within floors); zoom-peak SSIM ~0.98.
+- Quality (owner eye): V3 visibly cleaner on edges (KPI glyphs, chart diagonals, table text) — the ringing/lanczos win, real and tag-independent.
+
+**V2 export tagging bug (found via the quality A/B — worth knowing even as we move off V2).** Owner saw V2 as washed-out / lifted-blacks vs V3. Measured: it is NOT a pixel difference — stored dark-region Y is identical (30.00 both; full-frame 39.5 both). It is **tagging**: V2's H.264 output drops `color_primaries` and `color_transfer` (writes only matrix=bt709), so a player that guesses the transfer displays it wrong. **All three real `~/Movies/Zeigen` exports checked have the same `transfer=unknown, primaries=unknown`** — so V2 has been shipping mis-tagged files, not just the harness. V3 tags all three correctly. Re-tagging V2 with `h264_metadata` bsf (VUI rewrite, no re-encode, pixels unchanged) restores correct interpretation. Fixing V2's tag-writing is a separate V2 concern; V3 does not have the bug.
+
+**Remaining before switchover:** owner re-confirms quality on the re-tagged apples-to-apples pair (edge win is tag-independent so it should hold), then the Air thermal test (kit built: `~/Desktop/zeigen-thermal-kit/`). Only if both pass: wire V3 into the Rust export path behind the flag + flip. Nothing wired or flipped yet.
+
 ## 2026-07-16 — Phase 6 perf gate: AGREED BARS (locked with owner before running)
 
 The gate V3 must clear to switch over. All hard unless noted. Scope: re-encode exports only (zoom/overlay recordings); plain non-zoomed saves keep V2's `-c:v copy` fast path and are out of scope.
