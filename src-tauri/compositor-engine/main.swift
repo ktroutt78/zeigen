@@ -1,18 +1,27 @@
-// V3 Core Image compositor — Phase 1: identity re-encode.
+// V3 Core Image compositor.
+//   Phase 1 (DONE): identity re-encode, color round-trip proved (color mgmt off).
+//   Phase 2 (THIS): zoom transform — SINGLE-resample lanczos with sub-pixel window.
 //
-// Decodes a video, routes every frame through a CIContext (identity filter for
-// now — the point is to exercise the exact color path V3 will use), and re-encodes
-// via AVAssetWriter -> VideoToolbox H.264 with EXPLICIT 8M ABR and BT.709 color
-// tags. No zoom, no overlays yet. Video only; audio stays in ffmpeg and muxes later.
+// Decodes a video, routes every frame through a CIContext, and re-encodes via
+// AVAssetWriter -> VideoToolbox H.264 with EXPLICIT 8M ABR and BT.709 tags. Video
+// only; audio stays in ffmpeg and muxes later.
 //
-// This is the seam where all later phases plug in (zoom transform, overlay layers,
-// motion blur). Phase 1's whole job is to prove the color round-trip is correct on
-// the simplest possible pipeline, measured by the harness, before any overlay can
-// confound a color delta.
+// Zoom: crop the source to the sub-pixel window rect (CI is continuous -> the
+// fractional crop is EXACT and free), then ONE CILanczosScaleTransform up to full
+// frame. That is one resample with sub-pixel positioning, vs V2's three
+// (lanczos-up-4x -> zoompan bicubic -> lanczos-down) and its s/4 pixel quantization.
+// Zoom math (in_out_cubic ramps, clamped off-center window, Y-flip) mirrors
+// gpuzoom.swift / Review.tsx exactly, so geometry matches V2.
 //
-// NOT wired into the app yet: nothing in the Rust export path invokes this. V2
-// (ffmpeg) stays the default. Build: swiftc -O main.swift -o cicompositor
-// Run:   ./cicompositor <in.mp4> <out.mp4>
+// This is the seam where later phases plug in (overlay layers, motion blur). The
+// per-frame velocity is computed here (marked below) so Phase 5 motion blur can
+// consume it as radius = floor + k*|velocity|.
+//
+// NOT wired into the app: nothing in the Rust export path invokes this. V2 (ffmpeg)
+// stays the default. Build: swiftc -O main.swift -o cicompositor
+// Run:   ./cicompositor <in.mp4> <out.mp4> [scenario]   (scenario omitted = identity)
+//   scenarios: const | slow | multi   (clip-relative; mirror gpuzoom.swift)
+//   env VELLOG=<path> writes a per-frame velocity CSV for validation.
 import Foundation
 import AVFoundation
 import CoreImage
@@ -23,10 +32,43 @@ func fail(_ msg: String) -> Never {
     exit(1)
 }
 
+// --- Zoom model (mirrors gpuzoom.swift / Review.tsx zoomAt) ---
+func easeInOutCubic(_ u: Double) -> Double { u < 0.5 ? 4*u*u*u : 1 - pow(-2*u+2, 3)/2 }
+struct Seg { let start, end, scale, ramp, cxf, cyf: Double }  // cxf/cyf are top-left fractions
+func zoomAt(_ segs: [Seg], _ t: Double) -> Double {
+    for s in segs where t >= s.start && t <= s.end {
+        let ramp = min(s.ramp, (s.end - s.start) / 2)
+        if ramp <= 0 { return s.scale }
+        if t < s.start + ramp { return 1 + (s.scale - 1) * easeInOutCubic((t - s.start) / ramp) }
+        if t > s.end - ramp   { return 1 + (s.scale - 1) * easeInOutCubic((s.end - t) / ramp) }
+        return s.scale
+    }
+    return 1.0
+}
+func centerAt(_ segs: [Seg], _ t: Double) -> (Double, Double) {
+    for s in segs where t >= s.start && t <= s.end { return (s.cxf, s.cyf) }
+    return (0.5, 0.5)
+}
+
 let args = CommandLine.arguments
-guard args.count == 3 else { fail("usage: cicompositor <in.mp4> <out.mp4>") }
+guard args.count == 3 || args.count == 4 else {
+    fail("usage: cicompositor <in.mp4> <out.mp4> [scenario]")
+}
 let inURL = URL(fileURLWithPath: args[1])
 let outURL = URL(fileURLWithPath: args[2])
+let scenario = args.count == 4 ? args[3] : "identity"
+var segs: [Seg] = []
+switch scenario {
+case "identity": segs = []
+case "const": segs = [Seg(start: 0, end: 9999, scale: 2.0, ramp: 0.0, cxf: 0.5, cyf: 0.5)]
+case "slow":  segs = [Seg(start: 0, end: 5, scale: 1.6, ramp: 2.5, cxf: 1750.0/1920, cyf: 520.0/1080)]
+case "multi": segs = [Seg(start: 1.5, end: 5.0, scale: 2.0, ramp: 0.6, cxf: 0.09, cyf: 0.60),
+                      Seg(start: 6.0, end: 9.5, scale: 2.2, ramp: 0.6, cxf: 0.50, cyf: 0.48),
+                      Seg(start: 10.5, end: 14.0, scale: 2.0, ramp: 0.6, cxf: 0.911, cyf: 0.48)]
+default: fail("unknown scenario \(scenario)")
+}
+let velLogPath = ProcessInfo.processInfo.environment["VELLOG"]
+var velLog = "t,scale,dscale,cx_out,cy_out,vx,vy,content_speed\n"
 try? FileManager.default.removeItem(at: outURL)
 
 let asset = AVURLAsset(url: inURL)
@@ -117,6 +159,9 @@ let queue = DispatchQueue(label: "v3.compositor")
 let done = DispatchSemaphore(value: 0)
 var frames = 0
 let t0 = Date()
+let Wd = Double(W), Hd = Double(H)
+// velocity-tracking state (a fixed source point's output-space motion frame to frame)
+var prevO0x = Wd / 2, prevO0y = Hd / 2, prevScale = 1.0, havePrev = false
 
 writerInput.requestMediaDataWhenReady(on: queue) {
     while writerInput.isReadyForMoreMediaData {
@@ -127,12 +172,46 @@ writerInput.requestMediaDataWhenReady(on: queue) {
             return
         }
         let pts = CMSampleBufferGetPresentationTimeStamp(sample)
+        let t = CMTimeGetSeconds(pts)
         // No colorSpace override: CI reads the 709 video-range attachments the
         // decoder put on the YCbCr buffer, so input color is interpreted, not guessed.
         let src = CIImage(cvPixelBuffer: pixels)
 
-        // Identity for Phase 1. Later phases replace this with the layer stack.
-        let out = src
+        // Zoom geometry (mirror gpuzoom/Review.tsx): clamped off-center window of
+        // size W/s x H/s, focus mapped to output center. q is CI bottom-left px.
+        let s = zoomAt(segs, t)
+        let (cxf, cyf) = centerAt(segs, t)
+        let cx = cxf * Wd, cy = Hd - cyf * Hd
+        let hw = Wd / (2 * s), hh = Hd / (2 * s)
+        let qx = min(max(cx, hw), Wd - hw)
+        let qy = min(max(cy, hh), Hd - hh)
+
+        var out = src
+        if s > 1.0001 {
+            // ONE lanczos resample: sub-pixel window crop (exact, CI is continuous)
+            // -> translate window origin to 0 (exact) -> lanczos scale by s to WxH.
+            let win = CGRect(x: qx - hw, y: qy - hh, width: Wd / s, height: Hd / s)
+            let cropped = src.clampedToExtent().cropped(to: win)
+            let atOrigin = cropped.transformed(
+                by: CGAffineTransform(translationX: -win.origin.x, y: -win.origin.y))
+            let scaled = atOrigin.applyingFilter("CILanczosScaleTransform",
+                parameters: [kCIInputScaleKey: s, kCIInputAspectRatioKey: 1.0])
+            out = scaled.cropped(to: CGRect(x: 0, y: 0, width: W, height: H))
+        }
+
+        // --- velocity plumbing: output-space motion of a fixed source point.
+        // Phase 5 motion blur consumes `contentSpeed`/(vx,vy) as
+        // radius = floor + k*|velocity|; the floor also absorbs slow-pan shimmer.
+        let o0x = s * (Wd / 2 - qx) + Wd / 2
+        let o0y = s * (Hd / 2 - qy) + Hd / 2
+        let vx = havePrev ? o0x - prevO0x : 0.0
+        let vy = havePrev ? o0y - prevO0y : 0.0
+        let contentSpeed = (havePrev ? hypot(vx, vy) : 0.0)
+        if velLogPath != nil {
+            velLog += String(format: "%.4f,%.5f,%.5f,%.3f,%.3f,%.4f,%.4f,%.4f\n",
+                t, s, s - prevScale, o0x, o0y, vx, vy, contentSpeed)
+        }
+        prevO0x = o0x; prevO0y = o0y; prevScale = s; havePrev = true
 
         guard let pool = adaptor.pixelBufferPool else { fail("no pixel buffer pool") }
         var outPB: CVPixelBuffer?
@@ -157,8 +236,9 @@ writerInput.requestMediaDataWhenReady(on: queue) {
 
 done.wait()
 if writer.status == .completed {
+    if let vp = velLogPath { try? velLog.write(toFile: vp, atomically: true, encoding: .utf8) }
     let dt = Date().timeIntervalSince(t0)
-    print(String(format: "OK  %dx%d  %d frames  wall=%.2fs", W, H, frames, dt))
+    print(String(format: "OK  %dx%d  %d frames  scenario=%@  wall=%.2fs", W, H, frames, scenario, dt))
 } else {
     fail("writer status \(writer.status.rawValue): \(writer.error?.localizedDescription ?? "?")")
 }
