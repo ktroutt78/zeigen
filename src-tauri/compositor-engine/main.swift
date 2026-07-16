@@ -65,10 +65,24 @@ case "slow":  segs = [Seg(start: 0, end: 5, scale: 1.6, ramp: 2.5, cxf: 1750.0/1
 case "multi": segs = [Seg(start: 1.5, end: 5.0, scale: 2.0, ramp: 0.6, cxf: 0.09, cyf: 0.60),
                       Seg(start: 6.0, end: 9.5, scale: 2.2, ramp: 0.6, cxf: 0.50, cyf: 0.48),
                       Seg(start: 10.5, end: 14.0, scale: 2.0, ramp: 0.6, cxf: 0.911, cyf: 0.48)]
+// realistic single punch-in: 0.6s ramp to 2x off-center, hold, 0.6s out
+case "punch": segs = [Seg(start: 1.0, end: 4.0, scale: 2.0, ramp: 0.6, cxf: 0.66, cyf: 0.42)]
 default: fail("unknown scenario \(scenario)")
 }
-let velLogPath = ProcessInfo.processInfo.environment["VELLOG"]
-var velLog = "t,scale,dscale,cx_out,cy_out,vx,vy,content_speed\n"
+let env = ProcessInfo.processInfo.environment
+let velLogPath = env["VELLOG"]
+var velLog = "t,scale,dscale,blur_vel,blur_amount,content_speed\n"
+
+// Motion blur (Phase 5): ONE CI layer, radius = floor + k*|v|, applied only while
+// moving. For our scale-ramp zooms the motion is RADIAL (content flows out from the
+// focus), so the correct blur is CIZoomBlur centered on the focus, NOT a directional
+// smear. floor kills slow-ramp shimmer; k*|v| kills fast-ramp strobe. Default OFF so
+// Phase 2 behavior is unchanged unless BLUR=on.
+let blurOn = env["BLUR"] == "on"
+let blurFloor = Double(env["BLUR_FLOOR"] ?? "2.0")!
+let blurK = Double(env["BLUR_K"] ?? "0.35")!
+let blurMax = Double(env["BLUR_MAX"] ?? "40")!
+let blurEps = Double(env["BLUR_EPS"] ?? "0.4")!
 try? FileManager.default.removeItem(at: outURL)
 
 let asset = AVURLAsset(url: inURL)
@@ -199,17 +213,29 @@ writerInput.requestMediaDataWhenReady(on: queue) {
             out = scaled.cropped(to: CGRect(x: 0, y: 0, width: W, height: H))
         }
 
-        // --- velocity plumbing: output-space motion of a fixed source point.
-        // Phase 5 motion blur consumes `contentSpeed`/(vx,vy) as
-        // radius = floor + k*|velocity|; the floor also absorbs slow-pan shimmer.
+        // --- velocity for motion blur. The scale-ramp zoom moves content RADIALLY
+        // from the focus, so the driver is the corner radial speed from the scale
+        // rate, plus any off-center translational drift of the focus reference point.
         let o0x = s * (Wd / 2 - qx) + Wd / 2
         let o0y = s * (Hd / 2 - qy) + Hd / 2
-        let vx = havePrev ? o0x - prevO0x : 0.0
-        let vy = havePrev ? o0y - prevO0y : 0.0
-        let contentSpeed = (havePrev ? hypot(vx, vy) : 0.0)
+        let transSpeed = havePrev ? hypot(o0x - prevO0x, o0y - prevO0y) : 0.0
+        let radialEdge = havePrev ? 0.5 * hypot(Wd, Hd) * abs(s - prevScale) / s : 0.0
+        let blurVel = radialEdge + transSpeed
+        let blurAmount = (blurVel > blurEps) ? min(blurFloor + blurK * blurVel, blurMax) : 0.0
+
+        // Phase 5 motion blur: ONE radial CIZoomBlur layer from the focus (output
+        // center), amount = floor + k*|v|. floor absorbs slow-ramp shimmer; k*|v|
+        // absorbs fast-ramp strobe. Applied to the content plane (pre-overlay).
+        if blurOn && blurAmount > 0 {
+            out = out.clampedToExtent()
+                .applyingFilter("CIZoomBlur", parameters: [
+                    "inputCenter": CIVector(x: Wd / 2, y: Hd / 2),
+                    "inputAmount": blurAmount])
+                .cropped(to: CGRect(x: 0, y: 0, width: W, height: H))
+        }
         if velLogPath != nil {
-            velLog += String(format: "%.4f,%.5f,%.5f,%.3f,%.3f,%.4f,%.4f,%.4f\n",
-                t, s, s - prevScale, o0x, o0y, vx, vy, contentSpeed)
+            velLog += String(format: "%.4f,%.5f,%.5f,%.4f,%.4f,%.4f\n",
+                t, s, s - prevScale, blurVel, blurAmount, transSpeed)
         }
         prevO0x = o0x; prevO0y = o0y; prevScale = s; havePrev = true
 
