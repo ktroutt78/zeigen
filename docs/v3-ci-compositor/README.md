@@ -1,10 +1,45 @@
 # V3 — Core Image / AVFoundation compositor (deferred branch)
 
-Status: **decided, not started.** V2 ships first on the ffmpeg path (owner's daily driver);
-V3 is the GPU-native rewrite that removes V2's CPU/thermal tax. Decision recorded 2026-07-14
-(see DECISIONS.md and `docs/ZOOM-EXPORT-STEP4.md`).
+Status: **in progress.** Phases 0-2 + 5 built and owner-judged; overlays (Phase 3-4) not
+started. V2 stays the default export path throughout (flag-selected; V3 not wired into the app).
+Build state and the honest thesis below.
 
-## Why V3 exists (the measured case, not a hunch)
+## What V3 actually is (thesis corrected 2026-07-15 — read this first)
+
+V3 was framed as a "buttery, expensive-looking zoom" upgrade. **It is not that.** Owner-judged
+measurement through Phase 2 + 5 corrected the thesis:
+
+- **Zoom quality is at PARITY with V2 on sharpness** (Laplacian equal across V3, V2, and an ideal
+  single-lanczos), and **motion blur does NOT deliver at the owner's zoom speeds** (0.6s ramp to
+  2x) — see findings below. The glamour case is gone.
+- **V3 is fundamentally a performance / thermal rewrite** (encoder-bound not CPU-bound;
+  hardware-uniform; no fanless-Air throttle) that ALSO gives two modest real quality wins:
+  **cleaner hard edges** (less ringing than V2) and **untouched non-zoomed frames** (V2 softens
+  the whole timeline; V3 leaves identity frames alone).
+
+So the honest one-line thesis a future session should inherit: **V3 = a faster, cooler,
+hardware-uniform export that looks equal-or-slightly-cleaner, NOT a dramatically better-looking
+zoom.** Decide scope on the perf + cleaner-edges + non-zoomed case, not on zoom glamour.
+
+## Findings from the built phases (2026-07-15)
+
+**Ringing win (real, modest).** Static-zoom sharpness is equal by Laplacian, but that metric can't
+separate ringing from sharpness (ringing ADDS edge energy). Measuring over/undershoot adjacent to
+hard edges (`harness/ringing.py`): **V2 rings 7% more at step>40, 13% at step>70, 14% at step>100**,
+and registers ~36% more "hard edges" (many are ringing spikes). V3 rings less than even the ideal
+ffmpeg single-lanczos, because Core Image's lanczos kernel has **gentler negative lobes**. Same
+sharpness, cleaner edges — a genuine V3 win the parity metric hid.
+
+**Motion blur does NOT deliver at 0.6s / 2x (blind test).** The entire "V3 zoom looks better" case
+had narrowed to motion blur. A blinded ladder below "subtle" (half / quarter / eighth + two
+no-blur, shuffled, key withheld) was owner-judged: the owner's **favorite was a no-blur clip**,
+they **imagined a difference between two byte-identical no-blur clips**, and they **rejected every
+strength they could actually perceive**. Conclusion: at a 0.6s ramp to 2x there is no strobe worth
+fixing. Motion blur is **out of the value case**. The code stays (`main.swift`, `BLUR=on`, radial
+CIZoomBlur, `radius = floor + k*|v|`) as **off-by-default insurance** for faster/bigger zooms where
+strobe would actually appear — not a default, not a justification.
+
+## Why V3 exists (the measured PERF case — this is the real reason, not a hunch)
 
 V2's zoom render is ffmpeg `zoompan` + **4x oversample**, which is **~100% CPU/bandwidth-bound**
 — the hardware H.264 encoder is not the bottleneck at 4x. That degrades worst on exactly the
