@@ -74,8 +74,12 @@ echo "==> Signing with Zeigen Dev Signing"
 # every binary carries device entitlements — getUserMedia in the webview fails
 # with NotAllowedError and the engine's mic capture hangs. Hardened runtime is
 # only required for notarization, which a locally-built app doesn't need.
+# Nested sidecar binaries (Contents/MacOS/*) must be signed inside-out before
+# the bundle, or --deep --strict rejects them. Both externalBin sidecars:
 codesign --force -s "Zeigen Dev Signing" \
     "$INSTALL_DIR/Zeigen.app/Contents/MacOS/recording-engine"
+codesign --force -s "Zeigen Dev Signing" \
+    "$INSTALL_DIR/Zeigen.app/Contents/MacOS/cicompositor"
 codesign --force -s "Zeigen Dev Signing" "$INSTALL_DIR/Zeigen.app"
 codesign --verify --deep --strict "$INSTALL_DIR/Zeigen.app"
 
