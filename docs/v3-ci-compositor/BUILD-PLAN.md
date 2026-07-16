@@ -1,11 +1,12 @@
 # V3 build plan — Core Image / AVFoundation compositor
 
-Status: **in progress — Phases 0, 1, 2, 5 built and owner-judged. Phase 3 (content overlays)
-SCRAPPED 2026-07-16 — annotations dropped entirely (scope cut, not a parity failure; see
-DECISIONS.md). Phase 4 (screen-anchored bubble + watermark) is next.** See README.md for the
-corrected thesis (V3 is a perf/thermal rewrite with cleaner edges + untouched non-zoomed frames,
-NOT a buttery-zoom upgrade). The case for finishing: looks a bit better (ringing win), zoom
-slightly smoother, exports faster.
+Status: **in progress — Phases 0, 1, 2, 4, 5 built and owner-judged. Phase 3 (content overlays)
+SCRAPPED 2026-07-16 (scope cut, not a parity failure; see DECISIONS.md). Phase 4 (screen-anchored
+bubble + watermark) DONE 2026-07-16 — both pass, blind-indistinguishable from V2. Phase 6
+(full-pipeline perf gate + real-export A/B + flag flip) is next and is the last phase.** See
+README.md for the corrected thesis (V3 is a perf/thermal rewrite with cleaner edges + untouched
+non-zoomed frames, NOT a buttery-zoom upgrade). The case for finishing: looks a bit better (ringing
+win), zoom slightly smoother, exports faster.
 
 ## Build status (2026-07-16)
 
@@ -26,9 +27,15 @@ slightly smoother, exports faster.
   fixed by integer snapping — kept in DECISIONS.md); blur/spotlight were coded but never exercised.
   All of it removed; the compositor reads as if overlays were never ported. V2's ffmpeg overlay path
   is left dead-but-untouched.
-- **Phase 4 — screen-anchored overlays (webcam bubble + watermark): NOT started, now NEXT.** Never
-  depended on Phase 3 — bubble and watermark composite on the final zoomed frame, independent of the
-  (now-cut) content overlays. Only prerequisite is Phase 2 zoom, which is done.
+- **Phase 4 — screen-anchored overlays (webcam bubble + watermark): DONE 2026-07-16, both pass.**
+  Watermark dE 0.55; bubble dE 1.09 (root-caused + fixed a BGRA-webcam-decode green/chroma bug ->
+  native 709 YCbCr). Blind-indistinguishable from V2; both hold screen-anchored under 2x zoom.
+  Harness: `build_watermark_ab.py`, `build_bubble_ab.py`. Deferred by owner: shadow-blur radius
+  untuned (imperceptible), WEBCAM_LEAD_MS unhandled (known gap, fps-equal only — logged in
+  main.swift). See DECISIONS.md.
+- **Phase 6 — full-pipeline perf gate + real-export A/B + switchover: NEXT (last phase).** Bar to be
+  agreed with owner BEFORE running. Requires wiring V3 into the Rust export path behind the flag,
+  then measuring the FULL pipeline (zoom+bubble+watermark) vs V2, then the flag flip.
 
 Original companion: `gpuzoom.swift` (the proven perf spike).
 

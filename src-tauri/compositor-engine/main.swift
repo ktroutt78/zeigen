@@ -147,9 +147,12 @@ readerOutput.alwaysCopiesSampleData = false
 guard reader.canAdd(readerOutput) else { fail("cannot add reader output") }
 reader.add(readerOutput)
 
-// --- Webcam reader (bubble): a second stream, decoded in lockstep (1 webcam frame
-// per screen frame). Same-fps A/B sources align; the WEBCAM_LEAD_MS offset is a
-// later refinement. BGRA so CIImage sees straight RGBA for the mask/hflip/crop.
+// --- Webcam reader (bubble): a second stream, decoded in lockstep — ONE webcam frame
+// pulled per screen frame. KNOWN GAP: this assumes screen and webcam share the same
+// fps (true for our captures). It does NOT handle composite.rs's WEBCAM_LEAD_MS A/V
+// lead, nor a webcam at a different frame rate — if webcam fps ever differs from the
+// screen, the bubble will drift out of sync and this 1:1 pull must become PTS-matched.
+// Harmless while fps matches; surfaces here the moment it doesn't.
 var webcamOutput: AVAssetReaderTrackOutput? = nil
 var webcamReader: AVAssetReader? = nil
 if let wcPath = bubbleWebcam {

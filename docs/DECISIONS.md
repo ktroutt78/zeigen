@@ -4,6 +4,17 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-16 — Phase 4 DONE (webcam bubble + watermark). Next = Phase 6 (perf gate + switchover)
+
+Both screen-anchored overlays ported to V3 and owner-judged **pass** (blind A/B, indistinguishable from V2). Watermark dE 0.55; bubble dE 1.09 after a color fix (below). Both hold screen-anchored under 2x zoom. V3 still standalone; V2 remains the default export path until the Phase 6 switchover.
+
+**Bubble color root cause (fixed).** First bubble A/B showed a bad gap (box dE 3.67), green-dominant (interior green |d| 18.9 vs R/B ~3), spatial, not sharpness. Cause: decoding the webcam stream to **BGRA** made AVAssetReader guess the YUV->RGB matrix, landing hardest on green (green depends most on both chroma channels) — the same class as the Phase 1 BGRA luma shift. Fix: decode the webcam to native **709 YCbCr** like the screen path, so CI reads color from the buffer's attachments. Dropped to dE 1.09, green |d| 0.66. Residual ~1.1 is benign composite-math (mask edge CIBlendWithMask-vs-alphamerge, shadow CIGaussianBlur-vs-gblur, CI-vs-ffmpeg webcam scaler), sub-visible.
+
+**Deferred, by owner decision (do NOT chase):**
+- **Shadow blur radius: left UNTUNED.** CIGaussianBlur radius = 3x gblur sigma (default), shadow-band dE 0.97, owner saw no difference. Tuning buys nothing perceptible.
+- **WEBCAM_LEAD_MS: known GAP, not handled.** The compositor pulls 1 webcam frame per screen frame, assuming equal fps (true for our captures). It does NOT apply composite.rs's A/V lead offset, and would drift if webcam fps ever differs from the screen. Logged in `main.swift` at the webcam reader so it surfaces the moment fps differs; irrelevant until then.
+- **Trim keyboard asymmetry: intentional.** I/O set the trim points; the Trim accordion section opens by click only (no shortcut opens it, unlike M->Export). Owner: leave it — the real trim feedback is on the timeline, so a section-opening shortcut adds nothing. Do not wire I/O to openSection.
+
 ## 2026-07-16 — Phase 4 watermark: PASS
 
 Screen-anchored watermark ported to V3 (`main.swift`, env-driven, mirrors composite.rs). A/B against V2 (same logo PNG, ffmpeg composite.rs fragment replicated): watermark-box dE 0.55 identity, 0.56 under 2x zoom (holds screen-anchored, does not zoom). Owner judged **pass**; A/B clips indistinguishable in motion, logo held still on both.
