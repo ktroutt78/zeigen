@@ -4,6 +4,24 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-16 — V3 switchover LANDED (wired + verified, default-on)
+
+The wiring from the entry below is implemented and committed. V3 is now the default export path for eligible exports; V2 is the visible fallback.
+
+**Shape as built (two corrections to the plan below):**
+- Seam is NOT an in-body branch at `edit.rs:867`. `run_edit_pipeline` is a thin wrapper; the entire old body moved VERBATIM to `run_edit_pipeline_v2` (untouched). Wrapper: `decide_v3(use_v3_compositor(), ...)` -> on `Run` try `run_v3_export`, on its `Err` log + fall through to `_v2`; returns `PipelineReport { route_note }`.
+- Debug cicompositor path is NOT `compositor-engine/cicompositor` "already committed" — that binary is **gitignored**. `build.rs` swiftc-compiles the compositor to the recording-engine scratch (`target/recording-engine-build/cicompositor`) and stages `binaries/cicompositor-<triple>`; the debug runtime resolves the scratch output (mirrors `engine_binary_path`). Verified V3 still runs with the local gitignored copy moved aside.
+
+**Fallback note is specific (owner requirement).** `SaveResult.route_note` -> Review.tsx toast, "rendered via V2 fallback: <trigger>": `trimmed export` / `<res> downscale` / `sidecar has N annotation(s)` / `webcam has N segments` / `webcam without zoom` / `V3 error: <msg>`. GIF, flag-off, and the plain `-c:v copy` path are deliberately SILENT (self-evident, not fallbacks).
+
+**7th fallback added + owner-approved: multi-segment webcam -> V2.** A Continuity drop spawns `webcam-01.mp4`…; cicompositor takes a single `BUBBLE_WEBCAM`, concat is untested new code, and `segment[0]` would drop footage — so 2+ segments route to V2 (named note). Single-segment (built-in/USB, the Phase-4-gated common case) stays on V3. Conservative reading of "no untested code in the switchover commit."
+
+**Verification (all pass):** unit `v3_decision_table` (flag-off + all 7 fallbacks + exact notes, pure — flag is a param so no settings.json needed); `v3_export_produces_tagged_mp4_with_audio` (real cicompositor + audio mux; asserts 709 transfer tag = the V2-tagging-bug discriminator, source dims, audio present); copy path byte-exact via existing `empty_zoom_stays_on_video_copy_path`; V2 regression tests repointed to `_v2` and green; full lib suite 44/0; `legacy_args_pinned` + mask/shadow byte-pins intact. Bubble lead parity (step-function A/B, webcam flips at frame 10): V2 `tpad=0.105` flips at output frame 13, V3 `BUBBLE_LEAD_FRAMES=3` flips at 13 (exact), V3 lead=0 at 10 (proves the lead is needed). Spatial bubble parity unchanged from Phase 4 (only the temporal pull was touched).
+
+**Turn it off:** settings.json `use_v3_compositor: false` (or the `set_use_v3_compositor` command) — next export runs V2, no rebuild. `git revert` of this commit restores V2-default.
+
+---
+
 ## 2026-07-16 — V3 switchover: v1 scope AGREED (option 1) + wiring plan (NOT yet implemented)
 
 All Phase 6 gates passed (entries below) → switch V3 to default. This records the agreed v1 scope and the wiring plan. **The wiring is NOT yet implemented — no code written; investigation was in progress when context was cleared. Resume from here.**

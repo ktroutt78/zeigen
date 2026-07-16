@@ -30,9 +30,27 @@ fn main() {
     std::fs::copy(&built, binaries_dir.join(format!("recording-engine-{target}")))
         .expect("stage engine sidecar");
 
+    // Build the V3 Core Image compositor (single-file swiftc, release-optimized)
+    // and stage it as a second Tauri sidecar, so the packaged app carries its own
+    // cicompositor at Contents/MacOS/cicompositor. Same must-run-before-tauri_build
+    // ordering as the engine (externalBin existence is validated there).
+    let compositor_src = manifest_dir.join("compositor-engine/main.swift");
+    let compositor_out = scratch_path.join("cicompositor");
+    let status = Command::new("swiftc")
+        .arg("-O")
+        .arg(&compositor_src)
+        .arg("-o")
+        .arg(&compositor_out)
+        .status()
+        .expect("swiftc: failed to invoke for compositor-engine");
+    assert!(status.success(), "swiftc failed for compositor-engine");
+    std::fs::copy(&compositor_out, binaries_dir.join(format!("cicompositor-{target}")))
+        .expect("stage compositor sidecar");
+
     tauri_build::build();
 
     println!("cargo:rerun-if-changed=recording-engine/Sources");
     println!("cargo:rerun-if-changed=recording-engine/Package.swift");
     println!("cargo:rerun-if-changed=recording-engine/Info.plist");
+    println!("cargo:rerun-if-changed=compositor-engine/main.swift");
 }

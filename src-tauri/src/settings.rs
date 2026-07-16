@@ -22,6 +22,12 @@ pub struct Settings {
     // reshapes an existing recording.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bubble_roundness: Option<f64>,
+    // V3 (Core Image) compositor as the default export path. Default true (the
+    // switchover). Flip to false to route every export through V2 (ffmpeg) with
+    // no rebuild. Eligible exports fall through to V2 automatically on any V3
+    // failure regardless of this flag.
+    #[serde(default = "default_true")]
+    pub use_v3_compositor: bool,
 }
 
 impl Default for Settings {
@@ -30,12 +36,17 @@ impl Default for Settings {
             watermark: WatermarkSettings::default(),
             noise_reduction: default_noise_reduction(),
             bubble_roundness: None,
+            use_v3_compositor: default_true(),
         }
     }
 }
 
 fn default_noise_reduction() -> String {
     "med".to_string()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -102,6 +113,16 @@ pub fn noise_reduction_mix() -> Option<f64> {
         "low" => Some(0.5),
         "high" => Some(1.0),
         _ => Some(0.75), // "med" (and any unexpected value)
+    }
+}
+
+// V3 compositor default-path flag, read fresh each export (a settings change
+// takes effect on the next save). Absent config dir / first run / missing key
+// all resolve to the default (true) via read_settings_from.
+pub fn use_v3_compositor() -> bool {
+    match home_config_dir() {
+        Some(dir) => read_settings_from(&dir).use_v3_compositor,
+        None => true,
     }
 }
 
@@ -245,6 +266,14 @@ pub fn set_noise_reduction(app: AppHandle, level: String) -> Result<(), String> 
     let dir = config_dir(&app)?;
     let mut settings = read_settings_from(&dir);
     settings.noise_reduction = level;
+    write_settings_to(&dir, &settings)
+}
+
+#[tauri::command]
+pub fn set_use_v3_compositor(app: AppHandle, enabled: bool) -> Result<(), String> {
+    let dir = config_dir(&app)?;
+    let mut settings = read_settings_from(&dir);
+    settings.use_v3_compositor = enabled;
     write_settings_to(&dir, &settings)
 }
 

@@ -830,6 +830,7 @@ pub fn run() {
             settings::clear_watermark_logo,
             settings::set_noise_reduction,
             settings::set_bubble_roundness,
+            settings::set_use_v3_compositor,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

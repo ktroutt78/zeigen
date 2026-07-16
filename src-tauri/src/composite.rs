@@ -169,6 +169,16 @@ impl Corner {
             _ => Corner::BottomRight,
         }
     }
+
+    // Inverse of from_code; feeds the V3 compositor's WATERMARK_CORNER env.
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Corner::TopLeft => "tl",
+            Corner::TopRight => "tr",
+            Corner::BottomLeft => "bl",
+            Corner::BottomRight => "br",
+        }
+    }
 }
 
 // Watermark overlay shared by every export path: edit.rs run_edit_pipeline
@@ -283,6 +293,18 @@ enum VAlign {
 }
 
 impl BubbleZone {
+    // Two-letter code the V3 compositor (main.swift BUBBLE_ZONE) parses.
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::TopLeft => "tl",
+            Self::TopCenter => "tc",
+            Self::TopRight => "tr",
+            Self::BottomLeft => "bl",
+            Self::BottomCenter => "bc",
+            Self::BottomRight => "br",
+        }
+    }
+
     fn halign(self) -> HAlign {
         match self {
             Self::TopLeft | Self::BottomLeft => HAlign::Left,
@@ -699,6 +721,46 @@ pub(crate) fn build_webcam_overlay(
         shadow_sigma,
         shadow_padding,
         shadow_offset_y,
+        zone,
+    })
+}
+
+// V3 (Core Image compositor) bubble assets. Renders the SAME mask + shadow
+// silhouette PNGs as build_webcam_overlay's head (diameter, roundness, shadow
+// padding all identical) and returns their paths plus the resolved diameter and
+// zone, for main.swift to consume via BUBBLE_MASK_PNG / BUBBLE_SHADOW_PNG /
+// BUBBLE_DIAMETER / BUBBLE_ZONE. cicompositor recomputes shadow sigma/offset from
+// the diameter itself, so only these four values cross the boundary.
+pub(crate) struct V3BubbleAssets {
+    pub mask_path: PathBuf,
+    pub shadow_path: PathBuf,
+    pub diameter: u32,
+    pub zone: BubbleZone,
+}
+
+pub(crate) fn build_v3_bubble_assets(
+    out_dir: &Path,
+    bubble_zone: Option<BubbleZone>,
+    bubble_position_log: &[BubblePositionEntry],
+    bubble_roundness: Option<f64>,
+    size: WebcamSize,
+) -> Result<V3BubbleAssets, String> {
+    // Diameter source mirrors build_webcam_overlay exactly.
+    let diameter = bubble_position_log
+        .first()
+        .and_then(|e| e.diameter)
+        .map(|d| d.round().max(1.0) as u32)
+        .unwrap_or_else(|| size.px());
+    let mask_path = out_dir.join(mask_file_name("v3mask", diameter, bubble_roundness));
+    render_alpha_mask(diameter, bubble_roundness, &mask_path)?;
+    let shadow_padding = ((diameter as f64) * SHADOW_PADDING_FRAC).round() as u32;
+    let shadow_path = out_dir.join(mask_file_name("v3shadow", diameter, bubble_roundness));
+    render_shadow_source(diameter, shadow_padding, bubble_roundness, &shadow_path)?;
+    let zone = resolve_zone(bubble_zone, bubble_position_log);
+    Ok(V3BubbleAssets {
+        mask_path,
+        shadow_path,
+        diameter,
         zone,
     })
 }

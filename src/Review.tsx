@@ -1014,6 +1014,12 @@ export default function Review() {
         const result = await invoke<{
           output_path: string;
           thumbnail_out_of_trim: boolean;
+          // Present only when the export fell back to the V2 (ffmpeg) path for a
+          // specific reason (trim, downscale, annotations, webcam-without-zoom,
+          // multi-segment webcam, or a V3 runtime failure). Absent = the normal
+          // V3 path (or plain copy / GIF). Surfaced so a quiet fall-through is
+          // visible from the save itself, not guessed.
+          route_note?: string | null;
         }>("save_recording", {
           stamp,
           sourcePath,
@@ -1028,10 +1034,18 @@ export default function Review() {
         setLastSavedPath(result.output_path);
         setLastSavedAt(Date.now());
         if (spec.format === "mp4") setCommittedMp4Path(result.output_path);
+        const notices: string[] = [];
         if (result.thumbnail_out_of_trim) {
-          setNotice(
+          notices.push(
             "Thumbnail was outside the trim range — used the start of the trimmed output instead. Pick a new thumbnail to override.",
           );
+        }
+        if (result.route_note) {
+          // e.g. "rendered via V2 fallback: trimmed export"
+          notices.push(result.route_note);
+        }
+        if (notices.length > 0) {
+          setNotice(notices.join(" "));
         }
         // Notify main so its post-finalize toast updates from the scratch
         // path to whatever was just written under ~/Movies/Zeigen/.

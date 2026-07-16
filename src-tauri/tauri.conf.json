@@ -38,7 +38,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "externalBin": ["binaries/recording-engine"],
+    "externalBin": ["binaries/recording-engine", "binaries/cicompositor"],
     "resources": ["resources/audio/rnnoise.rnnn"],
     "icon": [
       "icons/32x32.png",

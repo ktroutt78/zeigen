@@ -117,6 +117,14 @@ let bubbleZone = env["BUBBLE_ZONE"] ?? "br"          // br|bl|tr|tl|bc|tc
 let bubbleShadowAlpha = Double(env["BUBBLE_SHADOW_ALPHA"] ?? "0.22")!
 // composite.rs gblur sigma=round(0.075*d); CIGaussianBlur radius = k*sigma (tuning knob).
 let bubbleShadowRadiusK = Double(env["BUBBLE_SHADOW_RADIUS_K"] ?? "3.0")!
+// Webcam A/V lead: V2 freezes the first webcam frame for WEBCAM_LEAD_MS (composite.rs)
+// via tpad=start_mode=clone, so the bubble reads in sync from t=0 despite the camera
+// lagging SCK screen capture at startup. cicompositor pulls the webcam 1:1, so replicate
+// the freeze: hold webcam frame 0 across the first `lead` screen frames, then advance
+// (webcam frame shown at screen frame i = max(0, i - lead)). Rust passes
+// round(WEBCAM_LEAD_MS/1000 * fps); default 0 leaves the pre-wiring standalone/harness
+// behavior (naive 1:1 pull) unchanged.
+let bubbleLeadFrames = Int(env["BUBBLE_LEAD_FRAMES"] ?? "0") ?? 0
 
 try? FileManager.default.removeItem(at: outURL)
 
@@ -366,7 +374,13 @@ writerInput.requestMediaDataWhenReady(on: queue) {
         // one webcam frame per screen frame: hflip -> centered square crop -> scale to
         // diameter -> circular/rounded mask. Shadow (static) under, bubble over.
         if let wo = webcamOutput, let mask = bubbleMask {
-            if let wcSample = wo.copyNextSampleBuffer(),
+            // `frames` is the 0-based screen frame index here (incremented after
+            // append below). Hold webcam frame 0 across the lead, then advance —
+            // matches V2's tpad clone-freeze. When !pull, lastBubble carries the
+            // held frame (also the natural behavior if the webcam stream ends first).
+            let pullWebcam = (frames == 0) || (frames > bubbleLeadFrames)
+            if pullWebcam,
+               let wcSample = wo.copyNextSampleBuffer(),
                let wcPix = CMSampleBufferGetImageBuffer(wcSample) {
                 let wc = CIImage(cvPixelBuffer: wcPix)
                 let ww = wc.extent.width, wh = wc.extent.height

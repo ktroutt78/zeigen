@@ -852,6 +852,337 @@ pub(crate) enum PipelineMode {
     Gif { resolution: GifResolution, fps: u32 },
 }
 
+// ===========================================================================
+// V3 (Core Image compositor) switchover.  DECISIONS.md 2026-07-16.
+//
+// A runtime flag (settings.use_v3_compositor, default true) routes ELIGIBLE
+// exports through the GPU-native cicompositor (compositor-engine/main.swift)
+// instead of V2's ffmpeg 4x oversample. V3 engages ONLY for: untrimmed, mp4,
+// Source-resolution, single-webcam re-encodes with zoom and/or webcam bubble
+// and/or watermark and an EMPTY annotations track. Every other case falls
+// through to the UNTOUCHED V2 path below, and any V3 runtime failure does too.
+// Six of those fall-throughs carry a specific, user-visible note (the owner
+// asked to see which trigger fired); flag-off, GIF and the plain copy path are
+// deliberately silent (self-evident choices, not fallbacks). All of this is
+// additive — reverting the switchover commit restores V2-as-default.
+// ===========================================================================
+
+// Export outcome surfaced to the UI. `route_note` is Some only when the export
+// took the V2 path for a reason the owner wants named ("rendered via V2
+// fallback: <trigger>"); None on the normal path (V3 success, plain -c:v copy,
+// or a GIF / flag choice the user made themselves).
+pub(crate) struct PipelineReport {
+    pub route_note: Option<String>,
+}
+
+impl PipelineReport {
+    fn normal() -> Self {
+        Self { route_note: None }
+    }
+    fn fallback(reason: &str) -> Self {
+        Self { route_note: Some(format!("rendered via V2 fallback: {reason}")) }
+    }
+}
+
+impl Mp4Resolution {
+    fn label(self) -> &'static str {
+        match self {
+            Self::P480 => "480p",
+            Self::P720 => "720p",
+            Self::P1080 => "1080p",
+            Self::Source => "source",
+        }
+    }
+}
+
+// Routing decision. `Run` attempts V3; `FallbackVisible` routes V2 with a named
+// note; `V2Silent` routes V2 with no note (flag off / GIF / copy fast path).
+enum V3Decision {
+    Run,
+    FallbackVisible(String),
+    V2Silent,
+}
+
+// Pure predicate over the export inputs (plus the runtime flag). Precedence when
+// several conditions hold: flag -> GIF -> downscale -> trim -> annotations ->
+// multi-segment webcam -> webcam-without-zoom -> no-V3-work. The first match
+// wins and names the note.
+fn decide_v3(
+    flag_on: bool,
+    screen_path: &Path,
+    webcam_segments: &[std::path::PathBuf],
+    sidecar: &SidecarState,
+    mode: PipelineMode,
+    watermark: &Option<Watermark>,
+) -> V3Decision {
+    // Escape-hatch layer 1: flag off -> V2, silently (the owner's own switch).
+    if !flag_on {
+        return V3Decision::V2Silent;
+    }
+    // GIF is out of v1 scope; the user explicitly chose the format, so no note.
+    let resolution = match mode {
+        PipelineMode::Mp4 { resolution } => resolution,
+        PipelineMode::Gif { .. } => return V3Decision::V2Silent,
+    };
+    // Non-Source downscale: mirror single_input's mp4_scale calc against the
+    // screen source. Untested through V3 -> V2 (same rule as trim).
+    if resolution != Mp4Resolution::Source {
+        let downscales = match probe_dimensions(screen_path) {
+            Ok((w, h)) => match resolution {
+                Mp4Resolution::P480 => h > 480,
+                Mp4Resolution::P720 => h > 720,
+                Mp4Resolution::P1080 => w > 1920,
+                Mp4Resolution::Source => false,
+            },
+            Err(_) => true,
+        };
+        if downscales {
+            return V3Decision::FallbackVisible(format!("{} downscale", resolution.label()));
+        }
+    }
+    // Trimmed: option 1 keeps trimmed exports on V2 (no pre-trim pass in the
+    // switchover commit). Normalize trim the same way single_input does.
+    if let Ok(duration) = probe_duration_seconds(screen_path) {
+        if let Some(t) = &sidecar.trim {
+            if t.start > TRIM_EPS || t.out < duration - TRIM_EPS {
+                return V3Decision::FallbackVisible("trimmed export".into());
+            }
+        }
+    }
+    // Annotations: V3 dropped annotation rendering (Phase 3 scrapped).
+    if !sidecar.annotations.is_empty() {
+        return V3Decision::FallbackVisible(format!(
+            "sidecar has {} annotation(s)",
+            sidecar.annotations.len()
+        ));
+    }
+    let has_zoom = !zoom_keyframes_to_segments(&sidecar.zoom).is_empty();
+    let has_webcam = !webcam_segments.is_empty();
+    // Multi-segment webcam (Continuity drop mid-recording spawns webcam-01.mp4,
+    // ...). cicompositor takes a single BUBBLE_WEBCAM; concatenating is untested
+    // new code, kept out of the switchover commit (same rule as trim). Not one of
+    // the six the owner enumerated — added because taking segment[0] would drop
+    // footage and a concat pass is exactly the untested risk the switchover avoids.
+    if webcam_segments.len() > 1 {
+        return V3Decision::FallbackVisible(format!(
+            "webcam has {} segments",
+            webcam_segments.len()
+        ));
+    }
+    // Webcam WITHOUT zoom is V2's two-pass composite() with its audio itsoffset
+    // shift; out of v1 scope.
+    if has_webcam && !has_zoom {
+        return V3Decision::FallbackVisible("webcam without zoom".into());
+    }
+    // Effective watermark = a logo that still exists (V2 skips a missing logo).
+    let has_watermark = watermark
+        .as_ref()
+        .map_or(false, |w| w.logo_path.is_file());
+    // Nothing for V3 to composite -> the plain -c:v copy fast path. Not a
+    // fallback; leave it untouched, no note.
+    if !has_zoom && !has_webcam && !has_watermark {
+        return V3Decision::V2Silent;
+    }
+    V3Decision::Run
+}
+
+// Release: cicompositor is bundled next to the app exe (externalBin sidecar),
+// mirroring engine_binary_path(). Debug: the committed compositor-engine binary.
+fn cicompositor_binary_path() -> PathBuf {
+    #[cfg(not(debug_assertions))]
+    {
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join("cicompositor")))
+            .unwrap_or_else(|| PathBuf::from("cicompositor"))
+    }
+    #[cfg(debug_assertions)]
+    {
+        // build.rs compiles the compositor here on every build (the source
+        // compositor-engine/cicompositor is gitignored, so don't depend on it).
+        // Mirrors engine_binary_path's scratch-output resolution.
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/recording-engine-build/cicompositor")
+    }
+}
+
+// Average frame rate (avg_frame_rate reflects VFR better than r_frame_rate), used
+// only to size the webcam bubble lead. Falls back to 30 on any parse trouble.
+fn probe_fps(path: &Path) -> f64 {
+    let out = std::process::Command::new(FFPROBE_PATH)
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=avg_frame_rate",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(path)
+        .output();
+    let parsed = out.ok().and_then(|o| {
+        let s = String::from_utf8_lossy(&o.stdout);
+        let s = s.trim();
+        let (n, d) = s.split_once('/')?;
+        let n: f64 = n.trim().parse().ok()?;
+        let d: f64 = d.trim().parse().ok()?;
+        (d > 0.0).then_some(n / d)
+    });
+    parsed.filter(|f| *f > 0.0).unwrap_or(30.0)
+}
+
+// V3 export: cicompositor renders zoom + bubble + watermark to a video-only mp4,
+// then ffmpeg muxes the SCREEN source's audio (arnndn, no itsoffset — the single-
+// input path doesn't shift). Returns Err to signal the caller to fall through to
+// V2; on Err the partial `output` is not trusted (V2 overwrites it). `webcam` is
+// the single segment (eligibility guarantees <=1); `watermark` is pre-filtered to
+// an existing logo.
+fn run_v3_export(
+    screen_path: &Path,
+    webcam: Option<&Path>,
+    output: &Path,
+    sidecar: &SidecarState,
+    webcam_size: crate::composite::WebcamSize,
+    watermark: Option<&Watermark>,
+    on_progress: impl Fn(f64),
+) -> Result<(), String> {
+    on_progress(0.02);
+    let bin = cicompositor_binary_path();
+    if !bin.is_file() {
+        return Err(format!("cicompositor binary missing: {}", bin.display()));
+    }
+    let (w, h) = probe_dimensions(screen_path)?;
+
+    // Temp workspace for the zoom JSON, bubble PNGs, and the video-only render.
+    let stem = screen_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("source");
+    let temp_dir = screen_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(".sources")
+        .join(format!("v3-{stem}"));
+    std::fs::create_dir_all(&temp_dir)
+        .map_err(|e| format!("create {}: {e}", temp_dir.display()))?;
+
+    // Zoom -> ZOOM_SEGMENTS JSON. cx/cy are source px (top-origin); cicompositor
+    // wants top-origin fractions and applies ZOOM_RENDER_RAMP_S itself per edge.
+    #[derive(serde::Serialize)]
+    struct V3ZoomSeg {
+        start: f64,
+        end: f64,
+        scale: f64,
+        ramp: f64,
+        cxf: f64,
+        cyf: f64,
+    }
+    let segs = zoom_keyframes_to_segments(&sidecar.zoom);
+    let zoom_json_path = if segs.is_empty() {
+        None
+    } else {
+        let items: Vec<V3ZoomSeg> = segs
+            .iter()
+            .map(|s| V3ZoomSeg {
+                start: s.start,
+                end: s.end,
+                scale: s.scale,
+                ramp: ZOOM_RENDER_RAMP_S,
+                cxf: s.cx / w as f64,
+                cyf: s.cy / h as f64,
+            })
+            .collect();
+        let json = serde_json::to_string(&items).map_err(|e| format!("zoom json: {e}"))?;
+        let p = temp_dir.join("zoom.json");
+        std::fs::write(&p, json).map_err(|e| format!("write zoom.json: {e}"))?;
+        Some(p)
+    };
+
+    // Bubble mask + shadow PNGs (identical geometry to V2 build_webcam_overlay).
+    let bubble = match webcam {
+        Some(_) => Some(crate::composite::build_v3_bubble_assets(
+            &temp_dir,
+            sidecar.bubble_zone,
+            &sidecar.bubble_position_log,
+            sidecar.bubble_roundness,
+            webcam_size,
+        )?),
+        None => None,
+    };
+
+    let video_only = temp_dir.join("v3-video.mp4");
+    let mut cmd = std::process::Command::new(&bin);
+    cmd.arg(screen_path).arg(&video_only).arg("identity");
+    if let Some(zj) = &zoom_json_path {
+        cmd.env("ZOOM_SEGMENTS", zj);
+    }
+    if let (Some(wc), Some(b)) = (webcam, &bubble) {
+        // Shadow alpha (0.22) and radius-k (3.0) match cicompositor's defaults and
+        // the Phase 4 A/B, so they're left unset. Lead frames replicate V2's
+        // WEBCAM_LEAD_MS clone-freeze (main.swift BUBBLE_LEAD_FRAMES).
+        let lead = (crate::composite::WEBCAM_LEAD_MS / 1000.0 * probe_fps(screen_path)).round();
+        cmd.env("BUBBLE_WEBCAM", wc)
+            .env("BUBBLE_MASK_PNG", &b.mask_path)
+            .env("BUBBLE_SHADOW_PNG", &b.shadow_path)
+            .env("BUBBLE_DIAMETER", b.diameter.to_string())
+            .env("BUBBLE_ZONE", b.zone.code())
+            .env("BUBBLE_LEAD_FRAMES", (lead.max(0.0) as i64).to_string());
+    }
+    if let Some(wm) = watermark {
+        cmd.env("WATERMARK_PNG", &wm.logo_path)
+            .env("WATERMARK_CORNER", wm.corner.code())
+            .env("WATERMARK_OPACITY", format!("{}", wm.opacity));
+        if let Some(sf) = wm.scale_frac {
+            cmd.env("WATERMARK_SCALE_FRAC", format!("{sf}"));
+        }
+    }
+    let comp = cmd
+        .output()
+        .map_err(|e| format!("spawn cicompositor: {e}"))?;
+    if !comp.status.success() {
+        return Err(format!(
+            "cicompositor {}: {}",
+            comp.status,
+            String::from_utf8_lossy(&comp.stderr).trim()
+        ));
+    }
+    let has_output = std::fs::metadata(&video_only)
+        .map(|m| m.len() > 0)
+        .unwrap_or(false);
+    if !has_output {
+        return Err("cicompositor produced no output".into());
+    }
+    on_progress(0.85);
+
+    // Mux: V3 video + SCREEN audio (arnndn, no itsoffset). faststart for /v/.
+    let mut mux = std::process::Command::new(FFMPEG_PATH);
+    mux.arg("-y")
+        .arg("-i")
+        .arg(&video_only)
+        .arg("-i")
+        .arg(screen_path)
+        .args(["-map", "0:v", "-map", "1:a?"]);
+    if let Some(af) = audio_nr_filter() {
+        mux.arg("-af").arg(af);
+    }
+    mux.args([
+        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
+    ])
+    .arg(output);
+    let muxed = mux.output().map_err(|e| format!("spawn ffmpeg mux: {e}"))?;
+    if !muxed.status.success() {
+        return Err(format!(
+            "ffmpeg mux {}: {}",
+            muxed.status,
+            String::from_utf8_lossy(&muxed.stderr).trim()
+        ));
+    }
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    on_progress(1.0);
+    Ok(())
+}
+
 // Phase 15 c2: composite-at-export wrapper. When webcam_segments is
 // non-empty, composite::composite runs first against raw screen.mp4 +
 // segments and writes a temp file; the existing single-input edit
@@ -864,7 +1195,73 @@ pub(crate) enum PipelineMode {
 // Phase 15 c2 still leaves the Phase 14 finalize composite running as a
 // backstop (the composited scratch mp4 exists but is ignored by this
 // path); c3 removes it.
+// V3 switchover seam. Eligible exports attempt the Core Image compositor first;
+// everything else — and any V3 runtime failure — runs the UNTOUCHED V2 body
+// (run_edit_pipeline_v2) below, carrying a specific note when the fall-through is
+// one the owner asked to see. on_progress is cloned into the V3 attempt so the
+// original survives to drive V2 if V3 fails.
 pub(crate) fn run_edit_pipeline(
+    screen_path: &Path,
+    webcam_segments: &[std::path::PathBuf],
+    output: &Path,
+    sidecar: &SidecarState,
+    mode: PipelineMode,
+    webcam_size: crate::composite::WebcamSize,
+    watermark: Option<Watermark>,
+    on_progress: impl Fn(f64) + Send + Clone + 'static,
+) -> Result<PipelineReport, String> {
+    if !screen_path.is_file() {
+        return Err(format!("screen capture missing: {}", screen_path.display()));
+    }
+    let fallback_note = match decide_v3(
+        crate::settings::use_v3_compositor(),
+        screen_path,
+        webcam_segments,
+        sidecar,
+        mode,
+        &watermark,
+    ) {
+        V3Decision::Run => {
+            let effective_wm = watermark
+                .as_ref()
+                .filter(|w| w.logo_path.is_file());
+            match run_v3_export(
+                screen_path,
+                webcam_segments.first().map(|p| p.as_path()),
+                output,
+                sidecar,
+                webcam_size,
+                effective_wm,
+                on_progress.clone(),
+            ) {
+                // V3 success is the normal path — done, V2 never runs, no note.
+                Ok(()) => return Ok(PipelineReport::normal()),
+                Err(e) => {
+                    eprintln!("[v3] export failed, falling back to V2: {e}");
+                    Some(PipelineReport::fallback(&format!("V3 error: {e}")))
+                }
+            }
+        }
+        V3Decision::FallbackVisible(reason) => {
+            eprintln!("[v3] routing to V2: {reason}");
+            Some(PipelineReport::fallback(&reason))
+        }
+        V3Decision::V2Silent => None,
+    };
+    run_edit_pipeline_v2(
+        screen_path,
+        webcam_segments,
+        output,
+        sidecar,
+        mode,
+        webcam_size,
+        watermark,
+        on_progress,
+    )?;
+    Ok(fallback_note.unwrap_or_else(PipelineReport::normal))
+}
+
+fn run_edit_pipeline_v2(
     screen_path: &Path,
     webcam_segments: &[std::path::PathBuf],
     output: &Path,
@@ -1782,6 +2179,12 @@ pub struct SaveResult {
     // surfaces a one-time toast in this case so the silent-fallback isn't
     // an opaque surprise.
     pub thumbnail_out_of_trim: bool,
+    // Some when the export ran through V2 for a reason the owner asked to see
+    // named ("rendered via V2 fallback: <trigger>"). None on the normal path
+    // (V3 success, plain copy, or a GIF/flag choice). The frontend shows it so a
+    // quiet fall-through to V2 is visible from the export itself, not guessed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_note: Option<String>,
 }
 
 // True when the user picked a thumbnail and trim is active and the picked
@@ -2090,7 +2493,7 @@ fn save_recording_impl(
     let (screen_path, segments) = export_inputs_from_source(source);
     let webcam_size = crate::composite::WebcamSize::Medium;
 
-    let output = match format.as_str() {
+    let (output, route_note) = match format.as_str() {
         "mp4" => {
             let res = match resolution.as_str() {
                 "480p" => Mp4Resolution::P480,
@@ -2100,7 +2503,7 @@ fn save_recording_impl(
                 other => return Err(format!("unknown mp4 resolution: {other}")),
             };
             let output = next_per_format_slot(&movies, &stamp, "mp4");
-            run_edit_pipeline(
+            let report = run_edit_pipeline(
                 &screen_path,
                 &segments,
                 &output,
@@ -2110,7 +2513,7 @@ fn save_recording_impl(
                 watermark,
                 on_progress,
             )?;
-            output
+            (output, report.route_note)
         }
         "gif" => {
             let res = match resolution.as_str() {
@@ -2121,7 +2524,7 @@ fn save_recording_impl(
             };
             let fps = fps.ok_or_else(|| "fps required for gif format".to_string())?;
             let output = next_per_format_slot(&movies, &stamp, "gif");
-            run_edit_pipeline(
+            let report = run_edit_pipeline(
                 &screen_path,
                 &segments,
                 &output,
@@ -2131,7 +2534,7 @@ fn save_recording_impl(
                 watermark,
                 on_progress,
             )?;
-            output
+            (output, report.route_note)
         }
         other => return Err(format!("unknown format: {other}")),
     };
@@ -2147,6 +2550,7 @@ fn save_recording_impl(
     Ok(SaveResult {
         output_path: output.to_string_lossy().into_owned(),
         thumbnail_out_of_trim: thumbnail_out_of_trim(&sidecar),
+        route_note,
     })
 }
 
@@ -2403,7 +2807,10 @@ mod tests {
             ..Default::default()
         };
         let out_zoomed = dir.join("out-zoomed.mp4");
-        run_edit_pipeline(
+        // V2 pipeline regression test — target run_edit_pipeline_v2 directly so
+        // the V3 switchover flag can't reroute it (V2 is the fallback we must keep
+        // covered). The V3 path has its own routing/verification.
+        run_edit_pipeline_v2(
             &source,
             &[],
             &out_zoomed,
@@ -2460,7 +2867,8 @@ mod tests {
             ..Default::default()
         };
         let out = dir.join("out.mp4");
-        run_edit_pipeline(
+        // V2 merged-path regression — target the V2 body directly (see note above).
+        run_edit_pipeline_v2(
             &screen,
             std::slice::from_ref(&webcam),
             &out,
@@ -2957,7 +3365,8 @@ mod tests {
             let actual = out_dir.join("actual.mp4");
 
             let start = std::time::Instant::now();
-            run_edit_pipeline(
+            // Parity against the V2 Phase-14 fixture — must run the V2 body, not V3.
+            run_edit_pipeline_v2(
                 &screen_path,
                 &segments,
                 &actual,
@@ -3283,7 +3692,8 @@ mod tests {
         // a) MP4-Source + watermark TR (also the Copy-to-Clipboard path —
         // clipboard_copy_recording calls run_edit_pipeline Mp4/Source).
         let out_src = "/tmp/zeigen-wm-mp4-source-tr.mp4";
-        run_edit_pipeline(source, &[], Path::new(out_src), &sidecar,
+        // V2 watermark-filter coverage — target the V2 body (V3 has its own A/B).
+        run_edit_pipeline_v2(source, &[], Path::new(out_src), &sidecar,
             PipelineMode::Mp4 { resolution: Mp4Resolution::Source },
             crate::composite::WebcamSize::Medium,
             wm_tr.clone(), |_| {})
@@ -3293,7 +3703,7 @@ mod tests {
 
         // a') BL corner — corner-switch check.
         let out_bl = "/tmp/zeigen-wm-mp4-source-bl.mp4";
-        run_edit_pipeline(source, &[], Path::new(out_bl), &sidecar,
+        run_edit_pipeline_v2(source, &[], Path::new(out_bl), &sidecar,
             PipelineMode::Mp4 { resolution: Mp4Resolution::Source },
             crate::composite::WebcamSize::Medium,
             wm_bl, |_| {})
@@ -3348,5 +3758,167 @@ mod tests {
         println!(
             "watermark OK: pipeline TR/BL + 720 + gif + linkedin({li}); frames in /tmp/zeigen-wm-frame-*.png; noop video bit-exact, audio re-encoded"
         );
+    }
+
+    // ---- V3 switchover verification ----
+
+    fn v3_tag(d: &V3Decision) -> String {
+        match d {
+            V3Decision::Run => "run".to_string(),
+            V3Decision::V2Silent => "silent".to_string(),
+            V3Decision::FallbackVisible(r) => format!("fb:{r}"),
+        }
+    }
+
+    fn ffprobe_field(path: &Path, entries: &str, stream: &str) -> String {
+        let out = Command::new(FFPROBE_PATH)
+            .args(["-v", "error", "-select_streams", stream, "-show_entries", entries,
+                   "-of", "default=noprint_wrappers=1:nokey=1"])
+            .arg(path)
+            .output()
+            .expect("ffprobe");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    // Directions 1 (route V3), 2 (flag off -> V2), plus every fallback trigger and
+    // its exact note. Pure over the inputs (flag is a param), so no settings.json
+    // or cicompositor needed — the decision table can't drift silently.
+    #[test]
+    fn v3_decision_table() {
+        let dir = std::env::temp_dir().join(format!("zeigen-v3-decide-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let scr = synth_source(&dir, "screen.mp4", 2.0, 2.0, 320, 240);
+        let tall = synth_source(&dir, "tall.mp4", 1.0, 1.0, 1280, 720);
+
+        let kf = |t: f64, scale: f64| ZoomKeyframe {
+            t, scale, center_x: 160.0, center_y: 120.0, ease: Ease::InOutCubic,
+            auto_generated: false,
+        };
+        let zoom = SidecarState {
+            zoom: vec![kf(0.3, 1.0), kf(0.9, 2.0), kf(1.1, 2.0), kf(1.7, 1.0)],
+            ..Default::default()
+        };
+        let src = PipelineMode::Mp4 { resolution: Mp4Resolution::Source };
+        let none: Option<Watermark> = None;
+        let wc1 = vec![dir.join("webcam-00.mp4")];
+        let wc2 = vec![dir.join("webcam-00.mp4"), dir.join("webcam-01.mp4")];
+
+        // 1) flag off -> silent V2, even for an otherwise-eligible export.
+        assert_eq!(v3_tag(&decide_v3(false, &scr, &[], &zoom, src, &none)), "silent");
+        // GIF -> silent (the user chose the format).
+        let gif = PipelineMode::Gif { resolution: GifResolution::P480, fps: 12 };
+        assert_eq!(v3_tag(&decide_v3(true, &scr, &[], &zoom, gif, &none)), "silent");
+        // Downscale -> named fallback (1280x720 under P480 downscales).
+        let p480 = PipelineMode::Mp4 { resolution: Mp4Resolution::P480 };
+        assert_eq!(v3_tag(&decide_v3(true, &tall, &[], &zoom, p480, &none)), "fb:480p downscale");
+        // Same tall source at Source res does NOT downscale -> eligible.
+        assert_eq!(v3_tag(&decide_v3(true, &tall, &[], &zoom, src, &none)), "run");
+        // Trim -> named fallback.
+        let trimmed = SidecarState {
+            trim: Some(Trim { start: 0.5, out: 1.5 }),
+            zoom: zoom.zoom.clone(),
+            ..Default::default()
+        };
+        assert_eq!(v3_tag(&decide_v3(true, &scr, &[], &trimmed, src, &none)), "fb:trimmed export");
+        // Annotations -> named fallback.
+        let annotated = SidecarState {
+            zoom: zoom.zoom.clone(),
+            annotations: vec![Annotation {
+                kind: "text".into(), start_time: 0.0, end_time: 1.0,
+                position: Position { x: 0.5, y: 0.5 }, content: "hi".into(),
+                size: None, endpoint: None, stroke: None,
+            }],
+            ..Default::default()
+        };
+        assert!(v3_tag(&decide_v3(true, &scr, &[], &annotated, src, &none))
+            .starts_with("fb:sidecar has 1 annotation"));
+        // Multi-segment webcam -> named fallback (concat kept out of the switchover).
+        assert!(v3_tag(&decide_v3(true, &scr, &wc2, &zoom, src, &none))
+            .starts_with("fb:webcam has 2 segments"));
+        // Webcam without zoom -> named fallback (two-pass composite path).
+        let no_zoom = SidecarState::default();
+        assert_eq!(v3_tag(&decide_v3(true, &scr, &wc1, &no_zoom, src, &none)),
+            "fb:webcam without zoom");
+        // No V3 work (plain copy fast path) -> silent V2.
+        assert_eq!(v3_tag(&decide_v3(true, &scr, &[], &no_zoom, src, &none)), "silent");
+        // Eligible: zoom only, and zoom + single webcam.
+        assert_eq!(v3_tag(&decide_v3(true, &scr, &[], &zoom, src, &none)), "run");
+        assert_eq!(v3_tag(&decide_v3(true, &scr, &wc1, &zoom, src, &none)), "run");
+
+        // Note wording surfaced to the UI.
+        assert_eq!(
+            PipelineReport::fallback("trimmed export").route_note.unwrap(),
+            "rendered via V2 fallback: trimmed export"
+        );
+        assert!(PipelineReport::normal().route_note.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Direction 1 end-to-end: run_v3_export actually spawns cicompositor, muxes the
+    // screen audio, and writes a playable mp4 at source dims with the 709 color tags
+    // V3 sets correctly (the discriminator vs V2's dropped transfer/primaries). Runs
+    // the real Rust wiring on a synthetic recording (screen+audio, webcam, zoom,
+    // bubble, watermark), independent of the settings flag.
+    #[test]
+    fn v3_export_produces_tagged_mp4_with_audio() {
+        ensure_audio_model_for_tests();
+        let dir = std::env::temp_dir().join(format!("zeigen-v3-export-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let screen = synth_source(&dir, "screen.mp4", 2.0, 2.0, 320, 240);
+        // Webcam segment: video-only, distinct pattern.
+        let webcam = dir.join("webcam-00.mp4");
+        let wc = Command::new(FFMPEG_PATH)
+            .args(["-y", "-v", "error", "-f", "lavfi", "-i",
+                   "testsrc=duration=2:size=160x160:rate=30", "-c:v", "libx264",
+                   "-pix_fmt", "yuv420p"])
+            .arg(&webcam).output().expect("webcam synth");
+        assert!(wc.status.success(), "webcam synth: {}", String::from_utf8_lossy(&wc.stderr));
+        // Watermark logo PNG.
+        let logo = dir.join("logo.png");
+        let lg = Command::new(FFMPEG_PATH)
+            .args(["-y", "-v", "error", "-f", "lavfi", "-i", "color=c=red:s=48x48",
+                   "-frames:v", "1"])
+            .arg(&logo).output().expect("logo synth");
+        assert!(lg.status.success(), "logo synth: {}", String::from_utf8_lossy(&lg.stderr));
+
+        let kf = |t: f64, scale: f64| ZoomKeyframe {
+            t, scale, center_x: 160.0, center_y: 120.0, ease: Ease::InOutCubic,
+            auto_generated: false,
+        };
+        let sidecar = SidecarState {
+            zoom: vec![kf(0.3, 1.0), kf(0.9, 2.0), kf(1.1, 2.0), kf(1.7, 1.0)],
+            bubble_position_log: vec![BubblePositionEntry {
+                t: 0.0, x: 0.9, y: 0.85, diameter: Some(120.0),
+            }],
+            bubble_zone: Some(crate::composite::BubbleZone::BottomRight),
+            ..Default::default()
+        };
+        let wm = Watermark::from_args(
+            Some(logo.to_string_lossy().into_owned()), Some("tr".into()), None, None,
+        );
+        let out = dir.join("out.mp4");
+        run_v3_export(
+            &screen,
+            Some(&webcam),
+            &out,
+            &sidecar,
+            crate::composite::WebcamSize::Medium,
+            wm.as_ref(),
+            |_| {},
+        )
+        .expect("v3 export");
+
+        assert!(out.is_file() && std::fs::metadata(&out).unwrap().len() > 0, "output written");
+        assert_eq!(probe_dimensions(&out).unwrap(), (320, 240), "source res preserved");
+        // Audio muxed from the screen source.
+        assert_eq!(ffprobe_field(&out, "stream=codec_type", "a:0"), "audio", "audio present");
+        // V3 tags the transfer/primaries (V2's known bug drops them).
+        assert_eq!(ffprobe_field(&out, "stream=color_transfer", "v:0"), "bt709",
+            "V3 output carries the 709 transfer tag");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
