@@ -70,6 +70,16 @@ case "punch": segs = [Seg(start: 1.0, end: 4.0, scale: 2.0, ramp: 0.6, cxf: 0.66
 default: fail("unknown scenario \(scenario)")
 }
 let env = ProcessInfo.processInfo.environment
+
+// Zoom segments may come from a JSON file (env ZOOM_SEGMENTS), overriding the scenario.
+// Array of {start,end,scale,ramp,cxf,cyf}. Lets the harness drive arbitrary sequences
+// (incl. long non-repeating ones for the perf/thermal gate) without hardcoded scenarios,
+// and mirrors how the app's sidecar zoom track would feed the compositor.
+if let zp = env["ZOOM_SEGMENTS"], let data = FileManager.default.contents(atPath: zp) {
+    struct JSeg: Decodable { let start, end, scale, ramp, cxf, cyf: Double }
+    guard let js = try? JSONDecoder().decode([JSeg].self, from: data) else { fail("bad ZOOM_SEGMENTS json") }
+    segs = js.map { Seg(start: $0.start, end: $0.end, scale: $0.scale, ramp: $0.ramp, cxf: $0.cxf, cyf: $0.cyf) }
+}
 let velLogPath = env["VELLOG"]
 var velLog = "t,scale,dscale,blur_vel,blur_amount,content_speed\n"
 
