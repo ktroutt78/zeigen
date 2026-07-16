@@ -10,8 +10,8 @@ import Waveform from "./Waveform";
 import ScrubPreview from "./ScrubPreview";
 
 // Review window. Left column is player + timeline; right column is an
-// accordion panel (Annotate / Watermark / Export sections plus a pinned
-// lifecycle footer). Supersedes the docs/design/surfaces/review.jsx
+// accordion panel (Trim / Bubble / Zoom / Watermark / Export sections plus a
+// pinned lifecycle footer). Supersedes the docs/design/surfaces/review.jsx
 // mock's top-toolbar layout — the toolbar's intrinsic width outgrew the
 // left column as tools were added, and the old label-beside-control rows
 // overflowed the 296px panel (the CSS overflow-y:auto side effect turned
@@ -23,118 +23,12 @@ import ScrubPreview from "./ScrubPreview";
 
 type Position = { x: number; y: number };
 
-type Annotation = {
-  type: "text" | "arrow" | "blur" | "spotlight";
-  start_time: number;
-  end_time: number;
-  position: Position;
-  content: string;
-  // Text-only: font size in source pixels. Defaults to 36 when absent.
-  size?: number;
-  // Arrow-only (C5), blur-only, and spotlight-only: end point in
-  // source-fraction coords. Blur and spotlight reuse the arrow's two-point
-  // shape as their rect corners — no new sidecar field, same reuse the
-  // Rust side makes in edit.rs.
-  endpoint?: Position;
-  stroke?: number;
-};
-
-type Tool = "text" | "arrow" | "blur" | "spotlight" | null;
-
-// Global per-recording annotation color — one color for all arrows/text on
-// the recording (not per-annotation). White is the pre-feature hardcode, so
-// absent/white means byte-identical legacy behavior. The last-picked color
-// is remembered across recordings (localStorage, like the accordion state);
-// the per-recording value travels to the export via the sidecar.
-const ANNOTATION_COLORS = [
-  { name: "White", hex: "#FFFFFF" },
-  { name: "Black", hex: "#000000" },
-  { name: "Red", hex: "#FF3B30" },
-  { name: "Yellow", hex: "#FFD60A" },
-  { name: "Blue", hex: "#0A84FF" },
-] as const;
-const DEFAULT_ANNOTATION_COLOR = "#FFFFFF";
-const ANNOTATION_COLOR_LS_KEY = "review-annotation-color";
-
-function loadAnnotationColor(): string {
-  try {
-    const raw = localStorage.getItem(ANNOTATION_COLOR_LS_KEY);
-    return ANNOTATION_COLORS.some((c) => c.hex === raw) ? raw! : DEFAULT_ANNOTATION_COLOR;
-  } catch {
-    return DEFAULT_ANNOTATION_COLOR;
-  }
-}
-
-function persistAnnotationColor(hex: string) {
-  try {
-    localStorage.setItem(ANNOTATION_COLOR_LS_KEY, hex);
-  } catch {
-    // Best-effort; the session still works from React state.
-  }
-}
-
-// Dark colors get a light text pill (and vice versa) so the glyphs stay
-// readable — mirrored by edit.rs's rasterize_text luminance flip so preview
-// and export show the same pill.
-function isDarkColor(hex: string): boolean {
-  const n = parseInt(hex.slice(1), 16);
-  const r = (n >> 16) & 0xff;
-  const g = (n >> 8) & 0xff;
-  const b = n & 0xff;
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b < 128;
-}
-
-// Contrasting outline drawn under the arrow so it stays visible on any
-// background — same luma rule and tones as the text pill flip, mirrored by
-// edit.rs rasterize_arrow so preview and export match.
-function contrastOutline(hex: string): string {
-  return isDarkColor(hex) ? "#F5F5F7" : "#141416";
-}
-
-const DEFAULT_TEXT_SIZE = 36;
-const ANNOTATION_DEFAULT_DURATION = 3;
-const MIN_TEXT_SIZE = 12;
-const MAX_TEXT_SIZE = 200;
-
-type Editor = {
-  tool: Tool;
-  setTool: (t: Tool) => void;
-  annotations: Annotation[];
-  selectedIndex: number | null;
-  setSelectedIndex: (n: number | null) => void;
-  editingIndex: number | null;
-  setEditingIndex: (n: number | null) => void;
-  updateAnnotation: (idx: number, patch: Partial<Annotation>) => void;
-  deleteAnnotation: (idx: number) => void;
-  placeTextAt: (xFrac: number, yFrac: number) => void;
-  placeArrow: (start: Position, end: Position) => void;
-  placeBlur: (start: Position, end: Position) => void;
-  placeSpotlight: (start: Position, end: Position) => void;
-};
-
-const DEFAULT_ARROW_STROKE = 8;
-const ARROW_MIN_LENGTH_FRAC = 0.01;
-// Below this, both drag dimensions are too small to redact/highlight
-// anything meaningful — drop the drag instead of creating a near-zero-size
-// region. Shared by both rect tools (blur, spotlight): same two-point drag
-// gesture, same "too small to matter" threshold.
-const REGION_MIN_SIZE_FRAC = 0.01;
-// Rough visual match to edit.rs's BLUR_SIGMA_MIN_PX / BLUR_SIGMA_FRAC —
-// same class of by-eye calibration as composite.rs's shadow gblur-vs-CSS-
-// blur note. CSS backdrop-filter and ffmpeg gblur aren't the same math, so
-// this is "looks about as strong," not a derived equivalence.
-const BLUR_PREVIEW_PX = 18;
-// Rough visual match to edit.rs's SPOTLIGHT_DIM_FACTOR (0.45) — a flat
-// black overlay at this alpha approximates "45% brightness" closely enough
-// for a live preview. Same "looks about as strong" caveat as BLUR_PREVIEW_PX.
-const SPOTLIGHT_PREVIEW_DIM_ALPHA = 1 - 0.45;
-
 type Trim = { in: number; out: number };
 
 // Mirror of src-tauri/src/edit.rs::BubblePositionEntry. Round-tripped
 // opaquely by the review window — finalize-time keyframes must survive
-// any sidecar rewrite the review triggers (trim/annotation edits, or
-// the empty-state delete path). Phase 15 c3's dual-stream player will
+// any sidecar rewrite the review triggers (trim edits, or the
+// empty-state delete path). Phase 15 c3's dual-stream player will
 // read these directly to position the bubble in the preview.
 type BubblePositionEntry = {
   t: number;
@@ -144,8 +38,8 @@ type BubblePositionEntry = {
 };
 
 // Mirror of src-tauri/src/edit.rs::ZoomKeyframe (zoom-layer step 2 schema).
-// t is seconds on the original timeline like annotation.start_time; center
-// is in video pixel space; auto_generated marks step-5 suggestion output
+// t is seconds on the original recording timeline; center is in video
+// pixel space; auto_generated marks step-5 suggestion output
 // (this UI only writes false — editing a suggested segment will clear it).
 type ZoomEase = "in_out_cubic" | "linear";
 type ZoomKeyframe = {
@@ -168,7 +62,7 @@ type ZoomSegment = {
   auto_generated: boolean;
 };
 
-const ZOOM_DEFAULT_DURATION = 3; // same default window as annotations
+const ZOOM_DEFAULT_DURATION = 3;
 const ZOOM_MIN_DURATION = 0.5;
 // V3-PLAN C.1 calm rules: 600ms ease-in-out ramps, 2.5x scale cap.
 const ZOOM_RAMP_S = 0.6;
@@ -275,8 +169,7 @@ function zoomAt(
   return null;
 }
 
-// Timeline + stage + right-panel Zoom section share this, same shape as
-// the annotation Editor api.
+// Timeline + stage + right-panel Zoom section share this.
 type ZoomEditor = {
   segments: ZoomSegment[];
   selectedIndex: number | null;
@@ -348,7 +241,6 @@ function nearestCornerZone(log: BubblePositionEntry[]): BubbleZone {
 
 type SidecarState = {
   trim?: Trim | null;
-  annotations: Annotation[];
   bubble_position_log?: BubblePositionEntry[];
   // V2 Step 2: constant bubble zone picked in Review. null/undefined = no
   // explicit pick; export migrates from the position-log centroid (nearest
@@ -356,17 +248,13 @@ type SidecarState = {
   bubble_zone?: BubbleZone | null;
   // Original-timeline timestamp picked via the Thumbnail tool. null/undefined
   // means "use the export-time default" (0.5s in) applied on the Rust side.
-  // Stored in original-timeline coords like annotation.start_time.
+  // Stored in original-timeline coords.
   thumbnail_time?: number | null;
   // Bubble corner roundness, 0.0 (square)..1.0 (circle). null/undefined =
   // circle via the legacy mask path — composite.rs keeps that branch
   // byte-identical to pre-E1, so the slider only writes the field when the
   // user moves it off full circle.
   bubble_roundness?: number | null;
-  // Global color for all text/arrow annotations, "#RRGGBB". null/undefined
-  // = white (the pre-feature hardcode) — only written when annotations
-  // exist and the color is non-white, keeping legacy sidecars unchanged.
-  annotation_color?: string | null;
   // Zoom layer keyframes (step-2 schema). Undefined/empty = no zoom; the
   // debounced save writes the field only when non-empty so a no-zoom
   // sidecar stays byte-identical to a pre-zoom one (the step-2 governing
@@ -376,23 +264,13 @@ type SidecarState = {
 
 const EMPTY_STATE: SidecarState = {
   trim: null,
-  annotations: [],
   bubble_position_log: [],
   thumbnail_time: null,
   bubble_roundness: null,
   bubble_zone: null,
-  annotation_color: null,
   zoom: [],
 };
 
-// Effective sidecar color: null unless there are annotations to color AND
-// the color differs from the white default. Keeps color-only state from
-// dirtying a recording or keeping an otherwise-empty sidecar alive.
-function normalizeAnnotationColor(s: SidecarState): string | null {
-  const c = s.annotation_color ?? null;
-  if (!c || s.annotations.length === 0) return null;
-  return c.toUpperCase() === DEFAULT_ANNOTATION_COLOR ? null : c;
-}
 const SIDECAR_DEBOUNCE_MS = 350;
 const TRIM_EPS = 0.05;
 
@@ -534,10 +412,6 @@ function statesEqual(a: SidecarState, b: SidecarState, duration: number | null):
   if (ta && tb && (Math.abs(ta.in - tb.in) > TRIM_EPS || Math.abs(ta.out - tb.out) > TRIM_EPS)) {
     return false;
   }
-  if (a.annotations.length !== b.annotations.length) return false;
-  for (let i = 0; i < a.annotations.length; i++) {
-    if (JSON.stringify(a.annotations[i]) !== JSON.stringify(b.annotations[i])) return false;
-  }
   const tta = a.thumbnail_time ?? null;
   const ttb = b.thumbnail_time ?? null;
   if ((tta == null) !== (ttb == null)) return false;
@@ -547,7 +421,6 @@ function statesEqual(a: SidecarState, b: SidecarState, duration: number | null):
   if ((bra == null) !== (brb == null)) return false;
   if (bra != null && brb != null && Math.abs(bra - brb) > 0.001) return false;
   if ((a.bubble_zone ?? null) !== (b.bubble_zone ?? null)) return false;
-  if (normalizeAnnotationColor(a) !== normalizeAnnotationColor(b)) return false;
   const za = a.zoom ?? [];
   const zb = b.zoom ?? [];
   if (za.length !== zb.length) return false;
@@ -575,7 +448,6 @@ function isLogicallyEmpty(s: SidecarState, duration: number | null): boolean {
   const noZoom = !s.zoom || s.zoom.length === 0;
   return (
     normalizeTrim(s.trim, duration) == null &&
-    s.annotations.length === 0 &&
     noBubble &&
     noThumb &&
     noRoundness &&
@@ -652,10 +524,9 @@ export default function Review() {
 
   // Edit state.
   const [trim, setTrim] = useState<Trim | null>(null);
-  const [annotations, setAnnotations] = useState<Annotation[]>([]);
   // Round-tripped opaquely. The frontend never mutates this; it just
-  // preserves what finalize wrote so sidecar rewrites (trim/annotation
-  // edits, empty-state delete path) don't wipe the bubble keyframes.
+  // preserves what finalize wrote so sidecar rewrites (trim edits,
+  // empty-state delete path) don't wipe the bubble keyframes.
   const [bubblePositionLog, setBubblePositionLog] = useState<BubblePositionEntry[]>([]);
   const [bubbleRoundness, setBubbleRoundness] = useState<number | null>(null);
   // V2 Step 2: explicit bubble zone. null until the user picks one — the
@@ -664,14 +535,6 @@ export default function Review() {
   // dirties the sidecar; untouched recordings keep bubble_zone absent and the
   // export re-derives the same default.
   const [bubbleZone, setBubbleZone] = useState<BubbleZone | null>(null);
-  // Global annotation color. Initialized from the remembered preference;
-  // the sidecar-read effect overrides it for recordings that already have
-  // annotations (so opening an old recording never recolors it).
-  const [annotationColor, setAnnotationColor] = useState<string>(loadAnnotationColor);
-  const onAnnotationColor = useCallback((hex: string) => {
-    setAnnotationColor(hex);
-    persistAnnotationColor(hex);
-  }, []);
   // Original-timeline timestamp for the user's chosen poster frame. null =
   // unset; export-time default (0.5s in) is applied on the Rust side.
   const [thumbnailTime, setThumbnailTime] = useState<number | null>(null);
@@ -705,11 +568,6 @@ export default function Review() {
   const [gifRes, setGifRes] = useState<"480p" | "720p" | "source">("720p");
   const [gifFps, setGifFps] = useState<10 | 15 | 20>(15);
 
-  // Annotation editing state.
-  const [tool, setTool] = useState<Tool>(null);
-  const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
-  const [editingIndex, setEditingIndex] = useState<number | null>(null);
-
   // Watermark (c3). logoPath + corner are the remembered global settings;
   // apply is per-recording (default on once a logo is set) — turning it off
   // skips the watermark on this clip without forgetting the logo. videoDims
@@ -727,8 +585,6 @@ export default function Review() {
 
   // Zoom layer (step 3). UI state is segments; the sidecar stores the
   // step-2 keyframe schema — converted on read and in currentState below.
-  // Zoom selection is exclusive with annotation selection so Backspace,
-  // Esc, and the stage overlays stay unambiguous.
   const [zoomSegments, setZoomSegments] = useState<ZoomSegment[]>([]);
   const [zoomSelectedIndex, setZoomSelectedIndex] = useState<number | null>(null);
 
@@ -828,138 +684,8 @@ export default function Review() {
   // the preview. null otherwise (apply off, or no logo).
   const wmEffectiveLogo = wmApply && wmLogoPath ? wmLogoPath : null;
 
-  const updateAnnotation = useCallback(
-    (idx: number, patch: Partial<Annotation>) => {
-      setAnnotations((prev) =>
-        prev.map((a, i) => (i === idx ? { ...a, ...patch } : a)),
-      );
-    },
-    [],
-  );
-
-  const deleteAnnotation = useCallback(
-    (idx: number) => {
-      setAnnotations((prev) => prev.filter((_, i) => i !== idx));
-      setSelectedIndex(null);
-      setEditingIndex(null);
-    },
-    [],
-  );
-
-  const placeTextAt = useCallback(
-    (xFrac: number, yFrac: number) => {
-      const t = videoRef.current?.currentTime ?? 0;
-      const end = duration != null ? Math.min(duration, t + ANNOTATION_DEFAULT_DURATION) : t + ANNOTATION_DEFAULT_DURATION;
-      const ann: Annotation = {
-        type: "text",
-        start_time: t,
-        end_time: end,
-        position: { x: xFrac, y: yFrac },
-        content: "",
-        size: DEFAULT_TEXT_SIZE,
-      };
-      setAnnotations((prev) => {
-        const next = [...prev, ann];
-        const newIdx = next.length - 1;
-        // Defer selection/edit-mode state to a microtask so the new index is
-        // valid against the freshly-rendered list.
-        Promise.resolve().then(() => {
-          setSelectedIndex(newIdx);
-          setEditingIndex(newIdx);
-        });
-        return next;
-      });
-      setTool(null);
-    },
-    [duration],
-  );
-
-  const placeArrow = useCallback(
-    (start: Position, end: Position) => {
-      const t = videoRef.current?.currentTime ?? 0;
-      const endT =
-        duration != null ? Math.min(duration, t + ANNOTATION_DEFAULT_DURATION) : t + ANNOTATION_DEFAULT_DURATION;
-      const ann: Annotation = {
-        type: "arrow",
-        start_time: t,
-        end_time: endT,
-        position: start,
-        endpoint: end,
-        stroke: DEFAULT_ARROW_STROKE,
-        content: "",
-      };
-      setAnnotations((prev) => {
-        const next = [...prev, ann];
-        const newIdx = next.length - 1;
-        Promise.resolve().then(() => {
-          setSelectedIndex(newIdx);
-        });
-        return next;
-      });
-      setTool(null);
-    },
-    [duration],
-  );
-
-  const placeBlur = useCallback(
-    (start: Position, end: Position) => {
-      const t = videoRef.current?.currentTime ?? 0;
-      const endT =
-        duration != null ? Math.min(duration, t + ANNOTATION_DEFAULT_DURATION) : t + ANNOTATION_DEFAULT_DURATION;
-      const ann: Annotation = {
-        type: "blur",
-        start_time: t,
-        end_time: endT,
-        position: start,
-        endpoint: end,
-        content: "",
-      };
-      setAnnotations((prev) => {
-        const next = [...prev, ann];
-        const newIdx = next.length - 1;
-        Promise.resolve().then(() => {
-          setSelectedIndex(newIdx);
-        });
-        return next;
-      });
-      setTool(null);
-    },
-    [duration],
-  );
-
-  const placeSpotlight = useCallback(
-    (start: Position, end: Position) => {
-      const t = videoRef.current?.currentTime ?? 0;
-      const endT =
-        duration != null ? Math.min(duration, t + ANNOTATION_DEFAULT_DURATION) : t + ANNOTATION_DEFAULT_DURATION;
-      const ann: Annotation = {
-        type: "spotlight",
-        start_time: t,
-        end_time: endT,
-        position: start,
-        endpoint: end,
-        content: "",
-      };
-      setAnnotations((prev) => {
-        const next = [...prev, ann];
-        const newIdx = next.length - 1;
-        Promise.resolve().then(() => {
-          setSelectedIndex(newIdx);
-        });
-        return next;
-      });
-      setTool(null);
-    },
-    [duration],
-  );
-
   const selectZoom = useCallback((i: number | null) => {
     setZoomSelectedIndex(i);
-    if (i != null) {
-      setSelectedIndex(null);
-      setEditingIndex(null);
-      setTool(null);
-    }
   }, []);
 
   // Any edit marks the segment manual — step-5 regeneration must never
@@ -1012,7 +738,7 @@ export default function Review() {
       const next = [...prev, seg].sort((a, b) => a.start - b.start);
       const idx = next.indexOf(seg);
       // Defer selection to a microtask so the new index is valid against
-      // the freshly-rendered list (same pattern as placeTextAt).
+      // the freshly-rendered list.
       Promise.resolve().then(() => selectZoom(idx));
       return next;
     });
@@ -1084,30 +810,19 @@ export default function Review() {
         if (state) {
           setSnapshot({
             trim: state.trim ?? null,
-            annotations: state.annotations ?? [],
             bubble_position_log: state.bubble_position_log ?? [],
             thumbnail_time: state.thumbnail_time ?? null,
             bubble_roundness: state.bubble_roundness ?? null,
             bubble_zone: state.bubble_zone ?? null,
-            annotation_color: state.annotation_color ?? null,
             zoom: state.zoom ?? [],
           });
           if (state.trim) setTrim(state.trim);
-          if (state.annotations) setAnnotations(state.annotations);
           if (state.bubble_position_log) setBubblePositionLog(state.bubble_position_log);
           if (state.thumbnail_time != null) setThumbnailTime(state.thumbnail_time);
           if (state.bubble_roundness != null) setBubbleRoundness(state.bubble_roundness);
           if (state.bubble_zone != null) setBubbleZone(state.bubble_zone);
           if (state.zoom && state.zoom.length > 0) {
             setZoomSegments(zoomKeyframesToSegments(state.zoom));
-          }
-          // Recordings with existing annotations keep their own color
-          // (absent = white, the pre-feature behavior) — the remembered
-          // preference only seeds recordings that have no annotations yet.
-          if (state.annotation_color != null) {
-            setAnnotationColor(state.annotation_color);
-          } else if ((state.annotations ?? []).length > 0) {
-            setAnnotationColor(DEFAULT_ANNOTATION_COLOR);
           }
         } else {
           setSnapshot(EMPTY_STATE);
@@ -1200,15 +915,13 @@ export default function Review() {
   const currentState: SidecarState = useMemo(
     () => ({
       trim: trim ?? null,
-      annotations,
       bubble_position_log: bubblePositionLog,
       thumbnail_time: thumbnailTime,
       bubble_roundness: bubbleRoundness,
       bubble_zone: bubbleZone,
-      annotation_color: annotationColor,
       zoom: zoomSegmentsToKeyframes(zoomSegments),
     }),
-    [trim, annotations, bubblePositionLog, thumbnailTime, bubbleRoundness, bubbleZone, annotationColor, zoomSegments],
+    [trim, bubblePositionLog, thumbnailTime, bubbleRoundness, bubbleZone, zoomSegments],
   );
 
   const dirty = useMemo(
@@ -1239,7 +952,6 @@ export default function Review() {
     const handle = window.setTimeout(() => {
       const norm: SidecarState = {
         trim: normalizeTrim(currentState.trim, duration),
-        annotations: currentState.annotations,
         bubble_position_log: currentState.bubble_position_log,
         thumbnail_time: currentState.thumbnail_time ?? null,
         bubble_roundness: currentState.bubble_roundness ?? null,
@@ -1247,7 +959,6 @@ export default function Review() {
         // invoke payload) so untouched/pre-Step-2 sidecars stay byte-identical
         // and the export keeps re-deriving the migration default.
         bubble_zone: currentState.bubble_zone ?? undefined,
-        annotation_color: normalizeAnnotationColor(currentState),
         // Empty zoom track = field absent (undefined drops out of the
         // invoke payload), preserving the step-2 byte-identity invariant.
         zoom:
@@ -1784,11 +1495,11 @@ export default function Review() {
     [seek],
   );
 
-  // Global keyboard shortcuts: T/A → text tool, R → arrow tool (C5),
-  // Space → play/pause, ←/→ → seek, ,/. → frame-step (Premiere/Final Cut
-  // convention — doesn't collide with arrow-key seeking), Shift+,/. (</>)
-  // → cycle playback speed (YouTube's own binding for the same keys),
-  // Esc → cancel tool/selection, Backspace/Delete → delete selection.
+  // Global keyboard shortcuts: Space → play/pause, ←/→ → seek, ,/. →
+  // frame-step (Premiere/Final Cut convention — doesn't collide with
+  // arrow-key seeking), Shift+,/. (</>) → cycle playback speed (YouTube's
+  // own binding for the same keys), I/O → trim in/out, Esc → cancel
+  // zoom selection, Backspace/Delete → delete the selected zoom.
   // Suppressed while the close modal is open (its own handler runs)
   // and while editing text content (contentEditable).
   useEffect(() => {
@@ -1800,31 +1511,7 @@ export default function Review() {
       if (e.metaKey || e.ctrlKey || e.altKey) return;
 
       const key = e.key.toLowerCase();
-      if (key === "t" || key === "a") {
-        e.preventDefault();
-        setTool((prev) => (prev === "text" ? null : "text"));
-        setSelectedIndex(null);
-        setEditingIndex(null);
-        setZoomSelectedIndex(null);
-      } else if (key === "r") {
-        e.preventDefault();
-        setTool((prev) => (prev === "arrow" ? null : "arrow"));
-        setSelectedIndex(null);
-        setEditingIndex(null);
-        setZoomSelectedIndex(null);
-      } else if (key === "b") {
-        e.preventDefault();
-        setTool((prev) => (prev === "blur" ? null : "blur"));
-        setSelectedIndex(null);
-        setEditingIndex(null);
-        setZoomSelectedIndex(null);
-      } else if (key === "s") {
-        e.preventDefault();
-        setTool((prev) => (prev === "spotlight" ? null : "spotlight"));
-        setSelectedIndex(null);
-        setEditingIndex(null);
-        setZoomSelectedIndex(null);
-      } else if (e.key === " ") {
+      if (e.key === " ") {
         e.preventDefault();
         // A selected zoom turns Space into its looped slow preview; otherwise
         // it's the normal transport toggle.
@@ -1873,24 +1560,13 @@ export default function Review() {
           // Stop the preview first; keep the zoom selected so it can be
           // re-previewed or edited without re-selecting.
           videoRef.current?.pause();
-        } else if (editingIndex != null) {
-          setEditingIndex(null);
-        } else if (selectedIndex != null) {
-          setSelectedIndex(null);
         } else if (zoomSelectedIndex != null) {
           setZoomSelectedIndex(null);
-        } else if (tool != null) {
-          setTool(null);
         }
       } else if (e.key === "Backspace" || e.key === "Delete") {
-        // Selections are mutually exclusive (selectZoom/selectAnnotation
-        // clear each other), so at most one branch fires.
-        if (zoomSelectedIndex != null && editingIndex == null) {
+        if (zoomSelectedIndex != null) {
           e.preventDefault();
           deleteZoom(zoomSelectedIndex);
-        } else if (selectedIndex != null && editingIndex == null) {
-          e.preventDefault();
-          deleteAnnotation(selectedIndex);
         }
       }
     };
@@ -1898,11 +1574,7 @@ export default function Review() {
     return () => window.removeEventListener("keydown", onKey);
   }, [
     showCloseModal,
-    tool,
-    selectedIndex,
-    editingIndex,
     zoomSelectedIndex,
-    deleteAnnotation,
     deleteZoom,
     togglePlay,
     toggleZoomLoop,
@@ -1911,31 +1583,6 @@ export default function Review() {
     frameStep,
     duration,
   ]);
-
-  // Shared by VideoStage, Timeline, and the right panel's Annotate section.
-  // setTool/setSelectedIndex clear the zoom selection so annotation work
-  // and zoom editing never hold the stage at the same time.
-  const editorApi: Editor = {
-    tool,
-    setTool: (t) => {
-      setTool(t);
-      if (t != null) setZoomSelectedIndex(null);
-    },
-    annotations,
-    selectedIndex,
-    setSelectedIndex: (i) => {
-      setSelectedIndex(i);
-      if (i != null) setZoomSelectedIndex(null);
-    },
-    editingIndex,
-    setEditingIndex,
-    updateAnnotation,
-    deleteAnnotation,
-    placeTextAt,
-    placeArrow,
-    placeBlur,
-    placeSpotlight,
-  };
 
   const zoomEditor: ZoomEditor = {
     segments: zoomSegments,
@@ -1958,8 +1605,7 @@ export default function Review() {
     getCurrentTime: () => videoRef.current?.currentTime ?? 0,
   };
 
-  // Post-trim length shown in the header (the old toolbar's info strip
-  // merged here when the toolbar moved into the Annotate section).
+  // Post-trim length shown in the header.
   const trimmedLen =
     trim && duration != null ? Math.max(0, trim.out - trim.in) : duration;
 
@@ -2029,20 +1675,15 @@ export default function Review() {
             scale: wmScale,
             opacity: wmOpacity,
           }}
-          editor={editorApi}
           zoom={zoomEditor}
-          annotationColor={annotationColor}
           thumbnailTime={thumbnailTime}
           bubbleRoundness={bubbleRoundness}
           bubbleZone={effectiveZone}
         />
         <ExportPanel
           sourcePath={sourcePath}
-          editor={editorApi}
           zoom={zoomEditor}
           thumbnail={thumbnailControls}
-          annotationColor={annotationColor}
-          onAnnotationColor={onAnnotationColor}
           bubbleZone={effectiveZone}
           onBubbleZone={setBubbleZone}
           hasBubble={hasBubble}
@@ -2216,12 +1857,9 @@ type LeftColumnProps = {
   setTrim: React.Dispatch<React.SetStateAction<Trim | null>>;
   audioStart: number | null;
   watermarkPreview: WatermarkPreview;
-  editor: Editor;
   zoom: ZoomEditor;
-  // Global per-recording annotation color (text glyphs, arrow stroke).
-  annotationColor: string;
   // Timeline marker only — the thumbnail picker itself lives in the right
-  // panel's Annotate section.
+  // panel's Export section.
   thumbnailTime: number | null;
   // Read-only: stamped into the sidecar at record time (recorder UI owns
   // the control); Review only previews it via BubbleLayer's border-radius.
@@ -2262,9 +1900,7 @@ function LeftColumn(props: LeftColumnProps) {
         togglePlay={props.togglePlay}
         playbackRate={props.playbackRate}
         watermarkPreview={props.watermarkPreview}
-        editor={props.editor}
         zoom={props.zoom}
-        annotationColor={props.annotationColor}
       />
       <Timeline
         assetUrl={props.assetUrl}
@@ -2278,7 +1914,6 @@ function LeftColumn(props: LeftColumnProps) {
         onScrubStart={props.onScrubStart}
         onScrubEnd={props.onScrubEnd}
         audioStart={props.audioStart}
-        editor={props.editor}
         zoom={props.zoom}
         thumbnailTime={props.thumbnailTime}
       />
@@ -2286,12 +1921,12 @@ function LeftColumn(props: LeftColumnProps) {
   );
 }
 
-// Anchored to the right panel's Annotate section (fixed position, left of
+// Anchored to the right panel's Export section (fixed position, left of
 // the panel so it floats over the video). Renders a paused <video> seeked to
 // the captured currentTime so the user confirms the exact frame. The
-// preview does NOT show the composited bubble/annotations/watermark — those
-// are overlays in the main player — so the popover spells that out so the
-// user isn't surprised by the final embedded poster.
+// preview does NOT show the composited bubble/watermark — those are overlays
+// in the main player — so the popover spells that out so the user isn't
+// surprised by the final embedded poster.
 function ThumbnailPopover({
   previewUrl,
   time,
@@ -2324,7 +1959,7 @@ function ThumbnailPopover({
           // Fixed, just left of the 296px panel and below the header —
           // deterministic anchor that works whether the popover was opened
           // by click or by the M shortcut (which may have just expanded a
-          // collapsed Annotate section, so no row rect exists yet).
+          // collapsed Export section, so no row rect exists yet).
           position: "fixed",
           top: 56,
           right: 308,
@@ -2377,7 +2012,7 @@ function ThumbnailPopover({
             marginBottom: 8,
           }}
         >
-          at {time.toFixed(2)}s · webcam bubble + annotations are added in the final export
+          at {time.toFixed(2)}s · webcam bubble is added in the final export
         </div>
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 6 }}>
           <button
@@ -2418,8 +2053,8 @@ function ThumbnailPopover({
   );
 }
 
-// Full-width row inside the Annotate section. Same states as the old
-// toolbar's ToolButton, but stacked vertically the rows can never outgrow
+// Full-width panel row (Trim label, Thumbnail picker). Same states as the
+// old toolbar's ToolButton, but stacked vertically the rows can never outgrow
 // the panel width.
 function ToolRow({
   icon,
@@ -2559,29 +2194,18 @@ type VideoStageProps = {
   togglePlay: () => void;
   playbackRate: number;
   watermarkPreview: WatermarkPreview;
-  editor: Editor;
   zoom: ZoomEditor;
-  annotationColor: string;
 };
 
 function VideoStage(props: VideoStageProps) {
   const stageRef = useRef<HTMLDivElement | null>(null);
-  // V2 Step 3: wrapper around video + annotations that carries the zoom
-  // transform (see the zoom rAF below).
+  // V2 Step 3: wrapper around the video that carries the zoom transform
+  // (see the zoom rAF below).
   const zoomLayerRef = useRef<HTMLDivElement | null>(null);
-  // Shared drag-to-draw state for the arrow, blur, and spotlight tools — all
-  // three are "two points, drag from start to end" gestures; only the
-  // placement callback and the live preview shape differ.
-  const [drawingShape, setDrawingShape] = useState<{
-    tool: "arrow" | "blur" | "spotlight";
-    start: Position;
-    end: Position;
-  } | null>(null);
 
-  // videoDims drives the letterbox-aware content box below — annotation
-  // coordinates must be captured relative to the actual video frame, not
-  // the (possibly larger, if the source isn't 16:9) stage box, since that's
-  // how the Rust export interprets position/endpoint fractions.
+  // videoDims drives the letterbox-aware content box below — the zoom
+  // framing math is captured relative to the actual video frame, not the
+  // (possibly larger, if the source isn't 16:9) stage box.
   const videoDims = props.watermarkPreview.videoDims;
 
   // Live zoom preview (step 3) — CSS scale+translate on the <video> only,
@@ -2589,22 +2213,19 @@ function VideoStage(props: VideoStageProps) {
   // (same rAF-outside-React pattern as BubbleLayer; React never writes
   // `transform` in the video's style object, so these imperative writes
   // survive re-renders). The webcam bubble is screen-anchored and must not
-  // zoom; annotation overlays stay untransformed too — content-anchored
-  // overlay ordering is step 4's export design and the preview stays
-  // conservative until then. While a zoom segment is selected the video is
-  // held at identity: edit view shows the full frame with the crop box
-  // (ZoomEditLayer); deselect to watch the applied zoom. The exception is the
-  // looped slow preview (zoom.looping) — it un-suppresses the transform while
-  // selected so the motion is visible, time-multiplexing edit vs. watch.
+  // zoom. While a zoom segment is selected the video is held at identity:
+  // edit view shows the full frame with the crop box (ZoomEditLayer);
+  // deselect to watch the applied zoom. The exception is the looped slow
+  // preview (zoom.looping) — it un-suppresses the transform while selected
+  // so the motion is visible, time-multiplexing edit vs. watch.
   const zoomSegs = props.zoom.segments;
   const zoomEditing = props.zoom.selectedIndex != null;
   const zoomLooping = props.zoom.looping;
   const videoRefForZoom = props.videoRef;
   useEffect(() => {
     const video = videoRefForZoom.current;
-    // V2 Step 3: the transform now drives the wrapper (video + annotations),
-    // not the bare video, so content-anchored annotations zoom with the
-    // content. The webcam bubble / watermark are outside the wrapper (fixed).
+    // V2 Step 3: the transform drives the wrapper around the video. The
+    // webcam bubble / watermark are outside the wrapper (fixed).
     const layer = zoomLayerRef.current;
     if (!video || !layer) return;
     const reset = () => {
@@ -2649,98 +2270,12 @@ function VideoStage(props: VideoStageProps) {
   }, [zoomSegs, zoomEditing, zoomLooping, videoDims, videoRefForZoom]);
 
   const onStageClick = (e: React.MouseEvent) => {
-    if (props.editor.tool !== "text") {
-      // Click on empty stage with no tool active = deselect. Deselecting a
-      // zoom leaves edit view and re-arms the live preview transform.
-      if (props.editor.tool == null && (e.target as HTMLElement).dataset.stageBg === "1") {
-        props.editor.setSelectedIndex(null);
-        props.editor.setEditingIndex(null);
-        props.zoom.select(null);
-      }
-      return;
+    // Click on the empty stage background = deselect any zoom, which leaves
+    // edit view and re-arms the live preview transform.
+    if ((e.target as HTMLElement).dataset.stageBg === "1") {
+      props.zoom.select(null);
     }
-    const rect = stageRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    const box = contentBox({ width: rect.width, height: rect.height }, videoDims);
-    const stagePx = { x: e.clientX - rect.left, y: e.clientY - rect.top };
-    // Reject clicks landing in the letterbox bars — outside the video itself.
-    if (
-      stagePx.x < box.x ||
-      stagePx.x > box.x + box.w ||
-      stagePx.y < box.y ||
-      stagePx.y > box.y + box.h
-    ) {
-      return;
-    }
-    const frac = toContentFrac(stagePx, box);
-    props.editor.placeTextAt(frac.x, frac.y);
   };
-
-  const onStagePointerDown = (e: React.PointerEvent) => {
-    const tool = props.editor.tool;
-    if (tool !== "arrow" && tool !== "blur" && tool !== "spotlight") return;
-    if ((e.target as HTMLElement).dataset.stageBg !== "1") return;
-    e.preventDefault();
-    const rect = stageRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    const box = contentBox({ width: rect.width, height: rect.height }, videoDims);
-    const startPx = { x: e.clientX - rect.left, y: e.clientY - rect.top };
-    if (
-      startPx.x < box.x ||
-      startPx.x > box.x + box.w ||
-      startPx.y < box.y ||
-      startPx.y > box.y + box.h
-    ) {
-      return;
-    }
-    const start = toContentFrac(startPx, box);
-    setDrawingShape({ tool, start, end: start });
-    const onMove = (ev: PointerEvent) => {
-      const r = stageRef.current?.getBoundingClientRect();
-      if (!r) return;
-      const b = contentBox({ width: r.width, height: r.height }, videoDims);
-      const end = toContentFrac({ x: ev.clientX - r.left, y: ev.clientY - r.top }, b);
-      setDrawingShape({ tool, start, end });
-    };
-    const onUp = (ev: PointerEvent) => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-      const r = stageRef.current?.getBoundingClientRect();
-      if (!r) {
-        setDrawingShape(null);
-        return;
-      }
-      const b = contentBox({ width: r.width, height: r.height }, videoDims);
-      const end = toContentFrac({ x: ev.clientX - r.left, y: ev.clientY - r.top }, b);
-      setDrawingShape(null);
-      if (tool === "arrow") {
-        const dx = end.x - start.x;
-        const dy = end.y - start.y;
-        const lenFrac = Math.sqrt(dx * dx + dy * dy);
-        if (lenFrac < ARROW_MIN_LENGTH_FRAC) return;
-        props.editor.placeArrow(start, end);
-      } else {
-        const wFrac = Math.abs(end.x - start.x);
-        const hFrac = Math.abs(end.y - start.y);
-        if (wFrac < REGION_MIN_SIZE_FRAC || hFrac < REGION_MIN_SIZE_FRAC) return;
-        if (tool === "blur") {
-          props.editor.placeBlur(start, end);
-        } else {
-          props.editor.placeSpotlight(start, end);
-        }
-      }
-    };
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-  };
-
-  const cursor =
-    props.editor.tool === "text" ||
-    props.editor.tool === "arrow" ||
-    props.editor.tool === "blur" ||
-    props.editor.tool === "spotlight"
-      ? "crosshair"
-      : "default";
 
   return (
     <div
@@ -2758,7 +2293,6 @@ function VideoStage(props: VideoStageProps) {
       <div
         ref={stageRef}
         onClick={onStageClick}
-        onPointerDown={onStagePointerDown}
         data-stage-bg="1"
         style={{
           position: "relative",
@@ -2770,16 +2304,12 @@ function VideoStage(props: VideoStageProps) {
           overflow: "hidden",
           border: "1px solid rgba(255,255,255,0.06)",
           background: "#000",
-          cursor,
         }}
       >
-        {/* V2 Step 3: the screen video AND content-anchored annotations share
-            the zoom transform (applied to this wrapper by the zoom rAF) so
-            annotations zoom WITH the content. The webcam bubble + watermark
-            stay OUTSIDE (screen-anchored) — and rendering the bubble after this
-            wrapper matches the export layer order (annotations -> zoom ->
-            webcam). AnnotationLayer's geometry keys off the untransformed
-            stageRef, so the wrapper transform is the only thing that scales. */}
+        {/* V2 Step 3: the screen video carries the zoom transform (applied to
+            this wrapper by the zoom rAF). The webcam bubble + watermark stay
+            OUTSIDE (screen-anchored) — rendering the bubble after this wrapper
+            matches the export layer order (zoom -> webcam). */}
         <div ref={zoomLayerRef} style={{ position: "absolute", inset: 0 }}>
           {props.assetUrl ? (
             <video
@@ -2814,15 +2344,6 @@ function VideoStage(props: VideoStageProps) {
               No source path
             </div>
           )}
-          <AnnotationLayer
-            stageRef={stageRef}
-            videoRef={props.videoRef}
-            editor={props.editor}
-            annotationColor={props.annotationColor}
-            currentTime={props.currentTime}
-            drawingShape={drawingShape}
-            videoDims={videoDims}
-          />
         </div>
         <BubbleLayer
           stageRef={stageRef}
@@ -3187,135 +2708,6 @@ function WatermarkPreviewLayer({
   );
 }
 
-function AnnotationLayer({
-  stageRef,
-  videoRef,
-  editor,
-  annotationColor,
-  currentTime,
-  drawingShape,
-  videoDims,
-}: {
-  stageRef: React.MutableRefObject<HTMLDivElement | null>;
-  videoRef: React.MutableRefObject<HTMLVideoElement | null>;
-  editor: Editor;
-  annotationColor: string;
-  currentTime: number;
-  drawingShape: { tool: "arrow" | "blur" | "spotlight"; start: Position; end: Position } | null;
-  videoDims: { w: number; h: number } | null;
-}) {
-  return (
-    <div
-      style={{
-        position: "absolute",
-        inset: 0,
-        pointerEvents: "none",
-      }}
-    >
-      {editor.annotations.map((ann, idx) => {
-        const visible =
-          currentTime >= ann.start_time - 0.001 && currentTime <= ann.end_time + 0.001;
-        const isSelected = editor.selectedIndex === idx;
-        const isEditing = editor.editingIndex === idx;
-        // Text/arrow stay visible while selected/editing regardless of
-        // playhead position — an editing aid so you can nudge them without
-        // scrubbing into their active window. Blur and spotlight are
-        // different: their whole point is "only visible in this window," so
-        // keeping them rendered outside that range (even while selected for
-        // a timeline-handle resize) would misrepresent what the export
-        // actually does. The timeline pip's band + resize handles don't
-        // depend on this render — they key off isSelected directly — so
-        // this doesn't block resizing from the timeline.
-        const staysVisibleWhenInactive =
-          ann.type !== "blur" && ann.type !== "spotlight" && (isSelected || isEditing);
-        if (!visible && !staysVisibleWhenInactive) return null;
-        if (ann.type === "text") {
-          return (
-            <TextAnnotationView
-              key={idx}
-              ann={ann}
-              idx={idx}
-              stageRef={stageRef}
-              videoRef={videoRef}
-              editor={editor}
-              color={annotationColor}
-              isSelected={isSelected}
-              isEditing={isEditing}
-              videoDims={videoDims}
-            />
-          );
-        }
-        if (ann.type === "arrow" && ann.endpoint) {
-          return (
-            <ArrowAnnotationView
-              key={idx}
-              ann={ann}
-              idx={idx}
-              stageRef={stageRef}
-              editor={editor}
-              color={annotationColor}
-              isSelected={isSelected}
-              videoDims={videoDims}
-            />
-          );
-        }
-        if (ann.type === "blur" && ann.endpoint) {
-          return (
-            <BlurAnnotationView
-              key={idx}
-              ann={ann}
-              idx={idx}
-              stageRef={stageRef}
-              editor={editor}
-              isSelected={isSelected}
-              videoDims={videoDims}
-            />
-          );
-        }
-        if (ann.type === "spotlight" && ann.endpoint) {
-          return (
-            <SpotlightAnnotationView
-              key={idx}
-              ann={ann}
-              idx={idx}
-              stageRef={stageRef}
-              editor={editor}
-              isSelected={isSelected}
-              videoDims={videoDims}
-            />
-          );
-        }
-        return null;
-      })}
-      {drawingShape?.tool === "arrow" && (
-        <ArrowPreview
-          start={drawingShape.start}
-          end={drawingShape.end}
-          stageRef={stageRef}
-          color={annotationColor}
-          videoDims={videoDims}
-        />
-      )}
-      {drawingShape?.tool === "blur" && (
-        <BlurPreview
-          start={drawingShape.start}
-          end={drawingShape.end}
-          stageRef={stageRef}
-          videoDims={videoDims}
-        />
-      )}
-      {drawingShape?.tool === "spotlight" && (
-        <SpotlightPreview
-          start={drawingShape.start}
-          end={drawingShape.end}
-          stageRef={stageRef}
-          videoDims={videoDims}
-        />
-      )}
-    </div>
-  );
-}
-
 // Zoom edit view (step 3) — shown while a zoom segment is selected. The
 // stage holds the full untransformed frame; the dashed rect previews the
 // visible region at the segment's scale (the same clamped framing the live
@@ -3402,233 +2794,6 @@ function ZoomEditLayer({
   );
 }
 
-function TextAnnotationView({
-  ann,
-  idx,
-  stageRef,
-  videoRef,
-  editor,
-  color,
-  isSelected,
-  isEditing,
-  videoDims,
-}: {
-  ann: Annotation;
-  idx: number;
-  stageRef: React.MutableRefObject<HTMLDivElement | null>;
-  videoRef: React.MutableRefObject<HTMLVideoElement | null>;
-  editor: Editor;
-  color: string;
-  isSelected: boolean;
-  isEditing: boolean;
-  videoDims: { w: number; h: number } | null;
-}) {
-  const bodyRef = useRef<HTMLDivElement | null>(null);
-  const box = useContentBox(stageRef, videoDims);
-
-  // Compute font size in CSS pixels: source-pixel size scaled by the video
-  // content box's rendered height vs source video height (not the stage's
-  // own height — those differ whenever the source isn't 16:9 and the video
-  // letterboxes inside the stage). Falls back to a 1:1 mapping until video
-  // metadata is known.
-  const sourceHeight = videoRef.current?.videoHeight || 0;
-  const scale = sourceHeight && box.h ? box.h / sourceHeight : 1;
-  const sizeSrc = ann.size ?? DEFAULT_TEXT_SIZE;
-  const sizeCss = sizeSrc * scale;
-  const pos = toStagePx(ann.position, box);
-
-  const startBodyDrag = (e: React.PointerEvent) => {
-    e.stopPropagation();
-    if (isEditing) return;
-    if (!isSelected) {
-      editor.setSelectedIndex(idx);
-    }
-    const stage = stageRef.current?.getBoundingClientRect();
-    if (!stage) return;
-    const dragBox = contentBox({ width: stage.width, height: stage.height }, videoDims);
-    const startX = e.clientX;
-    const startY = e.clientY;
-    const startPos = ann.position;
-    const onMove = (ev: PointerEvent) => {
-      const dx = (ev.clientX - startX) / dragBox.w;
-      const dy = (ev.clientY - startY) / dragBox.h;
-      editor.updateAnnotation(idx, {
-        position: {
-          x: Math.max(0, Math.min(1, startPos.x + dx)),
-          y: Math.max(0, Math.min(1, startPos.y + dy)),
-        },
-      });
-    };
-    const onUp = () => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-    };
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-  };
-
-  const startResize = (corner: "tl" | "tr" | "bl" | "br") => (e: React.PointerEvent) => {
-    e.stopPropagation();
-    e.preventDefault();
-    const stage = stageRef.current?.getBoundingClientRect();
-    if (!stage || !sourceHeight) return;
-    const startY = e.clientY;
-    const startSize = ann.size ?? DEFAULT_TEXT_SIZE;
-    // Sign convention: dragging away from the body grows; toward shrinks.
-    const grow = corner === "br" || corner === "bl" ? 1 : -1;
-    const onMove = (ev: PointerEvent) => {
-      const dy = (ev.clientY - startY) * grow;
-      const dySrc = dy / scale; // CSS px → source px
-      const next = Math.max(MIN_TEXT_SIZE, Math.min(MAX_TEXT_SIZE, startSize + dySrc));
-      editor.updateAnnotation(idx, { size: next });
-    };
-    const onUp = () => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-    };
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-  };
-
-  // Auto-focus contentEditable when entering edit mode.
-  useEffect(() => {
-    if (isEditing) {
-      const el = bodyRef.current;
-      if (!el) return;
-      el.focus();
-      // Place caret at end.
-      const range = document.createRange();
-      range.selectNodeContents(el);
-      range.collapse(false);
-      const sel = window.getSelection();
-      sel?.removeAllRanges();
-      sel?.addRange(range);
-    }
-  }, [isEditing]);
-
-  const onBodyClick = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (!isSelected) editor.setSelectedIndex(idx);
-  };
-  const onBodyDoubleClick = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    editor.setSelectedIndex(idx);
-    editor.setEditingIndex(idx);
-  };
-  const onContentBlur = () => {
-    const text = bodyRef.current?.innerText.trim() ?? "";
-    if (text === "") {
-      // Empty annotations are dropped on commit.
-      editor.deleteAnnotation(idx);
-      return;
-    }
-    if (text !== ann.content) {
-      editor.updateAnnotation(idx, { content: text });
-    }
-    editor.setEditingIndex(null);
-  };
-  const onContentKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      bodyRef.current?.blur();
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      bodyRef.current?.blur();
-    }
-  };
-
-  const showHandles = isSelected && !isEditing;
-
-  return (
-    <div
-      onPointerDown={startBodyDrag}
-      onClick={onBodyClick}
-      onDoubleClick={onBodyDoubleClick}
-      style={{
-        position: "absolute",
-        left: pos.x,
-        top: pos.y,
-        padding: `${Math.max(3, sizeCss * 0.15)}px ${Math.max(6, sizeCss * 0.3)}px`,
-        // Pill luminance flips against dark glyph colors — mirrored by
-        // edit.rs rasterize_text so preview and export match.
-        background: isDarkColor(color)
-          ? "rgba(245,245,247,0.86)"
-          : "rgba(20,20,22,0.86)",
-        color,
-        borderRadius: Math.max(3, sizeCss * 0.15),
-        border: isDarkColor(color)
-          ? "0.5px solid rgba(0,0,0,0.18)"
-          : "0.5px solid rgba(255,255,255,0.18)",
-        fontFamily: "var(--font-system)",
-        fontSize: `${sizeCss}px`,
-        lineHeight: 1.2,
-        fontWeight: 600,
-        letterSpacing: "-0.005em",
-        boxShadow: "0 6px 16px rgba(0,0,0,0.45)",
-        outline: isSelected ? "1.5px solid var(--accent)" : "none",
-        outlineOffset: 2,
-        cursor: isEditing ? "text" : isSelected ? "move" : "pointer",
-        pointerEvents: "auto",
-        whiteSpace: "pre-wrap",
-        userSelect: isEditing ? "text" : "none",
-      }}
-    >
-      <div
-        ref={bodyRef}
-        contentEditable={isEditing}
-        suppressContentEditableWarning
-        onBlur={onContentBlur}
-        onKeyDown={onContentKeyDown}
-        spellCheck={false}
-        style={{
-          outline: "none",
-          minWidth: isEditing && ann.content === "" ? `${Math.max(60, sizeCss * 2)}px` : undefined,
-        }}
-      >
-        {ann.content || (isEditing ? "" : "Type here…")}
-      </div>
-      {showHandles && (
-        <>
-          <ResizeHandle pos="tl" onPointerDown={startResize("tl")} />
-          <ResizeHandle pos="tr" onPointerDown={startResize("tr")} />
-          <ResizeHandle pos="bl" onPointerDown={startResize("bl")} />
-          <ResizeHandle pos="br" onPointerDown={startResize("br")} />
-        </>
-      )}
-    </div>
-  );
-}
-
-function ResizeHandle({
-  pos,
-  onPointerDown,
-}: {
-  pos: "tl" | "tr" | "bl" | "br";
-  onPointerDown: (e: React.PointerEvent) => void;
-}) {
-  const top = pos === "tl" || pos === "tr" ? -4 : "calc(100% - 3px)";
-  const left = pos === "tl" || pos === "bl" ? -4 : "calc(100% - 3px)";
-  const cursor =
-    pos === "tl" || pos === "br" ? "nwse-resize" : "nesw-resize";
-  return (
-    <span
-      onPointerDown={onPointerDown}
-      style={{
-        position: "absolute",
-        top,
-        left,
-        width: 7,
-        height: 7,
-        borderRadius: 1.5,
-        background: "#fff",
-        border: "1px solid var(--accent)",
-        cursor,
-        touchAction: "none",
-      }}
-    />
-  );
-}
-
 function useStageSize(stageRef: React.MutableRefObject<HTMLDivElement | null>) {
   const [size, setSize] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
   useEffect(() => {
@@ -3650,9 +2815,8 @@ function useStageSize(stageRef: React.MutableRefObject<HTMLDivElement | null>) {
 // rect when the source aspect isn't 16:9 (the stage is CSS-locked to 16:9;
 // `objectFit: contain` leaves bars otherwise). Single source of truth for
 // math that used to be duplicated inline in WatermarkPreviewLayer and
-// BubbleLayer — now also used by annotation capture/render so a drawn box
-// can't drift from how the Rust export interprets position/endpoint
-// (always a fraction of the true video frame; ffmpeg's pixel space has no
+// BubbleLayer — also used by the zoom edit layer so the crop box tracks the
+// true video frame (always a fraction of it; ffmpeg's pixel space has no
 // letterbox concept).
 function contentBox(
   stage: { width: number; height: number },
@@ -3700,606 +2864,6 @@ function toContentFrac(
   const fx = box.w > 0 ? (stagePx.x - box.x) / box.w : 0;
   const fy = box.h > 0 ? (stagePx.y - box.y) / box.h : 0;
   return { x: Math.max(0, Math.min(1, fx)), y: Math.max(0, Math.min(1, fy)) };
-}
-
-function ArrowMarker({ id, fill }: { id: string; fill: string }) {
-  return (
-    <marker
-      id={id}
-      markerWidth="6"
-      markerHeight="6"
-      refX="5.5"
-      refY="3"
-      orient="auto"
-      markerUnits="strokeWidth"
-      // The contrast outline strokes past the 6x6 marker box; without this
-      // the marker viewport clips it.
-      style={{ overflow: "visible" }}
-    >
-      <path
-        d="M0,0 L6,3 L0,6 z"
-        fill={fill}
-        stroke={contrastOutline(fill)}
-        strokeWidth={0.7}
-        strokeLinejoin="round"
-        // Stroke under fill — the rim sits outside the head silhouette,
-        // matching the export's outline-then-fill paint order.
-        paintOrder="stroke"
-      />
-    </marker>
-  );
-}
-
-function ArrowAnnotationView({
-  ann,
-  idx,
-  stageRef,
-  editor,
-  color,
-  isSelected,
-  videoDims,
-}: {
-  ann: Annotation;
-  idx: number;
-  stageRef: React.MutableRefObject<HTMLDivElement | null>;
-  editor: Editor;
-  color: string;
-  isSelected: boolean;
-  videoDims: { w: number; h: number } | null;
-}) {
-  const box = useContentBox(stageRef, videoDims);
-  const endpoint = ann.endpoint!;
-  const stroke = ann.stroke ?? DEFAULT_ARROW_STROKE;
-
-  // Display stroke: scale source px to CSS px using stage height as a proxy
-  // (we don't always know source dims here). At common sizes this is close
-  // enough for preview; saved arrow PNG uses the same source-px stroke.
-  const strokeCss = Math.max(2, Math.min(8, stroke * 0.35));
-  const markerId = `arrow-head-${idx}`;
-
-  const { x: sx, y: sy } = toStagePx(ann.position, box);
-  const { x: ex, y: ey } = toStagePx(endpoint, box);
-
-  const startEndpointDrag = (which: "start" | "end") => (e: React.PointerEvent) => {
-    e.stopPropagation();
-    e.preventDefault();
-    if (!isSelected) editor.setSelectedIndex(idx);
-    const stage = stageRef.current?.getBoundingClientRect();
-    if (!stage) return;
-    const dragBox = contentBox({ width: stage.width, height: stage.height }, videoDims);
-    const onMove = (ev: PointerEvent) => {
-      const frac = toContentFrac({ x: ev.clientX - stage.left, y: ev.clientY - stage.top }, dragBox);
-      if (which === "start") {
-        editor.updateAnnotation(idx, { position: frac });
-      } else {
-        editor.updateAnnotation(idx, { endpoint: frac });
-      }
-    };
-    const onUp = () => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-    };
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-  };
-
-  const startBodyDrag = (e: React.PointerEvent) => {
-    e.stopPropagation();
-    e.preventDefault();
-    if (!isSelected) editor.setSelectedIndex(idx);
-    const stage = stageRef.current?.getBoundingClientRect();
-    if (!stage) return;
-    const dragBox = contentBox({ width: stage.width, height: stage.height }, videoDims);
-    const startX = e.clientX;
-    const startY = e.clientY;
-    const startPos = ann.position;
-    const startEnd = endpoint;
-    const onMove = (ev: PointerEvent) => {
-      const dx = (ev.clientX - startX) / dragBox.w;
-      const dy = (ev.clientY - startY) / dragBox.h;
-      const np = {
-        x: Math.max(0, Math.min(1, startPos.x + dx)),
-        y: Math.max(0, Math.min(1, startPos.y + dy)),
-      };
-      const ne = {
-        x: Math.max(0, Math.min(1, startEnd.x + dx)),
-        y: Math.max(0, Math.min(1, startEnd.y + dy)),
-      };
-      editor.updateAnnotation(idx, { position: np, endpoint: ne });
-    };
-    const onUp = () => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-    };
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-  };
-
-  return (
-    <svg
-      style={{
-        position: "absolute",
-        inset: 0,
-        width: "100%",
-        height: "100%",
-        pointerEvents: "none",
-        overflow: "visible",
-      }}
-    >
-      <defs>
-        <ArrowMarker id={markerId} fill={color} />
-      </defs>
-      {/* Contrast outline under the shaft (head outline lives in the
-          marker via paint-order) */}
-      <line
-        x1={sx}
-        y1={sy}
-        x2={ex}
-        y2={ey}
-        stroke={contrastOutline(color)}
-        strokeWidth={strokeCss + 2}
-        strokeLinecap="round"
-      />
-      {/* Visible shaft */}
-      <line
-        x1={sx}
-        y1={sy}
-        x2={ex}
-        y2={ey}
-        stroke={color}
-        strokeWidth={strokeCss}
-        strokeLinecap="round"
-        markerEnd={`url(#${markerId})`}
-      />
-      {/* Wider hit area for body-drag (transparent) */}
-      <line
-        x1={sx}
-        y1={sy}
-        x2={ex}
-        y2={ey}
-        stroke="transparent"
-        strokeWidth={Math.max(strokeCss + 8, 12)}
-        strokeLinecap="round"
-        style={{ pointerEvents: isSelected ? "stroke" : "stroke", cursor: "move" }}
-        onPointerDown={startBodyDrag}
-        onClick={(e) => {
-          e.stopPropagation();
-          if (!isSelected) editor.setSelectedIndex(idx);
-        }}
-      />
-      {isSelected && (
-        <>
-          <EndpointHandle cx={sx} cy={sy} onPointerDown={startEndpointDrag("start")} />
-          <EndpointHandle cx={ex} cy={ey} onPointerDown={startEndpointDrag("end")} />
-        </>
-      )}
-    </svg>
-  );
-}
-
-// Redact-region preview. Same two-point drag model as ArrowAnnotationView
-// (position + endpoint, whole-body drag translates both) — rendered as an
-// HTML div with a CSS blur instead of an SVG line, since the region needs
-// a rect, not a stroke. Corner handles are plain HTML circles (PointHandle)
-// rather than EndpointHandle's SVG <circle>, since this view has no <svg>
-// wrapper to host one.
-//
-// Positions relative to the letterbox-aware content box (via useContentBox),
-// same convention as Bubble/Watermark and now Text/Arrow/Spotlight too —
-// matches how the Rust export reads position/endpoint as a fraction of the
-// true video frame, independent of any letterbox bars the stage renders
-// when the source isn't 16:9.
-function BlurAnnotationView({
-  ann,
-  idx,
-  stageRef,
-  editor,
-  isSelected,
-  videoDims,
-}: {
-  ann: Annotation;
-  idx: number;
-  stageRef: React.MutableRefObject<HTMLDivElement | null>;
-  editor: Editor;
-  isSelected: boolean;
-  videoDims: { w: number; h: number } | null;
-}) {
-  const box = useContentBox(stageRef, videoDims);
-  const endpoint = ann.endpoint!;
-
-  const p0 = toStagePx(ann.position, box);
-  const p1 = toStagePx(endpoint, box);
-  const x0 = Math.min(p0.x, p1.x);
-  const y0 = Math.min(p0.y, p1.y);
-  const x1 = Math.max(p0.x, p1.x);
-  const y1 = Math.max(p0.y, p1.y);
-
-  const startCornerDrag = (which: "position" | "endpoint") => (e: React.PointerEvent) => {
-    e.stopPropagation();
-    e.preventDefault();
-    if (!isSelected) editor.setSelectedIndex(idx);
-    const stage = stageRef.current?.getBoundingClientRect();
-    if (!stage) return;
-    const dragBox = contentBox({ width: stage.width, height: stage.height }, videoDims);
-    const onMove = (ev: PointerEvent) => {
-      const frac = toContentFrac({ x: ev.clientX - stage.left, y: ev.clientY - stage.top }, dragBox);
-      if (which === "position") {
-        editor.updateAnnotation(idx, { position: frac });
-      } else {
-        editor.updateAnnotation(idx, { endpoint: frac });
-      }
-    };
-    const onUp = () => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-    };
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-  };
-
-  const startBodyDrag = (e: React.PointerEvent) => {
-    e.stopPropagation();
-    e.preventDefault();
-    if (!isSelected) editor.setSelectedIndex(idx);
-    const stage = stageRef.current?.getBoundingClientRect();
-    if (!stage) return;
-    const dragBox = contentBox({ width: stage.width, height: stage.height }, videoDims);
-    const startX = e.clientX;
-    const startY = e.clientY;
-    const startPos = ann.position;
-    const startEnd = endpoint;
-    const onMove = (ev: PointerEvent) => {
-      const dx = (ev.clientX - startX) / dragBox.w;
-      const dy = (ev.clientY - startY) / dragBox.h;
-      const np = {
-        x: Math.max(0, Math.min(1, startPos.x + dx)),
-        y: Math.max(0, Math.min(1, startPos.y + dy)),
-      };
-      const ne = {
-        x: Math.max(0, Math.min(1, startEnd.x + dx)),
-        y: Math.max(0, Math.min(1, startEnd.y + dy)),
-      };
-      editor.updateAnnotation(idx, { position: np, endpoint: ne });
-    };
-    const onUp = () => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-    };
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-  };
-
-  return (
-    <>
-      <div
-        onPointerDown={startBodyDrag}
-        onClick={(e) => {
-          e.stopPropagation();
-          if (!isSelected) editor.setSelectedIndex(idx);
-        }}
-        style={{
-          position: "absolute",
-          left: x0,
-          top: y0,
-          width: Math.max(0, x1 - x0),
-          height: Math.max(0, y1 - y0),
-          backdropFilter: `blur(${BLUR_PREVIEW_PX}px)`,
-          WebkitBackdropFilter: `blur(${BLUR_PREVIEW_PX}px)`,
-          background: "rgba(255,255,255,0.02)",
-          outline: isSelected ? "1.5px solid var(--accent)" : "1px dashed rgba(255,255,255,0.5)",
-          outlineOffset: isSelected ? 0 : -1,
-          cursor: "move",
-          pointerEvents: "auto",
-        }}
-      />
-      {isSelected && (
-        <>
-          <PointHandle x={p0.x} y={p0.y} onPointerDown={startCornerDrag("position")} />
-          <PointHandle x={p1.x} y={p1.y} onPointerDown={startCornerDrag("endpoint")} />
-        </>
-      )}
-    </>
-  );
-}
-
-// Plain-HTML analog of EndpointHandle (which is an SVG <circle> and needs
-// an <svg> host) — same size/treatment, usable directly inside the div-
-// based BlurAnnotationView.
-function PointHandle({
-  x,
-  y,
-  onPointerDown,
-}: {
-  x: number;
-  y: number;
-  onPointerDown: (e: React.PointerEvent) => void;
-}) {
-  return (
-    <div
-      onPointerDown={onPointerDown}
-      style={{
-        position: "absolute",
-        left: x - 5,
-        top: y - 5,
-        width: 10,
-        height: 10,
-        borderRadius: "50%",
-        background: "#fff",
-        border: "1.5px solid var(--accent)",
-        cursor: "grab",
-        touchAction: "none",
-        pointerEvents: "auto",
-      }}
-    />
-  );
-}
-
-function EndpointHandle({
-  cx,
-  cy,
-  onPointerDown,
-}: {
-  cx: number;
-  cy: number;
-  onPointerDown: (e: React.PointerEvent) => void;
-}) {
-  return (
-    <circle
-      cx={cx}
-      cy={cy}
-      r={5}
-      fill="#fff"
-      stroke="var(--accent)"
-      strokeWidth={1.5}
-      style={{ pointerEvents: "auto", cursor: "grab", touchAction: "none" }}
-      onPointerDown={onPointerDown}
-    />
-  );
-}
-
-function ArrowPreview({
-  start,
-  end,
-  stageRef,
-  color,
-  videoDims,
-}: {
-  start: Position;
-  end: Position;
-  stageRef: React.MutableRefObject<HTMLDivElement | null>;
-  color: string;
-  videoDims: { w: number; h: number } | null;
-}) {
-  const box = useContentBox(stageRef, videoDims);
-  const p1 = toStagePx(start, box);
-  const p2 = toStagePx(end, box);
-  const markerId = "arrow-preview-head";
-  return (
-    <svg
-      style={{
-        position: "absolute",
-        inset: 0,
-        width: "100%",
-        height: "100%",
-        pointerEvents: "none",
-        overflow: "visible",
-      }}
-    >
-      <defs>
-        <ArrowMarker id={markerId} fill={color} />
-      </defs>
-      <line
-        x1={p1.x}
-        y1={p1.y}
-        x2={p2.x}
-        y2={p2.y}
-        stroke={contrastOutline(color)}
-        strokeOpacity="0.85"
-        strokeWidth={6}
-        strokeLinecap="round"
-      />
-      <line
-        x1={p1.x}
-        y1={p1.y}
-        x2={p2.x}
-        y2={p2.y}
-        stroke={color}
-        strokeOpacity="0.85"
-        strokeWidth={4}
-        strokeLinecap="round"
-        markerEnd={`url(#${markerId})`}
-      />
-    </svg>
-  );
-}
-
-// Live drag preview for the blur tool — a dashed marquee, no blur effect
-// applied yet (the actual redaction only renders once the region is
-// committed as an annotation). Percentage-based like TextAnnotationView,
-// since this is a direct child of the same full-stage AnnotationLayer div.
-function BlurPreview({
-  start,
-  end,
-  stageRef,
-  videoDims,
-}: {
-  start: Position;
-  end: Position;
-  stageRef: React.MutableRefObject<HTMLDivElement | null>;
-  videoDims: { w: number; h: number } | null;
-}) {
-  const box = useContentBox(stageRef, videoDims);
-  const p1 = toStagePx(start, box);
-  const p2 = toStagePx(end, box);
-  return (
-    <div
-      style={{
-        position: "absolute",
-        left: Math.min(p1.x, p2.x),
-        top: Math.min(p1.y, p2.y),
-        width: Math.abs(p2.x - p1.x),
-        height: Math.abs(p2.y - p1.y),
-        border: "1.5px dashed rgba(255,255,255,0.85)",
-        background: "rgba(255,255,255,0.06)",
-        pointerEvents: "none",
-      }}
-    />
-  );
-}
-
-// Spotlight preview — inverse of BlurAnnotationView: instead of blurring the
-// rect, dims everything OUTSIDE it. Same two-point drag model (position +
-// endpoint, whole-body drag translates both, corner PointHandles resize),
-// same rect math, reused verbatim from BlurAnnotationView's startCornerDrag/
-// startBodyDrag shape.
-//
-// The dim itself is a single CSS box-shadow with a huge spread
-// (`0 0 0 9999px`) on the rect div — a standard "spotlight cutout" trick.
-// The spread fills everything outside the rect's box with the dim color and
-// is naturally clipped by the stage's own `overflow: hidden`, so no second
-// full-stage overlay element is needed.
-function SpotlightAnnotationView({
-  ann,
-  idx,
-  stageRef,
-  editor,
-  isSelected,
-  videoDims,
-}: {
-  ann: Annotation;
-  idx: number;
-  stageRef: React.MutableRefObject<HTMLDivElement | null>;
-  editor: Editor;
-  isSelected: boolean;
-  videoDims: { w: number; h: number } | null;
-}) {
-  const box = useContentBox(stageRef, videoDims);
-  const endpoint = ann.endpoint!;
-
-  const p0 = toStagePx(ann.position, box);
-  const p1 = toStagePx(endpoint, box);
-  const x0 = Math.min(p0.x, p1.x);
-  const y0 = Math.min(p0.y, p1.y);
-  const x1 = Math.max(p0.x, p1.x);
-  const y1 = Math.max(p0.y, p1.y);
-
-  const startCornerDrag = (which: "position" | "endpoint") => (e: React.PointerEvent) => {
-    e.stopPropagation();
-    e.preventDefault();
-    if (!isSelected) editor.setSelectedIndex(idx);
-    const stage = stageRef.current?.getBoundingClientRect();
-    if (!stage) return;
-    const dragBox = contentBox({ width: stage.width, height: stage.height }, videoDims);
-    const onMove = (ev: PointerEvent) => {
-      const frac = toContentFrac({ x: ev.clientX - stage.left, y: ev.clientY - stage.top }, dragBox);
-      if (which === "position") {
-        editor.updateAnnotation(idx, { position: frac });
-      } else {
-        editor.updateAnnotation(idx, { endpoint: frac });
-      }
-    };
-    const onUp = () => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-    };
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-  };
-
-  const startBodyDrag = (e: React.PointerEvent) => {
-    e.stopPropagation();
-    e.preventDefault();
-    if (!isSelected) editor.setSelectedIndex(idx);
-    const stage = stageRef.current?.getBoundingClientRect();
-    if (!stage) return;
-    const dragBox = contentBox({ width: stage.width, height: stage.height }, videoDims);
-    const startX = e.clientX;
-    const startY = e.clientY;
-    const startPos = ann.position;
-    const startEnd = endpoint;
-    const onMove = (ev: PointerEvent) => {
-      const dx = (ev.clientX - startX) / dragBox.w;
-      const dy = (ev.clientY - startY) / dragBox.h;
-      const np = {
-        x: Math.max(0, Math.min(1, startPos.x + dx)),
-        y: Math.max(0, Math.min(1, startPos.y + dy)),
-      };
-      const ne = {
-        x: Math.max(0, Math.min(1, startEnd.x + dx)),
-        y: Math.max(0, Math.min(1, startEnd.y + dy)),
-      };
-      editor.updateAnnotation(idx, { position: np, endpoint: ne });
-    };
-    const onUp = () => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-    };
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-  };
-
-  return (
-    <>
-      <div
-        onPointerDown={startBodyDrag}
-        onClick={(e) => {
-          e.stopPropagation();
-          if (!isSelected) editor.setSelectedIndex(idx);
-        }}
-        style={{
-          position: "absolute",
-          left: x0,
-          top: y0,
-          width: Math.max(0, x1 - x0),
-          height: Math.max(0, y1 - y0),
-          boxShadow: `0 0 0 9999px rgba(0,0,0,${SPOTLIGHT_PREVIEW_DIM_ALPHA})`,
-          outline: isSelected ? "1.5px solid var(--accent)" : "1px dashed rgba(255,255,255,0.5)",
-          outlineOffset: isSelected ? 0 : -1,
-          cursor: "move",
-          pointerEvents: "auto",
-        }}
-      />
-      {isSelected && (
-        <>
-          <PointHandle x={p0.x} y={p0.y} onPointerDown={startCornerDrag("position")} />
-          <PointHandle x={p1.x} y={p1.y} onPointerDown={startCornerDrag("endpoint")} />
-        </>
-      )}
-    </>
-  );
-}
-
-// Live drag preview for the spotlight tool — a dashed marquee, no dim effect
-// applied yet, same as BlurPreview (the actual dim only renders once the
-// region is committed as an annotation).
-function SpotlightPreview({
-  start,
-  end,
-  stageRef,
-  videoDims,
-}: {
-  start: Position;
-  end: Position;
-  stageRef: React.MutableRefObject<HTMLDivElement | null>;
-  videoDims: { w: number; h: number } | null;
-}) {
-  const box = useContentBox(stageRef, videoDims);
-  const p1 = toStagePx(start, box);
-  const p2 = toStagePx(end, box);
-  return (
-    <div
-      style={{
-        position: "absolute",
-        left: Math.min(p1.x, p2.x),
-        top: Math.min(p1.y, p2.y),
-        width: Math.abs(p2.x - p1.x),
-        height: Math.abs(p2.y - p1.y),
-        border: "1.5px dashed rgba(255,255,255,0.85)",
-        background: "rgba(255,255,255,0.06)",
-        pointerEvents: "none",
-      }}
-    />
-  );
 }
 
 function PlayerOverlay({
@@ -4395,7 +2959,6 @@ type TimelineProps = {
   onScrubStart: () => void;
   onScrubEnd: () => void;
   audioStart: number | null;
-  editor: Editor;
   zoom: ZoomEditor;
   thumbnailTime: number | null;
 };
@@ -4614,37 +3177,6 @@ function Timeline(props: TimelineProps) {
             </>
           )}
         </div>
-
-        {/* Annotation pips — one per annotation. Dot drags the whole window
-            (start+end together, duration preserved); when selected, a
-            highlighted band + two edge handles appear so start/end can be
-            resized independently — the video content under a blur region
-            can shift take-to-take, so the redaction window needs to track
-            it rather than staying pinned at its creation-time 3s default.
-            The pip/band/handle machinery lives in SegmentTrack (shared
-            with the zoom lane below). */}
-        {props.duration != null && (
-          <SegmentTrack
-            segments={props.editor.annotations.map((a) => ({
-              start: a.start_time,
-              end: a.end_time,
-            }))}
-            duration={props.duration}
-            selectedIndex={props.editor.selectedIndex}
-            onSelect={props.editor.setSelectedIndex}
-            onChange={(i, p) =>
-              props.editor.updateAnnotation(i, {
-                ...(p.start !== undefined ? { start_time: p.start } : {}),
-                ...(p.end !== undefined ? { end_time: p.end } : {}),
-              })
-            }
-            label={(i) => {
-              const t = props.editor.annotations[i]?.type;
-              return t === "text" ? "T" : t === "arrow" ? "→" : t === "blur" ? "B" : "S";
-            }}
-            style={{ top: -2 }}
-          />
-        )}
 
         {/* Thumbnail tick — sits below the track so it doesn't fight the
             playhead/trim handles visually. Click jumps the scrubber to the
@@ -5026,15 +3558,13 @@ type SaveSpec = {
 // Exclusive accordion — one section open at a time; opening one collapses
 // the rest, and clicking the open section's header closes it. The open
 // section persists so the panel reopens the way the user last left it.
-// Order mirrors the working flow (edit, dress up, output): Annotate,
-// Watermark, Export — with Export still the first-run default open.
+// Order mirrors the working flow (edit, dress up, output): Trim, Bubble,
+// Zoom, Watermark, Export — with Export still the first-run default open.
 // Position and default are independent; change DEFAULT_OPEN_SECTION if the
-// workflow ranking shifts (e.g. when editing becomes primary). The former
-// Share section folded into Export (its rows are export destinations); a
-// persisted "share" from older builds fails the SECTION_IDS check below
-// and falls back to the default.
-type SectionId = "annotate" | "bubble" | "zoom" | "watermark" | "export";
-const SECTION_IDS: SectionId[] = ["annotate", "bubble", "zoom", "watermark", "export"];
+// workflow ranking shifts. A persisted id from an older build that isn't in
+// SECTION_IDS (e.g. the removed "annotate"/"share") falls back to the default.
+type SectionId = "trim" | "bubble" | "zoom" | "watermark" | "export";
+const SECTION_IDS: SectionId[] = ["trim", "bubble", "zoom", "watermark", "export"];
 const DEFAULT_OPEN_SECTION: SectionId | null = "export";
 // Key versioned away from the old "review-panel-sections" multi-open
 // format (a JSON object) so no migration parsing is needed.
@@ -5119,11 +3649,8 @@ function ZonePicker({
 
 function ExportPanel({
   sourcePath,
-  editor,
   zoom,
   thumbnail,
-  annotationColor,
-  onAnnotationColor,
   bubbleZone,
   onBubbleZone,
   hasBubble,
@@ -5151,11 +3678,8 @@ function ExportPanel({
   watermark,
 }: {
   sourcePath: string | null;
-  editor: Editor;
   zoom: ZoomEditor;
   thumbnail: ThumbnailControls;
-  annotationColor: string;
-  onAnnotationColor: (hex: string) => void;
   // V2 Step 2: effective bubble zone (explicit pick or migration default),
   // the setter for an explicit pick, and whether this recording has a webcam
   // bubble at all (the section is hidden otherwise).
@@ -5219,13 +3743,6 @@ function ExportPanel({
     });
   }, []);
 
-  // Activating a tool (row click or T/A/R/B/S shortcut) auto-expands
-  // Annotate so the active-tool highlight is never hidden inside a
-  // collapsed section.
-  useEffect(() => {
-    if (editor.tool != null) openSection("annotate");
-  }, [editor.tool, openSection]);
-
   // Thumbnail popover — moved here from the old top toolbar. capturedTime
   // is grabbed at open so the preview shows the exact frame the user had
   // on screen even if playback moves while the popover is open.
@@ -5246,7 +3763,7 @@ function ExportPanel({
     return () => window.removeEventListener("keydown", onKey);
   }, [popoverOpen]);
 
-  // M opens the popover, expanding Annotate first so the thumbnail row is
+  // M opens the popover, expanding Export first so the thumbnail row is
   // visible behind it.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -5262,7 +3779,7 @@ function ExportPanel({
       }
       if (popoverOpen) return;
       e.preventDefault();
-      openSection("annotate");
+      openSection("export");
       onThumbnailClick();
     };
     window.addEventListener("keydown", onKey);
@@ -5443,13 +3960,13 @@ function ExportPanel({
           overflow is impossible by construction (full-width rows only). */}
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden" }}>
         <Section
-          title="Annotate"
-          open={openId === "annotate"}
-          onToggle={() => toggleSection("annotate")}
+          title="Trim"
+          open={openId === "trim"}
+          onToggle={() => toggleSection("trim")}
         >
           <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-            {/* Trim row stays (disabled) until timeline trim passes the
-                functional checklist — docs/REVIEW-PANEL-CHECKLIST.md. */}
+            {/* The real trim UI is the timeline handles / I-O keys; this row
+                is the label that points at them. */}
             <ToolRow
               icon={P.edit}
               label="Trim"
@@ -5457,90 +3974,7 @@ function ExportPanel({
               disabled
               title="Trim with the timeline handles below, or press I / O"
             />
-            <ToolRow
-              icon="M2 13h12M5 10l3-7 3 7M6.5 8h3"
-              label="Text"
-              kbd="A"
-              active={editor.tool === "text"}
-              onClick={() => editor.setTool(editor.tool === "text" ? null : "text")}
-            />
-            <ToolRow
-              icon="M3 8h9M9 5l3 3-3 3"
-              label="Arrow"
-              kbd="R"
-              active={editor.tool === "arrow"}
-              onClick={() => editor.setTool(editor.tool === "arrow" ? null : "arrow")}
-            />
-            <ToolRow
-              icon="M2 3h12v10H2z M2 3l12 10M14 3L2 13"
-              label="Blur"
-              kbd="B"
-              active={editor.tool === "blur"}
-              onClick={() => editor.setTool(editor.tool === "blur" ? null : "blur")}
-            />
-            <ToolRow
-              icon="M8 3a5 5 0 100 10 5 5 0 000-10z M8 0.5v2M8 13.5v2M0.5 8h2M13.5 8h2"
-              label="Spotlight"
-              kbd="S"
-              active={editor.tool === "spotlight"}
-              onClick={() => editor.setTool(editor.tool === "spotlight" ? null : "spotlight")}
-            />
-            <ToolRow
-              icon="M5 2h6v11l-3-2.5L5 13z"
-              label="Thumbnail"
-              kbd="M"
-              active={thumbnail.thumbnailTime != null}
-              onClick={onThumbnailClick}
-            />
-            {/* One color for ALL arrows/text on this recording — global,
-                not per-annotation. */}
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                padding: "6px 9px",
-              }}
-            >
-              <span
-                style={{
-                  flex: 1,
-                  fontSize: 12,
-                  fontWeight: 500,
-                  color: "var(--fg-secondary)",
-                }}
-              >
-                Color
-              </span>
-              {ANNOTATION_COLORS.map((c) => (
-                <button
-                  key={c.hex}
-                  title={c.name}
-                  onClick={() => onAnnotationColor(c.hex)}
-                  style={{
-                    width: 18,
-                    height: 18,
-                    borderRadius: "50%",
-                    background: c.hex,
-                    border:
-                      annotationColor === c.hex
-                        ? "2px solid var(--accent)"
-                        : "1px solid var(--border-default)",
-                    cursor: "pointer",
-                    padding: 0,
-                  }}
-                />
-              ))}
-            </div>
           </div>
-          {popoverOpen && capturedTime != null && (
-            <ThumbnailPopover
-              previewUrl={thumbnail.previewUrl}
-              time={capturedTime}
-              onUse={useFrame}
-              onCancel={() => setPopoverOpen(false)}
-            />
-          )}
         </Section>
 
         {hasBubble && (
@@ -5750,6 +4184,23 @@ function ExportPanel({
           open={openId === "export"}
           onToggle={() => toggleSection("export")}
         >
+        <div style={{ marginBottom: 8 }}>
+          <ToolRow
+            icon="M5 2h6v11l-3-2.5L5 13z"
+            label="Thumbnail"
+            kbd="M"
+            active={thumbnail.thumbnailTime != null}
+            onClick={onThumbnailClick}
+          />
+        </div>
+        {popoverOpen && capturedTime != null && (
+          <ThumbnailPopover
+            previewUrl={thumbnail.previewUrl}
+            time={capturedTime}
+            onUse={useFrame}
+            onCancel={() => setPopoverOpen(false)}
+          />
+        )}
         <Field label="Format">
           <div className="segmented full">
             {(["mp4", "gif"] as const).map((f) => (

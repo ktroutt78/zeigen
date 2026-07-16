@@ -4,6 +4,21 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-16 — Annotations SCRAPPED entirely (code + UI) — scope cut, not a parity failure
+
+Supersedes "Phase 3 (overlays) next" from the 2026-07-15 entry below. **Decision (owner): drop Text, Arrow, Blur, and Spotlight annotations completely — from the V3 compositor AND the review UI.** This is a deliberate scope cut, NOT a parity problem. In fact text/arrow reached clean parity before the cut (see the root cause below), and blur/spotlight were coded but never exercised.
+
+**Reasoning (owner):** doesn't use Text or Arrow; won't use Blur-as-annotation given how much zooming there is; Screen Studio ships no annotations and doesn't need them. Not porting features to V3 that exist only because V2 had them, and not leaving half-kept features rotting behind a flag.
+
+**What was removed.**
+- V3 compositor (`src-tauri/compositor-engine/main.swift`): the overlay compositing path, the `OVERLAYS` JSON plumbing, `pngCache`, the overlay-blur/spotlight rendering, and the overlay-sigma constants. Reverted to zoom-on-`src`. It reads as if overlays were never ported. **Phase 5 radial motion blur (`CIZoomBlur`) stays** — untouched, still off-by-default insurance.
+- Harness: `build_overlay_ab.py` deleted.
+- Review UI (`src/Review.tsx`, `src/components/SegmentTrack.tsx`): the entire ANNOTATE section, the four tools, the annotation color swatches + helpers, the `Tool` state machine, stage placement handlers, live-preview rendering, and annotation pips — ~1650 lines. The sidecar stops writing `annotations`/`annotation_color` (Rust struct has `#[serde(default)]` on both, so omitting them deserializes cleanly — no Rust change). **Trim and Thumbnail survive** (they were never annotations): Trim is now its own top-level accordion section above Bubble; Thumbnail moved into Export (the poster is an output concern). M (thumbnail) and I/O (trim) shortcuts intact.
+
+**V2 is untouched.** The `edit.rs` ffmpeg overlay path (`rasterize_text`, `rasterize_arrow`, `blur_region_fragment`, `spotlight_region_fragment`) is left in place per the "don't touch V2" scope — it is now dead (the UI never writes annotations) but not removed. V2 remains the default export path.
+
+**Root cause worth keeping (it'll matter for anything composited later).** Text/arrow parity first tripped the harness: overlay-box dE 2.4, PSNR 25.9 dB despite feeding the *identical* PNG to both renderers. Not color/blend — the pill interior fill matched. It was **sub-pixel placement**: V3 composited the PNG at a fractional CI offset (e.g. 0.18·1080 = 194.4), and Core Image interpolated, softening every edge; ffmpeg's `overlay` snaps to integer pixels. **Rounding the CI placement to integer pixels fixed it** (box PSNR 25.9→38.3 dB, residual dE 1.6 sub-JND edge-blend only). Lesson for any future CI compositing of pixel-art/PNG/text layers: **snap placement to integer pixels unless you want sub-pixel interpolation.**
+
 ## 2026-07-15 — V3 thesis CORRECTED: perf/thermal rewrite, not a buttery-zoom upgrade
 
 Built and owner-judged V3 Phases 0-2 + 5 (`docs/v3-ci-compositor/`, `src-tauri/compositor-engine/`). Two findings settle the zoom-quality question; do not re-litigate them.

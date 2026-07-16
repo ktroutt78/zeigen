@@ -1,6 +1,7 @@
 // V3 Core Image compositor.
 //   Phase 1 (DONE): identity re-encode, color round-trip proved (color mgmt off).
-//   Phase 2 (THIS): zoom transform — SINGLE-resample lanczos with sub-pixel window.
+//   Phase 2 (DONE): zoom transform — SINGLE-resample lanczos with sub-pixel window.
+//   Phase 5 (DONE, off by default): velocity-driven radial motion blur.
 //
 // Decodes a video, routes every frame through a CIContext, and re-encodes via
 // AVAssetWriter -> VideoToolbox H.264 with EXPLICIT 8M ABR and BT.709 tags. Video
@@ -13,9 +14,8 @@
 // Zoom math (in_out_cubic ramps, clamped off-center window, Y-flip) mirrors
 // gpuzoom.swift / Review.tsx exactly, so geometry matches V2.
 //
-// This is the seam where later phases plug in (overlay layers, motion blur). The
-// per-frame velocity is computed here (marked below) so Phase 5 motion blur can
-// consume it as radius = floor + k*|velocity|.
+// The per-frame velocity is computed here (marked below) so the Phase 5 motion blur
+// consumes it as radius = floor + k*|velocity|.
 //
 // NOT wired into the app: nothing in the Rust export path invokes this. V2 (ffmpeg)
 // stays the default. Build: swiftc -O main.swift -o cicompositor

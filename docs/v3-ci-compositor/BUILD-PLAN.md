@@ -1,11 +1,13 @@
 # V3 build plan — Core Image / AVFoundation compositor
 
-Status: **in progress — Phases 0, 1, 2, 5 built and owner-judged. Owner DECIDED to continue;
-Phase 3 (overlays) is next.** See README.md for the corrected thesis (V3 is a perf/thermal rewrite
-with cleaner edges + untouched non-zoomed frames, NOT a buttery-zoom upgrade). The case that
-justified continuing: looks a bit better (ringing win), zoom slightly smoother, exports faster.
+Status: **in progress — Phases 0, 1, 2, 5 built and owner-judged. Phase 3 (content overlays)
+SCRAPPED 2026-07-16 — annotations dropped entirely (scope cut, not a parity failure; see
+DECISIONS.md). Phase 4 (screen-anchored bubble + watermark) is next.** See README.md for the
+corrected thesis (V3 is a perf/thermal rewrite with cleaner edges + untouched non-zoomed frames,
+NOT a buttery-zoom upgrade). The case for finishing: looks a bit better (ringing win), zoom
+slightly smoother, exports faster.
 
-## Build status (2026-07-15)
+## Build status (2026-07-16)
 
 - **Phase 0 — validation harness: DONE.** `harness/` (spatial_diff, temporal_probe, ringing,
   drivers). Trusted as a regression tripwire + relative smoothness comparator, not a quality judge.
@@ -18,9 +20,15 @@ justified continuing: looks a bit better (ringing win), zoom slightly smoother, 
   Blind owner test: at "eighth" strength blur is imperceptible (eighth-blur ≡ no-blur); only visible
   strengths registered and were rejected. No point tuning below eighth. Out of the value case; code
   kept off-by-default insurance for faster/bigger zooms.
-- **Phases 3-4 — overlays: NOT started.** Gated on the owner's scope decision, since the
-  zoom-glamour payoff did not materialize and the remaining case is perf + cleaner edges +
-  non-zoomed frames.
+- **Phase 3 — content overlays (text/arrow/blur/spotlight): SCRAPPED 2026-07-16.** Annotations
+  dropped entirely from V3 AND the review UI (scope cut — owner doesn't use them and Screen Studio
+  ships none; see DECISIONS.md). Text/arrow had reached clean parity (sub-pixel placement root cause,
+  fixed by integer snapping — kept in DECISIONS.md); blur/spotlight were coded but never exercised.
+  All of it removed; the compositor reads as if overlays were never ported. V2's ffmpeg overlay path
+  is left dead-but-untouched.
+- **Phase 4 — screen-anchored overlays (webcam bubble + watermark): NOT started, now NEXT.** Never
+  depended on Phase 3 — bubble and watermark composite on the final zoomed frame, independent of the
+  (now-cut) content overlays. Only prerequisite is Phase 2 zoom, which is done.
 
 Original companion: `gpuzoom.swift` (the proven perf spike).
 
@@ -137,25 +145,25 @@ early and it's a clean bail-out (only base + zoom built). Watch for **slow-pan s
 lanczos + sub-pixel phase pumping) — if it appears, it's handled by the Phase 5 blur floor, not by
 softening the kernel; note it, don't fix it yet.
 
-### Phase 3 — Content-anchored overlays (the fat-tail zone)
+### Phase 3 — Content-anchored overlays — SCRAPPED 2026-07-16
 
-Overlays that **zoom WITH content**: text, arrow, blur, spotlight. Sequence **one at a time**, each
-gated by the harness's localized-region diff so a break is isolated:
+**Cut entirely (annotations dropped from V3 and the UI — see DECISIONS.md).** Not a parity failure:
+text/arrow reached clean parity (the sub-pixel-placement root cause and its integer-snap fix are
+preserved in DECISIONS.md — reuse them for any future PNG/text CI compositing), and blur/spotlight
+were removed before being exercised. Kept below for the record of what the mechanism was.
 
-- **Text, arrow** — LOW risk: already Rust-rasterized to PNGs (`rasterize_text`, arrow rasterizer).
-  Reuse the exact PNGs as CI layers — pixel-identical source, only the composite math changes.
-- **Blur** (`kind=="blur"`, region gblur, sigma off shorter side) — NEW CI rendering (`CIGaussianBlur`
-  on a cropped region). CI's gaussian falloff != ffmpeg's `gblur` sigma exactly; expect to tune the
-  CI radius to match, gated by the region diff. Budget the most rounds here.
-- **Spotlight** (`kind=="spotlight"`, dim outside rect, `SPOTLIGHT_DIM_FACTOR=0.45`) — NEW CI
-  rendering (darken-outside-rect composite). Simpler than blur but still new.
+Overlays that would have **zoomed WITH content**: text, arrow, blur, spotlight — composited onto the
+source frame BEFORE the zoom (edit.rs order: blur -> spotlight -> text -> arrow -> zoom), so the
+crop+lanczos carried them with the content. Text/arrow reused the exact Rust-rasterized PNGs (only
+composite math new); blur was `CIGaussianBlur` on a cropped region, spotlight a darken-outside-rect
+`CIColorMatrix` composite. All removed.
 
-Nest these inside the zoom transform (they move with content), matching V2's `AnnotationLayer`
-placement. Watermark and bubble are NOT here — they're screen-anchored (Phase 4).
+### Phase 4 — Screen-anchored overlays (do NOT zoom) — NEXT
 
-### Phase 4 — Screen-anchored overlays (do NOT zoom)
-
-Ride on top of the zoomed+content-overlaid frame, unaffected by zoom:
+Ride on top of the zoomed frame, unaffected by zoom. **Independent of the scrapped Phase 3** — these
+composite on the final zoomed frame, so nothing here waited on content overlays; the only
+prerequisite is Phase 2 zoom (done). The integer-placement lesson from the Phase 3 root cause applies
+to both the watermark PNG and the bubble mask.
 
 - **Webcam bubble** — zone-based (V2 already made position constant, so no `f(t)` animation to
   port). Circular mask + shadow is the main NEW CI rendering (CI radial mask + shadow layer to

@@ -3,11 +3,10 @@ import { useRef } from "react";
 // Generic timeline track row — time-bounded segments rendered as a mid-point
 // pip that drags the whole window (duration preserved) plus, when selected, a
 // highlighted band and two edge handles for independent start/end resize.
-// Extracted verbatim from Review.tsx's annotation pips (zoom-layer step 3) so
-// annotations and the zoom track ride one implementation. The row is a
-// full-width absolutely-positioned strip; the container ignores pointer
-// events so the timeline underneath keeps its scrub behavior — only pips and
-// handles are interactive.
+// Drives the zoom lane below the timeline. The row is a full-width
+// absolutely-positioned strip; the container ignores pointer events so the
+// timeline underneath keeps its scrub behavior — only pips and handles are
+// interactive.
 
 export type TrackSegment = { start: number; end: number };
 
@@ -20,24 +19,22 @@ type SegmentTrackProps = {
   // Live frame-feedback hook. Fired during a pip/edge drag with the time the
   // user is positioning against (start frame for whole-window moves, the moving
   // edge for resizes) so the caller can drive a scrub thumbnail; null on drag
-  // end. Only the zoom lane wires this today — annotations leave it undefined.
+  // end.
   onDragHover?: (time: number | null) => void;
   label: (i: number) => string;
   // Zoom-lane ramp duration (seconds). When set, each band paints a brighter
   // held-at-full-scale core (dur - 2*ramp) against dimmer ramp shoulders, and
   // the selected band shows a dur/held readout — making the otherwise-invisible
-  // ramp reality visible. Annotations pass nothing and render unchanged.
+  // ramp reality visible.
   ramp?: number;
   // Allowed [min, max] window a segment may occupy. Default is the whole
-  // timeline (annotation behavior); the zoom track passes neighbor bounds so
-  // segments can't overlap.
+  // timeline; the zoom track passes neighbor bounds so segments can't overlap.
   bounds?: (i: number) => { min: number; max: number };
   // Render a muted band for unselected segments too — zoom segments are
   // ranges the user reasons about, so they stay visible on their lane.
   alwaysBand?: boolean;
   minGap?: number;
-  // Positions the row inside its relatively-positioned parent (annotations
-  // sit at top: -2 overlapping the track strip's top edge).
+  // Positions the row inside its relatively-positioned parent.
   style?: React.CSSProperties;
 };
 
