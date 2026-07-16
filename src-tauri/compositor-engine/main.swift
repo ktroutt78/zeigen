@@ -93,6 +93,21 @@ let blurEps = Double(env["BLUR_EPS"] ?? "0.4")!
 let wmCorner = env["WATERMARK_CORNER"] ?? "tr"
 let wmScaleFrac = Double(env["WATERMARK_SCALE_FRAC"] ?? "")
 let wmOpacity = Double(env["WATERMARK_OPACITY"] ?? "1.0")!
+
+// --- Webcam bubble (Phase 4): a SECOND video stream, composited on the final zoomed
+// frame (screen-anchored, constant placement). Mask + shadow silhouette PNGs are
+// pre-rendered (by the harness now, by Rust reusing composite.rs later) and fed to
+// both renderers, so only the composite math differs. Diameter drives the shadow
+// geometry exactly like composite.rs. Absent BUBBLE_WEBCAM -> no bubble.
+let bubbleWebcam = env["BUBBLE_WEBCAM"]
+let bubbleMaskPath = env["BUBBLE_MASK_PNG"]
+let bubbleShadowPath = env["BUBBLE_SHADOW_PNG"]
+let bubbleDiameter = Double(env["BUBBLE_DIAMETER"] ?? "240")!
+let bubbleZone = env["BUBBLE_ZONE"] ?? "br"          // br|bl|tr|tl|bc|tc
+let bubbleShadowAlpha = Double(env["BUBBLE_SHADOW_ALPHA"] ?? "0.22")!
+// composite.rs gblur sigma=round(0.075*d); CIGaussianBlur radius = k*sigma (tuning knob).
+let bubbleShadowRadiusK = Double(env["BUBBLE_SHADOW_RADIUS_K"] ?? "3.0")!
+
 try? FileManager.default.removeItem(at: outURL)
 
 let asset = AVURLAsset(url: inURL)
@@ -131,6 +146,31 @@ let readerOutput = AVAssetReaderTrackOutput(
 readerOutput.alwaysCopiesSampleData = false
 guard reader.canAdd(readerOutput) else { fail("cannot add reader output") }
 reader.add(readerOutput)
+
+// --- Webcam reader (bubble): a second stream, decoded in lockstep (1 webcam frame
+// per screen frame). Same-fps A/B sources align; the WEBCAM_LEAD_MS offset is a
+// later refinement. BGRA so CIImage sees straight RGBA for the mask/hflip/crop.
+var webcamOutput: AVAssetReaderTrackOutput? = nil
+var webcamReader: AVAssetReader? = nil
+if let wcPath = bubbleWebcam {
+    let wcAsset = AVURLAsset(url: URL(fileURLWithPath: wcPath))
+    let wcSem = DispatchSemaphore(value: 0)
+    var wcTrack: AVAssetTrack? = nil
+    Task { wcTrack = try? await wcAsset.loadTracks(withMediaType: .video).first; wcSem.signal() }
+    wcSem.wait()
+    guard let wt = wcTrack, let wr = try? AVAssetReader(asset: wcAsset) else { fail("webcam reader init") }
+    // Decode native 709 video-range YCbCr (NOT BGRA): a BGRA decode makes the reader
+    // guess the YUV->RGB matrix, which lands hardest on green (green depends most on
+    // both chroma channels) — the Phase 1 color-guess class. Native YCbCr lets CI read
+    // the color from the buffer's own attachments. hflip/crop/scale/mask run fine on it.
+    let wo = AVAssetReaderTrackOutput(track: wt, outputSettings:
+        [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange])
+    wo.alwaysCopiesSampleData = false
+    guard wr.canAdd(wo) else { fail("cannot add webcam output") }
+    wr.add(wo)
+    guard wr.startReading() else { fail("webcam startReading: \(wr.error?.localizedDescription ?? "?")") }
+    webcamOutput = wo; webcamReader = wr
+}
 
 // --- Writer: VideoToolbox H.264, explicit 8M ABR, BT.709 tags ---
 guard let writer = try? AVAssetWriter(outputURL: outURL, fileType: .mp4) else { fail("writer init") }
@@ -217,6 +257,41 @@ if let wp = env["WATERMARK_PNG"], let logo = CIImage(contentsOf: URL(fileURLWith
         by: CGAffineTransform(translationX: tx.rounded(), y: ty.rounded()))
 }
 
+// --- Webcam bubble static setup: the mask (applied per frame to the live webcam)
+// and the shadow (fully static — blur + alpha + placement precomputed once). Shadow
+// geometry mirrors composite.rs exactly (padding 0.25*d, sigma 0.075*d, offset d/30).
+var bubbleMask: CIImage? = nil
+var bubbleShadowPositioned: CIImage? = nil
+var bubbleTx = 0.0, bubbleTy = 0.0
+if bubbleWebcam != nil {
+    guard let mp = bubbleMaskPath, let mask = CIImage(contentsOf: URL(fileURLWithPath: mp))
+        else { fail("bubble mask missing (BUBBLE_MASK_PNG)") }
+    guard let shp = bubbleShadowPath, let shadow = CIImage(contentsOf: URL(fileURLWithPath: shp))
+        else { fail("bubble shadow missing (BUBBLE_SHADOW_PNG)") }
+    bubbleMask = mask
+    let d = bubbleDiameter, p = 24.0            // composite.rs PADDING_PX
+    let sp = (0.25 * d).rounded()               // shadow padding
+    let oy = (d / 30.0).rounded()               // shadow y offset
+    let sigma = (0.075 * d).rounded()           // gblur sigma
+    let cs = d + 2 * sp                          // shadow canvas side
+    let hRight = bubbleZone.hasSuffix("r"), hCenter = bubbleZone.hasSuffix("c")
+    let vTop = bubbleZone.hasPrefix("t")
+    // ffmpeg top-left (top-left origin), ow=oh=d for the bubble.
+    let bx = hRight ? (Wd - d - p) : (hCenter ? (Wd - d) / 2 : p)
+    let by = vTop ? p : (Hd - d - p)
+    bubbleTx = bx.rounded(); bubbleTy = (Hd - by - d).rounded()   // -> CI bottom-left
+    let sx = hRight ? (Wd - d - p - sp) : (hCenter ? (Wd - d) / 2 - sp : p - sp)
+    let sy = vTop ? (p + oy - sp) : (Hd - d - p + oy - sp)
+    // shadow: gblur (radius = k*sigma) within its canvas, alpha *= shadowAlpha, place.
+    let blurred = shadow.applyingFilter("CIGaussianBlur",
+        parameters: [kCIInputRadiusKey: bubbleShadowRadiusK * sigma]).cropped(to: shadow.extent)
+    let dimmed = blurred.applyingFilter("CIColorMatrix",
+        parameters: ["inputAVector": CIVector(x: 0, y: 0, z: 0, w: bubbleShadowAlpha)])
+    bubbleShadowPositioned = dimmed.transformed(
+        by: CGAffineTransform(translationX: sx.rounded(), y: (Hd - sy - cs).rounded()))
+}
+var lastBubble: CIImage? = nil
+
 writerInput.requestMediaDataWhenReady(on: queue) {
     while writerInput.isReadyForMoreMediaData {
         guard let sample = readerOutput.copyNextSampleBuffer(),
@@ -272,6 +347,29 @@ writerInput.requestMediaDataWhenReady(on: queue) {
                     "inputCenter": CIVector(x: Wd / 2, y: Hd / 2),
                     "inputAmount": blurAmount])
                 .cropped(to: CGRect(x: 0, y: 0, width: W, height: H))
+        }
+
+        // Screen-anchored webcam bubble (before watermark; on the final frame). Pull
+        // one webcam frame per screen frame: hflip -> centered square crop -> scale to
+        // diameter -> circular/rounded mask. Shadow (static) under, bubble over.
+        if let wo = webcamOutput, let mask = bubbleMask {
+            if let wcSample = wo.copyNextSampleBuffer(),
+               let wcPix = CMSampleBufferGetImageBuffer(wcSample) {
+                let wc = CIImage(cvPixelBuffer: wcPix)
+                let ww = wc.extent.width, wh = wc.extent.height
+                let side = min(ww, wh)
+                let flipped = wc.transformed(by: CGAffineTransform(a: -1, b: 0, c: 0, d: 1, tx: ww, ty: 0))
+                let sq = CGRect(x: (ww - side) / 2, y: (wh - side) / 2, width: side, height: side)
+                let atOrigin = flipped.cropped(to: sq).transformed(
+                    by: CGAffineTransform(translationX: -sq.origin.x, y: -sq.origin.y))
+                let scaled = atOrigin.applyingFilter("CILanczosScaleTransform",
+                    parameters: [kCIInputScaleKey: bubbleDiameter / side, kCIInputAspectRatioKey: 1.0])
+                let masked = scaled.applyingFilter("CIBlendWithMask",
+                    parameters: ["inputBackgroundImage": CIImage.empty(), "inputMaskImage": mask])
+                lastBubble = masked.transformed(by: CGAffineTransform(translationX: bubbleTx, y: bubbleTy))
+            }
+            if let shadow = bubbleShadowPositioned { out = shadow.composited(over: out) }
+            if let bub = lastBubble { out = bub.composited(over: out) }
         }
 
         // Screen-anchored watermark: on the FINAL frame, after motion blur (stays
