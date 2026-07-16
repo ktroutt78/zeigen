@@ -1,9 +1,9 @@
 # V3 build plan — Core Image / AVFoundation compositor
 
-Status: **in progress — Phases 0, 1, 2, 5 built and owner-judged; Phases 3-4 (overlays) NOT
-started; owner deciding whether the remaining case justifies the overlay-porting rounds.**
-See README.md for the corrected thesis (V3 is a perf/thermal rewrite with cleaner edges +
-untouched non-zoomed frames, NOT a buttery-zoom upgrade).
+Status: **in progress — Phases 0, 1, 2, 5 built and owner-judged. Owner DECIDED to continue;
+Phase 3 (overlays) is next.** See README.md for the corrected thesis (V3 is a perf/thermal rewrite
+with cleaner edges + untouched non-zoomed frames, NOT a buttery-zoom upgrade). The case that
+justified continuing: looks a bit better (ringing win), zoom slightly smoother, exports faster.
 
 ## Build status (2026-07-15)
 
@@ -14,8 +14,10 @@ untouched non-zoomed frames, NOT a buttery-zoom upgrade).
   NSNull`). See `src-tauri/compositor-engine/README.md`.
 - **Phase 2 — zoom (single-resample lanczos): DONE.** Sharpness parity with V2, but **less
   ringing** (cleaner hard edges). Velocity plumbing exposed for blur.
-- **Phase 5 — motion blur: DONE and pulled forward; result = does NOT deliver at 0.6s/2x.**
-  Blind owner test: favorite was no-blur. Out of the value case; code kept off-by-default.
+- **Phase 5 — motion blur: DONE and pulled forward; result = does NOTHING perceptible at 0.6s/2x.**
+  Blind owner test: at "eighth" strength blur is imperceptible (eighth-blur ≡ no-blur); only visible
+  strengths registered and were rejected. No point tuning below eighth. Out of the value case; code
+  kept off-by-default insurance for faster/bigger zooms.
 - **Phases 3-4 — overlays: NOT started.** Gated on the owner's scope decision, since the
   zoom-glamour payoff did not materialize and the remaining case is perf + cleaner edges +
   non-zoomed frames.

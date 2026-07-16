@@ -30,14 +30,17 @@ and registers ~36% more "hard edges" (many are ringing spikes). V3 rings less th
 ffmpeg single-lanczos, because Core Image's lanczos kernel has **gentler negative lobes**. Same
 sharpness, cleaner edges — a genuine V3 win the parity metric hid.
 
-**Motion blur does NOT deliver at 0.6s / 2x (blind test).** The entire "V3 zoom looks better" case
-had narrowed to motion blur. A blinded ladder below "subtle" (half / quarter / eighth + two
-no-blur, shuffled, key withheld) was owner-judged: the owner's **favorite was a no-blur clip**,
-they **imagined a difference between two byte-identical no-blur clips**, and they **rejected every
-strength they could actually perceive**. Conclusion: at a 0.6s ramp to 2x there is no strobe worth
-fixing. Motion blur is **out of the value case**. The code stays (`main.swift`, `BLUR=on`, radial
-CIZoomBlur, `radius = floor + k*|v|`) as **off-by-default insurance** for faster/bigger zooms where
-strobe would actually appear — not a default, not a justification.
+**Motion blur does NOTHING perceptible at 0.6s / 2x (blind test).** The entire "V3 zoom looks
+better" case had narrowed to motion blur. A blinded ladder below "subtle" (half / quarter / eighth
++ two no-blur, shuffled, key withheld) was owner-judged. Corrected reading (owner, post-reveal):
+**at "eighth" strength blur is IMPERCEPTIBLE** — the eighth-blur clip and a no-blur clip felt
+identical. The earlier "one clip had a little more blur" was an attention artifact (different part
+of the screen), not perception. Only the *perceptible* strengths (quarter, half) registered, and
+those read as visible blur. So the finding is "**blur does nothing at these speeds**," not "owner
+preferred no-blur over the lightest blur," and **there is no point tuning below eighth** (below the
+owner's discrimination threshold). At a 0.6s ramp to 2x there is no strobe worth fixing. Motion blur
+is **out of the value case**; the code stays (`main.swift`, `BLUR=on`, radial CIZoomBlur,
+`radius = floor + k*|v|`) as **off-by-default insurance** for faster/bigger zooms only.
 
 ## Why V3 exists (the measured PERF case — this is the real reason, not a hunch)
 
