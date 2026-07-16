@@ -14,7 +14,8 @@ type SegmentTrackProps = {
   segments: TrackSegment[];
   duration: number;
   selectedIndex: number | null;
-  onSelect: (i: number) => void;
+  // null deselects — a click (no drag) on the already-selected pip toggles off.
+  onSelect: (i: number | null) => void;
   onChange: (i: number, patch: { start?: number; end?: number }) => void;
   // Live frame-feedback hook. Fired during a pip/edge drag with the time the
   // user is positioning against (start frame for whole-window moves, the moving
@@ -84,6 +85,11 @@ export default function SegmentTrack({
         const onPipDown = (e: React.PointerEvent) => {
           e.stopPropagation();
           e.preventDefault();
+          // Toggle-off: a click (no drag) on an already-selected pip deselects.
+          // Select on down so an unselected pip can be dragged immediately;
+          // remember prior state + track movement to decide toggle on up.
+          const wasSelected = selectedIndex === idx;
+          let moved = false;
           onSelect(idx);
           const row = rowRef.current;
           if (!row) return;
@@ -93,6 +99,7 @@ export default function SegmentTrack({
           const startEnd = seg.end;
           const b = segBounds();
           const onMove = (ev: PointerEvent) => {
+            if (Math.abs(ev.clientX - startX) > 3) moved = true;
             const dx = ((ev.clientX - startX) / rect.width) * duration;
             const dur = startEnd - startStart;
             let nextStart = Math.max(b.min, startStart + dx);
@@ -110,6 +117,7 @@ export default function SegmentTrack({
             window.removeEventListener("pointermove", onMove);
             window.removeEventListener("pointerup", onUp);
             onDragHover?.(null);
+            if (wasSelected && !moved) onSelect(null);
           };
           window.addEventListener("pointermove", onMove);
           window.addEventListener("pointerup", onUp);

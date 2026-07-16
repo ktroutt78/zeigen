@@ -2324,7 +2324,11 @@ function VideoStage(props: VideoStageProps) {
             this wrapper by the zoom rAF). The webcam bubble + watermark stay
             OUTSIDE (screen-anchored) — rendering the bubble after this wrapper
             matches the export layer order (zoom -> webcam). */}
-        <div ref={zoomLayerRef} style={{ position: "absolute", inset: 0 }}>
+        {/* data-stage-bg here too: the video (pointerEvents:none) routes clicks
+            to this transform wrapper, not the stage div behind it, so without the
+            marker onStageClick's deselect never matched. Broke when this wrapper
+            was inserted between the video and the stage (V2 Step 3 zoom). */}
+        <div ref={zoomLayerRef} data-stage-bg="1" style={{ position: "absolute", inset: 0 }}>
           {props.assetUrl ? (
             <video
               ref={props.videoRef}
