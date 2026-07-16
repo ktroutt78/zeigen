@@ -4,6 +4,19 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-16 — Trim phase SCOPED + PARKED (not greenlit); switchover covers the typical export
+
+**Usage correction (owner).** Earlier concern that trim dominates real exports was based on bad self-reporting — the heavy trimming was TESTING. Real-world trim is an occasional tail-end cut, not every export. So the untrimmed-only v1 switchover DOES cover the typical export (screen + webcam + a couple zooms, untrimmed), and the original default-on recommendation stands. Trim staying on V2 costs little in practice. Owner will rebuild and watch the "rendered via V2 fallback: trimmed export" toast; if it's rare (expected), the trim phase stays parked indefinitely. Greenlight only if that toast turns out to fire often.
+
+**Trim phase scope (for when/if it's ever greenlit — don't re-derive).** V2's trim is entangled with exactly the three things V3 touches, so it is NOT "just an -ss/-to copy pass":
+- **Right approach: teach the compositor a trim window (`TRIM_IN`/`TRIM_OUT`).** It reads all frames, emits only those in `[trim_in, trim_out]`, resets output PTS to 0. Keeps it to ONE encode and stays frame-accurate. Zoom can then stay keyed off original PTS (no per-segment shift needed), or shift segments by `-trim_in` if the compositor resets its clock.
+- **The trap: a `-c copy` pre-trim pass.** Keyframe-accurate only — the cut can land up to a GOP (~1-2s) off. V2 is frame-accurate because it re-encodes with `-ss/-to` before `-i`. Matching that with a pre-pass would need a re-encode (eats the perf win); the compositor-window approach avoids it.
+- **Risk concentrates in (b), the webcam lead × trim.** V2 does NOT trim the webcam at `trim_in`; it trims at `trim_in - 105ms` (`wc_skip = (trim_in - lead).max(0)`, `pad_lead = (lead - trim_in).max(0)` in build_webcam_overlay). So the webcam's trim offset differs from the screen's by the WEBCAM_LEAD_MS. A naive `-ss trim_in` on the webcam desyncs the bubble ~3 frames at the cut. The lead logic shipped in this switchover (`BUBBLE_LEAD_FRAMES`) assumes an UNtrimmed start and would need to fold in the trim offset.
+- Other two interactions (lower risk): (a) zoom segments are in original time — V2 shifts by `off=trim_in`; V3 shifts or the compositor honors original PTS. A zoom straddling `trim_in` must render mid-ramp / fully-in at t=0, not restart. (c) audio mux must `-ss/-to` the SCREEN audio to the same window (sample-accurate) and stay locked to the trimmed video.
+- Size estimate: comparable to the bubble+lead work in this switchover — compositor change + Rust plumbing + trimmed audio mux, most risk in (b).
+
+**Gate (prove trimmed V3 == trimmed V2):** (1) frame accuracy — trimmed V3 frame 0/last match the source frames at trim_in/trim_out (SSIM/PSNR, and vs V2 frame 0); the thing a copy-trim silently gets wrong. (2) duration within one frame of the window and of V2. (3) bubble A/V sync across the cut — step-function method (as used for the lead) at t=0, for BOTH `trim_in > 105ms` and `trim_in < 105ms`. (4) zoom straddling trim_in renders correct partial scale at t=0 (scale-vs-time curve vs V2). (5) audio lipsync + length. (6) re-run the CPU/wall perf gate ON trimmed content (the trim handling is new cost) — confirm the <=60% win holds.
+
 ## 2026-07-16 — V3 switchover LANDED (wired + verified, default-on)
 
 The wiring from the entry below is implemented and committed. V3 is now the default export path for eligible exports; V2 is the visible fallback.
