@@ -4,6 +4,15 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-16 — Our motion blur vs Screen Studio's are NOT comparable (different effect, not a stronger one)
+
+Clarifies the 2026-07-15 motion-blur finding — does not change it. **Do not read "Screen Studio's blur is subtler even at 100%" as evidence ours is too strong.** They are different effects and are not comparable at any strength setting:
+
+- **Ours** is a **radial `CIZoomBlur`** centered on the zoom focus, driven by the scale-ramp velocity of a **hard 0.6s ramp to 2x** — content smears radially outward from the focus, spiking during the ramp and going to zero at the hold. Peak velocity on the demo punch was ~246 px/frame; the demo presets hit their caps (strong/medium/subtle = 95/48/22 px; the sub-subtle blind ladder = half/quarter/eighth ≈ 11/5.5/2.75 px).
+- **Screen Studio's** slider is a **directional** motion blur on its **slow eased camera moves** — a linear smear along the movement direction, over longer/lower-velocity motion. A gentler blur type on gentler motion.
+
+So SS looking subtler even maxed is a function of (a) directional vs radial and (b) slow-ease vs hard-0.6s-ramp, NOT of our intensity knob being turned up. Any future "match Screen Studio's blur feel" work must first change the *effect* (effect type + the motion it rides), not just lower our strength. The 2026-07-15 conclusion stands unchanged: our blur is imperceptible at eighth on a 0.6s/2x ramp, out of the value case, kept off-by-default as insurance for faster/bigger zooms only.
+
 ## 2026-07-16 — Annotations SCRAPPED entirely (code + UI) — scope cut, not a parity failure
 
 Supersedes "Phase 3 (overlays) next" from the 2026-07-15 entry below. **Decision (owner): drop Text, Arrow, Blur, and Spotlight annotations completely — from the V3 compositor AND the review UI.** This is a deliberate scope cut, NOT a parity problem. In fact text/arrow reached clean parity before the cut (see the root cause below), and blur/spotlight were coded but never exercised.
