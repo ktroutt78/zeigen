@@ -83,6 +83,16 @@ let blurFloor = Double(env["BLUR_FLOOR"] ?? "2.0")!
 let blurK = Double(env["BLUR_K"] ?? "0.35")!
 let blurMax = Double(env["BLUR_MAX"] ?? "40")!
 let blurEps = Double(env["BLUR_EPS"] ?? "0.4")!
+
+// --- Watermark (Phase 4): screen-anchored logo PNG composited on the FINAL zoomed
+// frame (output space — does NOT zoom, and applied after motion blur so it stays
+// sharp). Params mirror composite.rs Watermark (supplied by save_recording args):
+// corner tl|tr|bl|br, width-based scale_frac or legacy 10%-of-short-side height,
+// alpha opacity. Placement is integer px (ffmpeg overlay snaps to int; sub-pixel
+// would soften the logo edges — the Phase 3 finding). Absent WATERMARK_PNG -> none.
+let wmCorner = env["WATERMARK_CORNER"] ?? "tr"
+let wmScaleFrac = Double(env["WATERMARK_SCALE_FRAC"] ?? "")
+let wmOpacity = Double(env["WATERMARK_OPACITY"] ?? "1.0")!
 try? FileManager.default.removeItem(at: outURL)
 
 let asset = AVURLAsset(url: inURL)
@@ -177,6 +187,36 @@ let Wd = Double(W), Hd = Double(H)
 // velocity-tracking state (a fixed source point's output-space motion frame to frame)
 var prevO0x = Wd / 2, prevO0y = Hd / 2, prevScale = 1.0, havePrev = false
 
+// Pre-scale the watermark once (constant for the whole recording) and precompute
+// its integer top-left. scale: width-based round(sw*frac) (aspect kept) or legacy
+// round(0.10*min(sw,sh)) height (composite.rs metrics); opacity multiplies alpha.
+var wmComposite: CIImage? = nil
+if let wp = env["WATERMARK_PNG"], let logo = CIImage(contentsOf: URL(fileURLWithPath: wp)) {
+    let shortSide = min(Wd, Hd)
+    let factor = wmScaleFrac.map { ($0 * Wd).rounded() / logo.extent.width }
+        ?? ((shortSide * 0.10).rounded() / logo.extent.height)
+    var layer = logo.applyingFilter("CILanczosScaleTransform",
+        parameters: [kCIInputScaleKey: factor, kCIInputAspectRatioKey: 1.0])
+    if wmOpacity < 0.999 {
+        layer = layer.applyingFilter("CIColorMatrix",
+            parameters: ["inputAVector": CIVector(x: 0, y: 0, z: 0, w: wmOpacity)])
+    }
+    let ow = layer.extent.width, oh = layer.extent.height
+    let p = (shortSide * 0.02).rounded()  // composite.rs padding = 2% of short side
+    // ffmpeg corner (top-left origin) -> CI bottom-left; integer placement.
+    let leftX = p, rightX = Wd - ow - p
+    let topY = Hd - p - oh, botY = p
+    let (tx, ty): (Double, Double)
+    switch wmCorner {
+    case "tl": (tx, ty) = (leftX, topY)
+    case "bl": (tx, ty) = (leftX, botY)
+    case "br": (tx, ty) = (rightX, botY)
+    default:   (tx, ty) = (rightX, topY)  // tr (composite.rs default)
+    }
+    wmComposite = layer.transformed(
+        by: CGAffineTransform(translationX: tx.rounded(), y: ty.rounded()))
+}
+
 writerInput.requestMediaDataWhenReady(on: queue) {
     while writerInput.isReadyForMoreMediaData {
         guard let sample = readerOutput.copyNextSampleBuffer(),
@@ -232,6 +272,12 @@ writerInput.requestMediaDataWhenReady(on: queue) {
                     "inputCenter": CIVector(x: Wd / 2, y: Hd / 2),
                     "inputAmount": blurAmount])
                 .cropped(to: CGRect(x: 0, y: 0, width: W, height: H))
+        }
+
+        // Screen-anchored watermark: on the FINAL frame, after motion blur (stays
+        // sharp), unaffected by zoom. Constant placement -> just source-over.
+        if let wm = wmComposite {
+            out = wm.composited(over: out)
         }
         if velLogPath != nil {
             velLog += String(format: "%.4f,%.5f,%.5f,%.4f,%.4f,%.4f\n",
