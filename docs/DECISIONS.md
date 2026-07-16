@@ -4,6 +4,29 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-16 — V3 switchover: v1 scope AGREED (option 1) + wiring plan (NOT yet implemented)
+
+All Phase 6 gates passed (entries below) → switch V3 to default. This records the agreed v1 scope and the wiring plan. **The wiring is NOT yet implemented — no code written; investigation was in progress when context was cleared. Resume from here.**
+
+**Escape hatch (owner-approved), three layers:**
+1. Runtime flag `use_v3_compositor` in settings.json, default **true**. Flip to false -> next export runs V2, no rebuild.
+2. **Automatic fallback, made VISIBLE (owner requirement — not silent):** if V3 fails, log a line AND surface a note in the export result/UI ("rendered via V2 fallback: <reason>"), then run the existing V2 path. A V3 failure costs a slower export, never a lost recording.
+3. `git revert` of the single switchover commit restores V2-default.
+
+**v1 routing — V3 engages ONLY for:** untrimmed, mp4, Source-resolution (no downscale), re-encode exports with zoom and/or webcam bubble and/or watermark, and an empty annotations track.
+**Falls back to V2 (visibly) for:** trimmed exports; GIF; non-Source resolution downscale (`mp4_scale`); any legacy sidecar with annotations (V3 dropped annotation rendering, V2 still has it); webcam-WITHOUT-zoom (that path is the two-pass `composite()` which needs an audio itsoffset shift — out of v1 scope); and any V3 failure. The plain non-zoomed `-c:v copy` fast path is UNTOUCHED (V3 gated on `!mp4_video_can_copy`).
+
+**Why option 1 (trim -> V2) over option 2 (add a pre-trim pass):** every Phase-6 number and blind judgment covered untrimmed re-encodes with zoom/bubble/watermark — that is exactly what V3 was gated on. A pre-trim pass is untested new code; the owner refused to land it in the same commit that flips the daily-driver default. Trimmed exports staying on V2 cost nothing (same speed as today). If real use shows trim dominates, option 2 becomes its own phase with its own gate.
+
+**Wiring plan (resume here — all file:line from the export-path map):**
+- Seam: branch at the top of `run_edit_pipeline` (`edit.rs:867`). Compute `v3_eligible` (predicate above), and if `use_v3_compositor() && v3_eligible`, `match run_v3_export(...) { Ok => return Ok, Err(e) => { log+surface; fall through to existing V2 code } }`. V2 code below stays literally untouched.
+- Eligibility inputs: mp4 + Source-res (mirror `mp4_scale` calc, `edit.rs:1200-1220`, must be None), `sidecar.trim` normalized untrimmed (`edit.rs:1227-1234`), `sidecar.annotations.is_empty()`, `has_zoom = !zoom_keyframes_to_segments(&sidecar.zoom).is_empty()`, `has_webcam = !webcam_segments.is_empty()`, watermark present; and NOT(has_webcam && !has_zoom).
+- `run_v3_export`: (a) locate `cicompositor` binary — mirror `engine_binary_path()` (`engine.rs:159-175`): release = next to app exe, debug = `compositor-engine/cicompositor` (already built, committed). (b) render bubble mask+shadow PNGs by reusing `composite::build_webcam_overlay` (`composite.rs:636`) or making `render_alpha_mask`/`render_shadow_source` (`composite.rs:437,463`) `pub(crate)`. (c) convert `sidecar.zoom` (ZoomKeyframe, center in source px) -> cicompositor `ZOOM_SEGMENTS` JSON `{start,end,scale,ramp,cxf,cyf}` where cxf=center_x/W, cyf=center_y/H (center fractions, top-origin), ramp=`ZOOM_RENDER_RAMP_S`=0.6. (d) spawn `cicompositor <screen> <video_only.mp4> identity` with env ZOOM_SEGMENTS, BUBBLE_WEBCAM/MASK_PNG/SHADOW_PNG/DIAMETER/ZONE/SHADOW_ALPHA, WATERMARK_PNG/CORNER/SCALE_FRAC/OPACITY, and **BUBBLE_LEAD_FRAMES** (see next). Check `status.success()` + output non-empty. (e) mux audio: `ffmpeg -i video_only.mp4 -i <screen> -map 0:v -map 1:a? -c:v copy <arnndn -af> -c:a aac -b:a 192k -movflags +faststart <output>` — audio is the SCREEN source's, arnndn via `audio_nr_filter()`, NO itsoffset (single-input path doesn't shift).
+- **Webcam A/V lead (MUST add to `main.swift` + verify):** V2 freezes the first webcam frame for `WEBCAM_LEAD_MS = 105ms` (`composite.rs:76`, `tpad=start_duration=0.105:start_mode=clone`) so the bubble is in sync from t=0. cicompositor does a naive 1:1 pull — add `BUBBLE_LEAD_FRAMES` env = round(0.105*fps) (~3 at 30fps): for screen frames `i` where `i==0 || i>leadFrames` pull the next webcam frame, else reuse frame 0 (i.e. show webcam frame `max(0,i-lead)`). **Verify bubble sync parity vs V2 on the harness before committing.**
+- Bundling: mirror `recording-engine` sidecar — `build.rs` compiles the compositor to `binaries/cicompositor-<triple>`, add `"binaries/cicompositor"` to `externalBin` in `tauri.conf.json`.
+- Settings: add `use_v3_compositor: bool` (`#[serde(default=default_true)]`, Default true) to `Settings` (`settings.rs:11`), a free-fn `use_v3_compositor()` mirroring `noise_reduction_mix()` (`settings.rs:98`), and a `set_use_v3_compositor` command registered in `lib.rs:826`.
+- **Verify all THREE directions before the single commit:** (1) real re-encode export runs V3 with flag on, (2) flag off routes V2, (3) plain non-zoomed `-c:v copy` untouched. Plus harness parity of the V3 export vs V2 (bubble sync + overlays within floors). No real scratch recording exists to test against (they're transient) — construct a synthetic recording (sources/ dir with screen.mp4 + webcam-00.mp4 + a sidecar JSON with zoom/bubble/watermark) and run the actual Rust pipeline functions on it.
+
 ## 2026-07-16 — Phase 6 ALL GATES PASS → switch V3 to default
 
 Sustained thermal run (205s non-repeating clip, 36 varied zooms + bubble + watermark, 3 reps), owner-measured:
