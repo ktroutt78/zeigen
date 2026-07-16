@@ -4,6 +4,14 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-16 — Bubble depth: V3 will DELIBERATELY depart from V2 (harness divergence is BY DESIGN)
+
+Owner, real use: the webcam bubble reads flat / "pasted on top" rather than floating above the screen. NOT a regression — V2 had the same flat treatment; V3 inherited it by faithful port (parity did its job). Current treatment (both preview `boxShadow: 0 8px 24px rgba(0,0,0,0.22)` and export composite.rs gblur σ=0.075·d, offset=d/30, α=0.22): a single tight soft drop shadow, hard circular edge, no rim.
+
+**DECISION: fix it in V3 as a deliberate departure from V2.** Treatment TBD — owner judges by eye (candidate levers: larger/softer ambient shadow + a small tighter contact shadow, more vertical offset, and/or a subtle bright rim on the bubble edge). Not chosen yet.
+
+**HARNESS IMPLICATION (flagged so it doesn't trip later as a mystery regression):** once this lands, `harness/build_bubble_ab.py` + `spatial_diff.py` will show INTENTIONAL divergence from V2 in the `bubble` and `shadow_band` regions. The V2-parity bubble A/B is NO LONGER the gate for the bubble — re-baseline that harness to the chosen V3 look (or retire the V2 comparison for the bubble region). Do not read the divergence as a regression. The bubble's other invariants (screen-anchored under zoom, A/V lead) still hold and stay gated.
+
 ## 2026-07-16 — Trim phase SCOPED + PARKED (not greenlit); switchover covers the typical export
 
 **Usage correction (owner).** Earlier concern that trim dominates real exports was based on bad self-reporting — the heavy trimming was TESTING. Real-world trim is an occasional tail-end cut, not every export. So the untrimmed-only v1 switchover DOES cover the typical export (screen + webcam + a couple zooms, untrimmed), and the original default-on recommendation stands. Trim staying on V2 costs little in practice. Owner will rebuild and watch the "rendered via V2 fallback: trimmed export" toast; if it's rare (expected), the trim phase stays parked indefinitely. Greenlight only if that toast turns out to fire often.
