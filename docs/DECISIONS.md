@@ -4,6 +4,12 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-16 — Phase 4 watermark: PASS
+
+Screen-anchored watermark ported to V3 (`main.swift`, env-driven, mirrors composite.rs). A/B against V2 (same logo PNG, ffmpeg composite.rs fragment replicated): watermark-box dE 0.55 identity, 0.56 under 2x zoom (holds screen-anchored, does not zoom). Owner judged **pass**; A/B clips indistinguishable in motion, logo held still on both.
+
+**Fill-noise note (not pursued — sub-visible).** Owner's eye flagged V3 (blind B) as marginally noisier in the blue *fill* (not edges) at 3x on a still. Measured: total variance identical between V2 and V3; the "solid" patch was actually the logo's gradient, which swamped a clean noise read. A quick check found VideoToolbox deterministic (identical input encoded twice = 0.00 delta), so the ~0.9/255 fill delta is a real render-path difference (CI vs ffmpeg lanczos + color conversion of a saturated-blue gradient), NOT encoder randomness — but it is sub-visible at real viewing conditions and A/B were identical in motion. Not worth chasing. That's the record.
+
 ## 2026-07-16 — Our motion blur vs Screen Studio's are NOT comparable (different effect, not a stronger one)
 
 Clarifies the 2026-07-15 motion-blur finding — does not change it. **Do not read "Screen Studio's blur is subtler even at 100%" as evidence ours is too strong.** They are different effects and are not comparable at any strength setting:
