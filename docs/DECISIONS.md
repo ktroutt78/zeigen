@@ -4,6 +4,21 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-17 — Audio NR: macOS Voice Isolation ON + Zeigen RNNoise OFF (owner's setup)
+
+Settled after owner A/B testing. Owner keeps a mechanical keyboard next to the laptop and runs **macOS Mic Mode = Voice Isolation** essentially always. That mode is applied at capture and reaches Zeigen's `AVCaptureSession` mic stream.
+
+**Decision:** for owner's setup, **Voice Isolation ON (macOS) + Zeigen's own noise reduction OFF** (`NrLevel = "off"`, so `settings.rs::noise_reduction_mix` returns None and no `arnndn` pass runs). Do NOT rip out RNNoise — keep it as the off-by-default toggle it already is.
+
+**Why (measured, not assumed):**
+- **Don't double-process.** The old default `NrLevel = "med"` meant Voice Isolation ducked the audio in real time, then RNNoise ran again over the hollowed signal — worse artifacts (audible voice clipping on talk-and-type overlap). Turning Zeigen NR off removes the second pass; talk → pause+type → talk now records clean.
+- **RNNoise is the wrong tool for keyboard/mouse.** A/B: at Med and High (macOS Standard) typing was clearly audible; High filtered marginally more than Med but nowhere near Voice Isolation, which removed typing AND mouse clicks entirely. Root cause: RNNoise is a **stationary/broadband** model (fan, hiss, hum); impulsive transients (clicks) pass through. Voice Isolation is transient-aware ML source separation. So "crank NR to High" is NOT a keyboard fix.
+- **RNNoise's niche for owner is narrow** — quiet-room, no-typing recording with steady hiss. A nicer mic doesn't change this (may pick up MORE keyboard); Voice Isolation stays the transient tool regardless of mic.
+
+**Rejected:** making Voice Isolation the app's suppressor (apps can only READ mic mode, not set it — non-deterministic, hostage to a Control Center toggle) and any "nudge to Standard" prompt (wrong-shaped — owner wants suppression, so it'd nag every time). A future "Auto" mode (read active mic mode, skip RNNoise when Voice Isolation is active) was considered and **parked** — the persistent NR toggle already covers the steady state plus the occasional wildcard flip.
+
+**Residual edge:** exact talk-and-type overlap still ducks the voice slightly under Voice Isolation (real-time gate can't separate a keystroke landing on a syllable). Rare in practice; the one-off escape hatch is Mic Mode → Standard + Zeigen NR → Med for that session.
+
 ## 2026-07-16 — Auto-load suggested zooms at review-open: APPROVED + planned (not yet built)
 
 Owner trusts the C.1 zoom detector now (tuned, judged, better than Screen Studio) — the "button-only until it earns it" gate (ZOOM-LAYER-PLAN) is lifted. Auto-populate suggestions on review-open. **Reasoning:** the copy-path concern is solved by making the escape hatch one click — a "Clear all zooms" button. Common case (owner always wants zooms) becomes free; rare case (plain `-c:v copy` export) is one click back. The friction was backwards — owner was clicking Suggest every time for the thing they always want. With V3 default, the zoomed re-encode is cheap, so defaulting to zooms costs little.
