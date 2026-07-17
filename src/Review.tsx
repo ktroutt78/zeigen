@@ -176,7 +176,9 @@ type ZoomEditor = {
   select: (i: number | null) => void;
   update: (i: number, patch: Partial<ZoomSegment>) => void;
   remove: (i: number) => void;
-  addAtPlayhead: () => void;
+  // Wipe every zoom (auto + manual) and deselect — the escape hatch back to a
+  // plain -c:v copy export after the mount-time auto-load populates the lane.
+  clearAll: () => void;
   // Add a zoom starting at time t (clicked blank track); t inside an existing
   // zoom selects it instead. Add + select, never deselect-first.
   addAt: (t: number) => void;
@@ -459,6 +461,22 @@ function isLogicallyEmpty(s: SidecarState, duration: number | null): boolean {
   );
 }
 
+// The exact on-disk shape the debounced persist writes: normalized trim, and
+// the two "absent unless set" fields (bubble_zone, zoom) dropped to undefined
+// when empty so untouched / pre-feature sidecars stay byte-identical. Shared
+// by the debounce and the mount-time zoom auto-load so both write the same
+// bytes for the same state.
+function sidecarWritePayload(s: SidecarState, duration: number): SidecarState {
+  return {
+    trim: normalizeTrim(s.trim, duration),
+    bubble_position_log: s.bubble_position_log,
+    thumbnail_time: s.thumbnail_time ?? null,
+    bubble_roundness: s.bubble_roundness ?? null,
+    bubble_zone: s.bubble_zone ?? undefined,
+    zoom: s.zoom && s.zoom.length > 0 ? s.zoom : undefined,
+  };
+}
+
 // Phase 14 c2. Tracks the NR-processed preview MP4 the main <video>
 // switches to once arnndn has run over the scratch source — so the user
 // can audibly verify NR before save. "rendering" is the eager wait at
@@ -590,6 +608,10 @@ export default function Review() {
   // step-2 keyframe schema — converted on read and in currentState below.
   const [zoomSegments, setZoomSegments] = useState<ZoomSegment[]>([]);
   const [zoomSelectedIndex, setZoomSelectedIndex] = useState<number | null>(null);
+  // Flips true once the mount-time read_sidecar settles. Gates the zoom
+  // auto-load below so it never runs before we know whether the sidecar
+  // already carried a zoom track (which would double-suggest).
+  const [sidecarLoaded, setSidecarLoaded] = useState(false);
 
   useEffect(() => {
     invoke<AppSettings>("get_settings")
@@ -704,10 +726,10 @@ export default function Review() {
     setZoomSelectedIndex(null);
   }, []);
 
-  // Add a zoom starting at time `t` (clicked blank track, or the playhead via
-  // addZoomAtPlayhead). Fits it into the free window around t — zoom segments
-  // never overlap. t already inside a zoom selects that zoom instead of adding
-  // (so clicking a zoom's band selects it; clicking a gap adds + selects).
+  // Add a zoom starting at time `t` (clicked blank track). Fits it into the
+  // free window around t — zoom segments never overlap. t already inside a
+  // zoom selects that zoom instead of adding (so clicking a zoom's band
+  // selects it; clicking a gap adds + selects).
   const addZoomAt = useCallback(
     (t: number) => {
       if (duration == null || !videoDims) return;
@@ -750,24 +772,31 @@ export default function Review() {
     [duration, videoDims, zoomSegments, selectZoom],
   );
 
-  const addZoomAtPlayhead = useCallback(() => {
-    addZoomAt(videoRef.current?.currentTime ?? 0);
-  }, [addZoomAt]);
+  // Clear-all escape hatch. Wipes both auto and manual zooms and deselects.
+  // The mount-time auto-load has already fired (autoLoadedRef is set), so a
+  // clear stays cleared for this window — the app never reopens a recording,
+  // so it stays cleared for good.
+  const clearAllZooms = useCallback(() => {
+    setZoomSegments([]);
+    setZoomSelectedIndex(null);
+  }, []);
 
-  // Step 5 suggestion detection. Runs the C.1 heuristic over the cursor
-  // telemetry on the Rust side; the result replaces auto_generated
-  // segments only. Suggestions overlapping a manual zoom are dropped —
-  // user-placed segments always win.
+  // Step 5 suggestion detection — the manual "Re-suggest" button. Runs the
+  // C.1 heuristic over the cursor telemetry on the Rust side; the result
+  // replaces auto_generated segments only. Suggestions overlapping a manual
+  // zoom are dropped — user-placed segments always win. This path is an
+  // explicit edit: it notifies and (correctly) dirties the state, unlike the
+  // silent mount-time auto-load below.
   //
-  // AUTO-LOAD APPROVED (owner, 2026-07-16; detector has earned it — see
-  // DECISIONS.md). Planned: run this ONCE at review-open on a fresh recording
-  // (a ref-guarded mount effect), fold the result into the loaded snapshot so
-  // it reads as the default (not "— edited"), and give a "Clear all zooms"
-  // escape hatch. NO persisted "already-suggested" flag is needed: each
-  // recording gets exactly one review window (review-<stamp>) and the app never
-  // reopens recordings, so the mount-time run happens exactly once and a Clear
-  // stays cleared for free. IF reopening recordings is ever added, THAT is when
-  // a persisted flag becomes necessary (an empty zoom track is written absent /
+  // AUTO-LOAD (owner-approved 2026-07-16; detector has earned it — see
+  // DECISIONS.md; effect is `autoLoadedRef` below). It runs suggest ONCE at
+  // review-open on a fresh recording, folds the result into the snapshot so
+  // it reads as the default (not "— edited"), and Clear-all is the escape
+  // hatch. NO persisted "already-suggested" flag is needed: each recording
+  // gets exactly one review window (review-<stamp>) and the app never reopens
+  // recordings, so the mount-time run happens exactly once and a Clear stays
+  // cleared for free. IF reopening recordings is ever added, THAT is when a
+  // persisted flag becomes necessary (an empty zoom track is written absent /
   // deletes the sidecar, so "never suggested" and "cleared" look identical).
   const [suggesting, setSuggesting] = useState(false);
   const suggestZooms = useCallback(async () => {
@@ -804,6 +833,46 @@ export default function Review() {
       setSuggesting(false);
     }
   }, [sourcePath, duration, zoomSegments]);
+
+  // Mount-time auto-load. Fires exactly once per review window, when the
+  // sidecar has settled, duration is known, and the lane is empty. Silent by
+  // design — no notices — so a no-telemetry recording opens without a popup.
+  // The one-shot flag is spent as soon as those preconditions hold (before
+  // the empty check) so that a sidecar that ALREADY carried zooms marks the
+  // window as auto-loaded and a later Clear-all can't re-trigger a suggest.
+  const autoLoadedRef = useRef(false);
+  useEffect(() => {
+    if (autoLoadedRef.current) return;
+    if (!sourcePath || duration == null || !sidecarLoaded) return;
+    autoLoadedRef.current = true;
+    if (zoomSegments.length > 0) return; // sidecar already had zooms — keep them
+    (async () => {
+      const kfs = await invoke<ZoomKeyframe[] | null>("suggest_zooms", {
+        sourcePath,
+      }).catch(() => null);
+      if (kfs == null) return; // no cursor telemetry — silent
+      const suggested = zoomKeyframesToSegments(kfs)
+        .map((s) => ({ ...s, end: Math.min(s.end, duration) }))
+        .filter((s) => s.end - s.start >= ZOOM_MIN_DURATION)
+        .sort((a, b) => a.start - b.start);
+      if (suggested.length === 0) return; // nothing zoom-worthy — silent
+      const kf = zoomSegmentsToKeyframes(suggested);
+      setZoomSegments(suggested);
+      // Fold into the baseline so the header reads clean (not "— edited") on
+      // open; a subsequent Clear then correctly reads as an edit.
+      setSnapshot((prev) => ({ ...prev, zoom: kf }));
+      // Persist now rather than waiting on the debounce — the export reads the
+      // sidecar, and the folded state is dirty=false so nothing else forces a
+      // write before an immediate save.
+      invoke("write_sidecar", {
+        sourcePath,
+        state: sidecarWritePayload({ ...currentState, zoom: kf }, duration),
+      }).catch((err) => setError(`write sidecar: ${err}`));
+    })();
+    // currentState is intentionally omitted from deps: the ref guarantees a
+    // single run, and we want the value captured at that run.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourcePath, duration, sidecarLoaded, zoomSegments]);
 
   // Neighbor-bounded window per segment — segments stay sorted and
   // non-overlapping because drags/resizes can't cross these bounds.
@@ -847,8 +916,15 @@ export default function Review() {
         } else {
           setSnapshot(EMPTY_STATE);
         }
+        // Set last, after any setZoomSegments above, so the auto-load effect
+        // sees the loaded zoom track (React batches these together) and never
+        // mistakes a not-yet-applied read for an empty lane.
+        setSidecarLoaded(true);
       })
-      .catch((err) => setError(`read sidecar: ${err}`));
+      .catch((err) => {
+        setError(`read sidecar: ${err}`);
+        setSidecarLoaded(true);
+      });
     return () => {
       cancelled = true;
     };
@@ -970,22 +1046,9 @@ export default function Review() {
     if (!sourcePath || duration == null) return;
     const empty = isLogicallyEmpty(currentState, duration);
     const handle = window.setTimeout(() => {
-      const norm: SidecarState = {
-        trim: normalizeTrim(currentState.trim, duration),
-        bubble_position_log: currentState.bubble_position_log,
-        thumbnail_time: currentState.thumbnail_time ?? null,
-        bubble_roundness: currentState.bubble_roundness ?? null,
-        // Absent until the user picks a zone (undefined drops out of the
-        // invoke payload) so untouched/pre-Step-2 sidecars stay byte-identical
-        // and the export keeps re-deriving the migration default.
-        bubble_zone: currentState.bubble_zone ?? undefined,
-        // Empty zoom track = field absent (undefined drops out of the
-        // invoke payload), preserving the step-2 byte-identity invariant.
-        zoom:
-          currentState.zoom && currentState.zoom.length > 0
-            ? currentState.zoom
-            : undefined,
-      };
+      // bubble_zone / zoom drop to undefined when unset so untouched /
+      // pre-feature sidecars stay byte-identical (see sidecarWritePayload).
+      const norm = sidecarWritePayload(currentState, duration);
       setCommittedMp4Path(null);
       if (empty) {
         invoke("delete_sidecar", { sourcePath }).catch((err) =>
@@ -1624,7 +1687,7 @@ export default function Review() {
     select: selectZoom,
     update: updateZoom,
     remove: deleteZoom,
-    addAtPlayhead: addZoomAtPlayhead,
+    clearAll: clearAllZooms,
     addAt: addZoomAt,
     bounds: zoomBounds,
     canAdd: duration != null && videoDims != null,
@@ -4091,22 +4154,24 @@ function ExportPanel({
           onToggle={() => toggleSection("zoom")}
         >
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            <button
-              className="btn-secondary"
-              style={{ height: 26, fontSize: 11.5 }}
-              onClick={zoom.suggest}
-              disabled={!zoom.canAdd || busy || zoom.suggesting}
-            >
-              {zoom.suggesting ? "Suggesting…" : "Suggest zooms"}
-            </button>
-            <button
-              className="btn-secondary"
-              style={{ height: 26, fontSize: 11.5 }}
-              onClick={zoom.addAtPlayhead}
-              disabled={!zoom.canAdd || busy}
-            >
-              Add zoom at playhead
-            </button>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                className="btn-secondary"
+                style={{ flex: 1, height: 26, fontSize: 11.5 }}
+                onClick={zoom.suggest}
+                disabled={!zoom.canAdd || busy || zoom.suggesting}
+              >
+                {zoom.suggesting ? "Suggesting…" : "Re-suggest"}
+              </button>
+              <button
+                className="btn-secondary"
+                style={{ flex: 1, height: 26, fontSize: 11.5 }}
+                onClick={zoom.clearAll}
+                disabled={busy || zoom.segments.length === 0}
+              >
+                Clear all
+              </button>
+            </div>
             {zoom.selectedIndex != null && zoom.segments[zoom.selectedIndex] ? (
               <>
                 <Field
@@ -4152,10 +4217,8 @@ function ExportPanel({
               </div>
             ) : (
               <div style={{ fontSize: 11, color: "var(--fg-tertiary)" }}>
-                Suggest zooms fills the lane from your cursor activity, or
-                add one manually at the playhead. Playback previews live.
-                Export rendering is not wired up yet — saved files ignore
-                zoom for now.
+                No zooms. Click the timeline lane to add one, or Re-suggest
+                from your cursor activity. Playback previews live.
               </div>
             )}
           </div>
