@@ -3000,6 +3000,10 @@ type TimelineProps = {
 function Timeline(props: TimelineProps) {
   const trackRef = useRef<HTMLDivElement | null>(null);
   const [hover, setHover] = useState<{ time: number; rect: DOMRect } | null>(null);
+  // Hover-scrub (Model A): true while a bare-hover skim is driving the playhead,
+  // so onScrubStart/End fire once per skim session (webcam bubble aligns once at
+  // the end, not per tick). Reset when a drag ends so the two stay in sync.
+  const skimmingRef = useRef(false);
   const stamp = props.sourcePath ? parseStampFromPath(props.sourcePath) : null;
 
   const inPct =
@@ -3089,6 +3093,9 @@ function Timeline(props: TimelineProps) {
         seekAt(ev.clientX);
       } else {
         props.onScrubEnd();
+        // Drag ended the scrub session; keep skim state in sync so the next
+        // bare-hover re-arms onScrubStart instead of seeking un-gated.
+        skimmingRef.current = false;
         if (wasPlaying) props.videoRef.current?.play().catch(() => {});
       }
       const overTrack =
@@ -3102,15 +3109,46 @@ function Timeline(props: TimelineProps) {
     window.addEventListener("pointerup", onUp);
   };
 
+  // Hover-scrub seek: a bare hover (no button) over a PAUSED video moves the
+  // playhead + scrubs live via the gated seek (Model A: the playhead follows the
+  // cursor and stays where you left it). Paused-only so it never fights playback;
+  // gated seek + one-shot onScrubStart keep it from seek-flooding or churning the
+  // webcam decoder. Shared by the main track and the zoom lane (same x->time).
+  const skimSeek = (clientX: number) => {
+    const track = trackRef.current;
+    if (props.duration == null || !track) return;
+    if (!props.videoRef.current?.paused) {
+      // Playing (e.g. Space pressed while hovering): don't scrub over playback,
+      // and end any active skim so scrubbingRef doesn't stay set during play.
+      endSkim();
+      return;
+    }
+    if (!skimmingRef.current) {
+      skimmingRef.current = true;
+      props.onScrubStart();
+    }
+    props.seek(timeAt(clientX, track.getBoundingClientRect(), props.duration));
+  };
+  const endSkim = () => {
+    if (skimmingRef.current) {
+      skimmingRef.current = false;
+      props.onScrubEnd();
+    }
+  };
+
   const onTrackPointerMove = (e: React.PointerEvent) => {
     if (props.duration == null) return;
     const track = trackRef.current;
     if (!track) return;
     const rect = track.getBoundingClientRect();
     setHover({ time: timeAt(e.clientX, rect, props.duration), rect });
+    if (e.buttons === 0) skimSeek(e.clientX); // hover, not a drag
   };
 
-  const onTrackPointerLeave = () => setHover(null);
+  const onTrackPointerLeave = () => {
+    setHover(null);
+    endSkim();
+  };
 
   const trimLen =
     props.trim && props.duration != null ? Math.max(0, props.trim.out - props.trim.in) : null;
@@ -3304,7 +3342,16 @@ function Timeline(props: TimelineProps) {
           visible unselected (alwaysBand): a zoom is a range the user
           reasons about, not a point. */}
       {props.zoom.segments.length > 0 && props.duration != null && (
-        <div style={{ position: "relative", height: 44, marginTop: 16 }}>
+        <div
+          style={{ position: "relative", height: 44, marginTop: 16 }}
+          onPointerMove={(e) => {
+            // Hover-scrub over the zoom lane too — same x->time as the main
+            // track (uses trackRef's rect). Pips/handles stopPropagation their
+            // own pointerdown, so this only fires for bare hover.
+            if (e.buttons === 0) skimSeek(e.clientX);
+          }}
+          onPointerLeave={endSkim}
+        >
           <SegmentTrack
             segments={props.zoom.segments}
             duration={props.duration}
