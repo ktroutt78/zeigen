@@ -4,7 +4,7 @@ use serde::Deserialize;
 use tauri::{
     image::Image,
     menu::{CheckMenuItemBuilder, Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder},
-    tray::TrayIconBuilder,
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, Runtime,
 };
 
@@ -77,6 +77,19 @@ pub struct CameraItem {
 
 pub struct TrayState(pub Mutex<UiState>);
 
+// Bring the setup window to the front. Reused by the tray left-click and the
+// single-instance relaunch handler — both are "the user is trying to reach
+// the running app" gestures. show() covers a hidden window, unminimize() a
+// minimized one, and set_focus() raises it above other apps (Chrome, etc.)
+// and makes it key — the app is a regular (Dock) app, so focus activates it.
+pub fn raise_main_window<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+}
+
 pub fn setup<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     app.manage(TrayState(Mutex::new(UiState::default())));
 
@@ -87,7 +100,21 @@ pub fn setup<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         .icon(icon)
         .icon_as_template(true)
         .menu(&menu)
-        .show_menu_on_left_click(true)
+        // Left-click raises the setup window (the common "where did my app go"
+        // gesture); the menu stays available on right-click. show_menu_on_left
+        // must be off or the click is consumed by the menu and never reaches
+        // on_tray_icon_event.
+        .show_menu_on_left_click(false)
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                raise_main_window(tray.app_handle());
+            }
+        })
         .on_menu_event(|app, event| {
             handle_menu_click(app, event.id.as_ref());
         })

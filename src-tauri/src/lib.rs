@@ -710,11 +710,7 @@ pub fn run() {
         // engine child would die, and the next command sent to it hit a
         // dead stdin pipe (EngineClient::send's "Broken pipe" error).
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.show();
-                let _ = w.unminimize();
-                let _ = w.set_focus();
-            }
+            tray::raise_main_window(app);
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
