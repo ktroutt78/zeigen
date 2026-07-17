@@ -35,6 +35,13 @@ type SegmentTrackProps = {
   // ranges the user reasons about, so they stay visible on their lane.
   alwaysBand?: boolean;
   minGap?: number;
+  // Row height in px (band, held-core, and edge handles span it; the pip badge
+  // stays a fixed 14px, vertically centered). Default 14 (the compact lane).
+  bandHeight?: number;
+  // When set, a click on empty track (not on a pip/handle/band) calls this with
+  // the clicked time — the caller adds a segment there. A click landing inside
+  // an existing segment's span is the caller's to interpret (select vs. add).
+  onAddAt?: (t: number) => void;
   // Positions the row inside its relatively-positioned parent.
   style?: React.CSSProperties;
 };
@@ -51,9 +58,12 @@ export default function SegmentTrack({
   alwaysBand = false,
   minGap = 0.1,
   ramp,
+  bandHeight = 14,
+  onAddAt,
   style,
 }: SegmentTrackProps) {
   const rowRef = useRef<HTMLDivElement | null>(null);
+  const pipTop = (bandHeight - 14) / 2;
 
   return (
     <div
@@ -62,11 +72,44 @@ export default function SegmentTrack({
         position: "absolute",
         left: 0,
         right: 0,
-        height: 14,
+        height: bandHeight,
         pointerEvents: "none",
         ...style,
       }}
     >
+      {/* Blank-track add surface: sits under the pips/handles (which are
+          pointerEvents:auto and stopPropagation), so only clicks on empty track
+          or a segment band reach it. A drag is ignored (that's a scrub, not an
+          add); a plain click maps x -> time and hands it to onAddAt. */}
+      {onAddAt && (
+        <div
+          onPointerDown={(e) => {
+            const row = rowRef.current;
+            if (!row) return;
+            const rect = row.getBoundingClientRect();
+            const startX = e.clientX;
+            let moved = false;
+            const onMove = (ev: PointerEvent) => {
+              if (Math.abs(ev.clientX - startX) > 3) moved = true;
+            };
+            const onUp = (ev: PointerEvent) => {
+              window.removeEventListener("pointermove", onMove);
+              window.removeEventListener("pointerup", onUp);
+              if (moved) return;
+              const t = ((ev.clientX - rect.left) / rect.width) * duration;
+              onAddAt(Math.max(0, Math.min(duration, t)));
+            };
+            window.addEventListener("pointermove", onMove);
+            window.addEventListener("pointerup", onUp);
+          }}
+          style={{
+            position: "absolute",
+            inset: 0,
+            pointerEvents: "auto",
+            cursor: "copy",
+          }}
+        />
+      )}
       {segments.map((seg, idx) => {
         const mid = (seg.start + seg.end) / 2;
         const pct = (mid / duration) * 100;
@@ -161,7 +204,7 @@ export default function SegmentTrack({
                   left: `${startPct}%`,
                   width: `${Math.max(0, endPct - startPct)}%`,
                   top: 0,
-                  height: 14,
+                  height: bandHeight,
                   background: selected ? "rgba(255,255,255,0.12)" : "rgba(255,255,255,0.05)",
                   border: selected
                     ? "1px solid var(--accent)"
@@ -181,7 +224,7 @@ export default function SegmentTrack({
                   left: `${heldStartPct}%`,
                   width: `${Math.max(0, heldEndPct - heldStartPct)}%`,
                   top: 0,
-                  height: 14,
+                  height: bandHeight,
                   background: "var(--accent)",
                   opacity: selected ? 0.38 : 0.18,
                   borderRadius: 2,
@@ -219,7 +262,7 @@ export default function SegmentTrack({
               style={{
                 position: "absolute",
                 left: `${pct}%`,
-                top: 0,
+                top: pipTop,
                 transform: "translateX(-50%)",
                 cursor: "grab",
                 pointerEvents: "auto",
@@ -246,8 +289,8 @@ export default function SegmentTrack({
             </div>
             {selected && (
               <>
-                <EdgeHandle pct={startPct} side="start" onPointerDown={onEdgeDown("start")} />
-                <EdgeHandle pct={endPct} side="end" onPointerDown={onEdgeDown("end")} />
+                <EdgeHandle pct={startPct} side="start" height={bandHeight} onPointerDown={onEdgeDown("start")} />
+                <EdgeHandle pct={endPct} side="end" height={bandHeight} onPointerDown={onEdgeDown("end")} />
               </>
             )}
           </div>
@@ -262,10 +305,12 @@ export default function SegmentTrack({
 function EdgeHandle({
   pct,
   side,
+  height,
   onPointerDown,
 }: {
   pct: number;
   side: "start" | "end";
+  height: number;
   onPointerDown: (e: React.PointerEvent) => void;
 }) {
   return (
@@ -276,7 +321,7 @@ function EdgeHandle({
         left: `${pct}%`,
         top: 0,
         width: 6,
-        height: 14,
+        height,
         transform: side === "start" ? "translateX(-100%)" : "translateX(0)",
         background: "var(--accent)",
         borderRadius: 2,

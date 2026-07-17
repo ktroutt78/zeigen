@@ -4,6 +4,19 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-16 — Bubble shadow LOCKED: offset-down-right drop shadow (model history + params)
+
+The V3 bubble depth (flagged in the entry below) is shipped. Final model + the dead ends, so nobody re-derives them.
+
+**Shipped model (main.swift `elevated`, now the V3 DEFAULT):** a same-size silhouette, offset DOWN-RIGHT, moderately blurred. Params (fractions of diameter d): **blur 0.04·d, offset 0.05·d down + 0.05·d right, alpha 0.48.** Composited under the opaque bubble so the top-left is fully occluded (no halo) and only the bottom-right escapes → reads as a lit object. Calibrated by pixel measurement to a PowerPoint "offset bottom-right" reference: escape ~0.105×D on right+down, ~0.39 darkening on white, ~0 on left+up. `PADDING_PX` bumped 24→30 (V2 composite.rs + V3 main.swift + preview BUBBLE_ZONE_PADDING_PX, in sync) so the ~25px escape has full room instead of clipping 1px at the corner. Preview box-shadow mirrors it (set imperatively in BubbleLayer's effect so it scales with cssDiameter). Rust `build_v3_bubble_assets` needed NO change — its silhouette is already same-size d.
+
+**Model history — two dead ends (don't repeat):**
+- **Enlarged silhouette (silhouette > bubble) = WRONG.** It fixed an earlier washout but rings the object on every side including the top — a halo, no offset read. A silhouette larger than the bubble is not offset-able into a drop shadow.
+- **blur > bubble radius = WASHOUT.** A big Gaussian (blur 0.4–0.6·d, i.e. > the 0.5·d radius) spreads the silhouette's mass over a huge area and collapses the peak alpha from ~1.0 to ~0.3 before alpha applies. Result: faint, and levels indistinguishable (measured: "light" +24.7 vs "heavy" +29.8 darkening — same). Proven via a sanity render (alpha 0.9, blur 0.15·d) that darkened +50–72, confirming the pipeline was fine and the blur model was the bug.
+- **Why blur 0.04·d is NOT too small (it will look wrong to a reviewer):** it's the CI Gaussian RADIUS on a SAME-SIZE silhouette, under the bubble radius so the peak survives; combined with the 0.05·d offset it produces the measured 0.105×D escape / 0.39 darkening that matches the reference. Bigger blur here re-introduces the washout. Do not "fix" it upward.
+
+**Harness divergence is now REAL and BY DESIGN.** `harness/build_bubble_ab.py` compares V3 vs V2; V3 now ships the offset shadow, V2 keeps its flat gblur shadow, so the bubble + shadow_band region diffs diverge intentionally. This is NOT a regression and NOT a V2-parity gate anymore (re-baselined + noted in the harness header). Mask/placement (mechanical) and screen-anchoring under zoom still hold and stay checked.
+
 ## 2026-07-16 — Bubble depth: V3 will DELIBERATELY depart from V2 (harness divergence is BY DESIGN)
 
 Owner, real use: the webcam bubble reads flat / "pasted on top" rather than floating above the screen. NOT a regression — V2 had the same flat treatment; V3 inherited it by faithful port (parity did its job). Current treatment (both preview `boxShadow: 0 8px 24px rgba(0,0,0,0.22)` and export composite.rs gblur σ=0.075·d, offset=d/30, α=0.22): a single tight soft drop shadow, hard circular edge, no rim.

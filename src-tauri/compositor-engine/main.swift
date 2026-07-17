@@ -125,6 +125,24 @@ let bubbleShadowRadiusK = Double(env["BUBBLE_SHADOW_RADIUS_K"] ?? "3.0")!
 // round(WEBCAM_LEAD_MS/1000 * fps); default 0 leaves the pre-wiring standalone/harness
 // behavior (naive 1:1 pull) unchanged.
 let bubbleLeadFrames = Int(env["BUBBLE_LEAD_FRAMES"] ?? "0") ?? 0
+// Bubble depth treatment (DECISIONS.md 2026-07-16). The V3 DEFAULT is `elevated`:
+// an offset-down-right drop shadow (matches a PowerPoint "offset bottom-right"
+// shadow). `flat` is the legacy single tight shadow, kept for comparison via env.
+//
+// Offset-drop-shadow model: the silhouette is the SAME SIZE as the bubble, offset
+// DOWN-RIGHT by a small fraction of the diameter, MODERATELY blurred (radius well
+// under the bubble radius so the peak survives — a blur > radius washes it out;
+// a silhouette LARGER than the bubble rings the top-left). Composited under the
+// opaque bubble: the top-left of the shadow is fully occluded (no halo), only the
+// bottom-right escapes -> reads as a lit object, not a glow. blur 0.04xd LOOKS
+// too small but isn't: it's the CI Gaussian radius on a same-size silhouette, and
+// it's calibrated to the reference (escape ~0.105xD right+down, ~0.39 darkening on
+// white, 0 on left+up). See DECISIONS.md for the model history.
+let bubbleDepth = env["BUBBLE_DEPTH"] ?? "elevated"
+let elevBlurFrac = Double(env["BUBBLE_ELEV_BLUR_FRAC"] ?? "0.04")!
+let elevOffsetFrac = Double(env["BUBBLE_ELEV_OFFSET_FRAC"] ?? "0.05")!     // down
+let elevOffsetXFrac = Double(env["BUBBLE_ELEV_OFFSET_X_FRAC"] ?? "0.05")!  // right
+let elevAlpha = Double(env["BUBBLE_ELEV_ALPHA"] ?? "0.48")!
 
 try? FileManager.default.removeItem(at: outURL)
 
@@ -282,7 +300,7 @@ if let wp = env["WATERMARK_PNG"], let logo = CIImage(contentsOf: URL(fileURLWith
 // and the shadow (fully static — blur + alpha + placement precomputed once). Shadow
 // geometry mirrors composite.rs exactly (padding 0.25*d, sigma 0.075*d, offset d/30).
 var bubbleMask: CIImage? = nil
-var bubbleShadowPositioned: CIImage? = nil
+var bubbleShadowLayers: [CIImage] = []   // composited under the bubble, in order
 var bubbleTx = 0.0, bubbleTy = 0.0
 if bubbleWebcam != nil {
     guard let mp = bubbleMaskPath, let mask = CIImage(contentsOf: URL(fileURLWithPath: mp))
@@ -290,26 +308,40 @@ if bubbleWebcam != nil {
     guard let shp = bubbleShadowPath, let shadow = CIImage(contentsOf: URL(fileURLWithPath: shp))
         else { fail("bubble shadow missing (BUBBLE_SHADOW_PNG)") }
     bubbleMask = mask
-    let d = bubbleDiameter, p = 24.0            // composite.rs PADDING_PX
-    let sp = (0.25 * d).rounded()               // shadow padding
-    let oy = (d / 30.0).rounded()               // shadow y offset
-    let sigma = (0.075 * d).rounded()           // gblur sigma
-    let cs = d + 2 * sp                          // shadow canvas side
+    let d = bubbleDiameter
+    let p = Double(env["BUBBLE_PADDING"] ?? "30")!   // composite.rs PADDING_PX; env override for the harness
     let hRight = bubbleZone.hasSuffix("r"), hCenter = bubbleZone.hasSuffix("c")
     let vTop = bubbleZone.hasPrefix("t")
     // ffmpeg top-left (top-left origin), ow=oh=d for the bubble.
     let bx = hRight ? (Wd - d - p) : (hCenter ? (Wd - d) / 2 : p)
     let by = vTop ? p : (Hd - d - p)
     bubbleTx = bx.rounded(); bubbleTy = (Hd - by - d).rounded()   // -> CI bottom-left
-    let sx = hRight ? (Wd - d - p - sp) : (hCenter ? (Wd - d) / 2 - sp : p - sp)
-    let sy = vTop ? (p + oy - sp) : (Hd - d - p + oy - sp)
-    // shadow: gblur (radius = k*sigma) within its canvas, alpha *= shadowAlpha, place.
-    let blurred = shadow.applyingFilter("CIGaussianBlur",
-        parameters: [kCIInputRadiusKey: bubbleShadowRadiusK * sigma]).cropped(to: shadow.extent)
-    let dimmed = blurred.applyingFilter("CIColorMatrix",
-        parameters: ["inputAVector": CIVector(x: 0, y: 0, z: 0, w: bubbleShadowAlpha)])
-    bubbleShadowPositioned = dimmed.transformed(
-        by: CGAffineTransform(translationX: sx.rounded(), y: (Hd - sy - cs).rounded()))
+    // Bubble center in CI (bottom-left) coords; the shadow places relative to it.
+    let bubbleCx = bubbleTx + d / 2, bubbleCy = bubbleTy + d / 2
+    // Place a shadow layer: gaussian-blur the (black) silhouette, dim to `alpha`,
+    // center it on the bubble offset `dropX` right and `dropY` down (screen-down =
+    // CI-down). Canvas-agnostic — centers by the blurred extent. flat with
+    // dropX=0, dropY=d/30 reproduces the prior placement.
+    func shadowLayer(blur: Double, alpha: Double, dropX: Double, dropY: Double) -> CIImage {
+        let blurred = shadow.applyingFilter("CIGaussianBlur",
+            parameters: [kCIInputRadiusKey: blur]).cropped(to: shadow.extent)
+        let dimmed = blurred.applyingFilter("CIColorMatrix",
+            parameters: ["inputAVector": CIVector(x: 0, y: 0, z: 0, w: alpha)])
+        let e = dimmed.extent
+        return dimmed.transformed(by: CGAffineTransform(
+            translationX: (bubbleCx + dropX - e.midX).rounded(),
+            y: (bubbleCy - dropY - e.midY).rounded()))
+    }
+    switch bubbleDepth {
+    case "elevated":  // offset-down-right drop shadow (same-size silhouette)
+        bubbleShadowLayers = [shadowLayer(
+            blur: elevBlurFrac * d, alpha: elevAlpha,
+            dropX: elevOffsetXFrac * d, dropY: elevOffsetFrac * d)]
+    default:  // flat: the current single drop shadow (sigma=0.075d, offset=d/30)
+        bubbleShadowLayers = [shadowLayer(
+            blur: bubbleShadowRadiusK * (0.075 * d).rounded(),
+            alpha: bubbleShadowAlpha, dropX: 0, dropY: (d / 30.0).rounded())]
+    }
 }
 var lastBubble: CIImage? = nil
 
@@ -395,7 +427,7 @@ writerInput.requestMediaDataWhenReady(on: queue) {
                     parameters: ["inputBackgroundImage": CIImage.empty(), "inputMaskImage": mask])
                 lastBubble = masked.transformed(by: CGAffineTransform(translationX: bubbleTx, y: bubbleTy))
             }
-            if let shadow = bubbleShadowPositioned { out = shadow.composited(over: out) }
+            for sh in bubbleShadowLayers { out = sh.composited(over: out) }
             if let bub = lastBubble { out = bub.composited(over: out) }
         }
 

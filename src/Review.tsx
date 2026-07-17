@@ -177,6 +177,9 @@ type ZoomEditor = {
   update: (i: number, patch: Partial<ZoomSegment>) => void;
   remove: (i: number) => void;
   addAtPlayhead: () => void;
+  // Add a zoom starting at time t (clicked blank track); t inside an existing
+  // zoom selects it instead. Add + select, never deselect-first.
+  addAt: (t: number) => void;
   // Neighbor-bounded window per segment so zooms can't overlap.
   bounds: (i: number) => { min: number; max: number };
   canAdd: boolean;
@@ -213,7 +216,7 @@ const BUBBLE_ZONES: BubbleZone[] = [
 
 // Screen-pixel padding the export bakes the bubble off each pinned edge.
 // Mirrors composite.rs PADDING_PX; used to offset the parked preview.
-const BUBBLE_ZONE_PADDING_PX = 24;
+const BUBBLE_ZONE_PADDING_PX = 30;
 
 function zoneHAlign(z: BubbleZone): "left" | "center" | "right" {
   if (z === "top_left" || z === "bottom_left") return "left";
@@ -701,48 +704,55 @@ export default function Review() {
     setZoomSelectedIndex(null);
   }, []);
 
-  const addZoomAtPlayhead = useCallback(() => {
-    if (duration == null || !videoDims) return;
-    const t = videoRef.current?.currentTime ?? 0;
-    // Fit the new zoom into the free window around the playhead — zoom
-    // segments never overlap. Playhead already inside one selects it
-    // instead of adding.
-    let lo = 0;
-    let hi = duration;
-    for (let i = 0; i < zoomSegments.length; i++) {
-      const seg = zoomSegments[i];
-      if (seg.end <= t) {
-        lo = Math.max(lo, seg.end);
-      } else if (seg.start >= t) {
-        hi = Math.min(hi, seg.start);
-      } else {
-        selectZoom(i);
+  // Add a zoom starting at time `t` (clicked blank track, or the playhead via
+  // addZoomAtPlayhead). Fits it into the free window around t — zoom segments
+  // never overlap. t already inside a zoom selects that zoom instead of adding
+  // (so clicking a zoom's band selects it; clicking a gap adds + selects).
+  const addZoomAt = useCallback(
+    (t: number) => {
+      if (duration == null || !videoDims) return;
+      let lo = 0;
+      let hi = duration;
+      for (let i = 0; i < zoomSegments.length; i++) {
+        const seg = zoomSegments[i];
+        if (seg.end <= t) {
+          lo = Math.max(lo, seg.end);
+        } else if (seg.start >= t) {
+          hi = Math.min(hi, seg.start);
+        } else {
+          selectZoom(i);
+          return;
+        }
+      }
+      const start = Math.max(lo, Math.min(t, hi - ZOOM_MIN_DURATION));
+      const end = Math.min(hi, start + ZOOM_DEFAULT_DURATION);
+      if (end - start < ZOOM_MIN_DURATION) {
+        setNotice("No room for a zoom here");
         return;
       }
-    }
-    const start = Math.max(lo, Math.min(t, hi - ZOOM_MIN_DURATION));
-    const end = Math.min(hi, start + ZOOM_DEFAULT_DURATION);
-    if (end - start < ZOOM_MIN_DURATION) {
-      setNotice("No room for a zoom at the playhead");
-      return;
-    }
-    const seg: ZoomSegment = {
-      start,
-      end,
-      scale: ZOOM_DEFAULT_SCALE,
-      center_x: videoDims.w / 2,
-      center_y: videoDims.h / 2,
-      auto_generated: false,
-    };
-    setZoomSegments((prev) => {
-      const next = [...prev, seg].sort((a, b) => a.start - b.start);
-      const idx = next.indexOf(seg);
-      // Defer selection to a microtask so the new index is valid against
-      // the freshly-rendered list.
-      Promise.resolve().then(() => selectZoom(idx));
-      return next;
-    });
-  }, [duration, videoDims, zoomSegments, selectZoom]);
+      const seg: ZoomSegment = {
+        start,
+        end,
+        scale: ZOOM_DEFAULT_SCALE,
+        center_x: videoDims.w / 2,
+        center_y: videoDims.h / 2,
+        auto_generated: false,
+      };
+      setZoomSegments((prev) => {
+        const next = [...prev, seg].sort((a, b) => a.start - b.start);
+        const idx = next.indexOf(seg);
+        // Defer selection to a microtask so the new index is valid against
+        // the freshly-rendered list.
+        Promise.resolve().then(() => selectZoom(idx));
+        return next;
+      });
+    },
+    [duration, videoDims, zoomSegments, selectZoom],
+  );
+
+  const addZoomAtPlayhead = useCallback(() => {
+    addZoomAt(videoRef.current?.currentTime ?? 0);
+  }, [addZoomAt]);
 
   // Step 5 suggestion detection. Runs the C.1 heuristic over the cursor
   // telemetry on the Rust side; the result replaces auto_generated
@@ -1605,6 +1615,7 @@ export default function Review() {
     update: updateZoom,
     remove: deleteZoom,
     addAtPlayhead: addZoomAtPlayhead,
+    addAt: addZoomAt,
     bounds: zoomBounds,
     canAdd: duration != null && videoDims != null,
     suggest: suggestZooms,
@@ -2607,6 +2618,13 @@ function BubbleLayer({
     // center first (default transform-origin 50% 50%), then translate(...)
     // shifts the flipped result.
     w.style.transform = `translate(${tx}px, ${ty}px) scaleX(-1)`;
+    // Offset-down-right drop shadow, mirroring the V3 export (main.swift
+    // `elevated`): offset 0.05*d down-right, soft, alpha 0.48. Set here (not in
+    // JSX) so it scales with cssDiameter like width/height/transform. CSS blur
+    // and CI gaussian differ, so the blur px is by-eye against the export.
+    const shOff = 0.05 * cssDiameter;
+    const shBlur = 0.08 * cssDiameter;
+    w.style.boxShadow = `${shOff.toFixed(1)}px ${shOff.toFixed(1)}px ${shBlur.toFixed(1)}px rgba(0,0,0,0.48)`;
   }, [
     screenVideoRef,
     webcamVideoRef,
@@ -2656,11 +2674,9 @@ function BubbleLayer({
         objectFit: "cover",
         pointerEvents: "none",
         background: "#000",
-        // Soft drop shadow — matched in the export by a tiny_skia + gblur
-        // pass in composite.rs. Tuning the two to look the same is by-eye
-        // (CSS and ffmpeg render shadows differently); see composite.rs's
-        // shadow constants for the conversion.
-        boxShadow: "0 8px 24px rgba(0, 0, 0, 0.22)",
+        // boxShadow is set imperatively in the position effect (scales with
+        // cssDiameter, mirrors the V3 export's offset-down-right drop shadow) —
+        // kept out of JSX so a re-render doesn't clobber the scaled value.
       }}
     />
   );
@@ -3288,12 +3304,14 @@ function Timeline(props: TimelineProps) {
           visible unselected (alwaysBand): a zoom is a range the user
           reasons about, not a point. */}
       {props.zoom.segments.length > 0 && props.duration != null && (
-        <div style={{ position: "relative", height: 14, marginTop: 16 }}>
+        <div style={{ position: "relative", height: 44, marginTop: 16 }}>
           <SegmentTrack
             segments={props.zoom.segments}
             duration={props.duration}
             selectedIndex={props.zoom.selectedIndex}
             onSelect={props.zoom.select}
+            onAddAt={props.zoom.addAt}
+            bandHeight={36}
             onChange={(i, p) => props.zoom.update(i, p)}
             onDragHover={(t) => {
               const track = trackRef.current;
@@ -3312,7 +3330,7 @@ function Timeline(props: TimelineProps) {
             alwaysBand
             minGap={ZOOM_MIN_DURATION}
             ramp={ZOOM_RAMP_S}
-            style={{ top: 0 }}
+            style={{ top: 4 }}
           />
         </div>
       )}

@@ -27,9 +27,14 @@ VT = ["-c:v", "h264_videotoolbox", "-b:v", "8M", "-profile:v", "high", "-pix_fmt
       "-color_primaries", "bt709", "-color_trc", "bt709", "-an"]
 PUNCH = {"start": 1.0, "end": 4.0, "scale": 2.0, "ramp": 0.6, "cxf": 0.66, "cyf": 0.42}
 
+# RE-BASELINED 2026-07-16: V3 now SHIPS an offset-down-right drop shadow (main.swift
+# `elevated`, the default), while V2 keeps its flat gblur shadow. So the bubble +
+# shadow_band region diffs below WILL diverge from V2 BY DESIGN — that divergence is
+# NOT a regression and this is no longer a V2-parity gate for the bubble. The mask/
+# placement (mechanical) and screen-anchoring still hold. See DECISIONS.md.
 D = 240                 # bubble diameter
 ZONE = "br"             # br|bl|tr|tl|bc|tc
-P = 24                  # composite.rs PADDING_PX
+P = 30                  # composite.rs PADDING_PX (bumped 24->30 for the shadow's room)
 SP = round(0.25 * D)    # shadow padding = 60
 OY = round(D / 30)      # shadow y offset = 8
 SIGMA = round(0.075 * D)  # gblur sigma = 18
