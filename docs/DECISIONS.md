@@ -20,7 +20,7 @@ Owner trusts the C.1 zoom detector now (tuned, judged, better than Screen Studio
 
 **Q3 — once, and structurally can't re-run.** Each recording gets exactly ONE review window (`review-<stamp>`, created at finalize); the app never reopens recordings. So a mount-time auto-load runs once and a Clear stays cleared with NO persisted flag. Code comment added at `suggestZooms`: IF reopening is ever added, a persisted "already-suggested" flag becomes necessary (empty zoom track = absent field / deleted sidecar, so "never suggested" and "cleared" are indistinguishable without it).
 
-**Q2 — accordion shape (owner DECISION INCOMPLETE).** Slims but stays (the per-zoom Scale slider is the one control not on the timeline lane — its reason to exist). Agreed: KEEP Scale (when selected), ADD "Clear all zooms", RENAME "Suggest zooms" -> "Re-suggest" (regenerate). **UNRESOLVED:** whether to RETIRE "Add zoom at playhead" (the timeline click-to-add / 2b covers it) or keep it as a convenience — the owner left this sub-decision blank in the hand-off (template placeholder unfilled). Resolve before building the accordion changes.
+**Q2 — accordion shape (RESOLVED).** Slims but stays (the per-zoom Scale slider is the one control not on the timeline lane — its reason to exist). KEEP Scale (when selected), ADD "Clear all zooms", RENAME "Suggest zooms" -> "Re-suggest" (regenerate), **RETIRE "Add zoom at playhead"** (owner, 2026-07-16 — the timeline click-to-add / 2b covers it). Final section = Re-suggest + Clear-all at top, Scale when a zoom is selected.
 
 ## 2026-07-16 — Bubble shadow LOCKED: offset-down-right drop shadow (model history + params)
 
