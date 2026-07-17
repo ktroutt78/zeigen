@@ -4,6 +4,12 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-17 — V2 defect #2: VFR truncation freezes the last ~8s of downscaled/trimmed zoom exports (FIXED)
+
+**V2 export truncation bug (found cutting real videos; second V2 defect after the color-tagging one at 2026-07-16).** A zoomed export routed to V2 — i.e. a downscale (720p/480p) or a trimmed export, since full-res zoom exports go to V3 — froze on the last ~8 seconds: the video stream ended early and the final frame held while audio kept playing. **Root cause:** `zoom_filter_fragment` (`edit.rs`) runs `zoompan`, which has no VFR passthrough and emits at its own `fps=30`, but the screen source is variable-frame-rate (~29fps, SCK caps at 30 via `minimumFrameInterval` and drops frames under load). zoompan's frame-count model assumed 30fps input against a shorter VFR reality, so the re-encoded zoom video came out shorter than the audio track and the tail froze. **Fix:** prepend `fps=30` to the zoom fragment so the VFR source is conformed to CFR30 *before* zoompan (one line at `edit.rs`; mirrors the identical `fps=,scale=` VFR-conform idiom already used by the GIF tail). Single shared call site (`edit.rs:1947`), so the fix covers every V2 zoom export — downscale, trim, and full-res-with-flag-off.
+
+**No deliberate test re-baseline was needed (corrects the going-in assumption).** The fix was expected to trip `legacy_args_pinned`, but that test byte-pins the `composite()` webcam-overlay pipeline (`tpad`/`hflip`/`alphamerge`/`overlay` → `composite.mp4`), which contains no `zoompan` — nothing in the crate byte-pins the zoom fragment string. Full lib suite 44/0 after the fix, `legacy_args_pinned` still green. V3 path never had the bug (it does a 1:1 frame pull, not zoompan). V2 stays as the runtime safety net; this removes a truncation defect from that net.
+
 ## 2026-07-17 — Audio NR: macOS Voice Isolation ON + Zeigen RNNoise OFF (owner's setup)
 
 Settled after owner A/B testing. Owner keeps a mechanical keyboard next to the laptop and runs **macOS Mic Mode = Voice Isolation** essentially always. That mode is applied at capture and reaches Zeigen's `AVCaptureSession` mic stream.

@@ -1546,8 +1546,15 @@ fn zoom_filter_fragment(
     );
     // Single quotes protect the commas inside if()/between()/clip() from the
     // filtergraph parser; the expression evaluator still splits on them.
+    //
+    // Lead `fps={fps}` conforms the VFR (~29fps) screen source to CFR30 BEFORE
+    // zoompan. Without it zoompan's frame-count model (which assumes its output
+    // fps) diverges from the shorter VFR input, so the zoomed video stream ends
+    // up shorter than the audio and the last ~8s freeze on downscale/trim
+    // exports (V2 defect #2, DECISIONS.md 2026-07-17). The `fps=` prefix mirrors
+    // the GIF tail's identical VFR-conform idiom below.
     Some(format!(
-        "[{in_label}]scale={nw}:{nh}:flags=lanczos,\
+        "[{in_label}]fps={fps},scale={nw}:{nh}:flags=lanczos,\
 zoompan=z='{z}':x='{panx}':y='{pany}':d=1:s={nw}x{nh}:fps={fps},\
 scale={w}:{h}:flags=lanczos[{out_label}]"
     ))
