@@ -884,17 +884,6 @@ impl PipelineReport {
     }
 }
 
-impl Mp4Resolution {
-    fn label(self) -> &'static str {
-        match self {
-            Self::P480 => "480p",
-            Self::P720 => "720p",
-            Self::P1080 => "1080p",
-            Self::Source => "source",
-        }
-    }
-}
-
 // Routing decision. `Run` attempts V3; `FallbackVisible` routes V2 with a named
 // note; `V2Silent` routes V2 with no note (flag off / GIF / copy fast path).
 enum V3Decision {
@@ -904,9 +893,10 @@ enum V3Decision {
 }
 
 // Pure predicate over the export inputs (plus the runtime flag). Precedence when
-// several conditions hold: flag -> GIF -> downscale -> trim -> annotations ->
-// multi-segment webcam -> webcam-without-zoom -> no-V3-work. The first match
-// wins and names the note.
+// several conditions hold: flag -> GIF -> trim -> annotations -> multi-segment
+// webcam -> no-V3-work. The first match wins and names the note. Downscale and
+// webcam-without-zoom are handled INSIDE run_v3_export now (both are V3 paths),
+// so they no longer fall back here.
 fn decide_v3(
     flag_on: bool,
     screen_path: &Path,
@@ -920,26 +910,15 @@ fn decide_v3(
         return V3Decision::V2Silent;
     }
     // GIF is out of v1 scope; the user explicitly chose the format, so no note.
-    let resolution = match mode {
-        PipelineMode::Mp4 { resolution } => resolution,
-        PipelineMode::Gif { .. } => return V3Decision::V2Silent,
-    };
-    // Non-Source downscale: mirror single_input's mp4_scale calc against the
-    // screen source. Untested through V3 -> V2 (same rule as trim).
-    if resolution != Mp4Resolution::Source {
-        let downscales = match probe_dimensions(screen_path) {
-            Ok((w, h)) => match resolution {
-                Mp4Resolution::P480 => h > 480,
-                Mp4Resolution::P720 => h > 720,
-                Mp4Resolution::P1080 => w > 1920,
-                Mp4Resolution::Source => false,
-            },
-            Err(_) => true,
-        };
-        if downscales {
-            return V3Decision::FallbackVisible(format!("{} downscale", resolution.label()));
-        }
+    if let PipelineMode::Gif { .. } = mode {
+        return V3Decision::V2Silent;
     }
+    // Downscale is a V3 path now: run_v3_export renders at source res then appends
+    // a terminal Lanczos downscale to the target dims (mirrors V2's mp4_scale,
+    // likewise applied after the overlays). This is the case that made 720p slower
+    // than 1080p on V2 — the 4x oversample is source-sized, so a smaller output
+    // only ADDED a scale stage instead of saving work. run_v3_export reads the
+    // resolution to size the output; nothing to fall back for here.
     // Trimmed: option 1 keeps trimmed exports on V2 (no pre-trim pass in the
     // switchover commit). Normalize trim the same way single_input does.
     if let Ok(duration) = probe_duration_seconds(screen_path) {
@@ -974,11 +953,13 @@ fn decide_v3(
             webcam_segments.len()
         ));
     }
-    // Webcam WITHOUT zoom is V2's two-pass composite() with its audio itsoffset
-    // shift; out of v1 scope.
-    if has_webcam && !has_zoom {
-        return V3Decision::FallbackVisible("webcam without zoom".into());
-    }
+    // Webcam WITHOUT zoom is a V3 path now. The compositor renders a static
+    // (unzoomed) frame with the bubble — empty zoom segments are a no-op, not a
+    // failure. V2's no-zoom composite() applied an audio itsoffset that only drops
+    // the SCK mic-init leading gap (<=70ms, unrelated to the webcam); every zoom
+    // export already ships without that correction and reads as in-sync, so V3's
+    // no-shift mux matches what's already accepted. The sync-critical webcam A/V
+    // lead IS replicated via BUBBLE_LEAD_FRAMES (DECISIONS.md 2026-07-17).
     // Effective watermark = a logo that still exists (V2 skips a missing logo).
     let has_watermark = watermark
         .as_ref()
@@ -1037,12 +1018,27 @@ fn probe_fps(path: &Path) -> f64 {
     parsed.filter(|f| *f > 0.0).unwrap_or(30.0)
 }
 
-// V3 export: cicompositor renders zoom + bubble + watermark to a video-only mp4,
-// then ffmpeg muxes the SCREEN source's audio (arnndn, no itsoffset — the single-
-// input path doesn't shift). Returns Err to signal the caller to fall through to
-// V2; on Err the partial `output` is not trusted (V2 overwrites it). `webcam` is
-// the single segment (eligibility guarantees <=1); `watermark` is pre-filtered to
-// an existing logo.
+// V3 output dimensions for a target resolution, mirroring V2's mp4_scale tail
+// (`-2:480` / `-2:720` / `'min(iw,1920)':-2`): P480/P720 constrain height, P1080
+// caps width at 1920, each keeping aspect and rounding to an even number (ffmpeg
+// `-2`). Returns the source dims unchanged when the target wouldn't actually
+// shrink it, so the compositor skips the downscale and stays the Source path.
+fn v3_output_dims(w: u32, h: u32, resolution: Mp4Resolution) -> (u32, u32) {
+    let even = |x: f64| ((x / 2.0).round() as u32).max(1) * 2;
+    match resolution {
+        Mp4Resolution::P480 if h > 480 => (even(w as f64 * 480.0 / h as f64), 480),
+        Mp4Resolution::P720 if h > 720 => (even(w as f64 * 720.0 / h as f64), 720),
+        Mp4Resolution::P1080 if w > 1920 => (1920, even(h as f64 * 1920.0 / w as f64)),
+        _ => (w, h),
+    }
+}
+
+// V3 export: cicompositor renders zoom + bubble + watermark to a video-only mp4
+// (downscaled to `resolution` if below source), then ffmpeg muxes the SCREEN
+// source's audio (arnndn, no itsoffset — the single-input path doesn't shift).
+// Returns Err to signal the caller to fall through to V2; on Err the partial
+// `output` is not trusted (V2 overwrites it). `webcam` is the single segment
+// (eligibility guarantees <=1); `watermark` is pre-filtered to an existing logo.
 fn run_v3_export(
     screen_path: &Path,
     webcam: Option<&Path>,
@@ -1050,6 +1046,7 @@ fn run_v3_export(
     sidecar: &SidecarState,
     webcam_size: crate::composite::WebcamSize,
     watermark: Option<&Watermark>,
+    resolution: Mp4Resolution,
     on_progress: impl Fn(f64),
 ) -> Result<(), String> {
     on_progress(0.02);
@@ -1058,6 +1055,7 @@ fn run_v3_export(
         return Err(format!("cicompositor binary missing: {}", bin.display()));
     }
     let (w, h) = probe_dimensions(screen_path)?;
+    let (out_w, out_h) = v3_output_dims(w, h, resolution);
 
     // Temp workspace for the zoom JSON, bubble PNGs, and the video-only render.
     let stem = screen_path
@@ -1119,6 +1117,12 @@ fn run_v3_export(
     let video_only = temp_dir.join("v3-video.mp4");
     let mut cmd = std::process::Command::new(&bin);
     cmd.arg(screen_path).arg(&video_only).arg("identity");
+    // Below-source target -> compositor appends a terminal Lanczos downscale to
+    // these even, aspect-matched dims. Equal to source -> not set, output == source.
+    if (out_w, out_h) != (w, h) {
+        cmd.env("OUTPUT_WIDTH", out_w.to_string())
+            .env("OUTPUT_HEIGHT", out_h.to_string());
+    }
     if let Some(zj) = &zoom_json_path {
         cmd.env("ZOOM_SEGMENTS", zj);
     }
@@ -1230,6 +1234,11 @@ pub(crate) fn run_edit_pipeline(
             let effective_wm = watermark
                 .as_ref()
                 .filter(|w| w.logo_path.is_file());
+            // Run implies Mp4 (GIF routes to V2Silent in decide_v3).
+            let resolution = match mode {
+                PipelineMode::Mp4 { resolution } => resolution,
+                PipelineMode::Gif { .. } => unreachable!("GIF is V2Silent, never Run"),
+            };
             match run_v3_export(
                 screen_path,
                 webcam_segments.first().map(|p| p.as_path()),
@@ -1237,6 +1246,7 @@ pub(crate) fn run_edit_pipeline(
                 sidecar,
                 webcam_size,
                 effective_wm,
+                resolution,
                 on_progress.clone(),
             ) {
                 // V3 success is the normal path — done, V2 never runs, no note.
@@ -3821,9 +3831,10 @@ mod tests {
         // GIF -> silent (the user chose the format).
         let gif = PipelineMode::Gif { resolution: GifResolution::P480, fps: 12 };
         assert_eq!(v3_tag(&decide_v3(true, &scr, &[], &zoom, gif, &none)), "silent");
-        // Downscale -> named fallback (1280x720 under P480 downscales).
+        // Downscale is a V3 path now (renders at source res + terminal Lanczos
+        // downscale in run_v3_export) -> eligible, no fallback.
         let p480 = PipelineMode::Mp4 { resolution: Mp4Resolution::P480 };
-        assert_eq!(v3_tag(&decide_v3(true, &tall, &[], &zoom, p480, &none)), "fb:480p downscale");
+        assert_eq!(v3_tag(&decide_v3(true, &tall, &[], &zoom, p480, &none)), "run");
         // Same tall source at Source res does NOT downscale -> eligible.
         assert_eq!(v3_tag(&decide_v3(true, &tall, &[], &zoom, src, &none)), "run");
         // Trim -> named fallback.
@@ -3848,10 +3859,11 @@ mod tests {
         // Multi-segment webcam -> named fallback (concat kept out of the switchover).
         assert!(v3_tag(&decide_v3(true, &scr, &wc2, &zoom, src, &none))
             .starts_with("fb:webcam has 2 segments"));
-        // Webcam without zoom -> named fallback (two-pass composite path).
+        // Webcam without zoom is a V3 path now (static frame + bubble; empty zoom
+        // segments are a no-op). The dropped itsoffset only removed the <=70ms
+        // mic-init gap, which every zoom export already ships without.
         let no_zoom = SidecarState::default();
-        assert_eq!(v3_tag(&decide_v3(true, &scr, &wc1, &no_zoom, src, &none)),
-            "fb:webcam without zoom");
+        assert_eq!(v3_tag(&decide_v3(true, &scr, &wc1, &no_zoom, src, &none)), "run");
         // No V3 work (plain copy fast path) -> silent V2.
         assert_eq!(v3_tag(&decide_v3(true, &scr, &[], &no_zoom, src, &none)), "silent");
         // Eligible: zoom only, and zoom + single webcam.
@@ -3919,6 +3931,7 @@ mod tests {
             &sidecar,
             crate::composite::WebcamSize::Medium,
             wm.as_ref(),
+            Mp4Resolution::Source,
             |_| {},
         )
         .expect("v3 export");
@@ -3930,6 +3943,65 @@ mod tests {
         // V3 tags the transfer/primaries (V2's known bug drops them).
         assert_eq!(ffprobe_field(&out, "stream=color_transfer", "v:0"), "bt709",
             "V3 output carries the 709 transfer tag");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Downscale and webcam-without-zoom are V3 paths now (reclaimed from V2).
+    // Downscale: run_v3_export renders at source res then Lanczos-downscales to the
+    // target dims — assert the output lands at the requested height with an even,
+    // aspect-preserved width matching V2's mp4_scale `-2:480` (1280x720 -> 854x480),
+    // still 709-tagged with audio. Webcam-no-zoom: a static frame + bubble renders
+    // and muxes cleanly at source res (empty zoom segments are a no-op, not a fail).
+    #[test]
+    fn v3_downscale_and_webcam_no_zoom_exports() {
+        ensure_audio_model_for_tests();
+        let dir = std::env::temp_dir().join(format!("zeigen-v3-reclaim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let screen = synth_source(&dir, "screen.mp4", 2.0, 2.0, 1280, 720);
+        let webcam = dir.join("webcam-00.mp4");
+        let wc = Command::new(FFMPEG_PATH)
+            .args(["-y", "-v", "error", "-f", "lavfi", "-i",
+                   "testsrc=duration=2:size=160x160:rate=30", "-c:v", "libx264",
+                   "-pix_fmt", "yuv420p"])
+            .arg(&webcam).output().expect("webcam synth");
+        assert!(wc.status.success(), "webcam synth: {}", String::from_utf8_lossy(&wc.stderr));
+
+        let kf = |t: f64, scale: f64| ZoomKeyframe {
+            t, scale, center_x: 640.0, center_y: 360.0, ease: Ease::InOutCubic,
+            auto_generated: false,
+        };
+        let zoomed = SidecarState {
+            zoom: vec![kf(0.3, 1.0), kf(0.9, 2.0), kf(1.1, 2.0), kf(1.7, 1.0)],
+            ..Default::default()
+        };
+
+        // (a) Downscale to 480p with zoom (formerly "fb:480p downscale").
+        let out480 = dir.join("out-480.mp4");
+        run_v3_export(&screen, None, &out480, &zoomed,
+            crate::composite::WebcamSize::Medium, None, Mp4Resolution::P480, |_| {})
+            .expect("v3 480p export");
+        let (dw, dh) = probe_dimensions(&out480).unwrap();
+        assert_eq!(dh, 480, "480p downscale height");
+        assert_eq!(dw, 854, "aspect-preserved even width (1280*480/720 -> 854), matches V2 -2:480");
+        assert_eq!(ffprobe_field(&out480, "stream=color_transfer", "v:0"), "bt709",
+            "downscaled V3 still tags 709");
+        assert_eq!(ffprobe_field(&out480, "stream=codec_type", "a:0"), "audio",
+            "downscaled export keeps audio");
+
+        // (b) Webcam WITHOUT zoom at Source res (formerly "fb:webcam without zoom").
+        let no_zoom = SidecarState {
+            bubble_zone: Some(crate::composite::BubbleZone::BottomRight),
+            ..Default::default()
+        };
+        let outwc = dir.join("out-wc.mp4");
+        run_v3_export(&screen, Some(&webcam), &outwc, &no_zoom,
+            crate::composite::WebcamSize::Medium, None, Mp4Resolution::Source, |_| {})
+            .expect("v3 webcam-no-zoom export");
+        assert_eq!(probe_dimensions(&outwc).unwrap(), (1280, 720), "source res preserved");
+        assert_eq!(ffprobe_field(&outwc, "stream=codec_type", "a:0"), "audio",
+            "webcam-no-zoom export keeps audio");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

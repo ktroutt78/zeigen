@@ -171,6 +171,14 @@ let W = Int(naturalSize.width), H = Int(naturalSize.height)
 guard W > 0, H > 0 else { fail("bad dimensions \(W)x\(H)") }
 let fps = nominalFPS > 0 ? Int(nominalFPS.rounded()) : 30
 
+// Output resolution: composite at source WxH, then (when OUTPUT_* request smaller
+// dims) append a terminal Lanczos downscale before the writer — mirrors V2's
+// mp4_scale, which likewise scales AFTER the overlays. Rust passes even,
+// aspect-matched dims (v3_output_dims); absent -> output == source.
+let outW = Int(env["OUTPUT_WIDTH"] ?? "") ?? W
+let outH = Int(env["OUTPUT_HEIGHT"] ?? "") ?? H
+let downscaleOut = outW > 0 && outH > 0 && (outW != W || outH != H)
+
 // --- Reader: decode to native 709 video-range YCbCr, so CIImage interprets the
 // source color from the buffer's own attachments instead of us guessing a transfer
 // on a BGRA buffer (that guess shifted luma ~27 dB in Phase 1's first measurement). ---
@@ -215,8 +223,8 @@ if let wcPath = bubbleWebcam {
 guard let writer = try? AVAssetWriter(outputURL: outURL, fileType: .mp4) else { fail("writer init") }
 let writerInput = AVAssetWriterInput(mediaType: .video, outputSettings: [
     AVVideoCodecKey: AVVideoCodecType.h264,
-    AVVideoWidthKey: W,
-    AVVideoHeightKey: H,
+    AVVideoWidthKey: outW,
+    AVVideoHeightKey: outH,
     AVVideoCompressionPropertiesKey: [
         AVVideoAverageBitRateKey: 8_000_000,
         AVVideoProfileLevelKey: kVTProfileLevel_H264_High_AutoLevel as String,
@@ -237,8 +245,8 @@ let adaptor = AVAssetWriterInputPixelBufferAdaptor(
     assetWriterInput: writerInput,
     sourcePixelBufferAttributes: [
         kCVPixelBufferPixelFormatTypeKey as String: outFmt,
-        kCVPixelBufferWidthKey as String: W,
-        kCVPixelBufferHeightKey as String: H,
+        kCVPixelBufferWidthKey as String: outW,
+        kCVPixelBufferHeightKey as String: outH,
     ])
 guard writer.canAdd(writerInput) else { fail("cannot add writer input") }
 writer.add(writerInput)
@@ -436,6 +444,19 @@ writerInput.requestMediaDataWhenReady(on: queue) {
         if let wm = wmComposite {
             out = wm.composited(over: out)
         }
+
+        // Terminal downscale to the requested output dims — AFTER every overlay, so
+        // the bubble/watermark shrink with the frame exactly as V2's mp4_scale does.
+        // One Lanczos pass over the exact WxH frame; crop to the even output rect.
+        if downscaleOut {
+            let sScale = Double(outH) / Hd
+            let sAspect = (Double(outW) / Wd) / sScale
+            out = out.cropped(to: CGRect(x: 0, y: 0, width: W, height: H))
+                .clampedToExtent()
+                .applyingFilter("CILanczosScaleTransform",
+                    parameters: [kCIInputScaleKey: sScale, kCIInputAspectRatioKey: sAspect])
+                .cropped(to: CGRect(x: 0, y: 0, width: outW, height: outH))
+        }
         if velLogPath != nil {
             velLog += String(format: "%.4f,%.5f,%.5f,%.4f,%.4f,%.4f\n",
                 t, s, s - prevScale, blurVel, blurAmount, transSpeed)
@@ -454,7 +475,7 @@ writerInput.requestMediaDataWhenReady(on: queue) {
             kCVImageBufferColorPrimaries_ITU_R_709_2, .shouldPropagate)
         CVBufferSetAttachment(dst, kCVImageBufferTransferFunctionKey,
             kCVImageBufferTransferFunction_ITU_R_709_2, .shouldPropagate)
-        ciContext.render(out, to: dst, bounds: CGRect(x: 0, y: 0, width: W, height: H),
+        ciContext.render(out, to: dst, bounds: CGRect(x: 0, y: 0, width: outW, height: outH),
                           colorSpace: cs709)
         if !adaptor.append(dst, withPresentationTime: pts) {
             fail("append failed: \(writer.error?.localizedDescription ?? "?")")
@@ -467,7 +488,8 @@ done.wait()
 if writer.status == .completed {
     if let vp = velLogPath { try? velLog.write(toFile: vp, atomically: true, encoding: .utf8) }
     let dt = Date().timeIntervalSince(t0)
-    print(String(format: "OK  %dx%d  %d frames  scenario=%@  wall=%.2fs", W, H, frames, scenario, dt))
+    print(String(format: "OK  %dx%d->%dx%d  %d frames  scenario=%@  wall=%.2fs",
+                 W, H, outW, outH, frames, scenario, dt))
 } else {
     fail("writer status \(writer.status.rawValue): \(writer.error?.localizedDescription ?? "?")")
 }
