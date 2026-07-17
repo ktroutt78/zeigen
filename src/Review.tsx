@@ -757,8 +757,18 @@ export default function Review() {
   // Step 5 suggestion detection. Runs the C.1 heuristic over the cursor
   // telemetry on the Rust side; the result replaces auto_generated
   // segments only. Suggestions overlapping a manual zoom are dropped —
-  // user-placed segments always win. Button-only by design: no auto-run
-  // at review-open until the detector has earned it (ZOOM-LAYER-PLAN).
+  // user-placed segments always win.
+  //
+  // AUTO-LOAD APPROVED (owner, 2026-07-16; detector has earned it — see
+  // DECISIONS.md). Planned: run this ONCE at review-open on a fresh recording
+  // (a ref-guarded mount effect), fold the result into the loaded snapshot so
+  // it reads as the default (not "— edited"), and give a "Clear all zooms"
+  // escape hatch. NO persisted "already-suggested" flag is needed: each
+  // recording gets exactly one review window (review-<stamp>) and the app never
+  // reopens recordings, so the mount-time run happens exactly once and a Clear
+  // stays cleared for free. IF reopening recordings is ever added, THAT is when
+  // a persisted flag becomes necessary (an empty zoom track is written absent /
+  // deletes the sidecar, so "never suggested" and "cleared" look identical).
   const [suggesting, setSuggesting] = useState(false);
   const suggestZooms = useCallback(async () => {
     if (!sourcePath || duration == null) return;

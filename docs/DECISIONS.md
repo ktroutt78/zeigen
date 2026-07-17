@@ -4,6 +4,24 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-16 — Auto-load suggested zooms at review-open: APPROVED + planned (not yet built)
+
+Owner trusts the C.1 zoom detector now (tuned, judged, better than Screen Studio) — the "button-only until it earns it" gate (ZOOM-LAYER-PLAN) is lifted. Auto-populate suggestions on review-open. **Reasoning:** the copy-path concern is solved by making the escape hatch one click — a "Clear all zooms" button. Common case (owner always wants zooms) becomes free; rare case (plain `-c:v copy` export) is one click back. The friction was backwards — owner was clicking Suggest every time for the thing they always want. With V3 default, the zoomed re-encode is cheap, so defaulting to zooms costs little.
+
+**Shape (approved, resume here — NOT built):**
+- Auto-load effect: runs ONCE at review-open (ref-guarded mount effect) when `sourcePath` + `duration` ready, sidecar loaded, and `zoomSegments` empty → calls the existing `suggestZooms` (silent on no-telemetry) → folds the result into the loaded `snapshot` baseline + persists immediately.
+- "Clear all zooms" button in the Zoom accordion → `setZoomSegments([])` + deselect.
+- No Rust changes (`suggest_zooms` command exists; no new sidecar field).
+
+**Q1 — three wrinkles (only one real):**
+1. **dirty/"— edited" baseline (real).** Zooms load into `snapshot` (last-saved baseline), then auto-load mutates `zoomSegments` after → `currentState != snapshot` → header shows "— edited" on open before the user touches anything. Fix: fold auto-loaded zooms into `snapshot` so they read as the default; then a Clear correctly shows "— edited". Also persist the auto-zooms immediately (not just via debounce) since the export reads the sidecar.
+2. **Async timing.** `suggest_zooms` needs sourcePath + duration + cursor telemetry; lane populates a beat after open; "no telemetry" must be SILENT (no notice spam per open).
+3. **Default export re-encodes** (zooms present) instead of `-c:v copy`. Deliberate — Clear-all restores copy; cheap under V3.
+
+**Q3 — once, and structurally can't re-run.** Each recording gets exactly ONE review window (`review-<stamp>`, created at finalize); the app never reopens recordings. So a mount-time auto-load runs once and a Clear stays cleared with NO persisted flag. Code comment added at `suggestZooms`: IF reopening is ever added, a persisted "already-suggested" flag becomes necessary (empty zoom track = absent field / deleted sidecar, so "never suggested" and "cleared" are indistinguishable without it).
+
+**Q2 — accordion shape (owner DECISION INCOMPLETE).** Slims but stays (the per-zoom Scale slider is the one control not on the timeline lane — its reason to exist). Agreed: KEEP Scale (when selected), ADD "Clear all zooms", RENAME "Suggest zooms" -> "Re-suggest" (regenerate). **UNRESOLVED:** whether to RETIRE "Add zoom at playhead" (the timeline click-to-add / 2b covers it) or keep it as a convenience — the owner left this sub-decision blank in the hand-off (template placeholder unfilled). Resolve before building the accordion changes.
+
 ## 2026-07-16 — Bubble shadow LOCKED: offset-down-right drop shadow (model history + params)
 
 The V3 bubble depth (flagged in the entry below) is shipped. Final model + the dead ends, so nobody re-derives them.
