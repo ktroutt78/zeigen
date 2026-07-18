@@ -376,7 +376,10 @@ fn bubble_position_event(
         t,
         x: x_frac,
         y: y_frac,
-        diameter: diameter_physical,
+        // Store as a fraction of frame width (like x/y), so it resolves to the
+        // right pixel size against any capture resolution. diameter_physical and
+        // fw are both logical points here — their ratio is the frame fraction.
+        diameter_frac: diameter_physical.map(|d| d / fw as f64),
     });
     rec.last_logged = Some((now, x_frac, y_frac));
     Ok(())

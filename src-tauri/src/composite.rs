@@ -141,6 +141,30 @@ impl WebcamSize {
             Self::Large => 320,
         }
     }
+    // Fallback diameter as a fraction of frame width, when the sidecar logged no
+    // diameter_frac. The px() values were tuned at the 1512-wide built-in, so
+    // frac = px / 1512 reproduces them there and scales elsewhere.
+    fn frac(self) -> f64 {
+        self.px() as f64 / BUBBLE_REF_WIDTH
+    }
+}
+
+// Reference frame width the bubble diameter/padding constants were tuned at
+// (the built-in's logical width). frac = px / this; px = frac * screen_width.
+const BUBBLE_REF_WIDTH: f64 = 1512.0;
+
+// Resolve a logged diameter fraction (or the WebcamSize fallback) to pixels for a
+// given capture frame width. Shared by the V2 and V3 bubble builders.
+fn resolve_diameter_px(
+    bubble_position_log: &[BubblePositionEntry],
+    size: WebcamSize,
+    frame_width: u32,
+) -> u32 {
+    let frac = bubble_position_log
+        .first()
+        .and_then(|e| e.diameter_frac)
+        .unwrap_or_else(|| size.frac());
+    (frac * frame_width as f64).round().max(1.0) as u32
 }
 
 #[derive(Clone, Copy)]
@@ -258,7 +282,14 @@ impl Watermark {
     }
 }
 
-const PADDING_PX: u32 = 30;
+// Bubble inset from the frame edge, as a fraction of frame width (was a fixed
+// 30px, which shrank to a half-relative inset once capture doubled to backing
+// res). 30/1512 reproduces the old inset at the built-in and scales with res.
+const PADDING_FRAC: f64 = 30.0 / BUBBLE_REF_WIDTH;
+
+pub(crate) fn resolve_padding_px(frame_width: u32) -> u32 {
+    (PADDING_FRAC * frame_width as f64).round() as u32
+}
 
 // V2 Step 2: export bakes ONE constant bubble position (a zone) picked in
 // Review. The old PTS-keyed f(t) position (build_inline_position_expr /
@@ -542,10 +573,11 @@ pub(crate) fn webcam_overlay_filter(
     shadow_padding: u32,
     shadow_offset_y: u32,
     zone: BubbleZone,
+    padding: u32,
 ) -> String {
     webcam_overlay_filter_trimmed(
         base_label, out_label, n, wc0, mask_idx, shadow_idx, target, pad_lead, 0.0, shadow_sigma,
-        shadow_padding, shadow_offset_y, zone,
+        shadow_padding, shadow_offset_y, zone, padding,
     )
 }
 
@@ -564,6 +596,7 @@ pub(crate) fn webcam_overlay_filter_trimmed(
     shadow_padding: u32,
     shadow_offset_y: u32,
     zone: BubbleZone,
+    padding: u32,
 ) -> String {
     // start_mode=clone freezes the first webcam frame across the LEAD (bubble
     // visible from t=0 despite AVCaptureSession lagging SCK); the trim drops
@@ -603,8 +636,8 @@ format=yuva420p[wc_rgba];\
 [wc_rgba][mask_g]alphamerge[wc];\
 [{shadow_idx}:v]format=rgba,gblur=sigma={shadow_sigma},colorchannelmixer=aa={SHADOW_ALPHA}[shadow];"
     ));
-    let overlay_xy = zone.overlay_xy(PADDING_PX);
-    let shadow_xy = zone.shadow_overlay_xy(PADDING_PX, target, shadow_padding, shadow_offset_y);
+    let overlay_xy = zone.overlay_xy(padding);
+    let shadow_xy = zone.shadow_overlay_xy(padding, target, shadow_padding, shadow_offset_y);
     filter.push_str(&format!(
         "[{base_label}][shadow]overlay={shadow_xy}:eof_action=pass[shadowed];\
 [shadowed][wc]overlay={overlay_xy}:eof_action=pass[{out_label}]"
@@ -632,6 +665,7 @@ pub(crate) struct WebcamOverlay {
     shadow_padding: u32,
     shadow_offset_y: u32,
     zone: BubbleZone,
+    padding: u32,
 }
 
 impl WebcamOverlay {
@@ -650,6 +684,7 @@ impl WebcamOverlay {
             self.shadow_padding,
             self.shadow_offset_y,
             self.zone,
+            self.padding,
         )
     }
 }
@@ -665,13 +700,11 @@ pub(crate) fn build_webcam_overlay(
     loop_dur: f64,
     input_base: usize,
     trim_in: f64,
+    frame_width: u32,
 ) -> Result<WebcamOverlay, String> {
     // Same diameter source + shadow math as build_composite_args.
-    let target = bubble_position_log
-        .first()
-        .and_then(|e| e.diameter)
-        .map(|d| d.round().max(1.0) as u32)
-        .unwrap_or_else(|| size.px());
+    let target = resolve_diameter_px(bubble_position_log, size, frame_width);
+    let padding = resolve_padding_px(frame_width);
     let mask_path = out_dir.join(mask_file_name("mask", target, bubble_roundness));
     render_alpha_mask(target, bubble_roundness, &mask_path)?;
     let shadow_padding = ((target as f64) * SHADOW_PADDING_FRAC).round() as u32;
@@ -722,6 +755,7 @@ pub(crate) fn build_webcam_overlay(
         shadow_padding,
         shadow_offset_y,
         zone,
+        padding,
     })
 }
 
@@ -744,13 +778,10 @@ pub(crate) fn build_v3_bubble_assets(
     bubble_position_log: &[BubblePositionEntry],
     bubble_roundness: Option<f64>,
     size: WebcamSize,
+    frame_width: u32,
 ) -> Result<V3BubbleAssets, String> {
     // Diameter source mirrors build_webcam_overlay exactly.
-    let diameter = bubble_position_log
-        .first()
-        .and_then(|e| e.diameter)
-        .map(|d| d.round().max(1.0) as u32)
-        .unwrap_or_else(|| size.px());
+    let diameter = resolve_diameter_px(bubble_position_log, size, frame_width);
     let mask_path = out_dir.join(mask_file_name("v3mask", diameter, bubble_roundness));
     render_alpha_mask(diameter, bubble_roundness, &mask_path)?;
     let shadow_padding = ((diameter as f64) * SHADOW_PADDING_FRAC).round() as u32;
@@ -803,6 +834,7 @@ pub fn composite(
         watermark,
         screen_dur,
         audio_shift,
+        crate::edit::probe_dimensions(screen_path)?.0,
     )?;
     run_composite_ffmpeg(args, screen_dur, bubble_position_log.len(), on_progress)
 }
@@ -822,18 +854,14 @@ fn build_composite_args(
     watermark: Option<Watermark>,
     screen_dur: f64,
     audio_shift: f64,
+    frame_width: u32,
 ) -> Result<Vec<String>, String> {
-    // Prefer the live bubble diameter (sampled in physical pixels at record
-    // time) over the legacy WebcamSize default. The Size/Corner UI controls
-    // were removed in phase 8; the bubble is now drag-resizable and the
-    // composite has to honor whatever the user shipped. First-entry only —
-    // resizing mid-recording is rare and a single source-of-truth keeps the
-    // ffmpeg `scale` filter constant. None means an old sidecar; fall back.
-    let target = bubble_position_log
-        .first()
-        .and_then(|e| e.diameter)
-        .map(|d| d.round().max(1.0) as u32)
-        .unwrap_or_else(|| size.px());
+    // Prefer the live bubble diameter (a fraction of frame width, resolved to px
+    // against this capture's width) over the WebcamSize fallback. First-entry
+    // only — resizing mid-recording is rare and a single source-of-truth keeps
+    // the ffmpeg `scale` filter constant.
+    let target = resolve_diameter_px(bubble_position_log, size, frame_width);
+    let padding = resolve_padding_px(frame_width);
 
     let lead_in = WEBCAM_LEAD_MS / 1000.0;
 
@@ -939,6 +967,7 @@ fn build_composite_args(
         shadow_padding,
         shadow_offset_y,
         zone,
+        padding,
     );
 
     // Fix B: bake the watermark as one final overlay over the composited frame.
@@ -1112,8 +1141,8 @@ mod tests {
 
     fn log_2_entries() -> Vec<BubblePositionEntry> {
         vec![
-            BubblePositionEntry { t: 0.0, x: 0.9, y: 0.85, diameter: Some(240.0) },
-            BubblePositionEntry { t: 2.0, x: 0.5, y: 0.5, diameter: Some(240.0) },
+            BubblePositionEntry { t: 0.0, x: 0.9, y: 0.85, diameter_frac: Some(240.0 / 1512.0) },
+            BubblePositionEntry { t: 2.0, x: 0.5, y: 0.5, diameter_frac: Some(240.0 / 1512.0) },
         ]
     }
 
@@ -1134,6 +1163,9 @@ mod tests {
             None,
             10.0,
             0.02,
+            // Pin at 1512 (the frac reference), so padding resolves to 30 and a
+            // 240/1512 diameter_frac resolves to 240 — the pre-fraction pins hold.
+            1512,
         )
         .unwrap()
     }
@@ -1281,7 +1313,7 @@ mod tests {
     #[test]
     fn resolve_zone_migration_and_defaults() {
         fn e(x: f64, y: f64) -> BubblePositionEntry {
-            BubblePositionEntry { t: 0.0, x, y, diameter: Some(240.0) }
+            BubblePositionEntry { t: 0.0, x, y, diameter_frac: Some(240.0 / 1512.0) }
         }
         // Explicit zone always wins, log ignored (mid-edges included).
         assert_eq!(

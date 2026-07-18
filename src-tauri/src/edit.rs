@@ -132,11 +132,15 @@ pub struct BubblePositionEntry {
     pub t: f64,
     pub x: f64,
     pub y: f64,
-    // Bubble circle diameter in physical pixels at this sample. None on
-    // sidecars written before phase 8; the composite falls back to the
-    // legacy WebcamSize::px() default in that case.
+    // Bubble circle diameter as a FRACTION of the capture frame WIDTH (like x/y,
+    // which are already frame fractions). Resolved to pixels at export as
+    // frac * screen_width, so the bubble holds its relative size at any capture
+    // resolution. Stored absolute (physical px) before 2026-07-17; that was
+    // correct only while capture == the frontend's logical space (both 1512),
+    // and rendered half-size once capture moved to the 2x backing store — the
+    // whole reason this became a fraction. None -> the WebcamSize::frac() default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub diameter: Option<f64>,
+    pub diameter_frac: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -1110,6 +1114,7 @@ fn run_v3_export(
             &sidecar.bubble_position_log,
             sidecar.bubble_roundness,
             webcam_size,
+            w,
         )?),
         None => None,
     };
@@ -1136,6 +1141,9 @@ fn run_v3_export(
             .env("BUBBLE_SHADOW_PNG", &b.shadow_path)
             .env("BUBBLE_DIAMETER", b.diameter.to_string())
             .env("BUBBLE_ZONE", b.zone.code())
+            // Padding scales with the compositing frame width so the bubble holds
+            // its relative inset at backing resolution (default would stay 30px).
+            .env("BUBBLE_PADDING", crate::composite::resolve_padding_px(w).to_string())
             .env("BUBBLE_LEAD_FRAMES", (lead.max(0.0) as i64).to_string());
     }
     if let Some(wm) = watermark {
@@ -1758,6 +1766,7 @@ fn run_edit_pipeline_single_input(
             duration,
             webcam_base,
             trim_in,
+            probe_dimensions(source)?.0,
         )?)
     } else {
         None
@@ -2624,7 +2633,7 @@ mod tests {
       "t": 0.0,
       "x": 0.9,
       "y": 0.85,
-      "diameter": 240.0
+      "diameter_frac": 0.15873015873015872
     }
   ],
   "thumbnail_time": 7.5,
@@ -2661,7 +2670,7 @@ mod tests {
                 t: 0.0,
                 x: 0.9,
                 y: 0.85,
-                diameter: Some(240.0),
+                diameter_frac: Some(240.0 / 1512.0),
             }],
             thumbnail_time: Some(7.5),
             bubble_roundness: Some(0.35),
@@ -2883,7 +2892,7 @@ mod tests {
         let sidecar = SidecarState {
             zoom: vec![kf(0.3, 1.0), kf(0.9, 2.0), kf(1.1, 2.0), kf(1.7, 1.0)],
             bubble_position_log: vec![BubblePositionEntry {
-                t: 0.0, x: 0.9, y: 0.85, diameter: Some(120.0),
+                t: 0.0, x: 0.9, y: 0.85, diameter_frac: Some(120.0 / 1512.0),
             }],
             bubble_zone: Some(crate::composite::BubbleZone::BottomRight),
             ..Default::default()
@@ -3915,7 +3924,7 @@ mod tests {
         let sidecar = SidecarState {
             zoom: vec![kf(0.3, 1.0), kf(0.9, 2.0), kf(1.1, 2.0), kf(1.7, 1.0)],
             bubble_position_log: vec![BubblePositionEntry {
-                t: 0.0, x: 0.9, y: 0.85, diameter: Some(120.0),
+                t: 0.0, x: 0.9, y: 0.85, diameter_frac: Some(120.0 / 1512.0),
             }],
             bubble_zone: Some(crate::composite::BubbleZone::BottomRight),
             ..Default::default()

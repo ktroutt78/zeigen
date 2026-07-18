@@ -4,6 +4,17 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-17 — CLASS: values stored in one coordinate space, consumed in another (backing-scale exposed three)
+
+The 1512->3024 backing-scale capture change surfaced a recurring bug class, logged once here rather than three times: **a value written in coordinate space A and read in space B, correct only because A == B while capture happened to equal the frontend's logical space (both 1512). The moment capture became the 2x backing store, every one broke.** All three shipped silently until backing-scale moved the two spaces apart. The pattern to watch: a spatial value that is NOT a fraction and NOT dimensionless. If a fourth appears, it is this.
+
+The three found and fixed:
+1. **Cursor telemetry scale** (RecordingSession.swift) — `video_size` doubled to backing px but the cursor mapping `scale` would have stayed 1.0, halving every zoom-focus fraction (focus drifts top-left). Fixed by `captureGeometry()` returning width/height/scale as one coupled triple + a test that fails if they diverge (commit 27d0e11).
+2. **LinkedIn export resolution** (Review.tsx) — the direct-LinkedIn path forced `resolution: "source"`, harmless when Source was a 1512-logical capture, a 4K upload once capture went backing (LinkedIn downscales to 1080p anyway). Fixed to 1080p-supersample (commit f3a692c).
+3. **Bubble diameter** (this commit) — logged in logical points, consumed as an absolute pixel diameter against the export screen; correct at 1512, half-size at 3024. Preview and export AGREED WITH EACH OTHER while both wrong — the worst failure mode. Fixed by storing a **fraction** of frame width (`diameter_frac`), like x/y already were, resolved to px against the capture width at export.
+
+**Full sidecar audit (owner-requested), so nobody waits for a fourth to surface:** diameter was the ONLY remaining instance. Everything else is safe by being a fraction, a same-space value, or dimensionless — bubble x/y are fractions; **zoom center_x/y are stored AND consumed in capture-pixel space** (detection reads `video_size`, export/preview divide by the source width — same space, they move together, unlike diameter which crossed spaces); trim/thumbnail are seconds; scale/roundness/opacity/watermark scale_frac are ratios; annotations are dead. No fourth in the sidecar.
+
 ## 2026-07-17 — Zoom detection thresholds scaled to capture resolution (step 3 of backing-scale)
 
 Backing-scale doubled telemetry pixels (built-in 1512->3024), but `zoom.rs`'s six trigger/merge thresholds (`DWELL_RADIUS_PX`=150, `DRAG_MIN_PX`=60, `CENTER_MERGE_PX`=300, `POST_CLICK_STILL_PX`=60, `PARKED_BBOX_PX`=8, `JITTER_STEP_PX`=5) are absolute pixels. Same physical motion now spans 2x the pixels, so every threshold effectively HALVED — dwells under-detected, drags over-detected, merges rarer. A behavior change wearing a capture change's clothes, which is why the owner insisted on eye-judgment, not blind rescale.

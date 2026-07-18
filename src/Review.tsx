@@ -34,7 +34,10 @@ type BubblePositionEntry = {
   t: number;
   x: number;
   y: number;
-  diameter?: number | null;
+  // Fraction of the capture frame width (was absolute px pre-2026-07-17; that
+  // rendered half-size once capture moved to the 2x backing store). Multiply by
+  // the content width to get CSS pixels. Mirrors Rust BubblePositionEntry.
+  diameter_frac?: number | null;
 };
 
 // Mirror of src-tauri/src/edit.rs::ZoomKeyframe (zoom-layer step 2 schema).
@@ -440,7 +443,7 @@ function statesEqual(a: SidecarState, b: SidecarState, duration: number | null):
 // from the effective zone). The log survives only as the diameter source and
 // as the migration input for the zone default. DEFAULT_BUBBLE_DIAMETER_PX is
 // the fallback when a sidecar logged no diameter.
-const DEFAULT_BUBBLE_DIAMETER_PX = 240; // mirrors WebcamSize::Medium
+const DEFAULT_BUBBLE_DIAMETER_FRAC = 240 / 1512; // mirrors WebcamSize::Medium frac
 
 function isLogicallyEmpty(s: SidecarState, duration: number | null): boolean {
   // Bubble keyframes are finalize-time data the review must preserve —
@@ -2657,8 +2660,8 @@ function BubbleLayer({
     const { w: vw } = videoDims;
     const { x: cx, y: cy, w: cw, h: ch } = contentBox(stage, videoDims);
 
-    const diameter = bubblePositionLog[0].diameter ?? DEFAULT_BUBBLE_DIAMETER_PX;
-    const cssDiameter = (diameter / vw) * cw;
+    const frac = bubblePositionLog[0].diameter_frac ?? DEFAULT_BUBBLE_DIAMETER_FRAC;
+    const cssDiameter = frac * cw;
 
     // Size is constant per recording — bubble resize was removed in
     // phase 14 (be4aa02). Set once per effect run.
