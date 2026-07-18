@@ -206,7 +206,7 @@ impl Corner {
 }
 
 // Watermark overlay shared by every export path: edit.rs run_edit_pipeline
-// (Save MP4 / GIF / Copy) and linkedin.rs. By default the logo is scaled to
+// (Save MP4 / GIF / Copy). By default the logo is scaled to
 // 10% of the shorter source dimension (height, aspect preserved) and padded
 // 2% off the chosen corner, with the PNG's own alpha respected. scale_frac
 // overrides the size (logo WIDTH as a fraction of video width, so it looks

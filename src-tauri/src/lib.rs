@@ -5,7 +5,6 @@ mod edit;
 mod engine;
 mod exports;
 mod hotkey;
-mod linkedin;
 mod macos;
 mod prewarm;
 mod settings;
@@ -819,9 +818,7 @@ pub fn run() {
             thumbs::extract_thumb_sprite,
             discard_recording,
             clipboard::clipboard_copy_recording,
-            clipboard::clipboard_copy_text,
             exports::cleanup_recording_exports,
-            linkedin::linkedin_export,
             settings::get_settings,
             settings::set_watermark_logo,
             settings::set_watermark_corner,

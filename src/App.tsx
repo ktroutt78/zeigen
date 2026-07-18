@@ -739,7 +739,7 @@ type FinalizedRecording = {
   stamp: string;
   scratch_dir: string;
   // Logical key — survives as the param to discard_recording / save /
-  // clipboard / linkedin even when no actual composited file exists at
+  // clipboard even when no actual composited file exists at
   // this path (phase 15 c3 webcam recordings). save_recording derives
   // raw inputs from this path's parent/sources dir.
   scratch_mp4_path: string;

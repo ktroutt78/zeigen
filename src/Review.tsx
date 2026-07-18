@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { emit, listen } from "@tauri-apps/api/event";
-import { revealItemInDir, openUrl } from "@tauri-apps/plugin-opener";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { Icon, I, P } from "./components/icons";
 import SegmentTrack from "./components/SegmentTrack";
@@ -575,13 +575,8 @@ export default function Review() {
   const busy = saving || discarding;
 
   // Save-state: lastSavedPath drives Reveal target, Discard-disabled, and
-  // the close-window modal gate (modal fires only when null). committedMp4Path
-  // tracks the most recent MP4 specifically so the LinkedIn chain can reuse
-  // an existing baseline instead of always producing a fresh commit. After a
-  // GIF save these two diverge — lastSavedPath points at the .gif, but
-  // committedMp4Path keeps the prior MP4 path so LinkedIn still targets MP4.
+  // the close-window modal gate (modal fires only when null).
   const [lastSavedPath, setLastSavedPath] = useState<string | null>(null);
-  const [committedMp4Path, setCommittedMp4Path] = useState<string | null>(null);
   const [lastSavedAt, setLastSavedAt] = useState(0);
 
   // Format/resolution/fps live here (not in ExportPanel) so the close-window
@@ -1041,10 +1036,7 @@ export default function Review() {
   const hasBubble = bubblePositionLog.length > 0;
 
   // Debounced sidecar persistence on edit. Empty states are deleted to keep
-  // the sources area tidy; non-empty states are written. Any sidecar change
-  // also invalidates committedMp4Path — the cached LinkedIn baseline is now
-  // stale, so the next LinkedIn click chains a fresh save instead of
-  // shipping the old bake.
+  // the sources area tidy; non-empty states are written.
   useEffect(() => {
     if (!sourcePath || duration == null) return;
     const empty = isLogicallyEmpty(currentState, duration);
@@ -1052,7 +1044,6 @@ export default function Review() {
       // bubble_zone / zoom drop to undefined when unset so untouched /
       // pre-feature sidecars stay byte-identical (see sidecarWritePayload).
       const norm = sidecarWritePayload(currentState, duration);
-      setCommittedMp4Path(null);
       if (empty) {
         invoke("delete_sidecar", { sourcePath }).catch((err) =>
           setError(`delete sidecar: ${err}`),
@@ -1072,9 +1063,8 @@ export default function Review() {
   // session so subsequent saves can re-bake against edited sidecars.
   //
   // Returns the output path on success, null on failure. Called by the
-  // ExportPanel Save button, ⌘S, the close-window modal Save button, and
-  // the LinkedIn chain. Updates lastSavedPath unconditionally; updates
-  // committedMp4Path only for mp4 saves (LinkedIn baseline reuse).
+  // ExportPanel Save button, ⌘S, and the close-window modal Save button.
+  // Updates lastSavedPath unconditionally.
   const onSave = useCallback(
     async (spec: {
       format: "mp4" | "gif";
@@ -1121,7 +1111,6 @@ export default function Review() {
         });
         setLastSavedPath(result.output_path);
         setLastSavedAt(Date.now());
-        if (spec.format === "mp4") setCommittedMp4Path(result.output_path);
         const notices: string[] = [];
         if (result.thumbnail_out_of_trim) {
           notices.push(
@@ -1791,7 +1780,6 @@ export default function Review() {
           onBubbleZone={setBubbleZone}
           hasBubble={hasBubble}
           lastSavedPath={lastSavedPath}
-          committedMp4Path={committedMp4Path}
           lastSavedAt={lastSavedAt}
           duration={duration}
           trim={trim}
@@ -3816,7 +3804,6 @@ function ExportPanel({
   onBubbleZone,
   hasBubble,
   lastSavedPath,
-  committedMp4Path,
   lastSavedAt,
   duration,
   trim,
@@ -3848,7 +3835,6 @@ function ExportPanel({
   onBubbleZone: (z: BubbleZone) => void;
   hasBubble: boolean;
   lastSavedPath: string | null;
-  committedMp4Path: string | null;
   lastSavedAt: number;
   duration: number | null;
   trim: Trim | null;
@@ -3870,9 +3856,8 @@ function ExportPanel({
   setError: (msg: string | null) => void;
   watermark: WatermarkUI;
 }) {
-  // Transient post-save flash. Driven off lastSavedAt (parent state) so
-  // the LinkedIn chain's implicit save also flashes the button. Reset to
-  // 0 by a 1.5s timer; same shape as the legacy linkedinExportedAt badge.
+  // Transient post-save flash. Driven off lastSavedAt (parent state), reset
+  // to 0 by a 1.5s timer.
   const [savedFlashAt, setSavedFlashAt] = useState(0);
   useEffect(() => {
     if (lastSavedAt === 0) return;
@@ -4017,68 +4002,6 @@ function ExportPanel({
       setError(`copy to clipboard: ${err}`);
     }
   }, [sourcePath, setError, watermark]);
-
-  // LinkedIn export: ensure an MP4 baseline exists in ~/Movies/Zeigen/
-  // (commits a fresh MP4-Source save if none yet this session — reuses
-  // committedMp4Path otherwise per D-16), transcode that baseline to a
-  // recording-<stamp>-linkedin.mp4, drop the caption template on the
-  // pasteboard, open Safari to the share composer, and reveal the file
-  // in Finder for the user to drag in. LinkedIn has no upload API for
-  // personal profiles, so the manual drag is the design.
-  const [linkedinExporting, setLinkedinExporting] = useState(false);
-  const [linkedinExportedAt, setLinkedinExportedAt] = useState(0);
-  const linkedinExported = linkedinExportedAt > 0;
-  useEffect(() => {
-    if (linkedinExportedAt === 0) return;
-    const t = window.setTimeout(() => setLinkedinExportedAt(0), 1500);
-    return () => window.clearTimeout(t);
-  }, [linkedinExportedAt]);
-
-  const onLinkedinExport = useCallback(async () => {
-    if (!sourcePath || linkedinExporting) return;
-    const stamp = parseStampFromPath(sourcePath);
-    if (!stamp) {
-      setError(`linkedin export: cannot parse stamp from ${sourcePath}`);
-      return;
-    }
-    if (duration != null && duration > 600) {
-      const ok = await ask(
-        "LinkedIn caps videos at 10 minutes. Export anyway?",
-        { kind: "warning", okLabel: "Export anyway", cancelLabel: "Cancel" },
-      );
-      if (!ok) return;
-    }
-    setLinkedinExporting(true);
-    try {
-      let mp4Path = committedMp4Path;
-      if (!mp4Path) {
-        // LinkedIn caps at 1080p, so export at 1080p (supersampled from the
-        // backing-resolution capture) rather than Source/4K — same visible
-        // result, a quarter of the pixels, no upload of detail LinkedIn discards.
-        mp4Path = await onSave({ format: "mp4", resolution: "1080p" });
-        if (!mp4Path) return; // onSave already surfaced an error
-      }
-      const outPath = await invoke<string>("linkedin_export", {
-        stamp,
-        sourcePath: mp4Path,
-      });
-      // Caption first so the user's clipboard has it ready when they
-      // ⌘V into the LinkedIn post composer.
-      await invoke("clipboard_copy_text", {
-        text: "New screen recording — [your description here]",
-      }).catch(() => {});
-      // Open Safari first so its activate-on-launch fires, then reveal
-      // in Finder — Finder ends up on top with the file selected, ready
-      // for the user to drag it into the now-cued-up LinkedIn composer.
-      await openUrl("https://www.linkedin.com/feed/?shareActive=true").catch(() => {});
-      await revealItemInDir(outPath).catch(() => {});
-      setLinkedinExportedAt(Date.now());
-    } catch (err) {
-      setError(`linkedin export: ${err}`);
-    } finally {
-      setLinkedinExporting(false);
-    }
-  }, [sourcePath, duration, linkedinExporting, committedMp4Path, onSave, setError]);
 
   // ⌘C copy + ⌘S save. Skip when the user has a selection or is focused
   // on an editable element so the system's default text-copy behavior wins.
@@ -4516,33 +4439,6 @@ function ExportPanel({
           }
           onClick={onCopyClipboard}
           disabled={!sourcePath || busy}
-        />
-        <DestRow
-          icon={<Icon d="M2.5 5h11v9h-11zM5 8.5v3M5 6.5h.01M7.5 11.5v-3c0-.8.7-1.5 1.5-1.5s1.5.7 1.5 1.5v3M10.5 11.5v-3" size={13} stroke={1.4} />}
-          title="Export for LinkedIn"
-          sub={
-            linkedinExporting
-              ? "Transcoding…"
-              : "MP4 · ≤ 10 min · 1080p capped"
-          }
-          action={
-            linkedinExported ? (
-              <span
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 4,
-                  fontSize: 11.5,
-                  color: "var(--success-tint)",
-                }}
-              >
-                <Icon d={P.check} size={12} stroke={1.8} />
-                <span>Exported</span>
-              </span>
-            ) : undefined
-          }
-          onClick={onLinkedinExport}
-          disabled={!sourcePath || busy || linkedinExporting}
         />
         {lastSavedPath && (
           <DestRow

@@ -729,11 +729,11 @@ fn region_crop_px(ann: &Annotation, src_dims: (u32, u32)) -> (i64, i64, i64, i64
 // exact same rect for [start, end]. Pure filter graph — no rasterized PNG
 // input (unlike text/arrow), so no temp file lifecycle to manage.
 //
-// Shared by edit.rs's pass-2 pipeline (trim-adjusted start/end) and
-// linkedin.rs's custom transcode (raw start/end — LinkedIn never trims),
-// so both export paths that leave the machine apply the same redaction.
-// `idx` only needs to be unique among fragments chained into the same
-// filter string — callers pass a per-loop counter.
+// Used by edit.rs's pass-2 pipeline (trim-adjusted start/end). `idx` only
+// needs to be unique among fragments chained into the same filter string —
+// callers pass a per-loop counter. (Now that linkedin.rs is gone, the only
+// caller is single_input's annotation branch, which is dead-by-construction
+// and removed with the V2 single_input strip.)
 pub(crate) fn blur_region_fragment(
     idx: usize,
     prev_label: &str,
@@ -758,8 +758,7 @@ pub(crate) fn blur_region_fragment(
 // rect back on top for [start, end] — the inverse of blur_region_fragment,
 // which overlays a blurred crop over a sharp base. Same pure-filter-graph
 // shape (split + crop + overlay, no rasterized PNG), same idx/prev_label/
-// next_label contract, same dual-caller reuse (edit.rs pass-2, linkedin.rs
-// custom transcode) as blur.
+// next_label contract, same single caller (edit.rs pass-2) as blur.
 pub(crate) fn spotlight_region_fragment(
     idx: usize,
     prev_label: &str,
@@ -3839,13 +3838,6 @@ mod tests {
             "valid GIF"
         );
 
-        // d) LinkedIn — distinct -filter_complex invocation reusing the helper.
-        let li = crate::linkedin::linkedin_export(
-            "wm-smoke".into(), source_str.clone(), Some(logo_str.clone()), Some("tr".into()),
-        ).expect("linkedin + watermark");
-        assert!(Path::new(&li).is_file(), "linkedin output exists");
-        extract_frame(&li, "/tmp/zeigen-wm-frame-linkedin-tr.png");
-
         // f) No-watermark noop regression: video copied bit-exact, audio re-encoded.
         let noop = "/tmp/zeigen-wm-noop.mp4";
         run_edit_pipeline(source, &[], Path::new(noop), &sidecar,
@@ -3863,7 +3855,7 @@ mod tests {
         );
 
         println!(
-            "watermark OK: pipeline TR/BL + 720 + gif + linkedin({li}); frames in /tmp/zeigen-wm-frame-*.png; noop video bit-exact, audio re-encoded"
+            "watermark OK: pipeline TR/BL + 720 + gif; frames in /tmp/zeigen-wm-frame-*.png; noop video bit-exact, audio re-encoded"
         );
     }
 
