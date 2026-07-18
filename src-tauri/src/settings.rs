@@ -24,8 +24,9 @@ pub struct Settings {
     pub bubble_roundness: Option<f64>,
     // V3 (Core Image) compositor as the default export path. Default true (the
     // switchover). Flip to false to route every export through V2 (ffmpeg) with
-    // no rebuild. Eligible exports fall through to V2 automatically on any V3
-    // failure regardless of this flag.
+    // no rebuild. A V3 runtime failure does NOT fall back to V2 (owner,
+    // 2026-07-17): it fails the export loudly with the reason so a fixable bug
+    // surfaces instead of hiding under a silent V2 rescue.
     #[serde(default = "default_true")]
     pub use_v3_compositor: bool,
 }

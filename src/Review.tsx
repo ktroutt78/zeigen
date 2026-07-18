@@ -1101,10 +1101,11 @@ export default function Review() {
           output_path: string;
           thumbnail_out_of_trim: boolean;
           // Present only when the export fell back to the V2 (ffmpeg) path for a
-          // specific reason (trim, downscale, annotations, webcam-without-zoom,
-          // multi-segment webcam, or a V3 runtime failure). Absent = the normal
-          // V3 path (or plain copy / GIF). Surfaced so a quiet fall-through is
-          // visible from the save itself, not guessed.
+          // specific reason (trim, multi-segment webcam). Absent = the normal V3
+          // path (or plain copy / GIF). Surfaced so a quiet fall-through is
+          // visible from the save itself, not guessed. A V3 runtime FAILURE is
+          // no longer a note — it rejects the save and surfaces via the error
+          // banner below (owner, 2026-07-17: no silent V2 rescue).
           route_note?: string | null;
         }>("save_recording", {
           stamp,

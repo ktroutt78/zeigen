@@ -1213,10 +1213,12 @@ fn run_v3_export(
 // backstop (the composited scratch mp4 exists but is ignored by this
 // path); c3 removes it.
 // V3 switchover seam. Eligible exports attempt the Core Image compositor first;
-// everything else — and any V3 runtime failure — runs the UNTOUCHED V2 body
-// (run_edit_pipeline_v2) below, carrying a specific note when the fall-through is
-// one the owner asked to see. on_progress is cloned into the V3 attempt so the
-// original survives to drive V2 if V3 fails.
+// the remaining V2-only cases (trim, GIF, multi-segment webcam, flag-off, and
+// the plain copy path) run run_edit_pipeline_v2 below, carrying a specific note
+// when the routing is one the owner asked to see. A V3 RUNTIME FAILURE no longer
+// falls back to V2 (owner, 2026-07-17) — it returns Err with the reason so the
+// failure is loud and re-exportable, not silently rescued. on_progress is cloned
+// into the V3 attempt so the original survives to drive V2 on the routed cases.
 pub(crate) fn run_edit_pipeline(
     screen_path: &Path,
     webcam_segments: &[std::path::PathBuf],
@@ -1257,11 +1259,16 @@ pub(crate) fn run_edit_pipeline(
                 resolution,
                 on_progress.clone(),
             ) {
-                // V3 success is the normal path — done, V2 never runs, no note.
+                // V3 success is the normal path — done, no note.
                 Ok(()) => return Ok(PipelineReport::normal()),
+                // No V2 safety net (owner, 2026-07-17): a V3 failure fails the
+                // export loudly instead of silently re-rendering on V2 for weeks.
+                // The scratch screen.mp4 is read-only input and untouched, so the
+                // recording is preserved and re-exportable; the reason is surfaced
+                // to the review window's error banner (not swallowed into a note).
                 Err(e) => {
-                    eprintln!("[v3] export failed, falling back to V2: {e}");
-                    Some(PipelineReport::fallback(&format!("V3 error: {e}")))
+                    eprintln!("[v3] export failed: {e}");
+                    return Err(format!("V3 export failed: {e}"));
                 }
             }
         }
