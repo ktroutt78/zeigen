@@ -25,5 +25,9 @@ let package = Package(
                 ])
             ]
         ),
+        .testTarget(
+            name: "recording-engineTests",
+            dependencies: ["recording-engine"]
+        ),
     ]
 )

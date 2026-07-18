@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreGraphics
 import CoreMedia
 import Foundation
 import os
@@ -133,16 +134,22 @@ final class RecordingSession: NSObject,
                 throw EngineError(code: "DISPLAY_NOT_FOUND", message: "display_id \(displayID) not present")
             }
             filter = SCContentFilter(display: display, excludingWindows: [])
-            width = Int(display.width)
-            height = Int(display.height)
+            // Capture at the display's BACKING resolution (2x on Retina), not
+            // the logical point size SCDisplay.width reports on macOS 26. Cursor
+            // scale comes from the SAME geometry so telemetry and video stay
+            // locked (see captureGeometry).
+            let geo = Self.captureGeometry(
+                pointWidth: Double(display.width),
+                pointHeight: Double(display.height),
+                backingScale: Self.backingScale(for: displayID)
+            )
+            width = geo.width
+            height = geo.height
             resolvedWindowID = nil
-            let scale = display.frame.width > 0
-                ? Double(display.width) / Double(display.frame.width)
-                : 1.0
             cursorMapping = .fixed(
                 originX: Double(display.frame.origin.x),
                 originY: Double(display.frame.origin.y),
-                scale: scale
+                scale: geo.scale
             )
         case .window(let windowID):
             guard let window = shareable.windows.first(where: { $0.windowID == windowID }) else {
@@ -155,21 +162,29 @@ final class RecordingSession: NSObject,
             // window's point size by the scale of the display containing
             // its center. Falls back to 1.0 if no containing display is
             // found (window straddling the void after a display unplug).
-            let scale = Self.displayScale(for: window.frame, in: shareable.displays)
-            width = max(2, Int((window.frame.width * scale).rounded()))
-            height = max(2, Int((window.frame.height * scale).rounded()))
+            let geo = Self.captureGeometry(
+                pointWidth: Double(window.frame.width),
+                pointHeight: Double(window.frame.height),
+                backingScale: Self.displayScale(for: window.frame, in: shareable.displays)
+            )
+            width = geo.width
+            height = geo.height
             resolvedWindowID = windowID
+            // .window maps the cursor through the live window frame to
+            // pixelWidth/Height, so it tracks geo.width/height directly.
             cursorMapping = .window(windowID: windowID, pixelWidth: width, pixelHeight: height)
         case .area(let displayID, let pointRect):
             guard let display = shareable.displays.first(where: { $0.displayID == displayID }) else {
                 throw EngineError(code: "DISPLAY_NOT_FOUND", message: "display_id \(displayID) not present")
             }
             filter = SCContentFilter(display: display, excludingWindows: [])
-            let scale = display.frame.width > 0
-                ? CGFloat(display.width) / display.frame.width
-                : 1.0
-            width = max(2, Int((pointRect.width * scale).rounded()))
-            height = max(2, Int((pointRect.height * scale).rounded()))
+            let geo = Self.captureGeometry(
+                pointWidth: Double(pointRect.width),
+                pointHeight: Double(pointRect.height),
+                backingScale: Self.backingScale(for: displayID)
+            )
+            width = geo.width
+            height = geo.height
             resolvedWindowID = nil
             sourceRect = pointRect
             // Area rect is display-relative points; cursor locations are
@@ -177,7 +192,7 @@ final class RecordingSession: NSObject,
             cursorMapping = .fixed(
                 originX: Double(display.frame.origin.x + pointRect.origin.x),
                 originY: Double(display.frame.origin.y + pointRect.origin.y),
-                scale: Double(scale)
+                scale: geo.scale
             )
         }
         self.capturedWindowID = resolvedWindowID
@@ -912,18 +927,48 @@ final class RecordingSession: NSObject,
         ))
     }
 
-    // Find the SCK display containing the window's center, then derive
-    // points-to-pixels by comparing the display's pixel size to its frame.
-    // Falls back to 1.0 (treat points as pixels) when the window doesn't
-    // overlap any known display.
-    static func displayScale(for windowFrame: CGRect, in displays: [SCDisplay]) -> CGFloat {
+    // Backing-store scale for a display (pixels per point) from its current
+    // display mode. On a 2x Retina panel this is 2.0. SCDisplay.width returns
+    // POINTS on macOS 26 (not pixels, despite Apple's docs), so the old
+    // `SCDisplay.width / frame.width` ratio collapsed to 1.0 and we captured at
+    // LOGICAL resolution — every zoom then upscaled pixels that were never
+    // captured. CGDisplayModeGetPixelWidth/GetWidth is the real per-display
+    // backing factor. Falls back to 1.0 if the mode can't be read.
+    static func backingScale(for displayID: CGDirectDisplayID) -> Double {
+        guard let mode = CGDisplayCopyDisplayMode(displayID) else { return 1.0 }
+        let pointW = mode.width
+        guard pointW > 0 else { return 1.0 }
+        return Double(mode.pixelWidth) / Double(pointW)
+    }
+
+    // Capture dimensions + cursor scale, kept COUPLED by construction. Callers
+    // MUST take width/height AND the cursor `scale` from the SAME returned
+    // value: if the capture doubles but the cursor scale stays 1.0, video_size
+    // doubles while telemetry x/y stay in points, and every zoom focus resolves
+    // to half its fraction (drifts toward the top-left). Returning both from one
+    // function makes that divergence impossible; `geometry_locks_scale_to_dims`
+    // pins the invariant width == round(scale * pointWidth).
+    struct CaptureGeometry: Equatable { let width: Int; let height: Int; let scale: Double }
+    static func captureGeometry(
+        pointWidth: Double, pointHeight: Double, backingScale: Double
+    ) -> CaptureGeometry {
+        let s = backingScale > 0 ? backingScale : 1.0
+        return CaptureGeometry(
+            width: max(2, Int((pointWidth * s).rounded())),
+            height: max(2, Int((pointHeight * s).rounded())),
+            scale: s
+        )
+    }
+
+    // Find the SCK display containing the window's center, then read its
+    // backing scale. Falls back to 1.0 (treat points as pixels) when the window
+    // doesn't overlap any known display.
+    static func displayScale(for windowFrame: CGRect, in displays: [SCDisplay]) -> Double {
         let center = CGPoint(x: windowFrame.midX, y: windowFrame.midY)
-        guard let display = displays.first(where: { $0.frame.contains(center) }),
-              display.frame.width > 0
-        else {
+        guard let display = displays.first(where: { $0.frame.contains(center) }) else {
             return 1.0
         }
-        return CGFloat(display.width) / display.frame.width
+        return backingScale(for: display.displayID)
     }
 
     // Per-sample soft-knee limiter at -1 dBFS. Below threshold, samples pass
