@@ -125,6 +125,13 @@ let bubbleShadowRadiusK = Double(env["BUBBLE_SHADOW_RADIUS_K"] ?? "3.0")!
 // round(WEBCAM_LEAD_MS/1000 * fps); default 0 leaves the pre-wiring standalone/harness
 // behavior (naive 1:1 pull) unchanged.
 let bubbleLeadFrames = Int(env["BUBBLE_LEAD_FRAMES"] ?? "0") ?? 0
+// Webcam trim skip: on a trimmed export V2 drops max(0, trim_in - WEBCAM_LEAD_MS) of
+// the webcam front (composite.rs wc_skip) so the bubble at output t=0 shows content
+// from (trim_in - lead) — the same 105ms lead as the untrimmed start. Rust passes it
+// as a frame count; we discard that many webcam samples before the loop, then apply
+// the (residual) BUBBLE_LEAD_FRAMES freeze. Output frame i -> webcam frame
+// skip + max(0, i - lead), matching V2's [tpad pad_lead][trim wc_skip] chain exactly.
+let bubbleWebcamSkipFrames = Int(env["BUBBLE_WEBCAM_SKIP_FRAMES"] ?? "0") ?? 0
 // Bubble depth treatment (DECISIONS.md 2026-07-16). The V3 DEFAULT is `elevated`:
 // an offset-down-right drop shadow (matches a PowerPoint "offset bottom-right"
 // shadow). `flat` is the legacy single tight shadow, kept for comparison via env.
@@ -186,6 +193,18 @@ let outW = Int(env["OUTPUT_WIDTH"] ?? "") ?? W
 let outH = Int(env["OUTPUT_HEIGHT"] ?? "") ?? H
 let downscaleOut = outW > 0 && outH > 0 && (outW != W || outH != H)
 
+// Trim window (seconds, original timeline). The output grid runs [trimIn, trimOut]
+// but output PTS is rebased to 0; source frames and zoom are sampled at the ORIGINAL
+// time tSrc = trimIn + frames/fps, so a zoom straddling the cut renders its correct
+// partial scale at t=0 with no per-segment shift. Absent -> whole source, byte-
+// identical to the untrimmed path (nothing below fires when trimIn==0 && trimOut>=dur).
+let trimIn = max(0.0, Double(env["TRIM_IN"] ?? "0") ?? 0.0)
+let trimOut = { () -> Double in
+    let v = Double(env["TRIM_OUT"] ?? "") ?? srcDuration
+    return v > 0 ? v : srcDuration
+}()
+let isTrimmed = trimIn > 0.0001 || (srcDuration > 0 && trimOut < srcDuration - 0.0001)
+
 // Bitrate at a constant ~0.18 bits/pixel (BITS_PER_PIXEL), the same density the
 // historical flat 8 Mbps encoded at 1512x982x30 logical. Scaling by the actual
 // OUTPUT pixels x fps keeps quality-per-pixel constant: ~32 Mbps at a 3024x1964
@@ -209,6 +228,17 @@ let readerOutput = AVAssetReaderTrackOutput(
 readerOutput.alwaysCopiesSampleData = true
 guard reader.canAdd(readerOutput) else { fail("cannot add reader output") }
 reader.add(readerOutput)
+// Trim: restrict decode to [trimIn, trimOut]. AVAssetReader decodes from the
+// preceding sync sample and delivers frames with PTS in range, so it's frame-
+// accurate (matches V2's -ss/-to first-frame-at-or-after-trimIn) AND avoids
+// decoding-and-discarding everything before a late cut. Delivered PTS stay in the
+// ORIGINAL timeline, which is what the tSrc comparison below expects. Set only when
+// trimming, so the untrimmed path is unchanged.
+if isTrimmed {
+    reader.timeRange = CMTimeRange(
+        start: CMTime(seconds: trimIn, preferredTimescale: 600),
+        end: CMTime(seconds: trimOut, preferredTimescale: 600))
+}
 
 // --- Webcam reader (bubble): a second stream, decoded in lockstep — ONE webcam frame
 // pulled per screen frame. KNOWN GAP: this assumes screen and webcam share the same
@@ -235,6 +265,16 @@ if let wcPath = bubbleWebcam {
     guard wr.canAdd(wo) else { fail("cannot add webcam output") }
     wr.add(wo)
     guard wr.startReading() else { fail("webcam startReading: \(wr.error?.localizedDescription ?? "?")") }
+    // Trim: drop the first `bubbleWebcamSkipFrames` webcam frames so output frame 0
+    // shows webcam content from (trim_in - lead) — V2's wc_skip. Discard by frame
+    // count (not time) to match V2's frame mapping exactly. Cheap: 720p decode, and
+    // only the skipped frames, done once before the render loop.
+    if bubbleWebcamSkipFrames > 0 {
+        var dropped = 0
+        while dropped < bubbleWebcamSkipFrames, wo.copyNextSampleBuffer() != nil {
+            dropped += 1
+        }
+    }
     webcamOutput = wo; webcamReader = wr
 }
 
@@ -384,30 +424,38 @@ func nextSourceFrame() -> (CMTime, CVPixelBuffer)? {
 }
 var pending = nextSourceFrame()   // next source frame not yet reached by the grid
 var held: CVPixelBuffer? = nil    // source frame current at tOut, held across idle gaps
+// Trimmed output length in frames (V2 -ss/-to parity). Int.max when untrimmed, so
+// the untrimmed stop stays exactly the srcDuration+0.5/fps rule below (unchanged).
+let stopFrames = isTrimmed ? Int(((trimOut - trimIn) * Double(fps)).rounded()) : Int.max
 
 writerInput.requestMediaDataWhenReady(on: queue) {
     while writerInput.isReadyForMoreMediaData {
-        let tOut = Double(frames) / Double(fps)
-        // Advance to the latest source frame whose PTS <= tOut; hold it across gaps.
-        while let p = pending, CMTimeGetSeconds(p.0) <= tOut {
+        // Output PTS is rebased to 0 (frames/fps); source + zoom are sampled at the
+        // ORIGINAL time tSrc = trimIn + frames/fps. Untrimmed (trimIn==0) -> tSrc==tOut,
+        // so this path is unchanged. The reader.timeRange already excludes < trimIn.
+        let tSrc = trimIn + Double(frames) / Double(fps)
+        // Advance to the latest source frame whose PTS <= tSrc; hold it across gaps.
+        while let p = pending, CMTimeGetSeconds(p.0) <= tSrc {
             held = p.1
             pending = nextSourceFrame()
         }
-        // Before the first source PTS (often slightly > 0), show frame 0 from t=0.
+        // Before the first in-range source PTS (>= trimIn), show that first frame.
         if held == nil, let p = pending {
             held = p.1
             pending = nextSourceFrame()
         }
-        // Done: past the source duration, or drained the source when duration is unknown.
-        let pastEnd = srcDuration > 0
-            ? tOut > srcDuration + 0.5 / Double(fps)
-            : pending == nil
+        // Done: emitted the whole window, past trimOut, or drained the source.
+        // A trim emits exactly round((trimOut-trimIn)*fps) frames to match V2's
+        // -ss/-to count; without this cap the +0.5/fps end-tolerance (which exists
+        // to include the untrimmed last frame) overruns a trim by one frame.
+        let pastEnd = frames >= stopFrames
+            || (trimOut > 0 ? tSrc > trimOut + 0.5 / Double(fps) : pending == nil)
         guard let pixels = held, !pastEnd else {
             writerInput.markAsFinished()
             writer.finishWriting { done.signal() }
             return
         }
-        let t = tOut
+        let t = tSrc  // original-timeline time -> zoom straddling the cut renders correctly
         // No colorSpace override: CI reads the 709 video-range attachments the
         // decoder put on the YCbCr buffer, so input color is interpreted, not guessed.
         let src = CIImage(cvPixelBuffer: pixels)

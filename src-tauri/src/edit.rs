@@ -908,7 +908,6 @@ enum V3Decision {
 // paths), so they no longer fall back here.
 fn decide_v3(
     flag_on: bool,
-    screen_path: &Path,
     webcam_segments: &[std::path::PathBuf],
     sidecar: &SidecarState,
     mode: PipelineMode,
@@ -928,15 +927,10 @@ fn decide_v3(
     // than 1080p on V2 — the 4x oversample is source-sized, so a smaller output
     // only ADDED a scale stage instead of saving work. run_v3_export reads the
     // resolution to size the output; nothing to fall back for here.
-    // Trimmed: option 1 keeps trimmed exports on V2 (no pre-trim pass in the
-    // switchover commit). Normalize trim the same way single_input does.
-    if let Ok(duration) = probe_duration_seconds(screen_path) {
-        if let Some(t) = &sidecar.trim {
-            if t.start > TRIM_EPS || t.out < duration - TRIM_EPS {
-                return V3Decision::FallbackVisible("trimmed export".into());
-            }
-        }
-    }
+    // Trimmed MP4 is a V3 path now: run_v3_export passes TRIM_IN/TRIM_OUT to the
+    // compositor (renders only [trim_in, trim_out], rebases output PTS to 0) and
+    // trims the audio mux to the same window. (Trimmed GIF still routes V2Silent —
+    // the GIF check above precedes this, so it never reaches here.)
     // Annotations: V3 dropped annotation rendering (Phase 3 scrapped).
     // DEAD BY CONSTRUCTION today, kept as insurance: the app doesn't open
     // existing recordings, so the export path only runs on fresh sessions, and
@@ -1107,6 +1101,18 @@ fn run_v3_export(
         )
     });
 
+    // Trim window, normalized exactly as single_input/decide_v3 do: a trim that
+    // doesn't actually cut (start ~0 and out ~duration) is treated as untrimmed, so
+    // the compositor gets no TRIM_* env and the path stays byte-identical. Otherwise
+    // (trim_in, trim_out) in original-timeline seconds.
+    let src_dur = probe_duration_seconds(screen_path).unwrap_or(0.0);
+    let trim: Option<(f64, f64)> = match &sidecar.trim {
+        Some(t) if t.start > TRIM_EPS || (src_dur > 0.0 && t.out < src_dur - TRIM_EPS) => {
+            Some((t.start.max(0.0), if src_dur > 0.0 { t.out.min(src_dur) } else { t.out }))
+        }
+        _ => None,
+    };
+
     // Zoom -> ZOOM_SEGMENTS JSON. cx/cy are source px (top-origin); cicompositor
     // wants top-origin fractions and applies ZOOM_RENDER_RAMP_S itself per edge.
     #[derive(serde::Serialize)]
@@ -1164,11 +1170,25 @@ fn run_v3_export(
     if let Some(zj) = &zoom_json_path {
         cmd.env("ZOOM_SEGMENTS", zj);
     }
+    // Trim window (original-timeline seconds). Compositor renders only this span and
+    // rebases output PTS to 0; the audio mux below trims the screen audio to match.
+    if let Some((tin, tout)) = trim {
+        cmd.env("TRIM_IN", format!("{tin:.6}"))
+            .env("TRIM_OUT", format!("{tout:.6}"));
+    }
     if let (Some(wc), Some(b)) = (webcam.as_deref(), &bubble) {
-        // Shadow alpha (0.22) and radius-k (3.0) match cicompositor's defaults and
-        // the Phase 4 A/B, so they're left unset. Lead frames replicate V2's
-        // WEBCAM_LEAD_MS clone-freeze (main.swift BUBBLE_LEAD_FRAMES).
-        let lead = (crate::composite::WEBCAM_LEAD_MS / 1000.0 * probe_fps(screen_path)).round();
+        // Webcam A/V lead, trim-aware — mirrors composite.rs build_webcam_overlay
+        // (pad_lead / wc_skip) but in frames. Untrimmed: trim_in=0 -> pad_lead=lead,
+        // wc_skip=0, so BUBBLE_LEAD_FRAMES=round(lead*fps) and no skip (byte-identical
+        // to before). Trimmed: pad_lead=(lead-trim_in).max(0) freezes the residual
+        // lead; wc_skip=(trim_in-lead).max(0) drops the webcam front, so at output
+        // t=0 the bubble shows content from (trim_in-lead) — the same 105ms lead as
+        // the untrimmed start. Shadow alpha/radius-k stay at cicompositor defaults.
+        let fps = probe_fps(screen_path);
+        let lead_secs = crate::composite::WEBCAM_LEAD_MS / 1000.0;
+        let trim_in = trim.map(|(a, _)| a).unwrap_or(0.0);
+        let lead_frames = ((lead_secs - trim_in).max(0.0) * fps).round().max(0.0) as i64;
+        let skip_frames = ((trim_in - lead_secs).max(0.0) * fps).round().max(0.0) as i64;
         cmd.env("BUBBLE_WEBCAM", wc)
             .env("BUBBLE_MASK_PNG", &b.mask_path)
             .env("BUBBLE_SHADOW_PNG", &b.shadow_path)
@@ -1177,7 +1197,10 @@ fn run_v3_export(
             // Padding scales with the compositing frame width so the bubble holds
             // its relative inset at backing resolution (default would stay 30px).
             .env("BUBBLE_PADDING", crate::composite::resolve_padding_px(w).to_string())
-            .env("BUBBLE_LEAD_FRAMES", (lead.max(0.0) as i64).to_string());
+            .env("BUBBLE_LEAD_FRAMES", lead_frames.to_string());
+        if skip_frames > 0 {
+            cmd.env("BUBBLE_WEBCAM_SKIP_FRAMES", skip_frames.to_string());
+        }
     }
     if let Some(wm) = watermark {
         cmd.env("WATERMARK_PNG", &wm.logo_path)
@@ -1206,11 +1229,18 @@ fn run_v3_export(
     on_progress(0.85);
 
     // Mux: V3 video + SCREEN audio (arnndn, no itsoffset). faststart for /v/.
+    // On a trim, -ss/-to before the screen input windows the audio to [trim_in,
+    // trim_out] and rebases it to 0 (input-seek semantics, matching V2's single_input
+    // -ss/-to), so it stays locked to the already-trimmed compositor video.
     let mut mux = std::process::Command::new(FFMPEG_PATH);
-    mux.arg("-y")
-        .arg("-i")
-        .arg(&video_only)
-        .arg("-i")
+    mux.arg("-y").arg("-i").arg(&video_only);
+    if let Some((tin, tout)) = trim {
+        mux.arg("-ss")
+            .arg(format!("{tin:.3}"))
+            .arg("-to")
+            .arg(format!("{tout:.3}"));
+    }
+    mux.arg("-i")
         .arg(screen_path)
         .args(["-map", "0:v", "-map", "1:a?"]);
     if let Some(af) = audio_nr_filter() {
@@ -1300,7 +1330,6 @@ pub(crate) fn run_edit_pipeline(
     }
     let fallback_note = match decide_v3(
         crate::settings::use_v3_compositor(),
-        screen_path,
         webcam_segments,
         sidecar,
         mode,
@@ -3887,8 +3916,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("zeigen-v3-decide-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let scr = synth_source(&dir, "screen.mp4", 2.0, 2.0, 320, 240);
-        let tall = synth_source(&dir, "tall.mp4", 1.0, 1.0, 1280, 720);
+        // decide_v3 is a pure predicate now (no file I/O) — webcam paths need not
+        // exist (only their count matters) and no screen fixture is required.
 
         let kf = |t: f64, scale: f64| ZoomKeyframe {
             t, scale, center_x: 160.0, center_y: 120.0, ease: Ease::InOutCubic,
@@ -3904,23 +3933,26 @@ mod tests {
         let wc2 = vec![dir.join("webcam-00.mp4"), dir.join("webcam-01.mp4")];
 
         // 1) flag off -> silent V2, even for an otherwise-eligible export.
-        assert_eq!(v3_tag(&decide_v3(false, &scr, &[], &zoom, src, &none)), "silent");
+        assert_eq!(v3_tag(&decide_v3(false, &[], &zoom, src, &none)), "silent");
         // GIF -> silent (the user chose the format).
         let gif = PipelineMode::Gif { resolution: GifResolution::P480, fps: 12 };
-        assert_eq!(v3_tag(&decide_v3(true, &scr, &[], &zoom, gif, &none)), "silent");
+        assert_eq!(v3_tag(&decide_v3(true, &[], &zoom, gif, &none)), "silent");
         // Downscale is a V3 path now (renders at source res + terminal Lanczos
         // downscale in run_v3_export) -> eligible, no fallback.
         let p480 = PipelineMode::Mp4 { resolution: Mp4Resolution::P480 };
-        assert_eq!(v3_tag(&decide_v3(true, &tall, &[], &zoom, p480, &none)), "run");
-        // Same tall source at Source res does NOT downscale -> eligible.
-        assert_eq!(v3_tag(&decide_v3(true, &tall, &[], &zoom, src, &none)), "run");
-        // Trim -> named fallback.
+        assert_eq!(v3_tag(&decide_v3(true, &[], &zoom, p480, &none)), "run");
+        // Trimmed MP4 is a V3 path now (compositor TRIM_IN/TRIM_OUT + trimmed audio
+        // mux) -> eligible, no fallback.
         let trimmed = SidecarState {
             trim: Some(Trim { start: 0.5, out: 1.5 }),
             zoom: zoom.zoom.clone(),
             ..Default::default()
         };
-        assert_eq!(v3_tag(&decide_v3(true, &scr, &[], &trimmed, src, &none)), "fb:trimmed export");
+        assert_eq!(v3_tag(&decide_v3(true, &[], &trimmed, src, &none)), "run");
+        // Trimmed GIF still routes V2Silent — the GIF check precedes trim, so it
+        // never reaches the (now removed) trim branch.
+        let trimmed_gif = SidecarState { trim: Some(Trim { start: 0.5, out: 1.5 }), ..Default::default() };
+        assert_eq!(v3_tag(&decide_v3(true, &[], &trimmed_gif, gif, &none)), "silent");
         // Annotations -> named fallback.
         let annotated = SidecarState {
             zoom: zoom.zoom.clone(),
@@ -3931,21 +3963,21 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert!(v3_tag(&decide_v3(true, &scr, &[], &annotated, src, &none))
+        assert!(v3_tag(&decide_v3(true, &[], &annotated, src, &none))
             .starts_with("fb:sidecar has 1 annotation"));
         // Multi-segment webcam is a V3 path now (run_v3_export concatenates the
         // segments back-to-back and returns a drift caveat note).
-        assert_eq!(v3_tag(&decide_v3(true, &scr, &wc2, &zoom, src, &none)), "run");
+        assert_eq!(v3_tag(&decide_v3(true, &wc2, &zoom, src, &none)), "run");
         // Webcam without zoom is a V3 path now (static frame + bubble; empty zoom
         // segments are a no-op). The dropped itsoffset only removed the <=70ms
         // mic-init gap, which every zoom export already ships without.
         let no_zoom = SidecarState::default();
-        assert_eq!(v3_tag(&decide_v3(true, &scr, &wc1, &no_zoom, src, &none)), "run");
+        assert_eq!(v3_tag(&decide_v3(true, &wc1, &no_zoom, src, &none)), "run");
         // No V3 work (plain copy fast path) -> silent V2.
-        assert_eq!(v3_tag(&decide_v3(true, &scr, &[], &no_zoom, src, &none)), "silent");
+        assert_eq!(v3_tag(&decide_v3(true, &[], &no_zoom, src, &none)), "silent");
         // Eligible: zoom only, and zoom + single webcam.
-        assert_eq!(v3_tag(&decide_v3(true, &scr, &[], &zoom, src, &none)), "run");
-        assert_eq!(v3_tag(&decide_v3(true, &scr, &wc1, &zoom, src, &none)), "run");
+        assert_eq!(v3_tag(&decide_v3(true, &[], &zoom, src, &none)), "run");
+        assert_eq!(v3_tag(&decide_v3(true, &wc1, &zoom, src, &none)), "run");
 
         // Note wording surfaced to the UI.
         assert_eq!(
@@ -4136,6 +4168,272 @@ mod tests {
         assert_eq!(probe_dimensions(&out_multi).unwrap(), (1280, 720), "source res preserved");
         assert_eq!(ffprobe_field(&out_multi, "stream=codec_type", "a:0"), "audio",
             "multi-segment export keeps audio");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- Trim port gate (B) ----------------------------------------------------
+    // Drives the REAL V3 (run_v3_export, trim env) and REAL V2 (run_edit_pipeline_v2,
+    // -ss/-to) through the same trimmed sidecars and measures parity. The headline
+    // is the webcam step-function across the cut (the concentrated risk), for both
+    // trim_in > 105ms and < 105ms. Prints a report (run with --nocapture) and
+    // asserts V3==V2 within one frame.
+
+    // Per-frame mean luma of a wxh crop at (x,y). One value per output frame.
+    fn crop_luma_series(video: &Path, x: u32, y: u32, w: u32, h: u32) -> Vec<f64> {
+        let out = Command::new(FFMPEG_PATH)
+            .args(["-v", "error", "-i"])
+            .arg(video)
+            .args(["-vf", &format!("crop={w}:{h}:{x}:{y},format=gray"), "-f", "rawvideo", "-"])
+            .output()
+            .expect("crop luma series");
+        let fsz = (w * h) as usize;
+        out.stdout
+            .chunks(fsz)
+            .filter(|c| c.len() == fsz)
+            .map(|c| c.iter().map(|&b| b as f64).sum::<f64>() / fsz as f64)
+            .collect()
+    }
+    // First frame whose bubble-center luma crosses to white (black->white flip).
+    fn flip_frame(series: &[f64]) -> Option<usize> {
+        series.iter().position(|&v| v > 127.0)
+    }
+    // PSNR (dB) between EXACT frame `an` of a and frame `bn` of b. Extract by frame
+    // index (select=eq(n,..)) not -ss time-seek — a fractional -ss rounds to the next
+    // frame and would compare the wrong one (the bug this helper originally had).
+    fn frame_psnr(a: &Path, an: i64, b: &Path, bn: i64, dir: &Path) -> f64 {
+        let pa = dir.join("fa.png");
+        let pb = dir.join("fb.png");
+        for (v, n, p) in [(a, an, &pa), (b, bn, &pb)] {
+            let r = Command::new(FFMPEG_PATH)
+                .args(["-y", "-v", "error", "-i"])
+                .arg(v)
+                .args(["-vf", &format!("select=eq(n\\,{n})"), "-vsync", "0", "-frames:v", "1"])
+                .arg(p)
+                .output()
+                .expect("extract frame");
+            assert!(r.status.success(), "extract: {}", String::from_utf8_lossy(&r.stderr));
+        }
+        let r = Command::new(FFMPEG_PATH)
+            .args(["-i"]).arg(&pa).args(["-i"]).arg(&pb)
+            .args(["-lavfi", "psnr", "-f", "null", "-"])
+            .output()
+            .expect("psnr");
+        let txt = String::from_utf8_lossy(&r.stderr);
+        // ...average:inf ... (identical) or average:NN.NN
+        txt.rsplit("average:")
+            .next()
+            .and_then(|s| s.split_whitespace().next())
+            .map(|s| if s.starts_with("inf") { 99.0 } else { s.parse().unwrap_or(0.0) })
+            .unwrap_or(0.0)
+    }
+
+    #[test]
+    fn trim_gate() {
+        ensure_audio_model_for_tests();
+        let dir = std::env::temp_dir().join(format!("zeigen-trim-gate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (sw, sh) = (640u32, 480u32);
+        let fps = 30.0;
+
+        // --- Bubble step-function sources: solid-gray screen (so only the bubble
+        // changes in its region) + a webcam that is BLACK for 20 frames then WHITE. ---
+        let gray = dir.join("gray.mp4");
+        let g = Command::new(FFMPEG_PATH)
+            .args(["-y", "-v", "error",
+                   "-f", "lavfi", "-i", &format!("color=c=gray:s={sw}x{sh}:r=30:d=3"),
+                   "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
+                   "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac"])
+            .arg(&gray).output().expect("gray synth");
+        assert!(g.status.success(), "gray: {}", String::from_utf8_lossy(&g.stderr));
+        // Webcam: black 20 frames (0.667s), white to 3s. Flip at webcam frame 20.
+        let webcam = dir.join("webcam-00.mp4");
+        let wc = Command::new(FFMPEG_PATH)
+            .args(["-y", "-v", "error",
+                   "-f", "lavfi", "-i", "color=c=black:s=480x480:r=30:d=0.6667",
+                   "-f", "lavfi", "-i", "color=c=white:s=480x480:r=30:d=2.3333",
+                   "-filter_complex", "[0][1]concat=n=2:v=1:a=0",
+                   "-c:v", "libx264", "-pix_fmt", "yuv420p"])
+            .arg(&webcam).output().expect("webcam synth");
+        assert!(wc.status.success(), "webcam: {}", String::from_utf8_lossy(&wc.stderr));
+        // Measure the webcam's OWN flip frame (concat rounding can shift it a frame
+        // off the nominal 20), so the `expect` column below is exact, not a guess.
+        let flip_wc = flip_frame(&crop_luma_series(&webcam, 238, 238, 4, 4))
+            .map(|v| v as i64).expect("webcam has a black->white flip");
+
+        // Bubble geometry (bottom-right): center = (W - pad - D/2, H - pad - D/2).
+        let dia_frac = 0.16;
+        let d = (dia_frac * sw as f64).round() as u32;
+        let pad = crate::composite::resolve_padding_px(sw);
+        let cx = sw - pad - d / 2;
+        let cy = sh - pad - d / 2;
+        let (bx, by, bw, bh) = (cx - 2, cy - 2, 4, 4);
+        let bubble_log = vec![BubblePositionEntry { t: 0.0, x: 0.9, y: 0.85, diameter_frac: Some(dia_frac) }];
+        let lead = crate::composite::WEBCAM_LEAD_MS / 1000.0;
+
+        eprintln!("\n===== TRIM GATE =====");
+        eprintln!("webcam flips black->white at webcam frame {flip_wc}; lead={:.0}ms\n", lead * 1000.0);
+        eprintln!("branch          trim_in   expect  V3flip  V2flip  V3-V2   V3-V2(ms)");
+
+        let branches = [("A: trim_in>lead", 0.5f64, 2.5f64), ("B: trim_in<lead", 0.05, 2.0)];
+        for (name, tin, tout) in branches {
+            let sc = SidecarState {
+                bubble_zone: Some(crate::composite::BubbleZone::BottomRight),
+                bubble_position_log: bubble_log.clone(),
+                trim: Some(Trim { start: tin, out: tout }),
+                ..Default::default()
+            };
+            let v3 = dir.join(format!("v3-{}.mp4", if tin < lead { "b" } else { "a" }));
+            let v2 = dir.join(format!("v2-{}.mp4", if tin < lead { "b" } else { "a" }));
+            run_v3_export(&gray, std::slice::from_ref(&webcam), &v3, &sc,
+                crate::composite::WebcamSize::Medium, None, Mp4Resolution::Source, |_| {})
+                .expect("v3 trim export");
+            run_edit_pipeline_v2(&gray, std::slice::from_ref(&webcam), &v2, &sc,
+                PipelineMode::Mp4 { resolution: Mp4Resolution::Source },
+                crate::composite::WebcamSize::Medium, None, |_| {})
+                .expect("v2 trim export");
+
+            let f3 = flip_frame(&crop_luma_series(&v3, bx, by, bw, bh)).map(|v| v as i64).unwrap_or(-1);
+            let f2 = flip_frame(&crop_luma_series(&v2, bx, by, bw, bh)).map(|v| v as i64).unwrap_or(-1);
+            let expect = if tin >= lead {
+                flip_wc - ((tin - lead) * fps).round() as i64
+            } else {
+                flip_wc + ((lead - tin) * fps).round() as i64
+            };
+            let dframes = f3 - f2;
+            eprintln!("{name:<15} {tin:>6.3}s  {expect:>6}  {f3:>6}  {f2:>6}  {dframes:>5}   {:>7.1}",
+                dframes as f64 * 1000.0 / fps);
+            assert!((f3 - f2).abs() <= 1, "{name}: V3 bubble flip {f3} vs V2 {f2} diverge >1 frame");
+        }
+
+        // --- Frame accuracy + duration + audio: testsrc2 (distinguishable frames),
+        // no webcam, trim [0.5, 2.5]. V3 frame 0 must equal the SOURCE frame at
+        // trim_in and V2 frame 0. ---
+        let ts = dir.join("counter.mp4");
+        let c = Command::new(FFMPEG_PATH)
+            .args(["-y", "-v", "error",
+                   "-f", "lavfi", "-i", "testsrc2=s=640x480:r=30:d=3",
+                   "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
+                   "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac"])
+            .arg(&ts).output().expect("counter synth");
+        assert!(c.status.success(), "counter: {}", String::from_utf8_lossy(&c.stderr));
+        let (tin, tout) = (0.5f64, 2.5f64);
+        let sc = SidecarState { trim: Some(Trim { start: tin, out: tout }), ..Default::default() };
+        let v3 = dir.join("v3-frame.mp4");
+        let v2 = dir.join("v2-frame.mp4");
+        run_v3_export(&ts, &[], &v3, &sc, crate::composite::WebcamSize::Medium, None,
+            Mp4Resolution::Source, |_| {}).expect("v3 frame export");
+        run_edit_pipeline_v2(&ts, &[], &v2, &sc, PipelineMode::Mp4 { resolution: Mp4Resolution::Source },
+            crate::composite::WebcamSize::Medium, None, |_| {}).expect("v2 frame export");
+
+        // Frame accuracy by argmax-margin: V3 frame 0 must match the SOURCE frame at
+        // trim_in far better than either neighbor (robust to the double/triple-encode
+        // PSNR floor — the peak's identity is the proof, not its absolute dB).
+        let tf = (tin * fps).round() as i64;
+        let p_prev = frame_psnr(&v3, 0, &ts, tf - 1, &dir);
+        let p_at = frame_psnr(&v3, 0, &ts, tf, &dir);
+        let p_next = frame_psnr(&v3, 0, &ts, tf + 1, &dir);
+        let psnr_v2 = frame_psnr(&v3, 0, &v2, 0, &dir);
+        let dur3 = probe_duration_seconds(&v3).unwrap();
+        let dur2 = probe_duration_seconds(&v2).unwrap();
+        let adur3 = ffprobe_field(&v3, "stream=duration", "a:0").parse::<f64>().unwrap_or(0.0);
+        eprintln!("\nframe0 vs source frame {}/{}/{}: {p_prev:.1}/{p_at:.1}/{p_next:.1} dB \
+                   (peak must be the middle = trim_in)", tf - 1, tf, tf + 1);
+        eprintln!("frame0 vs V2 frame0: {psnr_v2:.1} dB  (V3 & V2 show the same source frame)");
+        eprintln!("duration V3 {dur3:.3}s  V2 {dur2:.3}s  window {:.3}s   audio {adur3:.3}s\n", tout - tin);
+
+        assert!(p_at > p_prev + 4.0 && p_at > p_next + 4.0,
+            "V3 frame 0 must match the source frame at trim_in, not a neighbor \
+             (prev {p_prev:.1}, at {p_at:.1}, next {p_next:.1})");
+        assert!(psnr_v2 > p_at - 3.0, "V3 frame 0 matches V2 frame 0 (got {psnr_v2:.1} dB)");
+        assert!((dur3 - (tout - tin)).abs() < 0.5 / fps, "V3 duration matches the window exactly");
+        assert!((dur3 - dur2).abs() < 0.5 / fps, "V3 duration matches V2 (same frame count)");
+        assert!((adur3 - dur3).abs() < 0.05, "audio length locked to trimmed video");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // On-demand trim perf: wall + CPU of REAL V3-trim vs V2-trim on a webcam+zoom
+    // trimmed clip, median of 3. CPU is getrusage(RUSAGE_CHILDREN) delta — the
+    // reaped-subprocess user+sys time (cicompositor/ffmpeg), the programmatic
+    // equivalent of Phase 6's `/usr/bin/time -l`. #[ignore]: spawns heavy renders,
+    // run explicitly (cargo test trim_perf -- --ignored --nocapture).
+    #[test]
+    #[ignore]
+    fn trim_perf() {
+        ensure_audio_model_for_tests();
+        let dir = std::env::temp_dir().join(format!("zeigen-trim-perf-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // 1280x720 / 6s source with audio; webcam segment; zoom + bubble; trim to a
+        // 4s window [1.0, 5.0] so V2 does real oversample work on the merged path.
+        let screen = dir.join("screen.mp4");
+        let s = Command::new(FFMPEG_PATH)
+            .args(["-y", "-v", "error",
+                   "-f", "lavfi", "-i", "testsrc2=s=1280x720:r=30:d=6",
+                   "-f", "lavfi", "-i", "sine=frequency=440:duration=6",
+                   "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac"])
+            .arg(&screen).output().expect("screen synth");
+        assert!(s.status.success(), "screen: {}", String::from_utf8_lossy(&s.stderr));
+        let webcam = dir.join("webcam-00.mp4");
+        let wc = Command::new(FFMPEG_PATH)
+            .args(["-y", "-v", "error", "-f", "lavfi", "-i",
+                   "testsrc=duration=6:size=320x320:rate=30", "-c:v", "libx264", "-pix_fmt", "yuv420p"])
+            .arg(&webcam).output().expect("webcam synth");
+        assert!(wc.status.success(), "webcam: {}", String::from_utf8_lossy(&wc.stderr));
+
+        let kf = |t: f64, scale: f64| ZoomKeyframe {
+            t, scale, center_x: 640.0, center_y: 360.0, ease: Ease::InOutCubic, auto_generated: false,
+        };
+        let sc = SidecarState {
+            zoom: vec![kf(1.5, 1.0), kf(2.1, 2.0), kf(3.5, 2.0), kf(4.1, 1.0)],
+            bubble_zone: Some(crate::composite::BubbleZone::BottomRight),
+            bubble_position_log: vec![BubblePositionEntry { t: 0.0, x: 0.9, y: 0.85, diameter_frac: Some(0.16) }],
+            trim: Some(Trim { start: 1.0, out: 5.0 }),
+            ..Default::default()
+        };
+
+        fn child_cpu_secs() -> f64 {
+            let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+            unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, &mut ru) };
+            ru.ru_utime.tv_sec as f64 + ru.ru_utime.tv_usec as f64 / 1e6
+                + ru.ru_stime.tv_sec as f64 + ru.ru_stime.tv_usec as f64 / 1e6
+        }
+        let median = |mut v: Vec<f64>| {
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            v[v.len() / 2]
+        };
+
+        let (mut v3w, mut v3c, mut v2w, mut v2c) = (vec![], vec![], vec![], vec![]);
+        for i in 0..3 {
+            let o3 = dir.join(format!("v3-{i}.mp4"));
+            let c0 = child_cpu_secs();
+            let t0 = std::time::Instant::now();
+            run_v3_export(&screen, std::slice::from_ref(&webcam), &o3, &sc,
+                crate::composite::WebcamSize::Medium, None, Mp4Resolution::Source, |_| {})
+                .expect("v3 trim");
+            v3w.push(t0.elapsed().as_secs_f64());
+            v3c.push(child_cpu_secs() - c0);
+
+            let o2 = dir.join(format!("v2-{i}.mp4"));
+            let c0 = child_cpu_secs();
+            let t0 = std::time::Instant::now();
+            run_edit_pipeline_v2(&screen, std::slice::from_ref(&webcam), &o2, &sc,
+                PipelineMode::Mp4 { resolution: Mp4Resolution::Source },
+                crate::composite::WebcamSize::Medium, None, |_| {})
+                .expect("v2 trim");
+            v2w.push(t0.elapsed().as_secs_f64());
+            v2c.push(child_cpu_secs() - c0);
+        }
+        let (v3w, v3c) = (median(v3w), median(v3c));
+        let (v2w, v2c) = (median(v2w), median(v2c));
+        eprintln!("\n===== TRIM PERF (1280x720, 6s src, [1.0,5.0] trim, zoom+bubble, median of 3) =====");
+        eprintln!("            wall(s)   CPU(s)");
+        eprintln!("V3-trim     {v3w:>6.2}   {v3c:>6.2}");
+        eprintln!("V2-trim     {v2w:>6.2}   {v2c:>6.2}");
+        eprintln!("V3/V2       {:>5.0}%   {:>5.0}%   (V3 wall {:.1}x faster, CPU {:.1}x less)\n",
+            v3w / v2w * 100.0, v3c / v2c * 100.0, v2w / v3w, v2c / v3c);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
