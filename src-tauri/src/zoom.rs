@@ -42,6 +42,15 @@ use crate::edit::{Ease, ZoomKeyframe};
 // snapshot tests below print and pin detector output; retune by editing
 // these and reading the new pin off the test failure.
 
+// All *_PX thresholds below are calibrated in pixels at REF_VIDEO_WIDTH — the
+// built-in display's logical width, where they were tuned. Telemetry arrives in
+// capture pixels, which doubled when capture moved to backing resolution
+// (3024 vs 1512), so detect() scales every px threshold by the actual video
+// width / REF (a 1512 capture is unchanged, a 3024 backing capture doubles them),
+// keeping detection resolution-independent. Time and scale-ratio thresholds are
+// already resolution-invariant and are NOT scaled.
+const REF_VIDEO_WIDTH: f64 = 1512.0;
+
 // C.1 dwell: cursor stays within a small region for >800ms. Implemented as
 // a maximal sample run whose bounding-box diagonal stays under the radius.
 const DWELL_RADIUS_PX: f64 = 150.0;
@@ -233,6 +242,18 @@ pub fn detect(track: &CursorTrack) -> Vec<ZoomKeyframe> {
     let track_end = samples.last().unwrap().t;
     let (w, h) = (track.video_size.width, track.video_size.height);
 
+    // Scale px thresholds to the capture resolution (see REF_VIDEO_WIDTH). At a
+    // 1512 logical capture res_scale is 1.0 (behavior unchanged); at a 3024
+    // backing capture it is 2.0, so the same physical motion clears the same
+    // physical thresholds it did before capture doubled.
+    let res_scale = w / REF_VIDEO_WIDTH;
+    let dwell_radius = DWELL_RADIUS_PX * res_scale;
+    let drag_min = DRAG_MIN_PX * res_scale;
+    let parked_bbox = PARKED_BBOX_PX * res_scale;
+    let post_click_still_px = POST_CLICK_STILL_PX * res_scale;
+    let jitter_step = JITTER_STEP_PX * res_scale;
+    let center_merge = CENTER_MERGE_PX * res_scale;
+
     let mut events: Vec<&CursorEvent> = track.events.iter().collect();
     events.sort_by(|a, b| a.t.total_cmp(&b.t));
     let scrolls: Vec<&CursorEvent> =
@@ -271,7 +292,7 @@ pub fn detect(track: &CursorTrack) -> Vec<ZoomKeyframe> {
             continue;
         }
         match ups.iter().find(|u| u.t >= e.t) {
-            Some(u) if dist(e.x, e.y, u.x, u.y) > DRAG_MIN_PX => {
+            Some(u) if dist(e.x, e.y, u.x, u.y) > drag_min => {
                 gestures.push(Gesture { t0: e.t, t1: u.t, x0: e.x, y0: e.y, x1: u.x, y1: u.y });
             }
             _ => clicks.push(e),
@@ -296,7 +317,7 @@ pub fn detect(track: &CursorTrack) -> Vec<ZoomKeyframe> {
             let nmaxx = maxx.max(s.x);
             let nminy = miny.min(s.y);
             let nmaxy = maxy.max(s.y);
-            if dist(nminx, nminy, nmaxx, nmaxy) > DWELL_RADIUS_PX {
+            if dist(nminx, nminy, nmaxx, nmaxy) > dwell_radius {
                 break;
             }
             (minx, maxx, miny, maxy) = (nminx, nmaxx, nminy, nmaxy);
@@ -312,7 +333,7 @@ pub fn detect(track: &CursorTrack) -> Vec<ZoomKeyframe> {
                     s.t >= t0 - SCROLL_VETO_PAD_S && s.t <= t1 + SCROLL_VETO_PAD_S
                 });
             let parked =
-                in_dwell.is_empty() && dist(minx, miny, maxx, maxy) < PARKED_BBOX_PX;
+                in_dwell.is_empty() && dist(minx, miny, maxx, maxy) < parked_bbox;
             // Rule 1: a clicked dwell whose whole post-click stretch stays
             // still is watching a consequence elsewhere — veto to wide. Third
             // sibling of the parked/scroll vetoes; scoped to clicked dwells so
@@ -332,7 +353,7 @@ pub fn detect(track: &CursorTrack) -> Vec<ZoomKeyframe> {
                         ny = ny.min(s.y);
                         xy = xy.max(s.y);
                     }
-                    xx >= nx && dist(nx, ny, xx, xy) < POST_CLICK_STILL_PX
+                    xx >= nx && dist(nx, ny, xx, xy) < post_click_still_px
                 }
                 _ => false,
             };
@@ -345,7 +366,7 @@ pub fn detect(track: &CursorTrack) -> Vec<ZoomKeyframe> {
                 let mut last_act = t0;
                 let (mut rx, mut ry) = (samples[i].x, samples[i].y);
                 for s in &samples[i..=j] {
-                    if dist(s.x, s.y, rx, ry) > JITTER_STEP_PX {
+                    if dist(s.x, s.y, rx, ry) > jitter_step {
                         first_act.get_or_insert(s.t);
                         last_act = s.t;
                         (rx, ry) = (s.x, s.y);
@@ -435,7 +456,7 @@ pub fn detect(track: &CursorTrack) -> Vec<ZoomKeyframe> {
         }
         let li = merged.len() - 1;
         let centers_near =
-            dist(merged[li].cx(), merged[li].cy(), c.cx(), c.cy()) <= CENTER_MERGE_PX;
+            dist(merged[li].cx(), merged[li].cy(), c.cx(), c.cy()) <= center_merge;
         let union_w = merged[li].maxx.max(c.maxx) - merged[li].minx.min(c.minx);
         let union_h = merged[li].maxy.max(c.maxy) - merged[li].miny.min(c.miny);
         let union_scale =
@@ -732,9 +753,16 @@ mod tests {
                 w[1]
             );
         }
+        // Re-pinned 2026-07-17 for the resolution-scaled thresholds. This is a
+        // 1920-wide EXTERNAL-display fixture, so res_scale = 1920/1512 = 1.27 and
+        // the thresholds grow 27% — the tail (122-161s) and the ~70s center shift
+        // moved. Judged by the MODEL (consistent fraction-of-screen normalization),
+        // NOT by eye: the source video is gone, and the eye-judgeable case (the
+        // built-in 1512->3024, on real footage) checked out. The two built-in-class
+        // fixtures (091633 @1470, 220817 @1512) are UNCHANGED by the scaling.
         assert_eq!(
             got,
-            "7.88-10.55s @(480,270) 2.0x; 15.01-20.91s @(869,638) 1.7x; 22.66-26.08s @(480,270) 2.0x; 30.38-42.17s @(497,314) 1.9x; 47.67-51.36s @(664,590) 1.4x; 61.52-65.49s @(684,604) 1.4x; 70.55-75.39s @(480,621) 2.0x; 80.34-83.64s @(480,413) 2.0x; 85.42-88.12s @(480,528) 2.0x; 89.32-93.52s @(952,686) 1.7x; 95.44-98.67s @(480,729) 2.0x; 108.86-113.74s @(480,644) 2.0x; 117.85-120.96s @(1146,662) 1.7x; 132.19-135.96s @(480,298) 2.0x; 143.92-148.76s @(1355,430) 1.7x; 149.96-152.22s @(565,530) 1.7x; 153.68-156.94s @(643,534) 1.5x; 158.14-161.14s @(1131,318) 1.7x"
+            "7.86-10.62s @(480,270) 2.0x; 14.42-20.92s @(869,638) 1.7x; 22.60-26.08s @(480,270) 2.0x; 29.77-42.17s @(497,314) 1.9x; 47.67-51.36s @(664,590) 1.4x; 61.52-65.49s @(684,604) 1.4x; 69.23-75.40s @(480,439) 2.0x; 80.34-83.64s @(480,413) 2.0x; 85.42-88.12s @(480,528) 2.0x; 89.32-93.52s @(952,686) 1.7x; 95.40-98.12s @(480,750) 2.0x; 108.59-113.74s @(480,644) 2.0x; 117.85-120.96s @(1146,662) 1.7x; 122.18-126.95s @(662,353) 1.7x; 135.76-141.47s @(985,376) 1.7x; 143.91-148.76s @(1355,430) 1.7x; 149.96-152.22s @(565,530) 1.7x; 153.68-157.44s @(643,534) 1.5x"
         );
     }
 

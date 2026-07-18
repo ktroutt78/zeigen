@@ -4,6 +4,16 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-17 — Zoom detection thresholds scaled to capture resolution (step 3 of backing-scale)
+
+Backing-scale doubled telemetry pixels (built-in 1512->3024), but `zoom.rs`'s six trigger/merge thresholds (`DWELL_RADIUS_PX`=150, `DRAG_MIN_PX`=60, `CENTER_MERGE_PX`=300, `POST_CLICK_STILL_PX`=60, `PARKED_BBOX_PX`=8, `JITTER_STEP_PX`=5) are absolute pixels. Same physical motion now spans 2x the pixels, so every threshold effectively HALVED — dwells under-detected, drags over-detected, merges rarer. A behavior change wearing a capture change's clothes, which is why the owner insisted on eye-judgment, not blind rescale.
+
+**Fix:** `detect()` scales the six px thresholds by `video_width / REF_VIDEO_WIDTH` (REF = 1512, the built-in's logical width where they were tuned). A 1512 capture is unchanged; a 3024 backing capture doubles them; detection is resolution-independent going forward. This is fraction-of-screen normalization ("cursor stayed within ~10% of the frame"), the correct basis for on-screen gestures. Centers are untouched (telemetry positions consumed as fractions). Everything else in the detector (fit_scale, gesture floors, all time windows) was already ratio/time-based — audited, not scaled.
+
+**Gate (owner eye, on CFR-smooth renders of the real 3024 recording).** Rendered flat-thresholds vs scaled side by side; the ONLY difference on the real recording was a 19-29s stretch (flat = two punches with a pointless zoom-out/in reset; scaled = one continuous hold). Owner chose **scaled**. The 10s opener and everything else were byte-identical.
+
+**Fixture re-pin (honest split):** the two built-in-class fixtures — 091633 (1470) and 220817 (1512) — are UNCHANGED by the scaling (res_scale ~1.0), proving no regression on built-in recordings. 105816 (1920, EXTERNAL display) shifts (res_scale 1.27, thresholds +27%) in its 122-161s tail + a ~70s center; re-pinned to the scaled output but judged by the MODEL (consistent fraction normalization), NOT by eye — its source video is gone, and the eye-judgeable built-in case checked out on real footage. Owner accepted the model-based re-pin (doesn't have an external 1080p display handy; built-in is the case that matters).
+
 ## 2026-07-17 — V3 zoom stutter: diagnosed as idle-skip (NOT load-drop), fixed with compositor CFR
 
 Zoomed V3 exports stuttered after backing-scale. Initial read (WRONG, corrected here): backing-scale's 4x pixels made SCK drop frames under load (measured 29->24 fps). **Actual cause: idle-frame skipping.** The recording engine writes only SCK `.complete` frames (`RecordingSession.swift:675`); SCK sends `.idle` frames when the screen is unchanged, which we discard. On a static dashboard that's ~24 fps with gaps to 333ms. The compositor keys the zoom off each frame's PTS (`zoomAt(segs, t)`), so across an idle gap the zoom lurched ~10x a normal step — the stutter. The compositor preserved the VFR 1:1.
