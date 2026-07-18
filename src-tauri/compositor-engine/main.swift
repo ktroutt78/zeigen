@@ -161,15 +161,22 @@ guard let track = videoTrack else { fail("no video track") }
 let sizeSem = DispatchSemaphore(value: 0)
 var naturalSize = CGSize.zero
 var nominalFPS: Float = 30
+var srcDuration: Double = 0
 Task {
     naturalSize = (try? await track.load(.naturalSize)) ?? .zero
     nominalFPS = (try? await track.load(.nominalFrameRate)) ?? 30
+    srcDuration = CMTimeGetSeconds((try? await asset.load(.duration)) ?? .zero)
     sizeSem.signal()
 }
 sizeSem.wait()
 let W = Int(naturalSize.width), H = Int(naturalSize.height)
 guard W > 0, H > 0 else { fail("bad dimensions \(W)x\(H)") }
-let fps = nominalFPS > 0 ? Int(nominalFPS.rounded()) : 30
+// CFR output rate. nominalFrameRate UNDER-reports on an idle-skipped VFR capture
+// (it's the average incl. static stretches — e.g. 24 on a 30fps-target recording),
+// and a grid below the active-content peak would subsample real motion frames. The
+// recorder targets 30 (minimumFrameInterval 1/30), so floor the grid at 30; a
+// genuinely higher-rate source (nominal > 30) is still honored.
+let fps = max(30, Int(nominalFPS.rounded()))
 
 // Output resolution: composite at source WxH, then (when OUTPUT_* request smaller
 // dims) append a terminal Lanczos downscale before the writer — mirrors V2's
@@ -196,7 +203,10 @@ let readerOutput = AVAssetReaderTrackOutput(
     track: track,
     outputSettings: [kCVPixelBufferPixelFormatTypeKey as String:
                         kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange])
-readerOutput.alwaysCopiesSampleData = false
+// CFR resampling holds a source frame across multiple output ticks during an idle
+// gap, so the held buffer must survive the next copyNextSampleBuffer — copy it out
+// of the reader's reused memory rather than referencing it.
+readerOutput.alwaysCopiesSampleData = true
 guard reader.canAdd(readerOutput) else { fail("cannot add reader output") }
 reader.add(readerOutput)
 
@@ -362,16 +372,42 @@ if bubbleWebcam != nil {
 }
 var lastBubble: CIImage? = nil
 
+// CFR resampling: emit output frames on a fixed `fps` grid instead of 1:1 with the
+// VFR source. SCK skips unchanged (idle) frames, so the capture is VFR — a zoom keyed
+// off frame PTS then lurches across an idle gap (the V3 stutter). For each output tick
+// we composite the source frame CURRENT at tOut (held across gaps) and stamp a regular
+// PTS, so the zoom animates in even 1/fps steps regardless of source frame drops.
+func nextSourceFrame() -> (CMTime, CVPixelBuffer)? {
+    guard let s = readerOutput.copyNextSampleBuffer(),
+          let p = CMSampleBufferGetImageBuffer(s) else { return nil }
+    return (CMSampleBufferGetPresentationTimeStamp(s), p)  // alwaysCopies -> p survives s
+}
+var pending = nextSourceFrame()   // next source frame not yet reached by the grid
+var held: CVPixelBuffer? = nil    // source frame current at tOut, held across idle gaps
+
 writerInput.requestMediaDataWhenReady(on: queue) {
     while writerInput.isReadyForMoreMediaData {
-        guard let sample = readerOutput.copyNextSampleBuffer(),
-              let pixels = CMSampleBufferGetImageBuffer(sample) else {
+        let tOut = Double(frames) / Double(fps)
+        // Advance to the latest source frame whose PTS <= tOut; hold it across gaps.
+        while let p = pending, CMTimeGetSeconds(p.0) <= tOut {
+            held = p.1
+            pending = nextSourceFrame()
+        }
+        // Before the first source PTS (often slightly > 0), show frame 0 from t=0.
+        if held == nil, let p = pending {
+            held = p.1
+            pending = nextSourceFrame()
+        }
+        // Done: past the source duration, or drained the source when duration is unknown.
+        let pastEnd = srcDuration > 0
+            ? tOut > srcDuration + 0.5 / Double(fps)
+            : pending == nil
+        guard let pixels = held, !pastEnd else {
             writerInput.markAsFinished()
             writer.finishWriting { done.signal() }
             return
         }
-        let pts = CMSampleBufferGetPresentationTimeStamp(sample)
-        let t = CMTimeGetSeconds(pts)
+        let t = tOut
         // No colorSpace override: CI reads the 709 video-range attachments the
         // decoder put on the YCbCr buffer, so input color is interpreted, not guessed.
         let src = CIImage(cvPixelBuffer: pixels)
@@ -486,7 +522,8 @@ writerInput.requestMediaDataWhenReady(on: queue) {
             kCVImageBufferTransferFunction_ITU_R_709_2, .shouldPropagate)
         ciContext.render(out, to: dst, bounds: CGRect(x: 0, y: 0, width: outW, height: outH),
                           colorSpace: cs709)
-        if !adaptor.append(dst, withPresentationTime: pts) {
+        let outPTS = CMTime(value: Int64(frames), timescale: Int32(fps))
+        if !adaptor.append(dst, withPresentationTime: outPTS) {
             fail("append failed: \(writer.error?.localizedDescription ?? "?")")
         }
         frames += 1
