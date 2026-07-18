@@ -4047,7 +4047,10 @@ function ExportPanel({
     try {
       let mp4Path = committedMp4Path;
       if (!mp4Path) {
-        mp4Path = await onSave({ format: "mp4", resolution: "source" });
+        // LinkedIn caps at 1080p, so export at 1080p (supersampled from the
+        // backing-resolution capture) rather than Source/4K — same visible
+        // result, a quarter of the pixels, no upload of detail LinkedIn discards.
+        mp4Path = await onSave({ format: "mp4", resolution: "1080p" });
         if (!mp4Path) return; // onSave already surfaced an error
       }
       const outPath = await invoke<string>("linkedin_export", {
