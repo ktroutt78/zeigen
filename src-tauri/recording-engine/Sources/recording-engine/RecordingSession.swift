@@ -201,12 +201,18 @@ final class RecordingSession: NSObject,
             : nil
 
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
+        // Bitrate at a constant ~0.18 bits/pixel — the density the historical flat
+        // 8 Mbps encoded at 1512x982x30 logical. Scaling by the ACTUAL capture
+        // pixels x fps keeps quality-per-pixel constant now that a Retina capture is
+        // 4x the pixels (a 3024x1964 backing capture lands ~32 Mbps instead of a
+        // starved 8). VideoToolbox ABR undershoots on compressible screen content.
+        let captureBitrate = max(4_000_000, Int(Double(width * height) * Double(maxFPS) * 0.18))
         let videoSettings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: width,
             AVVideoHeightKey: height,
             AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: 8_000_000,
+                AVVideoAverageBitRateKey: captureBitrate,
                 AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
             ],
         ]

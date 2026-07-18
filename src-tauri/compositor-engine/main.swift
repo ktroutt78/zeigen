@@ -179,6 +179,15 @@ let outW = Int(env["OUTPUT_WIDTH"] ?? "") ?? W
 let outH = Int(env["OUTPUT_HEIGHT"] ?? "") ?? H
 let downscaleOut = outW > 0 && outH > 0 && (outW != W || outH != H)
 
+// Bitrate at a constant ~0.18 bits/pixel (BITS_PER_PIXEL), the same density the
+// historical flat 8 Mbps encoded at 1512x982x30 logical. Scaling by the actual
+// OUTPUT pixels x fps keeps quality-per-pixel constant: ~32 Mbps at a 3024x1964
+// backing capture, ~13 Mbps at a 1920x1246 supersampled 1080p export — instead of
+// starving 4x the pixels on a fixed 8 Mbps. VideoToolbox ABR undershoots this
+// ceiling on compressible screen content, so it costs little on typical dashboards.
+let bitsPerPixel = Double(env["BITS_PER_PIXEL"] ?? "0.18") ?? 0.18
+let outBitrate = max(4_000_000, Int(Double(outW * outH) * Double(fps) * bitsPerPixel))
+
 // --- Reader: decode to native 709 video-range YCbCr, so CIImage interprets the
 // source color from the buffer's own attachments instead of us guessing a transfer
 // on a BGRA buffer (that guess shifted luma ~27 dB in Phase 1's first measurement). ---
@@ -226,7 +235,7 @@ let writerInput = AVAssetWriterInput(mediaType: .video, outputSettings: [
     AVVideoWidthKey: outW,
     AVVideoHeightKey: outH,
     AVVideoCompressionPropertiesKey: [
-        AVVideoAverageBitRateKey: 8_000_000,
+        AVVideoAverageBitRateKey: outBitrate,
         AVVideoProfileLevelKey: kVTProfileLevel_H264_High_AutoLevel as String,
         AVVideoExpectedSourceFrameRateKey: fps,
         AVVideoMaxKeyFrameIntervalKey: fps * 2,
