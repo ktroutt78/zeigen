@@ -1100,12 +1100,13 @@ export default function Review() {
         const result = await invoke<{
           output_path: string;
           thumbnail_out_of_trim: boolean;
-          // Present only when the export fell back to the V2 (ffmpeg) path for a
-          // specific reason (trim, multi-segment webcam). Absent = the normal V3
-          // path (or plain copy / GIF). Surfaced so a quiet fall-through is
-          // visible from the save itself, not guessed. A V3 runtime FAILURE is
-          // no longer a note — it rejects the save and surfaces via the error
-          // banner below (owner, 2026-07-17: no silent V2 rescue).
+          // A save-time note, shown as an amber notice. Two kinds: a V2-fallback
+          // note ("rendered via V2 fallback: trimmed export") when an ineligible
+          // export ran on ffmpeg, or a V3 caveat (multi-segment webcam concat
+          // drift) when V3 handled it with a wrinkle worth flagging. Absent = the
+          // clean path (normal V3, plain copy, or GIF). A V3 runtime FAILURE is
+          // NOT a note — it rejects the save and surfaces via the error banner
+          // below (owner, 2026-07-17: no silent V2 rescue).
           route_note?: string | null;
         }>("save_recording", {
           stamp,

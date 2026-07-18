@@ -886,6 +886,12 @@ impl PipelineReport {
     fn fallback(reason: &str) -> Self {
         Self { route_note: Some(format!("rendered via V2 fallback: {reason}")) }
     }
+    // A successful V3 export that carries a caveat (e.g. multi-segment webcam
+    // concat drift). The note is self-describing — NO "V2 fallback" prefix, since
+    // nothing fell back to V2.
+    fn caveat(note: &str) -> Self {
+        Self { route_note: Some(note.to_string()) }
+    }
 }
 
 // Routing decision. `Run` attempts V3; `FallbackVisible` routes V2 with a named
@@ -897,10 +903,10 @@ enum V3Decision {
 }
 
 // Pure predicate over the export inputs (plus the runtime flag). Precedence when
-// several conditions hold: flag -> GIF -> trim -> annotations -> multi-segment
-// webcam -> no-V3-work. The first match wins and names the note. Downscale and
-// webcam-without-zoom are handled INSIDE run_v3_export now (both are V3 paths),
-// so they no longer fall back here.
+// several conditions hold: flag -> GIF -> trim -> annotations -> no-V3-work. The
+// first match wins and names the note. Downscale, webcam-without-zoom, and
+// multi-segment webcam (concat) are handled INSIDE run_v3_export now (all V3
+// paths), so they no longer fall back here.
 fn decide_v3(
     flag_on: bool,
     screen_path: &Path,
@@ -946,17 +952,9 @@ fn decide_v3(
     }
     let has_zoom = !zoom_keyframes_to_segments(&sidecar.zoom).is_empty();
     let has_webcam = !webcam_segments.is_empty();
-    // Multi-segment webcam (Continuity drop mid-recording spawns webcam-01.mp4,
-    // ...). cicompositor takes a single BUBBLE_WEBCAM; concatenating is untested
-    // new code, kept out of the switchover commit (same rule as trim). Not one of
-    // the six the owner enumerated — added because taking segment[0] would drop
-    // footage and a concat pass is exactly the untested risk the switchover avoids.
-    if webcam_segments.len() > 1 {
-        return V3Decision::FallbackVisible(format!(
-            "webcam has {} segments",
-            webcam_segments.len()
-        ));
-    }
+    // Multi-segment webcam (a Continuity drop mid-recording spawns webcam-01.mp4,
+    // ...) is a V3 path now: run_v3_export concatenates the segments back-to-back
+    // into one bubble stream and returns a caveat note about the resulting drift.
     // Webcam WITHOUT zoom is a V3 path now. The compositor renders a static
     // (unzoomed) frame with the bubble — empty zoom segments are a no-op, not a
     // failure. V2's no-zoom composite() applied an audio itsoffset that only drops
@@ -1040,19 +1038,22 @@ fn v3_output_dims(w: u32, h: u32, resolution: Mp4Resolution) -> (u32, u32) {
 // V3 export: cicompositor renders zoom + bubble + watermark to a video-only mp4
 // (downscaled to `resolution` if below source), then ffmpeg muxes the SCREEN
 // source's audio (arnndn, no itsoffset — the single-input path doesn't shift).
-// Returns Err to signal the caller to fall through to V2; on Err the partial
-// `output` is not trusted (V2 overwrites it). `webcam` is the single segment
-// (eligibility guarantees <=1); `watermark` is pre-filtered to an existing logo.
+// Returns Err on any V3 failure — no V2 fallback (the caller surfaces the reason
+// and preserves the scratch source). `watermark` is pre-filtered to an existing
+// logo. `webcam_segments` is 0 or 1 in the common case; 2+ (a Continuity drop
+// mid-recording) are concatenated back-to-back into one bubble stream, and the
+// returned Option<String> carries a caveat note describing the resulting drift.
+// Ok(None) is the clean path; Ok(Some(note)) is a successful export with a note.
 fn run_v3_export(
     screen_path: &Path,
-    webcam: Option<&Path>,
+    webcam_segments: &[std::path::PathBuf],
     output: &Path,
     sidecar: &SidecarState,
     webcam_size: crate::composite::WebcamSize,
     watermark: Option<&Watermark>,
     resolution: Mp4Resolution,
     on_progress: impl Fn(f64),
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     on_progress(0.02);
     let bin = cicompositor_binary_path();
     if !bin.is_file() {
@@ -1073,6 +1074,39 @@ fn run_v3_export(
         .join(format!("v3-{stem}"));
     std::fs::create_dir_all(&temp_dir)
         .map_err(|e| format!("create {}: {e}", temp_dir.display()))?;
+
+    // Resolve the segments to the ONE bubble stream cicompositor consumes.
+    // COMMON CASE (0 or 1 segment) is untouched: a single segment is fed
+    // directly, byte-identical to before. 2+ segments (a Continuity drop spawned
+    // webcam-01.mp4, ...) are concatenated back-to-back — the concat path only
+    // exists when len > 1, so a clean single-segment recording never touches it.
+    let webcam: Option<PathBuf> = match webcam_segments {
+        [] => None,
+        [only] => Some(only.clone()),
+        many => Some(concat_webcam_segments(many, &temp_dir)?),
+    };
+    // Drift note: back-to-back concat removes the wall-clock gap(s) where the
+    // camera was disconnected, so the concatenated bubble stream is shorter than
+    // the screen by the total downtime. Computed only on the multi-segment path.
+    let webcam_note = (webcam_segments.len() > 1).then(|| {
+        let screen_dur = probe_duration_seconds(screen_path).unwrap_or(0.0);
+        let webcam_dur: f64 = webcam_segments
+            .iter()
+            .filter_map(|s| probe_duration_seconds(s).ok())
+            .sum();
+        // downtime = screen span not covered by any webcam segment ≈ sum of the
+        // Continuity gaps (start/stop offsets are sub-second vs a real drop).
+        let downtime = (screen_dur - webcam_dur).max(0.0);
+        format!(
+            "Webcam recorded in {n} segments (Continuity camera dropped mid-recording). \
+             Concatenated back-to-back, removing ~{d:.1}s of camera downtime — so after \
+             the drop the bubble runs AHEAD of the audio by up to ~{d:.1}s (the face \
+             mouths words before you hear them) and freezes on its last frame for the \
+             final ~{d:.1}s. Re-record if that's visible.",
+            n = webcam_segments.len(),
+            d = downtime,
+        )
+    });
 
     // Zoom -> ZOOM_SEGMENTS JSON. cx/cy are source px (top-origin); cicompositor
     // wants top-origin fractions and applies ZOOM_RENDER_RAMP_S itself per edge.
@@ -1107,7 +1141,7 @@ fn run_v3_export(
     };
 
     // Bubble mask + shadow PNGs (identical geometry to V2 build_webcam_overlay).
-    let bubble = match webcam {
+    let bubble = match &webcam {
         Some(_) => Some(crate::composite::build_v3_bubble_assets(
             &temp_dir,
             sidecar.bubble_zone,
@@ -1131,7 +1165,7 @@ fn run_v3_export(
     if let Some(zj) = &zoom_json_path {
         cmd.env("ZOOM_SEGMENTS", zj);
     }
-    if let (Some(wc), Some(b)) = (webcam, &bubble) {
+    if let (Some(wc), Some(b)) = (webcam.as_deref(), &bubble) {
         // Shadow alpha (0.22) and radius-k (3.0) match cicompositor's defaults and
         // the Phase 4 A/B, so they're left unset. Lead frames replicate V2's
         // WEBCAM_LEAD_MS clone-freeze (main.swift BUBBLE_LEAD_FRAMES).
@@ -1197,7 +1231,40 @@ fn run_v3_export(
     }
     let _ = std::fs::remove_dir_all(&temp_dir);
     on_progress(1.0);
-    Ok(())
+    Ok(webcam_note)
+}
+
+// Concatenate multiple webcam segments (a Continuity drop mid-recording spawns
+// webcam-01.mp4, ...) into ONE stream for cicompositor's single BUBBLE_WEBCAM.
+// Every segment shares webcam.rs's exact encode (h264_videotoolbox / nv12 / 30fps
+// / 1280x720 / -an), so a stream-copy concat is valid — no re-encode. Back-to-
+// back: the wall-clock gap where the camera was disconnected is REMOVED (the
+// accepted drift, surfaced to the user in run_v3_export's caveat note).
+fn concat_webcam_segments(segments: &[PathBuf], temp_dir: &Path) -> Result<PathBuf, String> {
+    let list = temp_dir.join("webcam-concat.txt");
+    let mut body = String::new();
+    for seg in segments {
+        // concat demuxer 'file' lines: single-quotes in the path are escaped per
+        // ffmpeg's rule ('\'' closes, escapes a literal quote, reopens).
+        let p = seg.to_string_lossy().replace('\'', "'\\''");
+        body.push_str(&format!("file '{p}'\n"));
+    }
+    std::fs::write(&list, &body).map_err(|e| format!("write concat list: {e}"))?;
+    let out = temp_dir.join("webcam-concat.mp4");
+    let r = std::process::Command::new(FFMPEG_PATH)
+        .args(["-y", "-hide_banner", "-v", "error", "-f", "concat", "-safe", "0", "-i"])
+        .arg(&list)
+        .args(["-c", "copy"])
+        .arg(&out)
+        .output()
+        .map_err(|e| format!("spawn ffmpeg concat: {e}"))?;
+    if !r.status.success() {
+        return Err(format!(
+            "webcam concat: {}",
+            String::from_utf8_lossy(&r.stderr).trim()
+        ));
+    }
+    Ok(out)
 }
 
 // Phase 15 c2: composite-at-export wrapper. When webcam_segments is
@@ -1251,7 +1318,7 @@ pub(crate) fn run_edit_pipeline(
             };
             match run_v3_export(
                 screen_path,
-                webcam_segments.first().map(|p| p.as_path()),
+                webcam_segments,
                 output,
                 sidecar,
                 webcam_size,
@@ -1259,8 +1326,10 @@ pub(crate) fn run_edit_pipeline(
                 resolution,
                 on_progress.clone(),
             ) {
-                // V3 success is the normal path — done, no note.
-                Ok(()) => return Ok(PipelineReport::normal()),
+                // V3 success. Ok(None) is the clean path; Ok(Some(note)) is a
+                // success carrying a caveat (multi-segment webcam concat drift).
+                Ok(None) => return Ok(PipelineReport::normal()),
+                Ok(Some(note)) => return Ok(PipelineReport::caveat(&note)),
                 // No V2 safety net (owner, 2026-07-17): a V3 failure fails the
                 // export loudly instead of silently re-rendering on V2 for weeks.
                 // The scratch screen.mp4 is read-only input and untouched, so the
@@ -3872,9 +3941,9 @@ mod tests {
         };
         assert!(v3_tag(&decide_v3(true, &scr, &[], &annotated, src, &none))
             .starts_with("fb:sidecar has 1 annotation"));
-        // Multi-segment webcam -> named fallback (concat kept out of the switchover).
-        assert!(v3_tag(&decide_v3(true, &scr, &wc2, &zoom, src, &none))
-            .starts_with("fb:webcam has 2 segments"));
+        // Multi-segment webcam is a V3 path now (run_v3_export concatenates the
+        // segments back-to-back and returns a drift caveat note).
+        assert_eq!(v3_tag(&decide_v3(true, &scr, &wc2, &zoom, src, &none)), "run");
         // Webcam without zoom is a V3 path now (static frame + bubble; empty zoom
         // segments are a no-op). The dropped itsoffset only removed the <=70ms
         // mic-init gap, which every zoom export already ships without.
@@ -3942,7 +4011,7 @@ mod tests {
         let out = dir.join("out.mp4");
         run_v3_export(
             &screen,
-            Some(&webcam),
+            std::slice::from_ref(&webcam),
             &out,
             &sidecar,
             crate::composite::WebcamSize::Medium,
@@ -3995,7 +4064,7 @@ mod tests {
 
         // (a) Downscale to 480p with zoom (formerly "fb:480p downscale").
         let out480 = dir.join("out-480.mp4");
-        run_v3_export(&screen, None, &out480, &zoomed,
+        run_v3_export(&screen, &[], &out480, &zoomed,
             crate::composite::WebcamSize::Medium, None, Mp4Resolution::P480, |_| {})
             .expect("v3 480p export");
         let (dw, dh) = probe_dimensions(&out480).unwrap();
@@ -4012,12 +4081,69 @@ mod tests {
             ..Default::default()
         };
         let outwc = dir.join("out-wc.mp4");
-        run_v3_export(&screen, Some(&webcam), &outwc, &no_zoom,
+        run_v3_export(&screen, std::slice::from_ref(&webcam), &outwc, &no_zoom,
             crate::composite::WebcamSize::Medium, None, Mp4Resolution::Source, |_| {})
             .expect("v3 webcam-no-zoom export");
         assert_eq!(probe_dimensions(&outwc).unwrap(), (1280, 720), "source res preserved");
         assert_eq!(ffprobe_field(&outwc, "stream=codec_type", "a:0"), "audio",
             "webcam-no-zoom export keeps audio");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Multi-segment webcam (Continuity drop) -> V3 concatenates the segments
+    // back-to-back into one bubble stream and returns a drift caveat note. Also
+    // proves the COMMON case (a single clean segment) returns Ok(None) — no note,
+    // no concat — so the concat path only exists when it must.
+    #[test]
+    fn v3_multi_segment_webcam_concats_and_notes_drift() {
+        ensure_audio_model_for_tests();
+        let dir = std::env::temp_dir().join(format!("zeigen-v3-multiseg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Screen spans 3s; webcam covers 1.5 + 1.0 = 2.5s -> ~0.5s of downtime.
+        let screen = synth_source(&dir, "screen.mp4", 3.0, 3.0, 1280, 720);
+        let synth_wc = |name: &str, dur: f64| {
+            let p = dir.join(name);
+            let r = Command::new(FFMPEG_PATH)
+                .args(["-y", "-v", "error", "-f", "lavfi", "-i",
+                       &format!("testsrc=duration={dur}:size=160x160:rate=30"),
+                       "-c:v", "libx264", "-pix_fmt", "yuv420p"])
+                .arg(&p).output().expect("webcam synth");
+            assert!(r.status.success(), "webcam synth: {}", String::from_utf8_lossy(&r.stderr));
+            p
+        };
+        let seg0 = synth_wc("webcam-00.mp4", 1.5);
+        let seg1 = synth_wc("webcam-01.mp4", 1.0);
+        let sidecar = SidecarState {
+            bubble_zone: Some(crate::composite::BubbleZone::BottomRight),
+            ..Default::default()
+        };
+
+        // --- Common case: single clean segment -> no concat, no note. ---
+        let out_one = dir.join("out-one.mp4");
+        let note_one = run_v3_export(&screen, std::slice::from_ref(&seg0), &out_one, &sidecar,
+            crate::composite::WebcamSize::Medium, None, Mp4Resolution::Source, |_| {})
+            .expect("v3 single-segment export");
+        assert!(note_one.is_none(), "single segment carries no caveat note");
+        assert_eq!(ffprobe_field(&out_one, "stream=codec_type", "a:0"), "audio");
+
+        // --- Multi-segment: concat + drift note. ---
+        let out_multi = dir.join("out-multi.mp4");
+        let note = run_v3_export(&screen, &[seg0.clone(), seg1.clone()], &out_multi, &sidecar,
+            crate::composite::WebcamSize::Medium, None, Mp4Resolution::Source, |_| {})
+            .expect("v3 multi-segment export")
+            .expect("multi-segment export carries a caveat note");
+        // The note is specific about direction and magnitude (owner's ask).
+        assert!(note.contains("2 segments"), "note names the segment count: {note}");
+        assert!(note.contains("AHEAD of the audio"), "note gives drift direction: {note}");
+        assert!(note.contains("freezes on its last frame"), "note describes the tail: {note}");
+        // ~0.5s downtime, formatted to one decimal.
+        assert!(note.contains("0.5s"), "note quantifies the downtime (~0.5s): {note}");
+        // Output is a valid, playable mp4 at source res with the screen audio.
+        assert_eq!(probe_dimensions(&out_multi).unwrap(), (1280, 720), "source res preserved");
+        assert_eq!(ffprobe_field(&out_multi, "stream=codec_type", "a:0"), "audio",
+            "multi-segment export keeps audio");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
