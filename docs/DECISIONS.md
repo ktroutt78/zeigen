@@ -4,6 +4,26 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-19 — V2 teardown (commit 6, FINAL — the V2-elimination arc is done)
+
+The V2 ffmpeg export machinery is deleted. Every zoom/webcam/watermark MP4 and GIF renders on cicompositor (V3); the plain-MP4 tail and plain-GIF tail go straight to ffmpeg. No V2 path, no `use_v3_compositor` flag, no fallback — a V3 runtime failure fails the export loudly. Diff-stat: **+352 / −3227** across edit.rs, composite.rs, settings.rs, lib.rs, Cargo.toml. Suite 44/0.
+
+**The reroute (load-bearing).** `decide_v3`/`V3Decision` collapsed into a plain predicate in `run_edit_pipeline`: `has_zoom || has_webcam || effective_wm` → `run_v3_export`, else → the NEW `run_plain_mp4`. The `V2Silent` arm carried more than the literal copy — trim-only and downscale-only plain MP4s flowed through `single_input` too — so the whole plain-MP4 tail was re-homed, not just `-c:v copy`. `run_plain_mp4` = `single_input` reduced to MP4/no-webcam/no-zoom/no-annotations/no-watermark; its args come from a pure `build_plain_mp4_args` so a test can pin them.
+
+**GATE 1 (owner) — plain path byte-exact after reroute.** Proven per case, before-captured on HEAD then reproduced after:
+- **copy**: `md5(out 0:v) == md5(src 0:v) == 4e712f18…`, identical BEFORE and AFTER the reroute (the `-c:v copy` contract: source video bitstream preserved bit-for-bit).
+- **trim-only** and **downscale-only** re-encode (h264_videotoolbox, not bit-deterministic), so the proof is "same ffmpeg command as V2": `build_plain_mp4_args` reproduces the pre-teardown `single_input` arg vector byte-for-byte. Both pinned in `empty_zoom_stays_on_video_copy_path` (which also runs the copy md5 guard live).
+
+**GATE 2 (owner) — byte-pin coverage after the pins come out.** `legacy_args_pinned` watched two things: (a) the exact V2 `build_composite_args` ffmpeg string, and (b) `mask-240.png` bytes. (a) is MOOT — the arg-builder is deleted, so there is no V2 string that can regress; the overlay geometry it encoded now lives in cicompositor (Swift `BUBBLE_ZONE`), watched by V3's banked gates (trim step-function delta 0.0, owner-verified placement), not an ffmpeg-string pin. (b) is REDUNDANT with `legacy_mask_and_shadow_byte_identical_to_pre_e1`, which pins `render_alpha_mask`/`render_shadow_source` byte-exact vs the SAME `mask-240-circle.png`/`shadow-240-pad60-circle.png` fixtures (renderers are V3-shared, kept). Plus `rounded_square_mask_geometry`, `styled_mask_gets_distinct_filename`, `resolve_zone_migration_and_defaults` all survive. **Nothing visual goes dark; the only pin whose subject disappears is the V2 arg string, which cannot regress once its builder is gone.**
+
+**What got deleted.** edit.rs: `run_edit_pipeline_v2`, `run_edit_pipeline_single_input`, the V2 zoom exprs (`zoom_*_expr`/`zoom_filter_fragment`/`ZOOM_OVERSAMPLE`/`ZOOM_OUTPUT_FPS`), annotation machinery (`rasterize_text`/`rasterize_arrow`/`blur_region_fragment`/`spotlight_region_fragment` + their consts/font/`region_crop_px`/`temp_dir_for`/`parse_annotation_color`/`is_dark_color`), `decide_v3`/`V3Decision`, `PipelineReport::fallback`. composite.rs: `composite`/`build_composite_args`/`run_composite_ffmpeg`, `webcam_overlay_filter[_trimmed]`/`WebcamOverlay`/`build_webcam_overlay`, `Watermark::filter_fragment`/`Corner::overlay_xy`/`BubbleZone` geometry methods + `HAlign`/`VAlign`, composite's own `probe_*`, dead shadow consts. Deps: `ab_glyph` (rasterizers gone), `libc` dev-dep (trim_perf gone). KEPT (V3-shared): `zoom_keyframes_to_segments`/`ZoomSeg`/`ZOOM_RENDER_RAMP_S`, `resolve_diameter_px`/`resolve_padding_px`/`render_alpha_mask`/`render_shadow_source`/`resolve_zone`/`build_v3_bubble_assets`/`Watermark::from_args`.
+
+**Tests.** The V2-parity A/B tests (their V3-vs-V2 oracle is now gone; verdicts banked) were converted to V3-absolute or deleted: `trim_gate` asserts V3 flip == the webcam-flip+LEAD/trim math (not vs V2); the GIF byte tests pin `gif_palette_filter` + valid-GIF (not md5 vs V2); `trim_perf` deleted (no V2 baseline). Annotation-rasterizer tests + `c2_byte_stability`/`save_recording_baseline`/`watermark_export_smoke`/`v3_decision_table` deleted.
+
+**Flag removal clean.** Field + serde default + getter + `set_use_v3_compositor` command + lib.rs registration + `default_true` all out. No frontend refs. `Settings` has no `deny_unknown_fields`, so a stale `settings.json` with the key deserializes clean. Scope: docs/V2-ELIMINATION-TEARDOWN-SCOPE.md.
+
+---
+
 ## 2026-07-18 — GIF-with-edits ported to V3 (commit 5 of the V2-elimination arc)
 
 A GIF of a zoomed/webcam/watermarked recording rendered on the V2 machinery (`zoom_filter_fragment` / `build_webcam_overlay` / `composite()`) then palettegen — the last live consumers besides trim (already ported). GIF now splits by whether it needs a render, before `decide_v3` (which is now MP4-only):
