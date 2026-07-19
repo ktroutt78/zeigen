@@ -901,36 +901,21 @@ enum V3Decision {
     V2Silent,
 }
 
-// Pure predicate over the export inputs (plus the runtime flag). Precedence when
-// several conditions hold: flag -> GIF -> trim -> annotations -> no-V3-work. The
-// first match wins and names the note. Downscale, webcam-without-zoom, and
-// multi-segment webcam (concat) are handled INSIDE run_v3_export now (all V3
-// paths), so they no longer fall back here.
+// Pure predicate over the MP4 export inputs (plus the runtime flag). Precedence
+// when several conditions hold: flag -> annotations -> no-V3-work. The first match
+// wins and names the note. GIF is handled before decide_v3 (never reaches here);
+// downscale, trim, webcam-without-zoom, and multi-segment webcam (concat) are all
+// V3 paths handled INSIDE run_v3_export, so they no longer fall back here.
 fn decide_v3(
     flag_on: bool,
     webcam_segments: &[std::path::PathBuf],
     sidecar: &SidecarState,
-    mode: PipelineMode,
     watermark: &Option<Watermark>,
 ) -> V3Decision {
     // Escape-hatch layer 1: flag off -> V2, silently (the owner's own switch).
     if !flag_on {
         return V3Decision::V2Silent;
     }
-    // GIF is out of v1 scope; the user explicitly chose the format, so no note.
-    if let PipelineMode::Gif { .. } = mode {
-        return V3Decision::V2Silent;
-    }
-    // Downscale is a V3 path now: run_v3_export renders at source res then appends
-    // a terminal Lanczos downscale to the target dims (mirrors V2's mp4_scale,
-    // likewise applied after the overlays). This is the case that made 720p slower
-    // than 1080p on V2 — the 4x oversample is source-sized, so a smaller output
-    // only ADDED a scale stage instead of saving work. run_v3_export reads the
-    // resolution to size the output; nothing to fall back for here.
-    // Trimmed MP4 is a V3 path now: run_v3_export passes TRIM_IN/TRIM_OUT to the
-    // compositor (renders only [trim_in, trim_out], rebases output PTS to 0) and
-    // trims the audio mux to the same window. (Trimmed GIF still routes V2Silent —
-    // the GIF check above precedes this, so it never reaches here.)
     // Annotations: V3 dropped annotation rendering (Phase 3 scrapped).
     // DEAD BY CONSTRUCTION today, kept as insurance: the app doesn't open
     // existing recordings, so the export path only runs on fresh sessions, and
@@ -1028,25 +1013,34 @@ fn v3_output_dims(w: u32, h: u32, resolution: Mp4Resolution) -> (u32, u32) {
     }
 }
 
-// V3 export: cicompositor renders zoom + bubble + watermark to a video-only mp4
-// (downscaled to `resolution` if below source), then ffmpeg muxes the SCREEN
-// source's audio (arnndn, no itsoffset — the single-input path doesn't shift).
-// Returns Err on any V3 failure — no V2 fallback (the caller surfaces the reason
-// and preserves the scratch source). `watermark` is pre-filtered to an existing
-// logo. `webcam_segments` is 0 or 1 in the common case; 2+ (a Continuity drop
-// mid-recording) are concatenated back-to-back into one bubble stream, and the
-// returned Option<String> carries a caveat note describing the resulting drift.
-// Ok(None) is the clean path; Ok(Some(note)) is a successful export with a note.
-fn run_v3_export(
+// Product of the shared V3 render (cicompositor): the video-only mp4 the caller
+// consumes (audio mux for MP4, palettegen for GIF), the temp dir the caller must
+// clean up AFTER consuming video_only (it lives inside), the resolved trim window
+// (so the MP4 caller can window the audio mux identically), and an optional caveat
+// note (multi-segment webcam concat drift) surfaced the same on both tails.
+struct V3Render {
+    video_only: PathBuf,
+    temp_dir: PathBuf,
+    trim: Option<(f64, f64)>,
+    caveat: Option<String>,
+}
+
+// Shared V3 render half: cicompositor renders zoom + bubble + watermark to a
+// video-only mp4 (downscaled to `resolution` if below source). No audio, no GIF
+// palette — the caller appends its own tail. Drives on_progress across [0.02,
+// 0.85]; the caller drives the rest. Does NOT clean up temp_dir. `watermark` is
+// pre-filtered to an existing logo. `webcam_segments` is 0 or 1 in the common
+// case; 2+ (a Continuity drop mid-recording) are concatenated back-to-back into
+// one bubble stream, and V3Render.caveat then describes the resulting drift.
+fn v3_render(
     screen_path: &Path,
     webcam_segments: &[std::path::PathBuf],
-    output: &Path,
     sidecar: &SidecarState,
     webcam_size: crate::composite::WebcamSize,
     watermark: Option<&Watermark>,
     resolution: Mp4Resolution,
-    on_progress: impl Fn(f64),
-) -> Result<Option<String>, String> {
+    on_progress: &impl Fn(f64),
+) -> Result<V3Render, String> {
     on_progress(0.02);
     let bin = cicompositor_binary_path();
     if !bin.is_file() {
@@ -1227,14 +1221,40 @@ fn run_v3_export(
         return Err("cicompositor produced no output".into());
     }
     on_progress(0.85);
+    Ok(V3Render { video_only, temp_dir, trim, caveat: webcam_note })
+}
+
+// V3 MP4 export: shared render + ffmpeg mux of the SCREEN source's audio (arnndn,
+// no itsoffset — the single-input path doesn't shift). Returns Err on any V3
+// failure — no V2 fallback (the caller surfaces the reason and preserves the
+// scratch source). Ok(None) is the clean path; Ok(Some(note)) carries a caveat.
+fn run_v3_export(
+    screen_path: &Path,
+    webcam_segments: &[std::path::PathBuf],
+    output: &Path,
+    sidecar: &SidecarState,
+    webcam_size: crate::composite::WebcamSize,
+    watermark: Option<&Watermark>,
+    resolution: Mp4Resolution,
+    on_progress: impl Fn(f64),
+) -> Result<Option<String>, String> {
+    let render = v3_render(
+        screen_path,
+        webcam_segments,
+        sidecar,
+        webcam_size,
+        watermark,
+        resolution,
+        &on_progress,
+    )?;
 
     // Mux: V3 video + SCREEN audio (arnndn, no itsoffset). faststart for /v/.
     // On a trim, -ss/-to before the screen input windows the audio to [trim_in,
     // trim_out] and rebases it to 0 (input-seek semantics, matching V2's single_input
     // -ss/-to), so it stays locked to the already-trimmed compositor video.
     let mut mux = std::process::Command::new(FFMPEG_PATH);
-    mux.arg("-y").arg("-i").arg(&video_only);
-    if let Some((tin, tout)) = trim {
+    mux.arg("-y").arg("-i").arg(&render.video_only);
+    if let Some((tin, tout)) = render.trim {
         mux.arg("-ss")
             .arg(format!("{tin:.3}"))
             .arg("-to")
@@ -1258,9 +1278,178 @@ fn run_v3_export(
             String::from_utf8_lossy(&muxed.stderr).trim()
         ));
     }
-    let _ = std::fs::remove_dir_all(&temp_dir);
+    let _ = std::fs::remove_dir_all(&render.temp_dir);
     on_progress(1.0);
-    Ok(webcam_note)
+    Ok(render.caveat)
+}
+
+// The GIF palettegen/paletteuse tail, shared verbatim by run_plain_gif and
+// run_v3_gif so the two can't drift — the IDENTICAL string V2's single_input GIF
+// tail emits (only the frames feeding it differ). stats_mode=diff weights moving
+// pixels (screencasts are mostly static); bayer dither preserves UI gradients
+// without sierra2_4a's noise floor.
+fn gif_palette_filter(prev_label: &str, resolution: GifResolution, fps: u32) -> String {
+    let scale_arg = match resolution {
+        GifResolution::P480 => "-2:480".to_string(),
+        GifResolution::P720 => "-2:720".to_string(),
+        GifResolution::Source => "'min(iw,1920)':-2".to_string(),
+    };
+    format!(
+        "[{prev_label}]fps={fps},scale={scale_arg}:flags=lanczos,split[gA][gB];[gA]palettegen=stats_mode=diff[gP];[gB][gP]paletteuse=dither=bayer:bayer_scale=5[gout]"
+    )
+}
+
+// V3 GIF export (zoom/webcam/watermark GIF): shared render at SOURCE resolution
+// — the GifResolution scale is done by the palettegen pass's own lanczos scale,
+// byte-identical to V2's tail, so the compositor must NOT also downscale — then a
+// single ffmpeg pass runs the palette tail over the rendered frames. The palette
+// filter args are identical to V2; only the pixels moved (through cicompositor +
+// its H.264 intermediate). Ok(Some(note)) carries the multi-segment concat caveat.
+fn run_v3_gif(
+    screen_path: &Path,
+    webcam_segments: &[std::path::PathBuf],
+    output: &Path,
+    sidecar: &SidecarState,
+    webcam_size: crate::composite::WebcamSize,
+    watermark: Option<&Watermark>,
+    resolution: GifResolution,
+    fps: u32,
+    on_progress: impl Fn(f64),
+) -> Result<Option<String>, String> {
+    let render = v3_render(
+        screen_path,
+        webcam_segments,
+        sidecar,
+        webcam_size,
+        watermark,
+        Mp4Resolution::Source,
+        &on_progress,
+    )?;
+    let filter = gif_palette_filter("0:v", resolution, fps);
+    let out = std::process::Command::new(FFMPEG_PATH)
+        .args(["-y", "-hide_banner", "-nostats"])
+        .arg("-i")
+        .arg(&render.video_only)
+        .arg("-filter_complex")
+        .arg(&filter)
+        .args(["-map", "[gout]", "-loop", "0"])
+        .arg(output)
+        .output()
+        .map_err(|e| format!("spawn ffmpeg gif: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "ffmpeg gif {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let _ = std::fs::remove_dir_all(&render.temp_dir);
+    on_progress(1.0);
+    Ok(render.caveat)
+}
+
+// Plain GIF (no zoom/webcam/watermark — incl. trim-only, downscale-only): one
+// ffmpeg pass, source -> optional -ss/-to -> the shared palette tail. This is the
+// surviving standalone GIF palettegen — the GIF analog of the plain -c:v copy MP4
+// fast path — and it is BYTE-IDENTICAL to V2's single_input plain-GIF output (same
+// argv, same filter string). It never touches the V2 render machinery.
+fn run_plain_gif(
+    source: &Path,
+    output: &Path,
+    sidecar: &SidecarState,
+    resolution: GifResolution,
+    fps: u32,
+    on_progress: impl Fn(f64) + Send + 'static,
+) -> Result<(), String> {
+    if !source.exists() {
+        return Err(format!("source missing: {}", source.display()));
+    }
+    let duration = probe_duration_seconds(source)?;
+    let trim: Option<&Trim> = match &sidecar.trim {
+        Some(t) if t.start > TRIM_EPS || t.out < duration - TRIM_EPS => Some(t),
+        _ => None,
+    };
+    let out_duration = trim.map(|t| (t.out - t.start).max(0.0)).unwrap_or(duration);
+
+    let mut args: Vec<String> = vec![
+        "-y".into(),
+        "-hide_banner".into(),
+        "-nostats".into(),
+        "-progress".into(),
+        "pipe:1".into(),
+    ];
+    if let Some(t) = trim {
+        let start = t.start.max(0.0);
+        let end = t.out.min(duration);
+        if !(end > start) {
+            return Err(format!("invalid trim: in={start} out={end}"));
+        }
+        args.push("-ss".into());
+        args.push(format!("{start:.3}"));
+        args.push("-to".into());
+        args.push(format!("{end:.3}"));
+    }
+    args.push("-i".into());
+    args.push(source.to_string_lossy().into_owned());
+    args.push("-filter_complex".into());
+    args.push(gif_palette_filter("0:v", resolution, fps));
+    args.push("-map".into());
+    args.push("[gout]".into());
+    args.push("-loop".into());
+    args.push("0".into());
+    args.push(output.to_string_lossy().into_owned());
+
+    let mut child = Command::new(FFMPEG_PATH)
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to spawn ffmpeg: {e}"))?;
+    let stdout = child.stdout.take().ok_or("ffmpeg stdout missing")?;
+    let stderr = child.stderr.take().ok_or("ffmpeg stderr missing")?;
+    let total_us = (out_duration * 1_000_000.0).max(1.0) as u64;
+    let progress_thread = std::thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines().map_while(Result::ok) {
+            if let Some(rest) = line.strip_prefix("out_time_us=") {
+                if let Ok(us) = rest.trim().parse::<u64>() {
+                    let frac = (us as f64 / total_us as f64).clamp(0.0, 1.0);
+                    on_progress(frac);
+                }
+            }
+        }
+    });
+    let stderr_thread = std::thread::spawn(move || {
+        let mut buf = String::new();
+        let reader = BufReader::new(stderr);
+        for line in reader.lines().map_while(Result::ok) {
+            buf.push_str(&line);
+            buf.push('\n');
+        }
+        buf
+    });
+    let status = child
+        .wait()
+        .map_err(|e| format!("failed to wait on ffmpeg: {e}"))?;
+    let _ = progress_thread.join();
+    let stderr_text = stderr_thread.join().unwrap_or_default();
+    if !status.success() {
+        return Err(format!(
+            "ffmpeg plain gif failed (exit {:?}):\n{}",
+            status.code(),
+            stderr_text
+                .lines()
+                .rev()
+                .take(40)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+    Ok(())
 }
 
 // Concatenate multiple webcam segments (a Continuity drop mid-recording spawns
@@ -1328,21 +1517,48 @@ pub(crate) fn run_edit_pipeline(
     if !screen_path.is_file() {
         return Err(format!("screen capture missing: {}", screen_path.display()));
     }
+    // GIF is fully off the V2 machinery, handled before decide_v3 (which is now the
+    // MP4-only V2-vs-V3 predicate). An edited GIF (zoom/webcam/watermark) renders on
+    // cicompositor then palettegen; a plain/trim/downscale-only GIF is a one-pass
+    // palettegen. Neither enters run_edit_pipeline_v2. A V3 render failure fails the
+    // GIF loudly (no fallback), same as MP4.
+    if let PipelineMode::Gif { resolution, fps } = mode {
+        let has_zoom = !zoom_keyframes_to_segments(&sidecar.zoom).is_empty();
+        let has_webcam = !webcam_segments.is_empty();
+        let effective_wm = watermark.as_ref().filter(|w| w.logo_path.is_file());
+        if has_zoom || has_webcam || effective_wm.is_some() {
+            let note = run_v3_gif(
+                screen_path,
+                webcam_segments,
+                output,
+                sidecar,
+                webcam_size,
+                effective_wm,
+                resolution,
+                fps,
+                on_progress,
+            )?;
+            return Ok(note
+                .map(|n| PipelineReport::caveat(&n))
+                .unwrap_or_else(PipelineReport::normal));
+        }
+        run_plain_gif(screen_path, output, sidecar, resolution, fps, on_progress)?;
+        return Ok(PipelineReport::normal());
+    }
     let fallback_note = match decide_v3(
         crate::settings::use_v3_compositor(),
         webcam_segments,
         sidecar,
-        mode,
         &watermark,
     ) {
         V3Decision::Run => {
             let effective_wm = watermark
                 .as_ref()
                 .filter(|w| w.logo_path.is_file());
-            // Run implies Mp4 (GIF routes to V2Silent in decide_v3).
+            // GIF returned above, so mode is always Mp4 here.
             let resolution = match mode {
                 PipelineMode::Mp4 { resolution } => resolution,
-                PipelineMode::Gif { .. } => unreachable!("GIF is V2Silent, never Run"),
+                PipelineMode::Gif { .. } => unreachable!("GIF handled before decide_v3"),
             };
             match run_v3_export(
                 screen_path,
@@ -3927,32 +4143,22 @@ mod tests {
             zoom: vec![kf(0.3, 1.0), kf(0.9, 2.0), kf(1.1, 2.0), kf(1.7, 1.0)],
             ..Default::default()
         };
-        let src = PipelineMode::Mp4 { resolution: Mp4Resolution::Source };
         let none: Option<Watermark> = None;
         let wc1 = vec![dir.join("webcam-00.mp4")];
         let wc2 = vec![dir.join("webcam-00.mp4"), dir.join("webcam-01.mp4")];
 
+        // decide_v3 is now MP4-only (GIF is routed before it — see the gif_* gate tests).
         // 1) flag off -> silent V2, even for an otherwise-eligible export.
-        assert_eq!(v3_tag(&decide_v3(false, &[], &zoom, src, &none)), "silent");
-        // GIF -> silent (the user chose the format).
-        let gif = PipelineMode::Gif { resolution: GifResolution::P480, fps: 12 };
-        assert_eq!(v3_tag(&decide_v3(true, &[], &zoom, gif, &none)), "silent");
-        // Downscale is a V3 path now (renders at source res + terminal Lanczos
-        // downscale in run_v3_export) -> eligible, no fallback.
-        let p480 = PipelineMode::Mp4 { resolution: Mp4Resolution::P480 };
-        assert_eq!(v3_tag(&decide_v3(true, &[], &zoom, p480, &none)), "run");
-        // Trimmed MP4 is a V3 path now (compositor TRIM_IN/TRIM_OUT + trimmed audio
-        // mux) -> eligible, no fallback.
+        assert_eq!(v3_tag(&decide_v3(false, &[], &zoom, &none)), "silent");
+        // Trimmed MP4 is a V3 path (compositor TRIM_IN/TRIM_OUT + trimmed audio mux)
+        // -> eligible, no fallback. (Downscale likewise — resolution is no longer a
+        // decide_v3 input; run_v3_export sizes the output.)
         let trimmed = SidecarState {
             trim: Some(Trim { start: 0.5, out: 1.5 }),
             zoom: zoom.zoom.clone(),
             ..Default::default()
         };
-        assert_eq!(v3_tag(&decide_v3(true, &[], &trimmed, src, &none)), "run");
-        // Trimmed GIF still routes V2Silent — the GIF check precedes trim, so it
-        // never reaches the (now removed) trim branch.
-        let trimmed_gif = SidecarState { trim: Some(Trim { start: 0.5, out: 1.5 }), ..Default::default() };
-        assert_eq!(v3_tag(&decide_v3(true, &[], &trimmed_gif, gif, &none)), "silent");
+        assert_eq!(v3_tag(&decide_v3(true, &[], &trimmed, &none)), "run");
         // Annotations -> named fallback.
         let annotated = SidecarState {
             zoom: zoom.zoom.clone(),
@@ -3963,21 +4169,21 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert!(v3_tag(&decide_v3(true, &[], &annotated, src, &none))
+        assert!(v3_tag(&decide_v3(true, &[], &annotated, &none))
             .starts_with("fb:sidecar has 1 annotation"));
         // Multi-segment webcam is a V3 path now (run_v3_export concatenates the
         // segments back-to-back and returns a drift caveat note).
-        assert_eq!(v3_tag(&decide_v3(true, &wc2, &zoom, src, &none)), "run");
+        assert_eq!(v3_tag(&decide_v3(true, &wc2, &zoom, &none)), "run");
         // Webcam without zoom is a V3 path now (static frame + bubble; empty zoom
         // segments are a no-op). The dropped itsoffset only removed the <=70ms
         // mic-init gap, which every zoom export already ships without.
         let no_zoom = SidecarState::default();
-        assert_eq!(v3_tag(&decide_v3(true, &wc1, &no_zoom, src, &none)), "run");
+        assert_eq!(v3_tag(&decide_v3(true, &wc1, &no_zoom, &none)), "run");
         // No V3 work (plain copy fast path) -> silent V2.
-        assert_eq!(v3_tag(&decide_v3(true, &[], &no_zoom, src, &none)), "silent");
+        assert_eq!(v3_tag(&decide_v3(true, &[], &no_zoom, &none)), "silent");
         // Eligible: zoom only, and zoom + single webcam.
-        assert_eq!(v3_tag(&decide_v3(true, &[], &zoom, src, &none)), "run");
-        assert_eq!(v3_tag(&decide_v3(true, &wc1, &zoom, src, &none)), "run");
+        assert_eq!(v3_tag(&decide_v3(true, &[], &zoom, &none)), "run");
+        assert_eq!(v3_tag(&decide_v3(true, &wc1, &zoom, &none)), "run");
 
         // Note wording surfaced to the UI.
         assert_eq!(
@@ -4168,6 +4374,217 @@ mod tests {
         assert_eq!(probe_dimensions(&out_multi).unwrap(), (1280, 720), "source res preserved");
         assert_eq!(ffprobe_field(&out_multi, "stream=codec_type", "a:0"), "audio",
             "multi-segment export keeps audio");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- GIF port gate (commit 5) ----------------------------------------------
+    // Decoded frame count of a video/GIF.
+    fn frame_count(path: &Path) -> u64 {
+        let out = Command::new(FFPROBE_PATH)
+            .args(["-v", "error", "-select_streams", "v:0", "-count_frames",
+                   "-show_entries", "stream=nb_read_frames",
+                   "-of", "default=noprint_wrappers=1:nokey=1"])
+            .arg(path).output().expect("ffprobe frames");
+        String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0)
+    }
+
+    // Plain / trim-only / downscale-only GIF stays on run_plain_gif and must be
+    // BYTE-IDENTICAL to V2's single_input GIF (same argv, same filter string). This
+    // is the regression guard on the untouched path: if the extraction ever changes
+    // a byte, the files diverge here.
+    #[test]
+    fn gif_plain_path_byte_identical() {
+        let dir = std::env::temp_dir().join(format!("zeigen-gif-plain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = synth_source(&dir, "screen.mp4", 2.0, 2.0, 1280, 720);
+
+        let cases: [(&str, SidecarState, GifResolution, u32); 4] = [
+            ("plain-source", SidecarState::default(), GifResolution::Source, 15),
+            ("plain-720", SidecarState::default(), GifResolution::P720, 15),
+            ("plain-480", SidecarState::default(), GifResolution::P480, 12),
+            ("trim-only",
+                SidecarState { trim: Some(Trim { start: 0.4, out: 1.6 }), ..Default::default() },
+                GifResolution::P480, 15),
+        ];
+        for (name, sidecar, res, fps) in cases {
+            let v2 = dir.join(format!("{name}-v2.gif"));
+            let plain = dir.join(format!("{name}-plain.gif"));
+            run_edit_pipeline_v2(&source, &[], &v2, &sidecar,
+                PipelineMode::Gif { resolution: res, fps },
+                crate::composite::WebcamSize::Medium, None, |_| {})
+                .expect("v2 plain gif");
+            run_plain_gif(&source, &plain, &sidecar, res, fps, |_| {})
+                .expect("run_plain_gif");
+            let a = std::fs::read(&v2).expect("read v2");
+            let b = std::fs::read(&plain).expect("read plain");
+            assert_eq!(&a[..6], b"GIF89a", "{name}: valid GIF header");
+            assert_eq!(a, b, "{name}: run_plain_gif must be byte-identical to V2 single_input GIF");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Edited GIF (zoom/webcam/watermark) renders on cicompositor then palettegen via
+    // run_v3_gif: valid GIF at the requested height (GifResolution scale done by the
+    // palette pass, not the compositor), and frame-count parity with V2 for a zoomed
+    // GIF (the shared fps filter + duration set the count identically on both paths).
+    #[test]
+    fn gif_v3_edited_valid_and_frame_parity() {
+        let dir = std::env::temp_dir().join(format!("zeigen-gif-v3-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let screen = synth_source(&dir, "screen.mp4", 2.0, 2.0, 1280, 720);
+        let webcam = dir.join("webcam-00.mp4");
+        let wc = Command::new(FFMPEG_PATH)
+            .args(["-y", "-v", "error", "-f", "lavfi", "-i",
+                   "testsrc=duration=2:size=160x160:rate=30", "-c:v", "libx264",
+                   "-pix_fmt", "yuv420p"])
+            .arg(&webcam).output().expect("webcam synth");
+        assert!(wc.status.success(), "webcam synth: {}", String::from_utf8_lossy(&wc.stderr));
+        let logo = dir.join("logo.png");
+        let lg = Command::new(FFMPEG_PATH)
+            .args(["-y", "-v", "error", "-f", "lavfi", "-i", "color=c=red:s=48x48",
+                   "-frames:v", "1"])
+            .arg(&logo).output().expect("logo synth");
+        assert!(lg.status.success(), "logo synth: {}", String::from_utf8_lossy(&lg.stderr));
+
+        let kf = |t: f64, scale: f64| ZoomKeyframe {
+            t, scale, center_x: 640.0, center_y: 360.0, ease: Ease::InOutCubic,
+            auto_generated: false,
+        };
+        let zoomed = SidecarState {
+            zoom: vec![kf(0.3, 1.0), kf(0.9, 2.0), kf(1.1, 2.0), kf(1.7, 1.0)],
+            ..Default::default()
+        };
+        let wm = Watermark::from_args(
+            Some(logo.to_string_lossy().into_owned()), Some("tr".into()), None, None,
+        );
+        let is_gif = |p: &Path| &std::fs::read(p).expect("read gif")[..6] == b"GIF89a";
+
+        // (a) zoom GIF at 720p -> valid, height 720.
+        let gz = dir.join("zoom.gif");
+        run_v3_gif(&screen, &[], &gz, &zoomed,
+            crate::composite::WebcamSize::Medium, None, GifResolution::P720, 15, |_| {})
+            .expect("v3 zoom gif");
+        assert!(is_gif(&gz), "zoom gif valid");
+        assert_eq!(probe_dimensions(&gz).unwrap().1, 720, "720p gif height");
+
+        // (b) zoom+webcam GIF at 480p -> valid, 854x480 (aspect-preserved, matches -2:480).
+        let gzw = dir.join("zoomwc.gif");
+        run_v3_gif(&screen, std::slice::from_ref(&webcam), &gzw, &zoomed,
+            crate::composite::WebcamSize::Medium, None, GifResolution::P480, 12, |_| {})
+            .expect("v3 zoom+wc gif");
+        assert!(is_gif(&gzw), "zoom+wc gif valid");
+        assert_eq!(probe_dimensions(&gzw).unwrap(), (854, 480), "480p gif dims");
+
+        // (c) watermark-only GIF -> valid.
+        let gwm = dir.join("wm.gif");
+        run_v3_gif(&screen, &[], &gwm, &SidecarState::default(),
+            crate::composite::WebcamSize::Medium, wm.as_ref(), GifResolution::Source, 15, |_| {})
+            .expect("v3 wm gif");
+        assert!(is_gif(&gwm), "watermark gif valid");
+
+        // Frame-count parity: V3 zoom GIF vs V2 zoom GIF, same res + fps.
+        let v2z = dir.join("zoom-v2.gif");
+        run_edit_pipeline_v2(&screen, &[], &v2z, &zoomed,
+            PipelineMode::Gif { resolution: GifResolution::P720, fps: 15 },
+            crate::composite::WebcamSize::Medium, None, |_| {})
+            .expect("v2 zoom gif");
+        let (c3, c2) = (frame_count(&gz), frame_count(&v2z));
+        assert!((c3 as i64 - c2 as i64).abs() <= 1,
+            "V3 gif frame count {c3} within 1 of V2 {c2}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Multi-segment webcam (Continuity drop) GIF surfaces the SAME drift caveat an
+    // MP4 does (run_v3_gif shares v3_render's concat), and the single clean segment
+    // returns Ok(None).
+    #[test]
+    fn gif_v3_multiseg_drift_caveat() {
+        let dir = std::env::temp_dir().join(format!("zeigen-gif-multiseg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let screen = synth_source(&dir, "screen.mp4", 3.0, 3.0, 1280, 720);
+        let synth_wc = |name: &str, dur: f64| {
+            let p = dir.join(name);
+            let r = Command::new(FFMPEG_PATH)
+                .args(["-y", "-v", "error", "-f", "lavfi", "-i",
+                       &format!("testsrc=duration={dur}:size=160x160:rate=30"),
+                       "-c:v", "libx264", "-pix_fmt", "yuv420p"])
+                .arg(&p).output().expect("webcam synth");
+            assert!(r.status.success(), "webcam synth: {}", String::from_utf8_lossy(&r.stderr));
+            p
+        };
+        let seg0 = synth_wc("webcam-00.mp4", 1.5);
+        let seg1 = synth_wc("webcam-01.mp4", 1.0);
+        let sidecar = SidecarState {
+            bubble_zone: Some(crate::composite::BubbleZone::BottomRight),
+            ..Default::default()
+        };
+
+        let one = dir.join("one.gif");
+        let note_one = run_v3_gif(&screen, std::slice::from_ref(&seg0), &one, &sidecar,
+            crate::composite::WebcamSize::Medium, None, GifResolution::Source, 12, |_| {})
+            .expect("single-segment gif");
+        assert!(note_one.is_none(), "single segment carries no caveat note");
+        assert_eq!(&std::fs::read(&one).unwrap()[..6], b"GIF89a", "single-seg gif valid");
+
+        let multi = dir.join("multi.gif");
+        let note = run_v3_gif(&screen, &[seg0.clone(), seg1.clone()], &multi, &sidecar,
+            crate::composite::WebcamSize::Medium, None, GifResolution::Source, 12, |_| {})
+            .expect("multi-segment gif")
+            .expect("multi-segment gif carries a caveat note");
+        assert!(note.contains("2 segments"), "note names the segment count: {note}");
+        assert!(note.contains("AHEAD of the audio"), "note gives drift direction: {note}");
+        assert_eq!(&std::fs::read(&multi).unwrap()[..6], b"GIF89a", "multi-seg gif valid");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The dispatcher branch itself: run_edit_pipeline routes a plain GIF to
+    // run_plain_gif (no note, and byte-identical to the direct call — proving it
+    // took the plain path, not the V3 render) and an edited GIF to run_v3_gif
+    // (valid, clean note). GIF routing is flag-independent (handled before
+    // decide_v3), so no settings fixture is needed.
+    #[test]
+    fn gif_dispatch_routing() {
+        let dir = std::env::temp_dir().join(format!("zeigen-gif-dispatch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let screen = synth_source(&dir, "screen.mp4", 2.0, 2.0, 1280, 720);
+
+        // Plain GIF via the dispatcher == via run_plain_gif direct (took the plain path).
+        let plain_sc = SidecarState::default();
+        let via = dir.join("via.gif");
+        let rep = run_edit_pipeline(&screen, &[], &via, &plain_sc,
+            PipelineMode::Gif { resolution: GifResolution::P480, fps: 12 },
+            crate::composite::WebcamSize::Medium, None, |_| {})
+            .expect("dispatch plain gif");
+        assert!(rep.route_note.is_none(), "plain gif carries no note");
+        let direct = dir.join("direct.gif");
+        run_plain_gif(&screen, &direct, &plain_sc, GifResolution::P480, 12, |_| {})
+            .expect("direct plain gif");
+        assert_eq!(std::fs::read(&via).unwrap(), std::fs::read(&direct).unwrap(),
+            "dispatcher plain GIF == run_plain_gif (took the plain path)");
+
+        // Edited (zoom) GIF via the dispatcher -> valid, clean (V3 render path).
+        let kf = |t: f64, scale: f64| ZoomKeyframe {
+            t, scale, center_x: 640.0, center_y: 360.0, ease: Ease::InOutCubic,
+            auto_generated: false,
+        };
+        let zoomed = SidecarState {
+            zoom: vec![kf(0.3, 1.0), kf(0.9, 2.0), kf(1.1, 2.0), kf(1.7, 1.0)],
+            ..Default::default()
+        };
+        let ez = dir.join("edit.gif");
+        let rep2 = run_edit_pipeline(&screen, &[], &ez, &zoomed,
+            PipelineMode::Gif { resolution: GifResolution::P720, fps: 15 },
+            crate::composite::WebcamSize::Medium, None, |_| {})
+            .expect("dispatch zoom gif");
+        assert!(rep2.route_note.is_none(), "clean v3 gif carries no note");
+        assert_eq!(&std::fs::read(&ez).unwrap()[..6], b"GIF89a", "dispatched zoom gif valid");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

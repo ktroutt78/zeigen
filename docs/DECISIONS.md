@@ -4,6 +4,23 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-18 — GIF-with-edits ported to V3 (commit 5 of the V2-elimination arc)
+
+A GIF of a zoomed/webcam/watermarked recording rendered on the V2 machinery (`zoom_filter_fragment` / `build_webcam_overlay` / `composite()`) then palettegen — the last live consumers besides trim (already ported). GIF now splits by whether it needs a render, before `decide_v3` (which is now MP4-only):
+
+- **Edited GIF** (zoom/webcam/watermark) -> `run_v3_gif`: cicompositor renders at SOURCE res (via the shared `v3_render` factored out of `run_v3_export`), then a single ffmpeg palettegen pass. The GifResolution scale is done by the palette pass's own lanczos, not the compositor — byte-identical scale filter to V2's tail.
+- **Plain GIF** (incl. trim-only, downscale-only) -> `run_plain_gif`: one-pass ffmpeg palettegen, BYTE-IDENTICAL to V2's single_input GIF (gated by md5). The GIF analog of the plain `-c:v copy` MP4 fast path — survives teardown independently.
+
+Neither enters `run_edit_pipeline_v2`. The palettegen/paletteuse arg string is unchanged from V2 (`stats_mode=diff`, `dither=bayer:bayer_scale=5`); only the frames feeding it moved (through cicompositor + its ~0.18 bits/px H.264 intermediate).
+
+**The palette-path risk and how it resolved.** The feared failure mode: for a zoomed GIF, V2 fed palettegen its frames in the same pass with no re-encode; V3 adds a full H.264 encode/decode hop (yuv420p 4:2:0 + DCT) before the 256-color quantize + bayer dither, which could band flat gradients. **Owner eye-check (2026-07-18) on the built-to-expose-it content — rebalance.mp4's dark-gray map fields + fine bar charts, zoomed 2x on the charts, V3 vs V2 GIFs + matched full-zoom still-PNGs: PASS.** No banding in either; V3's darks came out cleaner (less dither speckle) and visibly sharper (the backing-scale/Core-Image win carries into the GIF). Red-channel check on the hardest case (saturated reds against dark — deficit dots + pills): no posterization, 123 distinct red levels in V3 (137 V2), edges dither cleanly. **The added H.264 hop cost nothing visible.** Decision: ship the simplest-first intermediate (reuse the 0.18 bits/px render); the bitrate reserve lever is NOT needed and stays unused.
+
+Gate (durable, in edit.rs): `gif_plain_path_byte_identical` (md5 vs V2 for plain/trim/480/720), `gif_v3_edited_valid_and_frame_parity` (valid + correct dims + frame-count parity), `gif_v3_multiseg_drift_caveat` (same Continuity-drop caveat an MP4 gets), `gif_dispatch_routing` (plain->run_plain_gif byte-identical, edited->run_v3_gif). The one-shot eye-check render harness was removed after the verdict — it A/B'd against V2, which teardown deletes; scope + this entry record the result. Scope: docs/V2-ELIMINATION-GIF-SCOPE.md.
+
+Next and last: teardown (commit 6) — delete the V2 machinery + `use_v3_compositor` flag, reroute the plain `-c:v copy` MP4 path + `run_plain_gif` to survive byte-exact.
+
+---
+
 ## 2026-07-17 — CLASS: values stored in one coordinate space, consumed in another (backing-scale exposed three)
 
 The 1512->3024 backing-scale capture change surfaced a recurring bug class, logged once here rather than three times: **a value written in coordinate space A and read in space B, correct only because A == B while capture happened to equal the frontend's logical space (both 1512). The moment capture became the 2x backing store, every one broke.** All three shipped silently until backing-scale moved the two spaces apart. The pattern to watch: a spatial value that is NOT a fraction and NOT dimensionless. If a fourth appears, it is this.
