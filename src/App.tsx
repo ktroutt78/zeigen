@@ -655,6 +655,121 @@ async function openMarqueeOverlays(
   });
 }
 
+const WINDOW_PICKER_LABEL_PREFIX = "window-picker-";
+
+// Hover picker (spike): one transparent always-on-top overlay per display,
+// each pre-loaded with the windows that sit on it (frames translated into
+// that display's coordinate space). The overlay highlights the frontmost
+// window under the cursor. No selection yet — this exists to eye-check the
+// hover feel. Returns when the user hits Esc.
+async function openWindowPickerOverlays(
+  displays: DisplayShape[],
+  windows: WindowSource[],
+): Promise<void> {
+  if (displays.length === 0) return;
+
+  const monitors = await availableMonitors();
+  const primary =
+    monitors.find((m) => m.position.x === 0 && m.position.y === 0) ||
+    monitors[0];
+  const primaryCocoaHeight =
+    primary && primary.scaleFactor
+      ? primary.size.height / primary.scaleFactor
+      : 1080;
+
+  const labels: string[] = [];
+
+  for (let i = 0; i < displays.length; i++) {
+    const d = displays[i];
+    const label = `${WINDOW_PICKER_LABEL_PREFIX}${i}`;
+    labels.push(label);
+
+    // Windows whose frame intersects this display, translated to
+    // display-relative points (the overlay treats client coords as
+    // display-relative). Only on-screen windows can be highlighted.
+    const winsForDisplay = windows
+      .filter(
+        (w) =>
+          w.on_screen &&
+          w.x < d.x + d.width &&
+          w.x + w.width > d.x &&
+          w.y < d.y + d.height &&
+          w.y + w.height > d.y,
+      )
+      .map((w) => ({
+        id: w.id,
+        x: w.x - d.x,
+        y: w.y - d.y,
+        w: w.width,
+        h: w.height,
+        app: w.app,
+        title: w.title,
+        z: w.z,
+      }));
+
+    const params = new URLSearchParams({
+      display_index: String(i + 1),
+      wins: JSON.stringify(winsForDisplay),
+    });
+
+    const old = await WebviewWindow.getByLabel(label);
+    if (old) await old.close().catch(() => {});
+
+    new WebviewWindow(label, {
+      url: `/#window-picker?${params.toString()}`,
+      title: "Pick Window",
+      width: 400,
+      height: 400,
+      decorations: false,
+      transparent: true,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      resizable: false,
+      visibleOnAllWorkspaces: true,
+      shadow: false,
+      focus: i === 0,
+    });
+
+    void (async () => {
+      for (let attempt = 0; attempt < 50; attempt++) {
+        const win = await WebviewWindow.getByLabel(label);
+        if (win) {
+          try {
+            await invoke("set_window_frame_cg", {
+              label,
+              cgX: d.x,
+              cgY: d.y,
+              width: d.width,
+              height: d.height,
+              primaryCocoaHeight,
+            });
+            await invoke("make_capture_invisible", { label });
+          } catch (e) {
+            console.error(`[window-picker] ${label} setup failed`, e);
+          }
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      console.error(`[window-picker] ${label} window never registered`);
+    })();
+  }
+
+  return new Promise(async (resolve) => {
+    const closeAll = async () => {
+      for (const label of labels) {
+        const w = await WebviewWindow.getByLabel(label);
+        if (w) await w.close().catch(() => {});
+      }
+    };
+    const unlisten = await listen("window-picker-cancelled", async () => {
+      unlisten();
+      await closeAll();
+      resolve();
+    });
+  });
+}
+
 type ReviewOpenArgs = {
   // Logical scratch identity — what discard/save/clipboard pin against.
   // Always set; for phase 15 c3 webcam recordings the file at this path
@@ -725,6 +840,9 @@ type WindowSource = {
   width: number;
   height: number;
   on_screen: boolean;
+  // Front-to-back stacking index from the engine (0 = frontmost). Used by
+  // the hover picker to resolve the frontmost window under the cursor.
+  z: number;
 };
 type Mic = { uid: string; name: string };
 type Device = { index: number; name: string };
@@ -1398,6 +1516,18 @@ function App() {
     // per the "selection persists across mode-switches" locked decision.
   };
 
+  // Spike: launch the hover-window picker overlay (highlight-on-hover only,
+  // no selection wired yet). Here to eye-check the feel.
+  const openWindowPicker = async () => {
+    const shapes: DisplayShape[] = displays.map((d) => ({
+      x: d.x,
+      y: d.y,
+      width: d.width,
+      height: d.height,
+    }));
+    await openWindowPickerOverlays(shapes, windows);
+  };
+
   // Click handler for the Selected Area picker tile. Routes:
   //  - From display/window -> enter area mode + auto-hide bubble. Open
   //    marquee only when no selection exists (selectionspersists across
@@ -1995,15 +2125,39 @@ function App() {
         ) : sourceKind === "window" ? (
           <>
             <RowLabel icon={I.window} label="Window" />
-            <WindowRow
-              windows={windows}
-              value={selectedWindow}
-              onChange={setSelectedWindow}
-              onIdentify={(w) =>
-                openIdentifyWindowOverlay(w).catch((e) => setError(String(e)))
-              }
-              disabled={recording}
-            />
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div style={{ flex: 1 }}>
+                <WindowRow
+                  windows={windows}
+                  value={selectedWindow}
+                  onChange={setSelectedWindow}
+                  onIdentify={(w) =>
+                    openIdentifyWindowOverlay(w).catch((e) => setError(String(e)))
+                  }
+                  disabled={recording}
+                />
+              </div>
+              {/* Spike trigger for the hover picker (feel-check only). */}
+              <button
+                onClick={() =>
+                  openWindowPicker().catch((e) => setError(String(e)))
+                }
+                disabled={recording}
+                style={{
+                  padding: "6px 10px",
+                  fontSize: 12,
+                  fontFamily: "var(--font-system)",
+                  borderRadius: 6,
+                  border: "1px solid var(--border, rgba(255,255,255,0.14))",
+                  background: "transparent",
+                  color: "var(--fg-secondary, #ccc)",
+                  cursor: recording ? "default" : "pointer",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                Hover pick
+              </button>
+            </div>
           </>
         ) : (
           <>
