@@ -1888,21 +1888,21 @@ function App() {
         disabled={recording}
       />
 
-      <div className="hairline" />
-
       <div
         style={{
-          padding: "16px 18px",
+          margin: "12px 14px 0",
+          padding: "10px 16px",
+          background: "var(--bg-sidebar)",
+          borderRadius: "var(--r-lg)",
           display: "grid",
           // minmax(0, 1fr) instead of 1fr — without the explicit 0 min,
           // a 1fr track grows to fit its intrinsic min-content (e.g. a
-          // long select option label) and pushes the fixed 480px capture
+          // long select option label) and pushes the fixed-width capture
           // window into horizontal scroll.
           gridTemplateColumns: "auto minmax(0, 1fr)",
           rowGap: 14,
           columnGap: 12,
           alignItems: "center",
-          flex: 1,
         }}
       >
         <RowLabel icon={I.webcam} label="Camera" />
@@ -2048,6 +2048,8 @@ function App() {
         )}
       </div>
 
+      <div style={{ flex: 1 }} />
+
       <StatusStrip
         error={error}
         lastSaved={lastSaved}
@@ -2126,7 +2128,7 @@ function CompositeProgressOverlay({ value }: { value: number }) {
               inset: 0,
               right: "auto",
               width: `${pct}%`,
-              background: "oklch(0.66 0.18 252)",
+              background: "var(--accent-bright)",
               transition: "width 200ms ease-out",
             }}
           />
@@ -2164,8 +2166,7 @@ function BrandBar({
         padding: "0 14px",
         display: "flex",
         alignItems: "center",
-        borderBottom: "1px solid var(--border-faint)",
-        background: "linear-gradient(to bottom, #2a2a2c, #232325)",
+        background: "var(--bg-window)",
       }}
     >
       <svg
@@ -2175,12 +2176,12 @@ function BrandBar({
         aria-label="Zeigen"
         style={{ display: "block", flexShrink: 0 }}
       >
-        <rect x="6" y="6" width="108" height="108" rx="26" fill="oklch(0.58 0.18 252)" />
+        <rect x="6" y="6" width="108" height="108" rx="26" fill="var(--accent)" />
         <path
           d="M28 32 H92 V46 L48 78 H92 V92 H28 V78 L72 46 H28 Z"
-          fill="oklch(0.36 0.16 260)"
+          fill="#fff"
         />
-        <path d="M28 32 H92 V40 H28 Z" fill="#000" opacity="0.22" />
+        <path d="M28 32 H92 V40 H28 Z" fill="#000" opacity="0.14" />
       </svg>
       <span
         style={{
@@ -2202,7 +2203,7 @@ function BrandBar({
             padding: "2px 7px",
             borderRadius: 99,
             background: "var(--recording-soft)",
-            border: "1px solid oklch(0.62 0.18 25 / 0.35)",
+            border: "1px solid var(--recording-ring)",
             color: "var(--recording-tint)",
             fontFamily: "var(--font-mono)",
             fontSize: 11,
@@ -2288,14 +2289,14 @@ function SourceTiles({
               gap: 11,
               padding: "13px 12px",
               background: active ? "var(--accent-soft)" : "var(--bg-elevated)",
-              border: `1px solid ${active ? "var(--accent)" : "var(--border-faint)"}`,
-              borderRadius: 8,
+              border: `1px solid ${active ? "var(--accent-line)" : "transparent"}`,
+              borderRadius: "var(--r-md)",
               textAlign: "left",
               color: dim ? "var(--fg-tertiary)" : "var(--fg-primary)",
               fontFamily: "var(--font-system)",
-              boxShadow: active ? "0 0 0 3px var(--accent-soft)" : "none",
+              boxShadow: "none",
               transition: "all 120ms cubic-bezier(0.4, 0, 0.2, 1)",
-              opacity: dim ? 0.55 : disabled ? 0.7 : 1,
+              opacity: dim ? 0.42 : disabled ? 0.7 : 1,
               cursor: interactive ? "pointer" : "not-allowed",
             }}
           >
@@ -2303,14 +2304,13 @@ function SourceTiles({
               style={{
                 width: 30,
                 height: 30,
-                borderRadius: 7,
+                borderRadius: "var(--r-sm)",
                 flexShrink: 0,
                 background: active ? "var(--accent)" : "var(--bg-input)",
                 color: active ? "#fff" : "var(--fg-secondary)",
                 display: "inline-flex",
                 alignItems: "center",
                 justifyContent: "center",
-                border: "1px solid var(--border-faint)",
               }}
             >
               {s.icon}
@@ -2507,7 +2507,7 @@ function ContinuityPill() {
         gap: 5,
         padding: "3px 8px",
         background: "var(--success-soft)",
-        border: "1px solid oklch(0.62 0.13 155 / 0.34)",
+        border: "1px solid oklch(0.66 0.15 155 / 0.34)",
         borderRadius: 99,
         color: "var(--success-tint)",
         fontSize: 10.5,
@@ -2522,7 +2522,7 @@ function ContinuityPill() {
           height: 5,
           borderRadius: 99,
           background: "var(--success-tint)",
-          boxShadow: "0 0 0 2px oklch(0.62 0.13 155 / 0.32)",
+          boxShadow: "0 0 0 2px oklch(0.66 0.15 155 / 0.32)",
         }}
       />
       iPhone connected
@@ -2551,9 +2551,7 @@ function FooterBar({
         display: "flex",
         alignItems: "center",
         justifyContent: "space-between",
-        padding: "12px 14px",
-        background: "rgba(255,255,255,0.015)",
-        borderTop: "1px solid var(--border-faint)",
+        padding: "12px 16px",
       }}
     >
       <div
@@ -2620,9 +2618,10 @@ function FooterBar({
             display: "inline-flex",
             alignItems: "center",
             gap: 8,
-            padding: "7px 14px 7px 11px",
-            fontWeight: 600,
-            letterSpacing: "-0.005em",
+            padding: "8px 16px 8px 12px",
+            fontWeight: 650,
+            letterSpacing: "-0.01em",
+            boxShadow: "var(--shadow-accent-glow)",
             opacity: canStart ? 1 : 0.55,
             cursor: canStart ? "pointer" : "not-allowed",
           }}
@@ -2719,13 +2718,13 @@ function StripRow({
     tone === "recording"
       ? {
           bg: "var(--recording-soft)",
-          border: "oklch(0.62 0.18 25 / 0.35)",
+          border: "oklch(0.63 0.19 25 / 0.35)",
           accent: "var(--recording-tint)",
         }
       : tone === "success"
       ? {
           bg: "var(--success-soft)",
-          border: "oklch(0.62 0.13 155 / 0.34)",
+          border: "oklch(0.66 0.15 155 / 0.34)",
           accent: "var(--success-tint)",
         }
       : {
@@ -2815,17 +2814,16 @@ function SettingsPanel({
     <div
       style={{
         margin: "10px 14px 0",
-        padding: 12,
-        background: "var(--bg-elevated)",
-        border: "1px solid var(--border-faint)",
-        borderRadius: 6,
+        padding: "14px 16px",
+        background: "var(--bg-sidebar)",
+        borderRadius: "var(--r-lg)",
         display: "flex",
         flexDirection: "column",
         gap: 8,
         fontSize: 12,
       }}
     >
-      <span style={{ fontWeight: 600, color: "var(--fg-primary)" }}>Settings</span>
+      <span style={{ fontSize: 10.5, fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--fg-tertiary)" }}>Settings</span>
       <label
         style={{
           display: "flex",
@@ -2847,7 +2845,7 @@ function SettingsPanel({
           }}
         />
         <button
-          className="btn-primary"
+          className="btn-secondary"
           disabled={!dirty}
           onClick={() => onHotkey(draft.trim())}
           style={{
@@ -2878,7 +2876,6 @@ function SettingsPanel({
           style={{
             display: "inline-flex",
             background: "var(--bg-input)",
-            border: "1px solid var(--border-subtle)",
             borderRadius: "var(--r-sm)",
             padding: 2,
           }}
@@ -2892,8 +2889,8 @@ function SettingsPanel({
                 aria-checked={active}
                 onClick={() => onCountdownDuration(v)}
                 style={{
-                  background: active ? "var(--accent-soft)" : "transparent",
-                  color: active ? "var(--accent-tint)" : "var(--fg-secondary)",
+                  background: active ? "var(--bg-raised)" : "transparent",
+                  color: active ? "var(--fg-primary)" : "var(--fg-secondary)",
                   border: "none",
                   cursor: "pointer",
                   padding: "4px 10px",
@@ -2923,7 +2920,6 @@ function SettingsPanel({
           style={{
             display: "inline-flex",
             background: "var(--bg-input)",
-            border: "1px solid var(--border-subtle)",
             borderRadius: "var(--r-sm)",
             padding: 2,
           }}
@@ -2937,8 +2933,8 @@ function SettingsPanel({
                 aria-checked={active}
                 onClick={() => onLengthCapMode(v)}
                 style={{
-                  background: active ? "var(--accent-soft)" : "transparent",
-                  color: active ? "var(--accent-tint)" : "var(--fg-secondary)",
+                  background: active ? "var(--bg-raised)" : "transparent",
+                  color: active ? "var(--fg-primary)" : "var(--fg-secondary)",
                   border: "none",
                   cursor: "pointer",
                   padding: "4px 10px",
@@ -2999,7 +2995,6 @@ function SettingsPanel({
           style={{
             display: "inline-flex",
             background: "var(--bg-input)",
-            border: "1px solid var(--border-subtle)",
             borderRadius: "var(--r-sm)",
             padding: 2,
           }}
@@ -3015,8 +3010,8 @@ function SettingsPanel({
                 aria-checked={active}
                 onClick={() => onNoiseReduction(v)}
                 style={{
-                  background: active ? "var(--accent-soft)" : "transparent",
-                  color: active ? "var(--accent-tint)" : "var(--fg-secondary)",
+                  background: active ? "var(--bg-raised)" : "transparent",
+                  color: active ? "var(--fg-primary)" : "var(--fg-secondary)",
                   border: "none",
                   cursor: "pointer",
                   padding: "4px 10px",
