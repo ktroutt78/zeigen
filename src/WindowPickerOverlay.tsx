@@ -57,10 +57,14 @@ export default function WindowPickerOverlay() {
     emit("window-picker-cancelled").catch(() => {});
   }, []);
 
+  const select = useCallback((id: number) => {
+    emit("window-picker-selected", { id }).catch(() => {});
+  }, []);
+
   useEffect(() => {
-    getCurrentWebviewWindow()
-      .setFocus()
-      .catch(() => {});
+    // Esc is a bonus path: it only fires once this overlay is the key window,
+    // which a borderless transparent window isn't until the pointer enters it
+    // (see focusedRef below). The mouse paths are the guaranteed exits.
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
@@ -71,10 +75,28 @@ export default function WindowPickerOverlay() {
     return () => window.removeEventListener("keydown", onKey);
   }, [cancel]);
 
+  // Focus this display's overlay the first time the pointer enters it, so its
+  // clicks land immediately (a non-key borderless window would otherwise spend
+  // the first click just becoming key) and Esc has a chance to work.
+  const focusedRef = useRef(false);
   const onPointerMove = (e: React.PointerEvent) => {
+    if (!focusedRef.current) {
+      focusedRef.current = true;
+      getCurrentWebviewWindow()
+        .setFocus()
+        .catch(() => {});
+    }
     const next = hitTest(params.windows, e.clientX, e.clientY);
     // Only re-render on a change of target, not every pixel of movement.
     setHovered((prev) => (prev?.id === next?.id ? prev : next));
+  };
+
+  // Click commits: over a window -> select it; over bare desktop -> cancel.
+  const onPointerDown = (e: React.PointerEvent) => {
+    if (e.button !== 0) return;
+    const hit = hitTest(params.windows, e.clientX, e.clientY);
+    if (hit) select(hit.id);
+    else cancel();
   };
 
   const label = useMemo(() => {
@@ -93,6 +115,7 @@ export default function WindowPickerOverlay() {
         background: "transparent",
       }}
       onPointerMove={onPointerMove}
+      onPointerDown={onPointerDown}
     >
       {hovered && (
         <div
@@ -147,7 +170,7 @@ export default function WindowPickerOverlay() {
           left: "50%",
           bottom: 22,
           transform: "translateX(-50%)",
-          padding: "8px 14px",
+          padding: "8px 10px 8px 14px",
           borderRadius: 8,
           background: "rgba(0, 0, 0, 0.72)",
           color: "#fff",
@@ -155,14 +178,34 @@ export default function WindowPickerOverlay() {
             "var(--font-system, -apple-system, BlinkMacSystemFont, sans-serif)",
           fontSize: 12,
           letterSpacing: "0.01em",
-          pointerEvents: "none",
           display: "flex",
-          gap: 14,
+          alignItems: "center",
+          gap: 12,
         }}
       >
-        <span>Hover a window on Display {params.displayIndex}</span>
-        <span style={{ opacity: 0.65 }}>·</span>
-        <span style={{ opacity: 0.85 }}>Esc to cancel</span>
+        <span style={{ pointerEvents: "none" }}>
+          Click a window to select · click empty space to cancel
+        </span>
+        <button
+          // Guaranteed mouse exit — stop the event reaching the root so it
+          // cancels rather than being read as an empty-space click.
+          onPointerDown={(e) => {
+            e.stopPropagation();
+            cancel();
+          }}
+          style={{
+            padding: "4px 10px",
+            borderRadius: 6,
+            border: "1px solid rgba(255,255,255,0.25)",
+            background: "rgba(255,255,255,0.08)",
+            color: "#fff",
+            fontFamily: "inherit",
+            fontSize: 12,
+            cursor: "pointer",
+          }}
+        >
+          Cancel
+        </button>
       </div>
     </div>
   );

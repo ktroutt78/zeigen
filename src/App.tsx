@@ -657,16 +657,16 @@ async function openMarqueeOverlays(
 
 const WINDOW_PICKER_LABEL_PREFIX = "window-picker-";
 
-// Hover picker (spike): one transparent always-on-top overlay per display,
-// each pre-loaded with the windows that sit on it (frames translated into
-// that display's coordinate space). The overlay highlights the frontmost
-// window under the cursor. No selection yet — this exists to eye-check the
-// hover feel. Returns when the user hits Esc.
+// Hover picker: one transparent always-on-top overlay per display, each
+// pre-loaded with the windows that sit on it (frames translated into that
+// display's coordinate space). The overlay highlights the frontmost window
+// under the cursor; a click selects it, a click on empty space or Cancel
+// dismisses. Resolves to the chosen SCWindow id, or null on cancel.
 async function openWindowPickerOverlays(
   displays: DisplayShape[],
   windows: WindowSource[],
-): Promise<void> {
-  if (displays.length === 0) return;
+): Promise<number | null> {
+  if (displays.length === 0) return null;
 
   const monitors = await availableMonitors();
   const primary =
@@ -755,18 +755,27 @@ async function openWindowPickerOverlays(
     })();
   }
 
-  return new Promise(async (resolve) => {
+  return new Promise<number | null>(async (resolve) => {
     const closeAll = async () => {
       for (const label of labels) {
         const w = await WebviewWindow.getByLabel(label);
         if (w) await w.close().catch(() => {});
       }
     };
-    const unlisten = await listen("window-picker-cancelled", async () => {
-      unlisten();
+    const unlistens: Array<() => void> = [];
+    const finish = async (result: number | null) => {
+      unlistens.forEach((u) => u());
       await closeAll();
-      resolve();
-    });
+      resolve(result);
+    };
+    unlistens.push(
+      await listen<{ id: number }>("window-picker-selected", (e) => {
+        finish(e.payload?.id ?? null);
+      }),
+    );
+    unlistens.push(
+      await listen("window-picker-cancelled", () => finish(null)),
+    );
   });
 }
 
@@ -1516,8 +1525,9 @@ function App() {
     // per the "selection persists across mode-switches" locked decision.
   };
 
-  // Spike: launch the hover-window picker overlay (highlight-on-hover only,
-  // no selection wired yet). Here to eye-check the feel.
+  // Live-hover window picker: highlight the window under the cursor across all
+  // displays, click to select it (returns here and sets the Window source),
+  // click empty space or Cancel to dismiss.
   const openWindowPicker = async () => {
     const shapes: DisplayShape[] = displays.map((d) => ({
       x: d.x,
@@ -1525,7 +1535,9 @@ function App() {
       width: d.width,
       height: d.height,
     }));
-    await openWindowPickerOverlays(shapes, windows);
+    const picked = await openWindowPickerOverlays(shapes, windows);
+    if (picked != null) setSelectedWindow(picked);
+    // On cancel (null) the prior selection is left untouched.
   };
 
   // Click handler for the Selected Area picker tile. Routes:
