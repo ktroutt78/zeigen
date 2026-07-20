@@ -12,8 +12,11 @@ Out of scope: real-time annotation, Windows/Linux, transcription, team features.
 
 - Tauri + React + Vite
 - Swift helper binary (`src-tauri/recording-engine/`) for screen + mic capture via ScreenCaptureKit + AVCaptureSession, muxed by AVAssetWriter. Protocol in `docs/IPC-SPEC.md`.
-- ffmpeg for webcam capture (Phase 3), compositing (`filter_complex`), and transcoding (`h264_videotoolbox`). ffmpeg `-f avfoundation` is **not** used for screen capture — `AVCaptureScreenInput` was removed on macOS 26.
+- Swift compositor binary (`src-tauri/compositor-engine/`, `cicompositor`) is the **single canonical render/composite path**: Core Image renders every zoom / webcam bubble / watermark at export. The old ffmpeg `filter_complex` oversample-composite path (V2) was eliminated 2026-07-19 (`v0.1.0-engine-v2-removed`); there is no fallback — a compositor failure fails the export loudly.
+- ffmpeg remains only for webcam capture (Phase 3), GIF palettegen, and H.264 transcoding (`h264_videotoolbox`). It no longer composites edits. ffmpeg `-f avfoundation` is **not** used for screen capture — `AVCaptureScreenInput` was removed on macOS 26.
 - Cloudflare R2 for storage, Cloudflare Pages for the `/v/[id]` viewer
+
+**Portability note:** collapsing to one compositor path means a future Windows port reimplements a single render pipeline (cicompositor's Core Image logic), not two — the dual ffmpeg-vs-Core-Image split is gone.
 
 ## Known gotchas
 
