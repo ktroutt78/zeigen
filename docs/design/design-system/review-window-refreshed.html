@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Zeigen — Review screen, refreshed</title>
+<style>
+  :root {
+    --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, monospace;
+
+    /* Tonal elevation — no hairlines, contrast does the dividing */
+    --l0: #0d0e11;   /* deepest — video canvas */
+    --l1: #16171a;   /* window base */
+    --l2: #1e2024;   /* panels (rail, timeline) */
+    --l3: #26282d;   /* cards, controls */
+    --l4: #303237;   /* hover / raised control */
+
+    --fg:   #f3f4f6;
+    --fg2:  #a9acb3;
+    --fg3:  #71747c;
+    --fg4:  #4c4f56;
+
+    --accent: oklch(0.60 0.17 252);
+    --accent-bright: oklch(0.66 0.17 252);
+    --accent-soft: oklch(0.60 0.17 252 / 0.16);
+
+    --zoom: oklch(0.66 0.17 300);        /* violet — zoom markers */
+    --zoom-soft: oklch(0.66 0.17 300 / 0.18);
+    --rec: oklch(0.63 0.19 25);
+
+    --r-sm: 6px; --r-md: 9px; --r-lg: 12px;
+  }
+  html, body { margin: 0; background: #08090b; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 32px; font-family: var(--font); color: var(--fg); }
+  .root { display: flex; flex-direction: column; gap: 16px; align-items: center; }
+  .caption { font-size: 11px; color: var(--fg3); letter-spacing: 0.06em; text-transform: uppercase; font-weight: 600; }
+
+  .win {
+    width: 1200px;
+    background: var(--l1);
+    border-radius: 12px;
+    box-shadow: 0 30px 80px rgba(0,0,0,0.6), 0 0 0 0.5px rgba(255,255,255,0.08);
+    overflow: hidden;
+  }
+
+  /* Title bar — blends into window, no drawn divider */
+  .titlebar { height: 38px; display: flex; align-items: center; padding: 0 14px; position: relative; background: var(--l1); }
+  .traffic { display: flex; gap: 8px; }
+  .traffic span { width: 12px; height: 12px; border-radius: 50%; }
+  .traffic .c { background: #ff5f57; } .traffic .m { background: #febc2e; } .traffic .x { background: #28c840; }
+  .title { position: absolute; left: 0; right: 0; text-align: center; font-size: 13px; font-weight: 500; color: var(--fg2); pointer-events: none; }
+
+  /* File header — subtle raise, no hairline */
+  .header { display: flex; align-items: center; gap: 10px; padding: 10px 16px 14px; }
+  .app-mark { width: 22px; height: 22px; border-radius: 6px; background: var(--accent); display: inline-flex; align-items: center; justify-content: center; }
+  .header .name { font-weight: 600; font-size: 13.5px; letter-spacing: -0.01em; }
+  .header .badge { font-size: 11px; font-weight: 600; color: var(--zoom); background: var(--zoom-soft); padding: 2px 7px; border-radius: 5px; letter-spacing: -0.005em; }
+  .header .meta { color: var(--fg3); font-family: var(--mono); font-size: 11.5px; }
+  .header .dot { color: var(--fg4); }
+
+  .body { display: grid; grid-template-columns: 1fr 320px; gap: 12px; padding: 0 12px 12px; }
+
+  /* LEFT column */
+  .player-col { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+
+  .video-wrap { background: var(--l0); border-radius: var(--r-lg); padding: 14px; }
+  .video { position: relative; aspect-ratio: 16/9; width: 100%; background: #14161b; border-radius: var(--r-md); overflow: hidden; }
+  .frame { position: absolute; inset: 0; background: repeating-linear-gradient(135deg, #1b2130 0 16px, #161b28 16px 32px); display: flex; align-items: center; justify-content: center; }
+  .frame .label { color: rgba(255,255,255,0.32); font-family: var(--mono); font-size: 11px; letter-spacing: 0.12em; }
+  .bubble { position: absolute; right: 20px; bottom: 20px; width: 84px; height: 84px; border-radius: 50%; background: repeating-linear-gradient(135deg, #5b4a52 0 5px, #4d3e46 5px 10px); box-shadow: 0 10px 24px rgba(0,0,0,0.55), 0 0 0 2px rgba(255,255,255,0.14); }
+  .playbar { position: absolute; left: 12px; right: 12px; bottom: 12px; display: flex; align-items: center; gap: 12px; padding: 7px 12px; background: rgba(14,15,18,0.66); backdrop-filter: blur(14px); border-radius: var(--r-md); }
+  .playbar .pp { background: transparent; border: none; color: #fff; cursor: pointer; padding: 0; display: inline-flex; }
+  .playbar .tc { font-family: var(--mono); font-size: 11.5px; color: rgba(255,255,255,0.9); font-variant-numeric: tabular-nums; }
+  .playbar .spacer { flex: 1; }
+  .playbar .ico { color: rgba(255,255,255,0.62); display: inline-flex; cursor: pointer; }
+
+  /* Timeline — elevated panel, dimmed waveform, quiet zoom pins */
+  .timeline { background: var(--l2); border-radius: var(--r-lg); padding: 12px 16px 14px; }
+  .tl-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+  .tl-head .l { font-size: 11px; color: var(--fg3); letter-spacing: 0.07em; text-transform: uppercase; font-weight: 600; display: inline-flex; align-items: center; gap: 10px; }
+  .legend { display: inline-flex; align-items: center; gap: 5px; text-transform: none; letter-spacing: 0; font-weight: 500; color: var(--fg3); font-size: 10.5px; }
+  .legend .swatch { width: 8px; height: 8px; border-radius: 3px; background: var(--zoom); }
+  .tl-head .d { font-family: var(--mono); font-size: 11px; color: var(--fg3); }
+
+  .track-area { position: relative; padding-top: 18px; }
+  /* zoom pins ride ABOVE the waveform now, as quiet ticks */
+  .pins { position: absolute; top: 0; left: 0; right: 0; height: 16px; }
+  .pin { position: absolute; top: 0; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; cursor: pointer; }
+  .pin .cap { font-size: 9px; font-weight: 700; color: var(--zoom); opacity: 0.85; line-height: 1; margin-bottom: 2px; }
+  .pin .stem { width: 2px; height: 8px; background: var(--zoom); opacity: 0.55; border-radius: 1px; }
+  .pin:hover .stem, .pin.active .stem { opacity: 1; }
+  .pin.active .cap { opacity: 1; }
+
+  .lanes { position: relative; display: flex; flex-direction: column; gap: 6px; }
+  .lane { display: grid; grid-template-columns: 46px 1fr; align-items: center; gap: 10px; }
+  .lane .lane-lab { display: inline-flex; align-items: center; justify-content: center; color: var(--fg3); }
+  .track { position: relative; height: 40px; border-radius: var(--r-sm); background: var(--l1); overflow: hidden; }
+  /* video lane — thumbnail filmstrip */
+  .filmstrip { position: absolute; inset: 0; background:
+      repeating-linear-gradient(90deg, #2a3550 0 34px, #223049 34px 35px, #2e3a58 35px 69px, #223049 69px 70px);
+    opacity: 0.6; }
+  .wave { position: absolute; inset: 0; opacity: 0.4;
+    background: repeating-linear-gradient(90deg,
+      var(--fg2) 0 1px, transparent 1px 2px,
+      var(--fg3) 2px 3px, transparent 3px 4px,
+      var(--fg2) 4px 5px, transparent 5px 7px);
+    mask: linear-gradient(180deg, transparent, #000 30%, #000 70%, transparent);
+    -webkit-mask: linear-gradient(180deg, transparent, #000 30%, #000 70%, transparent);
+  }
+  /* active zoom regions faintly tinted under the track */
+  .zoom-region { position: absolute; top: 0; bottom: 0; background: var(--zoom-soft); }
+  .trim { position: absolute; top: 0; bottom: 0; width: 6px; background: var(--accent); box-shadow: 0 0 0 1px rgba(0,0,0,0.35); }
+  .trim.l { left: 0; border-radius: var(--r-sm) 0 0 var(--r-sm); }
+  .trim.r { right: 0; border-radius: 0 var(--r-sm) var(--r-sm) 0; }
+  .playhead { position: absolute; top: -20px; bottom: -2px; left: 15%; width: 0; border-left: 1.5px solid #fff; filter: drop-shadow(0 0 3px rgba(255,255,255,0.5)); }
+  .playhead::before { content: ''; position: absolute; top: -3px; left: -5px; width: 10px; height: 10px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.5); }
+
+  /* RIGHT rail */
+  .rail { background: var(--l2); border-radius: var(--r-lg); display: flex; flex-direction: column; overflow: hidden; }
+
+  /* Tool toolbar — replaces the accordion */
+  .toolbar { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; padding: 10px; }
+  .tool { display: flex; flex-direction: column; align-items: center; gap: 5px; padding: 10px 4px; border-radius: var(--r-sm); background: transparent; border: none; cursor: pointer; color: var(--fg2); font-family: var(--font); font-size: 11px; font-weight: 500; letter-spacing: -0.005em; transition: background 120ms, color 120ms; }
+  .tool svg { display: block; }
+  .tool:hover { background: var(--l3); color: var(--fg); }
+  .tool.active { background: var(--accent-soft); color: var(--accent-bright); }
+
+  .rail-scroll { flex: 1; padding: 2px 12px 12px; overflow: hidden; }
+  .ctx-title { font-size: 10.5px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg3); margin: 12px 2px 10px; display: flex; align-items: center; gap: 7px; }
+  .ctx-title .c { width: 6px; height: 6px; border-radius: 2px; background: var(--zoom); }
+
+  /* Active-tool (ZOOM) contextual controls */
+  .ctx-card { background: var(--l3); border-radius: var(--r-md); padding: 12px; margin-bottom: 12px; }
+  .field { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 0; }
+  .field .lab { font-size: 12.5px; color: var(--fg2); }
+  .field .val { font-family: var(--mono); font-size: 11.5px; color: var(--fg); }
+  .slider { position: relative; height: 4px; background: var(--l1); border-radius: 3px; flex: 1; }
+  .slider .fill { position: absolute; left: 0; top: 0; bottom: 0; width: 62%; background: var(--zoom); border-radius: 3px; }
+  .slider .knob { position: absolute; left: 62%; top: 50%; transform: translate(-50%, -50%); width: 13px; height: 13px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.5); }
+  .seg { display: inline-flex; background: var(--l1); border-radius: var(--r-sm); padding: 2px; gap: 2px; }
+  .seg .o { background: transparent; border: none; color: var(--fg2); padding: 3px 9px; font-size: 11px; font-weight: 500; border-radius: 4px; cursor: pointer; }
+  .seg .o.on { background: var(--l4); color: var(--fg); }
+
+  /* EXPORT section */
+  .export-head { font-size: 10.5px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg3); margin: 6px 2px 10px; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+  .row .lab { font-size: 12.5px; color: var(--fg2); }
+
+  .dest { display: grid; grid-template-columns: 30px 1fr auto; align-items: center; gap: 11px; padding: 9px 11px; width: 100%; background: var(--l3); border: none; border-radius: var(--r-md); cursor: pointer; text-align: left; color: var(--fg); font-family: var(--font); margin-bottom: 6px; transition: background 120ms; }
+  .dest:hover { background: var(--l4); }
+  .dest .icon { width: 28px; height: 28px; border-radius: var(--r-sm); background: var(--l1); color: var(--fg2); display: inline-flex; align-items: center; justify-content: center; }
+  .dest .t { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .dest .t .a { font-size: 12.5px; font-weight: 600; letter-spacing: -0.005em; }
+  .dest .t .b { font-size: 11px; color: var(--fg3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .kbd { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; padding: 0 5px; background: var(--l1); border-radius: 4px; font-size: 10.5px; font-weight: 500; color: var(--fg2); font-family: var(--font); }
+  .kgrp { display: inline-flex; gap: 3px; }
+
+  .save { display: inline-flex; align-items: center; justify-content: center; gap: 8px; width: 100%; padding: 11px; margin: 4px 0 12px; border: none; border-radius: var(--r-md); cursor: pointer; background: var(--accent); color: #fff; font-family: var(--font); font-size: 13.5px; font-weight: 650; letter-spacing: -0.01em; box-shadow: 0 1px 0 rgba(255,255,255,0.14) inset, 0 2px 8px oklch(0.60 0.17 252 / 0.35); transition: background 120ms; }
+  .save:hover { background: var(--accent-bright); }
+
+  /* footer actions */
+  .actions { padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+  .btn2 { display: inline-flex; align-items: center; justify-content: center; gap: 8px; width: 100%; padding: 9px; border-radius: var(--r-md); cursor: pointer; font-family: var(--font); font-size: 12.5px; font-weight: 600; letter-spacing: -0.005em; background: var(--l3); color: var(--fg); border: none; transition: background 120ms; }
+  .btn2:hover { background: var(--l4); }
+  .discard { display: inline-flex; align-items: center; justify-content: center; gap: 7px; width: 100%; padding: 8px; border-radius: var(--r-md); cursor: pointer; background: transparent; border: none; color: var(--fg3); font-family: var(--font); font-size: 12px; font-weight: 500; transition: color 120ms, background 120ms; }
+  .discard:hover { color: var(--rec); background: oklch(0.63 0.19 25 / 0.10); }
+</style>
+</head>
+<body>
+<div class="root">
+  <div class="win">
+    <div class="titlebar">
+      <div class="traffic"><span class="c"></span><span class="m"></span><span class="x"></span></div>
+      <div class="title">Screen Recording</div>
+    </div>
+
+    <div class="header">
+      <span class="app-mark"><svg width="14" height="14" viewBox="0 0 16 16"><path d="M4.5 5 H11.5 V6 L7 10 H11.5 V11 H4.5 V10 L9 6 H4.5 Z" fill="#fff"/></svg></span>
+      <span class="name">Screen Recording</span>
+      <span class="badge">edited</span>
+      <span class="dot">·</span>
+      <span class="meta">04:37 · .mp4</span>
+      <span class="dot">·</span>
+      <span class="meta" style="color:var(--fg4)">just now</span>
+    </div>
+
+    <div class="body">
+      <!-- LEFT -->
+      <div class="player-col">
+        <div class="video-wrap">
+          <div class="video">
+            <div class="frame"><span class="label">SCREEN CAPTURE</span></div>
+            <div class="bubble"></div>
+            <div class="playbar">
+              <button class="pp"><svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M5 3 V13 L13 8 Z"/></svg></button>
+              <span class="tc">00:26 / 04:37</span>
+              <span class="spacer"></span>
+              <span class="ico"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2 6 V10 H5 L9 13 V3 L5 6 Z"/></svg></span>
+              <span class="ico"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6 V3 H6 M10 3 H13 V6 M13 10 V13 H10 M6 13 H3 V10"/></svg></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="timeline">
+          <div class="tl-head">
+            <span class="l">Timeline
+              <span class="legend"><span class="swatch"></span>Zoom points</span>
+            </span>
+            <span class="d">04:37</span>
+          </div>
+          <div class="track-area">
+            <div class="pins" style="left:56px;right:0">
+              <div class="pin" style="left:4%"><span class="cap">1.5×</span><span class="stem"></span></div>
+              <div class="pin active" style="left:13%"><span class="cap">2×</span><span class="stem"></span></div>
+              <div class="pin" style="left:17%"><span class="cap">2×</span><span class="stem"></span></div>
+              <div class="pin" style="left:34%"><span class="cap">1.5×</span><span class="stem"></span></div>
+              <div class="pin" style="left:43%"><span class="cap">2×</span><span class="stem"></span></div>
+              <div class="pin" style="left:45%"><span class="cap">3×</span><span class="stem"></span></div>
+              <div class="pin" style="left:52%"><span class="cap">2×</span><span class="stem"></span></div>
+              <div class="pin" style="left:63%"><span class="cap">1.5×</span><span class="stem"></span></div>
+              <div class="pin" style="left:72%"><span class="cap">2×</span><span class="stem"></span></div>
+              <div class="pin" style="left:82%"><span class="cap">2×</span><span class="stem"></span></div>
+            </div>
+            <div class="lanes">
+              <div class="lane">
+                <span class="lane-lab"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="12" height="8" rx="1.5"/><path d="M6.5 6.5 L10 8 L6.5 9.5 Z"/></svg></span>
+                <div class="track">
+                  <div class="zoom-region" style="left:13%;width:5%"></div>
+                  <div class="zoom-region" style="left:43%;width:4%"></div>
+                  <div class="zoom-region" style="left:72%;width:4%"></div>
+                  <div class="filmstrip"></div>
+                  <div class="trim l"></div>
+                  <div class="trim r"></div>
+                </div>
+              </div>
+              <div class="lane">
+                <span class="lane-lab"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8 H4 L5.5 4 L7.5 12 L9.5 6 L11 8 H14"/></svg></span>
+                <div class="track">
+                  <div class="wave"></div>
+                  <div class="trim l"></div>
+                  <div class="trim r"></div>
+                </div>
+              </div>
+            </div>
+            <div class="playhead"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- RIGHT -->
+      <div class="rail">
+        <div class="toolbar">
+          <button class="tool"><svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3 V17 M14 3 V17 M3 6 H17 M3 14 H17"/></svg>Trim</button>
+          <button class="tool"><svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="10" cy="10" r="6"/></svg>Bubble</button>
+          <button class="tool active"><svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="5.5"/><path d="M13 13 L17 17 M7 9 H11 M9 7 V11"/></svg>Zoom</button>
+          <button class="tool"><svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6 H16 M4 10 H12 M4 14 H14"/></svg>Mark</button>
+        </div>
+
+        <div class="rail-scroll">
+          <div class="ctx-title"><span class="c"></span>Zoom · point at 00:34</div>
+          <div class="ctx-card">
+            <div class="field"><span class="lab">Level</span><span class="val">2.0×</span></div>
+            <div class="field"><div class="slider"><div class="fill"></div><div class="knob"></div></div></div>
+            <div class="field"><span class="lab">Easing</span>
+              <div class="seg"><button class="o">Snap</button><button class="o on">Smooth</button></div>
+            </div>
+            <div class="field"><span class="lab">Follow cursor</span>
+              <div class="seg"><button class="o on">On</button><button class="o">Off</button></div>
+            </div>
+          </div>
+
+          <div class="export-head">Export</div>
+          <div class="row"><span class="lab">Format</span>
+            <div class="seg"><button class="o on">MP4</button><button class="o">GIF</button></div>
+          </div>
+          <div class="row"><span class="lab">Resolution</span>
+            <div class="seg"><button class="o">480p</button><button class="o on">720p</button><button class="o">1080p</button></div>
+          </div>
+
+          <button class="save"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5 L6.5 12 L13 4.5"/></svg>Save as MP4</button>
+
+          <button class="dest">
+            <span class="icon"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="8" height="9" rx="1"/><path d="M6 4 V2 H11 V11 H12"/></svg></span>
+            <span class="t"><span class="a">Copy to Clipboard</span><span class="b">Paste into Slack, Mail, Mess…</span></span>
+            <span class="kgrp"><span class="kbd">⌘</span><span class="kbd">C</span></span>
+          </button>
+          <button class="dest">
+            <span class="icon"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="11" height="10" rx="1"/><path d="M5 8 V11 M5 6 H5.01 M8 11 V8 c0-.8 .7-1.5 1.5-1.5 s1.5 .7 1.5 1.5 V11"/></svg></span>
+            <span class="t"><span class="a">Export for LinkedIn</span><span class="b">MP4 · ≤ 10 min · 1080p capped</span></span>
+          </button>
+          <button class="dest">
+            <span class="icon"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2 5.5 A1.5 1.5 0 0 1 3.5 4 H6 L7.5 5.5 H12.5 A1.5 1.5 0 0 1 14 7 V11.5 A1.5 1.5 0 0 1 12.5 13 H3.5 A1.5 1.5 0 0 1 2 11.5 Z"/></svg></span>
+            <span class="t"><span class="a">Reveal in Finder</span><span class="b">recording-2026-07-17-151014.mp4</span></span>
+          </button>
+        </div>
+
+        <div class="actions">
+          <button class="btn2"><svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="8" r="4"/></svg>Record another</button>
+          <button class="discard"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4 H13 M5 4 V2.5 H11 V4 M5 4 L5.5 13 H10.5 L11 4"/></svg>Discard recording</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="caption">Refreshed · tonal elevation · tool toolbar · violet zoom markers</div>
+</div>
+</body>
+</html>
