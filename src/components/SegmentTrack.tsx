@@ -271,17 +271,17 @@ export default function SegmentTrack({
               <span
                 style={{
                   display: "inline-block",
-                  width: 14,
-                  height: 14,
-                  borderRadius: 99,
-                  background: selected ? "var(--zoom)" : "var(--bg-elevated)",
-                  border: "1px solid var(--zoom)",
-                  color: selected ? "#fff" : "var(--zoom)",
-                  textAlign: "center",
+                  padding: "1px 6px",
+                  borderRadius: "var(--r-pill)",
+                  background: selected ? "var(--zoom-soft)" : "transparent",
+                  color: "var(--zoom)",
                   lineHeight: "12px",
                   fontSize: 9,
-                  fontWeight: 700,
+                  fontWeight: 600,
+                  letterSpacing: "0.03em",
                   fontFamily: "var(--font-system)",
+                  opacity: selected ? 1 : 0.9,
+                  whiteSpace: "nowrap",
                 }}
               >
                 {label(idx)}

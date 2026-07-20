@@ -8,8 +8,11 @@ import { useEffect, useRef, useState } from "react";
 const PEAK_CACHE_SIZE = 4096;
 const SILENCE_THRESHOLD = 0.001;
 const CLIPPING_THRESHOLD = 0.98;
-const BAR_COLOR = "#6f6f74"; // var(--fg-tertiary)
-const CENTERLINE_COLOR = "#4a4a4f"; // var(--fg-quaternary)
+// Brighter than the body text so the audio signature reads clearly on the
+// refreshed dark timeline panel (was the muted --fg-tertiary #6f6f74, which
+// washed out to a faint band). --fg-secondary in the refreshed palette.
+const BAR_COLOR = "#a9acb3"; // var(--fg-secondary)
+const CENTERLINE_COLOR = "#4c4f56"; // var(--fg-quaternary)
 const LABEL_FONT =
   '500 11px -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif';
 

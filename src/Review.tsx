@@ -3384,7 +3384,7 @@ function Timeline(props: TimelineProps) {
               // safe and needs no second ScrubPreview.
               setHover({ time: t, rect: track.getBoundingClientRect() });
             }}
-            label={() => "Z"}
+            label={() => "zoom"}
             bounds={props.zoom.bounds}
             alwaysBand
             minGap={ZOOM_MIN_DURATION}
