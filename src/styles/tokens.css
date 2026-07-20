@@ -1,8 +1,11 @@
 /* ============================================================
-   Zeigen — design tokens + components (dark only)
+   Zeigen — design tokens + components (dark only) — refreshed v2 skin
    Drop into the Tauri app's global CSS (or import alongside Tailwind).
-   All accents share lightness 0.62 / chroma 0.18 to feel harmonious.
-   Recording red is reserved for live state, never a brand color.
+   Sections divide by tonal elevation (--bg-canvas → --bg-raised), not
+   hairline borders. One accent (blue) per screen; violet is reserved for
+   zoom, red for live/destructive. Named families kept for maintainability;
+   values driven by the refreshed skin. Full spec + reference surface:
+   docs/design/design-system/refreshed-skin-spec.md
    ============================================================ */
 
 :root {
@@ -26,62 +29,71 @@
   --track-tight:    -0.01em;
   --track-eyebrow:  0.06em;
 
-  /* ─── Surfaces ─────────────────────────────────────────────── */
-  --bg-window:   #1c1c1e;  /* main window canvas                   */
-  --bg-sidebar:  #242426;  /* sidebar / export panel               */
-  --bg-elevated: #2c2c2e;  /* tiles, cards, secondary buttons      */
-  --bg-input:    #1f1f21;  /* form fields, segmented control bg    */
-  --bg-hover:    rgba(255,255,255,0.04);
-  --bg-active:   rgba(255,255,255,0.08);
+  /* ─── Surfaces — tonal elevation ladder (deepest → raised) ──── */
+  --bg-canvas:   #0d0e11;  /* deepest — video canvas               */
+  --bg-window:   #16171a;  /* main window base                     */
+  --bg-sidebar:  #1e2024;  /* panels: rail, timeline, settings     */
+  --bg-elevated: #26282d;  /* tiles, cards, secondary buttons      */
+  --bg-raised:   #303237;  /* hover / active, segmented thumb      */
+  --bg-input:    #16171a;  /* form fields, tracks (== window base) */
+  --bg-hover:    rgba(255,255,255,0.04);  /* ghost overlay         */
+  --bg-active:   rgba(255,255,255,0.06);
 
   /* Tray / popover (translucent — sits over wallpaper) */
-  --bg-tray:     rgba(40,40,42,0.96);
+  --bg-tray:     rgba(30,32,36,0.96);
 
   /* Translucent overlays inside video / camera surfaces */
-  --bg-overlay-thin:   rgba(20,20,22,0.6);
-  --bg-overlay-medium: rgba(20,20,22,0.78);
-  --bg-overlay-strong: rgba(20,20,22,0.86);
+  --bg-overlay-thin:   rgba(13,14,17,0.6);
+  --bg-overlay-medium: rgba(13,14,17,0.72);
+  --bg-overlay-strong: rgba(13,14,17,0.86);
 
-  /* ─── Borders (1px hairlines) ──────────────────────────────── */
-  --border-faint:  rgba(255,255,255,0.06);  /* row dividers       */
-  --border-subtle: rgba(255,255,255,0.09);  /* inputs, buttons    */
-  --border-strong: rgba(255,255,255,0.14);  /* window chrome      */
+  /* ─── Borders — used sparingly; elevation divides regions ───── */
+  --border-faint:  rgba(255,255,255,0.05);  /* rare row dividers  */
+  --border-subtle: rgba(255,255,255,0.08);  /* window chrome ring */
+  --border-strong: rgba(255,255,255,0.10);  /* emphasized edge    */
   --border-hair:   0.5px;                    /* tray, titlebars   */
 
   /* ─── Foreground ───────────────────────────────────────────── */
-  --fg-primary:    #f2f2f7;  /* labels, values                   */
-  --fg-secondary:  #a8a8ad;  /* row icons, subdued copy           */
-  --fg-tertiary:   #6f6f74;  /* hints, file paths, eyebrows       */
-  --fg-quaternary: #4a4a4f;  /* timecode marks, disabled glyphs   */
+  --fg-primary:    #f3f4f6;  /* labels, values                   */
+  --fg-secondary:  #a9acb3;  /* row icons, subdued copy           */
+  --fg-tertiary:   #71747c;  /* hints, file paths, eyebrows       */
+  --fg-quaternary: #4c4f56;  /* timecode marks, disabled glyphs   */
 
-  /* ─── Accent (electric blue) ───────────────────────────────── */
-  --accent:        oklch(0.62 0.18 250);          /* primary CTAs */
-  --accent-soft:   oklch(0.62 0.18 250 / 0.16);   /* selected fill*/
-  --accent-ring:   oklch(0.62 0.18 250 / 0.30);   /* focus glow   */
-  --accent-deep:   oklch(0.50 0.18 250);          /* gradient end */
-  --accent-tint:   oklch(0.78 0.14 250);          /* on-dark text */
+  /* ─── Accent (electric blue) — ONE per screen ──────────────── */
+  --accent:        oklch(0.60 0.17 252);          /* primary CTAs   */
+  --accent-bright: oklch(0.66 0.17 252);          /* hover          */
+  --accent-soft:   oklch(0.60 0.17 252 / 0.16);   /* selected fill  */
+  --accent-line:   oklch(0.60 0.17 252 / 0.50);   /* selected border*/
+  --accent-ring:   oklch(0.60 0.17 252 / 0.30);   /* focus glow     */
+  --accent-tint:   oklch(0.80 0.15 252);          /* on-dark text   */
   --accent-fg:     #fff;
 
   /* ─── Status ──────────────────────────────────────────────── */
-  --recording:        oklch(0.62 0.18 25);
-  --recording-soft:   oklch(0.62 0.18 25 / 0.14);
-  --recording-ring:   oklch(0.62 0.18 25 / 0.25);
-  --recording-tint:   oklch(0.78 0.15 25);
+  --recording:        oklch(0.63 0.19 25);   /* live + destructive */
+  --recording-soft:   oklch(0.63 0.19 25 / 0.14);
+  --recording-ring:   oklch(0.63 0.19 25 / 0.25);
+  --recording-tint:   oklch(0.80 0.16 25);
 
-  --success:          oklch(0.62 0.13 155);  /* iPhone connected, etc. */
-  --success-soft:     oklch(0.62 0.13 155 / 0.14);
-  --success-tint:     oklch(0.82 0.13 155);
+  /* Zoom — violet, reserved for zoom markers only (never blue) */
+  --zoom:             oklch(0.66 0.17 300);
+  --zoom-soft:        oklch(0.66 0.17 300 / 0.18);
 
-  /* Warning — length-cap 80% threshold tint. Slightly lighter than the
-     0.62 family so digit glyphs read clearly on the dark bubble pill. */
-  --warning:          oklch(0.72 0.16 70);
-  --warning-tint:     oklch(0.82 0.14 70);
+  /* Success — iPhone connected, etc. Retuned into the refreshed palette
+     (the wireframe dropped it by omission; the connected state still needs it). */
+  --success:          oklch(0.66 0.15 155);
+  --success-soft:     oklch(0.66 0.15 155 / 0.16);
+  --success-tint:     oklch(0.82 0.14 155);
+
+  /* Warning — length-cap 80% threshold tint; lighter so digit glyphs
+     read clearly on the dark bubble pill. */
+  --warning:          oklch(0.75 0.16 70);
+  --warning-tint:     oklch(0.83 0.14 70);
 
   /* ─── Radius ──────────────────────────────────────────────── */
   --r-xs:     4px;    /* micro pills, frame chips                */
   --r-sm:     6px;    /* inputs, secondary buttons               */
-  --r-md:     8px;    /* cards, tiles, control bars              */
-  --r-lg:     10px;   /* window chrome                           */
+  --r-md:     9px;    /* cards, tiles, control bars              */
+  --r-lg:     12px;   /* panels, window chrome                   */
   --r-xl:     14px;   /* floating panels (rare)                  */
   --r-pill:   999px;
 
@@ -96,10 +108,11 @@
   /* ─── Shadows ─────────────────────────────────────────────── */
   --shadow-sm: 0 1px 2px rgba(0,0,0,0.4);
   --shadow-md: 0 8px 24px rgba(0,0,0,0.45), 0 1px 0 rgba(255,255,255,0.04) inset;
-  --shadow-lg: 0 24px 64px rgba(0,0,0,0.55), 0 1px 0 rgba(255,255,255,0.04) inset;
-  --shadow-tray: 0 18px 56px rgba(0,0,0,0.55), 0 0 0 0.5px rgba(255,255,255,0.05) inset;
+  --shadow-lg: 0 30px 80px rgba(0,0,0,0.6), 0 0 0 0.5px rgba(255,255,255,0.08);
+  --shadow-tray: 0 18px 56px rgba(0,0,0,0.55), 0 0 0 0.5px rgba(255,255,255,0.06) inset;
   --shadow-accent-ring:    0 0 0 3px var(--accent-soft), 0 1px 0 rgba(255,255,255,0.12) inset;
   --shadow-recording-ring: 0 0 0 3px var(--recording-ring), 0 1px 0 rgba(255,255,255,0.15) inset;
+  --shadow-accent-glow:    0 1px 0 rgba(255,255,255,0.14) inset, 0 2px 8px oklch(0.60 0.17 252 / 0.35);
 
   /* ─── Backdrop blur ───────────────────────────────────────── */
   --blur-thin:   blur(10px);
@@ -116,9 +129,9 @@
 }
 
 /* Per-variant accent — applied via .accent-red / .accent-blue / .accent-green wrapper */
-.accent-red    { --accent: oklch(0.62 0.18 25);  --accent-soft: oklch(0.62 0.18 25 / 0.16); --accent-fg: #fff; }
-.accent-blue   { --accent: oklch(0.62 0.18 250); --accent-soft: oklch(0.62 0.18 250 / 0.16); --accent-fg: #fff; }
-.accent-green  { --accent: oklch(0.62 0.13 155); --accent-soft: oklch(0.62 0.13 155 / 0.16); --accent-fg: #fff; }
+.accent-red    { --accent: oklch(0.63 0.19 25);  --accent-soft: oklch(0.63 0.19 25 / 0.16); --accent-fg: #fff; }
+.accent-blue   { --accent: oklch(0.60 0.17 252); --accent-soft: oklch(0.60 0.17 252 / 0.16); --accent-fg: #fff; }
+.accent-green  { --accent: oklch(0.66 0.15 155); --accent-soft: oklch(0.66 0.15 155 / 0.16); --accent-fg: #fff; }
 
 /* Window chrome — macOS-ish */
 .mac-window {
@@ -282,17 +295,17 @@
 
 /* Recording indicator — both `.rec-dot` and `.ds-rec-dot` are supported */
 @keyframes rec-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 oklch(0.62 0.18 25 / 0.5); }
-  50%      { box-shadow: 0 0 0 4px oklch(0.62 0.18 25 / 0); }
+  0%, 100% { box-shadow: 0 0 0 0 oklch(0.63 0.19 25 / 0.5); }
+  50%      { box-shadow: 0 0 0 4px oklch(0.63 0.19 25 / 0); }
 }
 @keyframes ds-rec-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 oklch(0.62 0.18 25 / 0.5); }
-  50%      { box-shadow: 0 0 0 4px oklch(0.62 0.18 25 / 0); }
+  0%, 100% { box-shadow: 0 0 0 0 oklch(0.63 0.19 25 / 0.5); }
+  50%      { box-shadow: 0 0 0 4px oklch(0.63 0.19 25 / 0); }
 }
 .rec-dot {
   width: 8px; height: 8px; border-radius: 50%;
-  background: oklch(0.62 0.18 25);
-  box-shadow: 0 0 0 0 oklch(0.62 0.18 25 / 0.6);
+  background: oklch(0.63 0.19 25);
+  box-shadow: 0 0 0 0 oklch(0.63 0.19 25 / 0.6);
   animation: rec-pulse 1.6s ease-out infinite;
   flex-shrink: 0;
 }
