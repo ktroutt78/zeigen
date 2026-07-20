@@ -1964,7 +1964,6 @@ function LeftColumn(props: LeftColumnProps) {
       style={{
         display: "flex",
         flexDirection: "column",
-        borderRight: "1px solid var(--border-faint)",
         minWidth: 0,
         minHeight: 0,
         overflow: "hidden",
@@ -2319,7 +2318,7 @@ function VideoStage(props: VideoStageProps) {
       style={{
         position: "relative",
         padding: 16,
-        background: "#0c0d10",
+        background: "var(--bg-canvas)",
         flex: 1,
         minHeight: 0,
         display: "flex",
@@ -2337,10 +2336,10 @@ function VideoStage(props: VideoStageProps) {
           maxWidth: "100%",
           maxHeight: "100%",
           width: "100%",
-          borderRadius: 8,
+          borderRadius: "var(--r-md)",
           overflow: "hidden",
-          border: "1px solid rgba(255,255,255,0.06)",
-          background: "#000",
+          border: "1px solid var(--border-faint)",
+          background: "#14161b",
         }}
       >
         {/* V2 Step 3: the screen video carries the zoom transform (applied to
@@ -2935,12 +2934,12 @@ function PlayerOverlay({
         display: "flex",
         alignItems: "center",
         gap: 10,
-        padding: "6px 10px",
-        background: "var(--bg-overlay-thin)",
-        backdropFilter: "blur(10px)",
-        WebkitBackdropFilter: "blur(10px)",
+        padding: "7px 12px",
+        background: "var(--bg-overlay-medium)",
+        backdropFilter: "blur(14px)",
+        WebkitBackdropFilter: "blur(14px)",
         border: "0.5px solid rgba(255,255,255,0.1)",
-        borderRadius: 8,
+        borderRadius: "var(--r-md)",
         color: "#fff",
       }}
     >
@@ -3168,9 +3167,10 @@ function Timeline(props: TimelineProps) {
   return (
     <div
       style={{
-        padding: "10px 16px 14px",
-        borderTop: "1px solid var(--border-faint)",
-        background: "rgba(255,255,255,0.012)",
+        margin: "8px 12px 12px",
+        padding: "12px 16px 14px",
+        background: "var(--bg-sidebar)",
+        borderRadius: "var(--r-lg)",
       }}
     >
       <div
