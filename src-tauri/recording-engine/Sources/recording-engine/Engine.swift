@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreGraphics
 import CoreMedia
 import Foundation
 import ScreenCaptureKit
@@ -109,6 +110,20 @@ actor Engine {
     // the same surface from the user's POV. Keep the largest; the
     // smaller ones are usually dormant helper windows.
     private func filterShareableWindows(_ windows: [SCWindow]) -> [WindowInfo] {
+        // Front-to-back stacking order. SCShareableContent doesn't carry a
+        // reliable z-order, but CGWindowListCopyWindowInfo returns on-screen
+        // windows front-to-back — map each windowID to its index so the
+        // picker can resolve the frontmost window under the cursor.
+        let onScreen = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
+        ) as? [[String: Any]] ?? []
+        var zByID: [UInt32: Int] = [:]
+        for (index, entry) in onScreen.enumerated() {
+            if let num = entry[kCGWindowNumber as String] as? UInt32 {
+                zByID[num] = index
+            }
+        }
+
         let candidates: [WindowInfo] = windows.compactMap { w -> WindowInfo? in
             guard let app = w.owningApplication else { return nil }
             let bundleID = app.bundleIdentifier
@@ -135,7 +150,8 @@ actor Engine {
                 y: Int(w.frame.origin.y),
                 width: Int(w.frame.width),
                 height: Int(w.frame.height),
-                on_screen: w.isOnScreen
+                on_screen: w.isOnScreen,
+                z: zByID[w.windowID] ?? Int.max
             )
         }
 
@@ -150,7 +166,7 @@ actor Engine {
                 byKey[key] = w
             }
         }
-        return Array(byKey.values)
+        return byKey.values.sorted { $0.z < $1.z }
     }
 
     private func handleStart(_ cmd: Command) async {

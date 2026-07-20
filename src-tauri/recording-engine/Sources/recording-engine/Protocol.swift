@@ -50,6 +50,12 @@ struct WindowInfo: Encodable {
     let width: Int
     let height: Int
     let on_screen: Bool
+    // Front-to-back stacking index: 0 is frontmost. Sourced from
+    // CGWindowListCopyWindowInfo's on-screen order (SCShareableContent
+    // does not carry reliable z-order). Consumers hit-testing an
+    // overlapping point pick the lowest z among the windows that
+    // contain it. Windows absent from the on-screen list sort last.
+    let z: Int
 }
 
 enum Event {
@@ -95,6 +101,7 @@ func emit(_ event: Event) {
                     "width": w.width,
                     "height": w.height,
                     "on_screen": w.on_screen,
+                    "z": w.z,
                 ]
                 if let b = w.bundle_id { dict["bundle_id"] = b }
                 return dict
