@@ -1723,7 +1723,7 @@ export default function Review() {
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "1fr 296px",
+          gridTemplateColumns: "1fr 320px",
           flex: 1,
           minHeight: 0,
         }}
@@ -1852,8 +1852,7 @@ function Header({
         display: "flex",
         alignItems: "center",
         gap: 8,
-        borderBottom: "1px solid var(--border-faint)",
-        background: "linear-gradient(to bottom, #2a2a2c, #232325)",
+        background: "var(--bg-window)",
       }}
     >
       <span
@@ -1861,7 +1860,7 @@ function Header({
           width: 18,
           height: 18,
           borderRadius: 5,
-          background: "linear-gradient(135deg, var(--accent), var(--accent-deep))",
+          background: "var(--accent)",
           display: "inline-flex",
           alignItems: "center",
           justifyContent: "center",
@@ -2053,10 +2052,10 @@ function ThumbnailPopover({
           // collapsed Export section, so no row rect exists yet).
           position: "fixed",
           top: 56,
-          right: 308,
+          right: 332,
           width: 280,
           background: "var(--bg-elevated)",
-          border: "1px solid var(--border-default)",
+          border: "1px solid var(--border-subtle)",
           borderRadius: 8,
           boxShadow: "0 8px 24px rgba(0,0,0,0.22)",
           padding: 12,
@@ -2112,7 +2111,7 @@ function ThumbnailPopover({
               padding: "5px 11px",
               height: 26,
               background: "transparent",
-              border: "1px solid var(--border-default)",
+              border: "1px solid var(--border-subtle)",
               borderRadius: 6,
               color: "var(--fg-secondary)",
               fontSize: 12,
@@ -2194,61 +2193,8 @@ function ToolRow({
   );
 }
 
-// Accordion section in the right panel. Header row is always visible;
-// content renders only while open. Plain conditional render — no
-// animation machinery.
-function Section({
-  title,
-  open,
-  onToggle,
-  children,
-}: {
-  title: string;
-  open: boolean;
-  onToggle: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <div style={{ borderBottom: "1px solid var(--border-faint)" }}>
-      <button
-        onClick={onToggle}
-        style={{
-          width: "100%",
-          display: "flex",
-          alignItems: "center",
-          gap: 7,
-          padding: "10px 14px",
-          background: "transparent",
-          border: "none",
-          cursor: "pointer",
-          fontFamily: "var(--font-system)",
-        }}
-      >
-        <span
-          style={{
-            display: "inline-flex",
-            color: "var(--fg-tertiary)",
-            transform: open ? "rotate(90deg)" : "none",
-          }}
-        >
-          <Icon d={P.chevronRight} size={10} stroke={1.6} />
-        </span>
-        <span
-          style={{
-            fontSize: 10.5,
-            color: "var(--fg-tertiary)",
-            letterSpacing: "0.06em",
-            textTransform: "uppercase",
-            fontWeight: 600,
-          }}
-        >
-          {title}
-        </span>
-      </button>
-      {open && <div style={{ padding: "0 14px 12px" }}>{children}</div>}
-    </div>
-  );
-}
+// (The accordion Section shell was removed in the refreshed rail; the tool
+// toolbar + contextual cards replace it. See ToolTile.)
 
 // Label-above-control row. Replaces the old label-beside-control ChipsRow,
 // whose side-by-side layout was what pushed 4-segment controls past the
@@ -2864,7 +2810,7 @@ function ZoomEditLayer({
           top: qy - cropH / 2,
           width: cropW,
           height: cropH,
-          border: "1.5px dashed var(--accent)",
+          border: "1.5px dashed var(--zoom)",
           borderRadius: 4,
           // Oversized shadow dims everything outside the crop rect — the
           // "what the zoomed export shows" affordance.
@@ -2885,9 +2831,9 @@ function ZoomEditLayer({
         }}
       >
         <svg width={26} height={26} viewBox="0 0 26 26" style={{ display: "block" }} aria-hidden>
-          <circle cx={13} cy={13} r={8} fill="none" stroke="var(--accent)" strokeWidth={2} />
-          <path d="M13 0v6M13 20v6M0 13h6M20 13h6" stroke="var(--accent)" strokeWidth={2} />
-          <circle cx={13} cy={13} r={1.8} fill="var(--accent)" />
+          <circle cx={13} cy={13} r={8} fill="none" stroke="var(--zoom)" strokeWidth={2} />
+          <path d="M13 0v6M13 20v6M0 13h6M20 13h6" stroke="var(--zoom)" strokeWidth={2} />
+          <circle cx={13} cy={13} r={1.8} fill="var(--zoom)" />
         </svg>
       </div>
     </div>
@@ -3704,40 +3650,80 @@ type SaveSpec = {
   fps?: number;
 };
 
-// Exclusive accordion — one section open at a time; opening one collapses
-// the rest, and clicking the open section's header closes it. The open
-// section persists so the panel reopens the way the user last left it.
-// Order mirrors the working flow (edit, dress up, output): Trim, Bubble,
-// Zoom, Watermark, Export — with Export still the first-run default open.
-// Position and default are independent; change DEFAULT_OPEN_SECTION if the
-// workflow ranking shifts. A persisted id from an older build that isn't in
-// SECTION_IDS (e.g. the removed "annotate"/"share") falls back to the default.
-type SectionId = "trim" | "bubble" | "zoom" | "watermark" | "export";
-const SECTION_IDS: SectionId[] = ["trim", "bubble", "zoom", "watermark", "export"];
-const DEFAULT_OPEN_SECTION: SectionId | null = "export";
-// Key versioned away from the old "review-panel-sections" multi-open
-// format (a JSON object) so no migration parsing is needed.
-const SECTIONS_LS_KEY = "review-panel-open-section";
+// Which editing tool the rail toolbar has active (exclusive — one at a time).
+// The contextual card below the toolbar swaps to match; Export is a permanent
+// block, not a tool. Persisted so the rail reopens on the last tool. Order
+// mirrors the working flow: Trim, Bubble, Zoom, Watermark, Mark. A persisted
+// id from an older build (e.g. "export"/"annotate"/"share") falls back to the
+// default.
+type ToolId = "trim" | "bubble" | "zoom" | "watermark" | "mark";
+const TOOL_IDS: ToolId[] = ["trim", "bubble", "zoom", "watermark", "mark"];
+const DEFAULT_TOOL: ToolId = "trim";
+// Key versioned away from the old "review-panel-open-section" accordion format.
+const TOOL_LS_KEY = "review-panel-active-tool";
 
-function loadOpenSection(): SectionId | null {
+function loadActiveTool(): ToolId {
   try {
-    const raw = localStorage.getItem(SECTIONS_LS_KEY);
-    if (raw == null) return DEFAULT_OPEN_SECTION;
-    if (raw === "") return null; // user left everything collapsed
-    return SECTION_IDS.includes(raw as SectionId)
-      ? (raw as SectionId)
-      : DEFAULT_OPEN_SECTION;
+    const raw = localStorage.getItem(TOOL_LS_KEY);
+    if (raw == null) return DEFAULT_TOOL;
+    return TOOL_IDS.includes(raw as ToolId) ? (raw as ToolId) : DEFAULT_TOOL;
   } catch {
-    return DEFAULT_OPEN_SECTION;
+    return DEFAULT_TOOL;
   }
 }
 
-function persistOpenSection(id: SectionId | null) {
+function persistActiveTool(id: ToolId) {
   try {
-    localStorage.setItem(SECTIONS_LS_KEY, id ?? "");
+    localStorage.setItem(TOOL_LS_KEY, id);
   } catch {
     // Best-effort; the session still works from React state.
   }
+}
+
+// Rail contextual-card + eyebrow chrome, shared by every tool card.
+const CTX_CARD: React.CSSProperties = {
+  background: "var(--bg-elevated)",
+  borderRadius: "var(--r-md)",
+  padding: 12,
+  marginBottom: 14,
+};
+const RAIL_EYEBROW: React.CSSProperties = {
+  fontSize: 10.5,
+  fontWeight: 600,
+  letterSpacing: "0.08em",
+  textTransform: "uppercase",
+  color: "var(--fg-tertiary)",
+  margin: "0 2px 8px",
+};
+
+// One tile in the rail tool toolbar (icon over label). Active = accent-soft
+// fill + accent-bright text; hover handled by the .rail-tool CSS class.
+function ToolTile({
+  icon,
+  label,
+  active,
+  disabled,
+  onClick,
+  title,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  active: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+  title?: string;
+}) {
+  return (
+    <button
+      className={active ? "rail-tool on" : "rail-tool"}
+      onClick={disabled ? undefined : onClick}
+      disabled={disabled}
+      title={title}
+    >
+      {icon}
+      <span>{label}</span>
+    </button>
+  );
 }
 
 // V2 Step 2 zone picker: a 2x3 grid (4 corners + top/bottom mid-edges). Each
@@ -3778,7 +3764,7 @@ function ZonePicker({
               background: "var(--bg-input)",
               border: selected
                 ? "1.5px solid var(--accent)"
-                : "1px solid var(--border-default)",
+                : "1px solid var(--border-subtle)",
             }}
           >
             <span
@@ -3870,21 +3856,13 @@ function ExportPanel({
     return () => window.clearTimeout(t);
   }, [savedFlashAt]);
 
-  // Which section is open (exclusive), persisted so the panel reopens the
-  // way the user last left it (same remembered-preference idea as bubble
-  // roundness, but pure UI chrome — localStorage, not settings.json).
-  const [openId, setOpenId] = useState<SectionId | null>(loadOpenSection);
-  const toggleSection = useCallback((id: SectionId) => {
-    setOpenId((prev) => {
-      const next = prev === id ? null : id;
-      persistOpenSection(next);
-      return next;
-    });
-  }, []);
-  const openSection = useCallback((id: SectionId) => {
-    setOpenId((prev) => {
+  // Which tool is active (exclusive), persisted so the rail reopens the way
+  // the user last left it (pure UI chrome — localStorage, not settings.json).
+  const [activeTool, setActiveToolState] = useState<ToolId>(loadActiveTool);
+  const setActiveTool = useCallback((id: ToolId) => {
+    setActiveToolState((prev) => {
       if (prev === id) return prev;
-      persistOpenSection(id);
+      persistActiveTool(id);
       return id;
     });
   }, []);
@@ -3925,12 +3903,12 @@ function ExportPanel({
       }
       if (popoverOpen) return;
       e.preventDefault();
-      openSection("export");
+      setActiveTool("mark");
       onThumbnailClick();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [popoverOpen, openSection, onThumbnailClick]);
+  }, [popoverOpen, setActiveTool, onThumbnailClick]);
 
   const useFrame = () => {
     if (capturedTime != null) thumbnail.setThumbnailTime(capturedTime);
@@ -4045,45 +4023,82 @@ function ExportPanel({
     >
       {/* Sections scroll vertically if the window is short; horizontal
           overflow is impossible by construction (full-width rows only). */}
-      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden" }}>
-        <Section
-          title="Trim"
-          open={openId === "trim"}
-          onToggle={() => toggleSection("trim")}
-        >
-          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-            {/* The real trim UI is the timeline handles / I-O keys; this row
-                is the label that points at them. */}
-            <ToolRow
-              icon={P.edit}
-              label="Trim"
-              active={false}
-              disabled
-              title="Trim with the timeline handles below, or press I / O"
-            />
-          </div>
-        </Section>
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", padding: "10px 12px 12px" }}>
+        {/* Tool toolbar — one active tool; the contextual card below swaps to match. */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 4, marginBottom: 6 }}>
+          <ToolTile
+            label="Trim"
+            active={activeTool === "trim"}
+            onClick={() => setActiveTool("trim")}
+            icon={<Icon d={<path d="M5 2v12M11 2v12M2 5h12M2 11h12" />} size={17} stroke={1.4} />}
+          />
+          <ToolTile
+            label="Bubble"
+            active={activeTool === "bubble"}
+            disabled={!hasBubble}
+            title={hasBubble ? undefined : "No webcam bubble in this recording"}
+            onClick={() => setActiveTool("bubble")}
+            icon={<Icon d={<circle cx="8" cy="8" r="5" />} size={17} stroke={1.4} />}
+          />
+          <ToolTile
+            label="Zoom"
+            active={activeTool === "zoom"}
+            onClick={() => setActiveTool("zoom")}
+            icon={<Icon d={<><circle cx="7" cy="7" r="4" /><path d="M10 10l3.5 3.5M5.2 7h3.6M7 5.2v3.6" /></>} size={17} stroke={1.4} />}
+          />
+          <ToolTile
+            label="Watermark"
+            active={activeTool === "watermark"}
+            onClick={() => setActiveTool("watermark")}
+            icon={<Icon d={<><rect x="2.5" y="3.5" width="11" height="9" rx="1.5" /><path d="M5 11l2.2-2.6 1.5 1.7 1.3-1.5 1.5 2.4z" /></>} size={17} stroke={1.4} />}
+          />
+          <ToolTile
+            label="Mark"
+            active={activeTool === "mark"}
+            onClick={() => setActiveTool("mark")}
+            icon={<Icon d={<path d="M4 2.5h8v11l-4-2.5-4 2.5z" />} size={17} stroke={1.4} />}
+          />
+        </div>
 
-        {hasBubble && (
-          <Section
-            title="Bubble"
-            open={openId === "bubble"}
-            onToggle={() => toggleSection("bubble")}
-          >
-            <Field label="Position">
-              <ZonePicker value={bubbleZone} onChange={onBubbleZone} />
-            </Field>
-            <div style={{ fontSize: 11, color: "var(--fg-tertiary)", lineHeight: 1.35 }}>
-              The webcam bubble is baked at this fixed spot on export.
+        {activeTool === "trim" && (
+          <>
+            <div style={RAIL_EYEBROW}>Trim</div>
+            <div style={CTX_CARD}>
+              <div style={{ fontSize: 11.5, color: "var(--fg-tertiary)", lineHeight: 1.4 }}>
+                Drag the handles on the timeline below to trim, or press{" "}
+                <span className="kbd">I</span> / <span className="kbd">O</span> to set the
+                in and out points at the playhead.
+              </div>
             </div>
-          </Section>
+          </>
         )}
 
-        <Section
-          title="Zoom"
-          open={openId === "zoom"}
-          onToggle={() => toggleSection("zoom")}
-        >
+        {activeTool === "bubble" && (
+          <>
+            <div style={RAIL_EYEBROW}>Webcam bubble</div>
+            <div style={CTX_CARD}>
+              {hasBubble ? (
+                <>
+                  <Field label="Position">
+                    <ZonePicker value={bubbleZone} onChange={onBubbleZone} />
+                  </Field>
+                  <div style={{ fontSize: 11, color: "var(--fg-tertiary)", lineHeight: 1.35 }}>
+                    The webcam bubble is baked at this fixed spot on export.
+                  </div>
+                </>
+              ) : (
+                <div style={{ fontSize: 11.5, color: "var(--fg-tertiary)" }}>
+                  No webcam bubble in this recording.
+                </div>
+              )}
+            </div>
+          </>
+        )}
+
+        {activeTool === "zoom" && (
+          <>
+            <div style={RAIL_EYEBROW}>Zoom</div>
+            <div style={CTX_CARD}>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             <div style={{ display: "flex", gap: 8 }}>
               <button
@@ -4110,7 +4125,7 @@ function ExportPanel({
                 >
                   <input
                     type="range"
-                    className="slider"
+                    className="slider zoom"
                     min={Math.round(ZOOM_MIN_SCALE * 100)}
                     max={Math.round(ZOOM_MAX_SCALE * 100)}
                     step={5}
@@ -4153,13 +4168,14 @@ function ExportPanel({
               </div>
             )}
           </div>
-        </Section>
+            </div>
+          </>
+        )}
 
-        <Section
-          title="Watermark"
-          open={openId === "watermark"}
-          onToggle={() => toggleSection("watermark")}
-        >
+        {activeTool === "watermark" && (
+          <>
+            <div style={RAIL_EYEBROW}>Watermark</div>
+            <div style={CTX_CARD}>
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {watermark.logoPath ? (
             <>
@@ -4264,22 +4280,28 @@ function ExportPanel({
             </div>
           )}
         </div>
-        </Section>
+            </div>
+          </>
+        )}
 
-        <Section
-          title="Export"
-          open={openId === "export"}
-          onToggle={() => toggleSection("export")}
-        >
-        <div style={{ marginBottom: 8 }}>
-          <ToolRow
-            icon="M5 2h6v11l-3-2.5L5 13z"
-            label="Thumbnail"
-            kbd="M"
-            active={thumbnail.thumbnailTime != null}
-            onClick={onThumbnailClick}
-          />
-        </div>
+        {activeTool === "mark" && (
+          <>
+            <div style={RAIL_EYEBROW}>Thumbnail</div>
+            <div style={CTX_CARD}>
+              <ToolRow
+                icon="M5 2h6v11l-3-2.5L5 13z"
+                label={thumbnail.thumbnailTime != null ? "Change frame" : "Set current frame"}
+                kbd="M"
+                active={thumbnail.thumbnailTime != null}
+                onClick={onThumbnailClick}
+              />
+              <div style={{ fontSize: 11, color: "var(--fg-tertiary)", lineHeight: 1.35, marginTop: 8 }}>
+                Choose the frame shown before playback. The webcam bubble is added
+                in the final export.
+              </div>
+            </div>
+          </>
+        )}
         {popoverOpen && capturedTime != null && (
           <ThumbnailPopover
             previewUrl={thumbnail.previewUrl}
@@ -4288,6 +4310,9 @@ function ExportPanel({
             onCancel={() => setPopoverOpen(false)}
           />
         )}
+
+        {/* Export — permanent block (not a tool) */}
+        <div style={{ ...RAIL_EYEBROW, marginBottom: 10 }}>Export</div>
         <Field label="Format">
           <div className="segmented full">
             {(["mp4", "gif"] as const).map((f) => (
@@ -4450,11 +4475,9 @@ function ExportPanel({
           />
         )}
         </div>
-        </Section>
       </div>
 
-      {/* Pinned lifecycle footer — always visible, not part of the
-          accordion. */}
+      {/* Pinned lifecycle footer — always visible, not part of the scroll region. */}
       <div
         style={{
           borderTop: "1px solid var(--border-faint)",

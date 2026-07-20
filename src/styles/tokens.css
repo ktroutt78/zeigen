@@ -151,8 +151,7 @@
   display: flex;
   align-items: center;
   padding: 0 12px;
-  border-bottom: 1px solid var(--border-faint);
-  background: linear-gradient(to bottom, #2a2a2c, #232325);
+  background: var(--bg-window);  /* blends into the window — no drawn divider */
   user-select: none;
 }
 .mac-traffic { display: flex; gap: 8px; }
@@ -226,7 +225,7 @@
 }
 
 /* Toggle (macOS-like) */
-.toggle { position: relative; width: 32px; height: 20px; border-radius: 999px; background: #3a3a3c; transition: background 0.15s; cursor: pointer; flex-shrink: 0; }
+.toggle { position: relative; width: 32px; height: 20px; border-radius: 999px; background: var(--bg-raised); transition: background 0.15s; cursor: pointer; flex-shrink: 0; }
 .toggle::after { content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 999px; background: #fff; transition: left 0.15s; box-shadow: 0 1px 2px rgba(0,0,0,0.4); }
 .toggle.on { background: var(--accent); }
 .toggle.on::after { left: 14px; }
@@ -244,7 +243,11 @@
 .slider::-webkit-slider-runnable-track {
   height: 4px;
   border-radius: 999px;
-  background: linear-gradient(to right, var(--accent) var(--fill, 100%), #3a3a3c var(--fill, 100%));
+  background: linear-gradient(to right, var(--accent) var(--fill, 100%), var(--bg-raised) var(--fill, 100%));
+}
+/* Zoom tool's scale slider fills violet — zoom's reserved color. */
+.slider.zoom::-webkit-slider-runnable-track {
+  background: linear-gradient(to right, var(--zoom) var(--fill, 100%), var(--bg-raised) var(--fill, 100%));
 }
 .slider::-webkit-slider-thumb {
   -webkit-appearance: none;
@@ -265,6 +268,21 @@
 .segmented.full > button { flex: 1; }
 .segmented > button { background: transparent; border: none; color: var(--fg-secondary); padding: 3px 10px; font: 500 12px var(--font-system); border-radius: 4px; cursor: pointer; }
 .segmented > button.on { background: var(--bg-elevated); color: var(--fg-primary); box-shadow: 0 1px 0 rgba(255,255,255,0.06) inset, 0 1px 2px rgba(0,0,0,0.3); }
+
+/* Review rail — tool toolbar tile (icon over label) */
+.rail-tool {
+  display: flex; flex-direction: column; align-items: center; gap: 5px;
+  padding: 10px 2px; border-radius: var(--r-sm);
+  background: transparent; border: none; cursor: pointer;
+  color: var(--fg-secondary);
+  font: 500 10.5px var(--font-system); letter-spacing: -0.01em;
+  min-width: 0;
+  transition: background var(--dur-quick) var(--ease-ds), color var(--dur-quick) var(--ease-ds);
+}
+.rail-tool > span { line-height: 1; }
+.rail-tool:hover:not(:disabled) { background: var(--bg-elevated); color: var(--fg-primary); }
+.rail-tool.on { background: var(--accent-soft); color: var(--accent-bright); }
+.rail-tool:disabled { opacity: 0.4; cursor: not-allowed; }
 
 /* Keycap */
 .kbd {
@@ -318,9 +336,9 @@
 /* Wallpaper used behind floating webcam / review */
 .desktop-wallpaper {
   background:
-    radial-gradient(1200px 600px at 20% 0%, #2a2030 0%, transparent 60%),
-    radial-gradient(900px 500px at 90% 100%, #1a2230 0%, transparent 60%),
-    #15161a;
+    radial-gradient(1200px 600px at 20% 0%, #16181f 0%, transparent 60%),
+    radial-gradient(900px 500px at 90% 100%, #121722 0%, transparent 60%),
+    #0b0c0f;
 }
 
 /* Focus ring */
