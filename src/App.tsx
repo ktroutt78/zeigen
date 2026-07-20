@@ -2125,8 +2125,14 @@ function App() {
         ) : sourceKind === "window" ? (
           <>
             <RowLabel icon={I.window} label="Window" />
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <div style={{ flex: 1 }}>
+            {/* minWidth:0 on both the flex container (grid item) and the
+                WindowRow wrapper — without them the intermediate flex child
+                keeps min-width:auto and grows to the longest option's text,
+                widening the fixed 560px window into a scrollbar. WindowRow
+                clamps internally too; this preserves that chain across the
+                extra nesting the picker button adds. */}
+            <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+              <div style={{ flex: 1, minWidth: 0, overflow: "hidden" }}>
                 <WindowRow
                   windows={windows}
                   value={selectedWindow}
