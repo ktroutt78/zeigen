@@ -1,0 +1,319 @@
+/* ============================================================
+   Zeigen — design tokens + components (dark only)
+   Drop into the Tauri app's global CSS (or import alongside Tailwind).
+   All accents share lightness 0.62 / chroma 0.18 to feel harmonious.
+   Recording red is reserved for live state, never a brand color.
+   ============================================================ */
+
+:root {
+  /* ─── Type ─────────────────────────────────────────────────── */
+  --font-system: -apple-system, BlinkMacSystemFont,
+                 "SF Pro Text", "SF Pro Display",
+                 "Helvetica Neue", Arial, sans-serif;
+  --font-mono:   ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+
+  /* Type scale (px) — see tailwind.config.js for full metrics */
+  --text-micro:   10.5px;
+  --text-caption: 11px;
+  --text-small:   12px;
+  --text-label:   12.5px;
+  --text-body:    13px;
+  --text-title:   14px;
+  --text-display: 17px;
+
+  /* Tracking */
+  --track-tightish: -0.005em;
+  --track-tight:    -0.01em;
+  --track-eyebrow:  0.06em;
+
+  /* ─── Surfaces ─────────────────────────────────────────────── */
+  --bg-window:   #1c1c1e;  /* main window canvas                   */
+  --bg-sidebar:  #242426;  /* sidebar / export panel               */
+  --bg-elevated: #2c2c2e;  /* tiles, cards, secondary buttons      */
+  --bg-input:    #1f1f21;  /* form fields, segmented control bg    */
+  --bg-hover:    rgba(255,255,255,0.04);
+  --bg-active:   rgba(255,255,255,0.08);
+
+  /* Tray / popover (translucent — sits over wallpaper) */
+  --bg-tray:     rgba(40,40,42,0.96);
+
+  /* Translucent overlays inside video / camera surfaces */
+  --bg-overlay-thin:   rgba(20,20,22,0.6);
+  --bg-overlay-medium: rgba(20,20,22,0.78);
+  --bg-overlay-strong: rgba(20,20,22,0.86);
+
+  /* ─── Borders (1px hairlines) ──────────────────────────────── */
+  --border-faint:  rgba(255,255,255,0.06);  /* row dividers       */
+  --border-subtle: rgba(255,255,255,0.09);  /* inputs, buttons    */
+  --border-strong: rgba(255,255,255,0.14);  /* window chrome      */
+  --border-hair:   0.5px;                    /* tray, titlebars   */
+
+  /* ─── Foreground ───────────────────────────────────────────── */
+  --fg-primary:    #f2f2f7;  /* labels, values                   */
+  --fg-secondary:  #a8a8ad;  /* row icons, subdued copy           */
+  --fg-tertiary:   #6f6f74;  /* hints, file paths, eyebrows       */
+  --fg-quaternary: #4a4a4f;  /* timecode marks, disabled glyphs   */
+
+  /* ─── Accent (electric blue) ───────────────────────────────── */
+  --accent:        oklch(0.62 0.18 250);          /* primary CTAs */
+  --accent-soft:   oklch(0.62 0.18 250 / 0.16);   /* selected fill*/
+  --accent-ring:   oklch(0.62 0.18 250 / 0.30);   /* focus glow   */
+  --accent-deep:   oklch(0.50 0.18 250);          /* gradient end */
+  --accent-tint:   oklch(0.78 0.14 250);          /* on-dark text */
+  --accent-fg:     #fff;
+
+  /* ─── Status ──────────────────────────────────────────────── */
+  --recording:        oklch(0.62 0.18 25);
+  --recording-soft:   oklch(0.62 0.18 25 / 0.14);
+  --recording-ring:   oklch(0.62 0.18 25 / 0.25);
+  --recording-tint:   oklch(0.78 0.15 25);
+
+  --success:          oklch(0.62 0.13 155);  /* iPhone connected, etc. */
+  --success-soft:     oklch(0.62 0.13 155 / 0.14);
+  --success-tint:     oklch(0.82 0.13 155);
+
+  /* Warning — length-cap 80% threshold tint. Slightly lighter than the
+     0.62 family so digit glyphs read clearly on the dark bubble pill. */
+  --warning:          oklch(0.72 0.16 70);
+  --warning-tint:     oklch(0.82 0.14 70);
+
+  /* ─── Radius ──────────────────────────────────────────────── */
+  --r-xs:     4px;    /* micro pills, frame chips                */
+  --r-sm:     6px;    /* inputs, secondary buttons               */
+  --r-md:     8px;    /* cards, tiles, control bars              */
+  --r-lg:     10px;   /* window chrome                           */
+  --r-xl:     14px;   /* floating panels (rare)                  */
+  --r-pill:   999px;
+
+  /* ─── Spacing — 4px base ─────────────────────────────────── */
+  --pad-row:    9px 14px;     /* settings row                    */
+  --pad-pane:   12px 14px;    /* pane outer                      */
+  --pad-tile:   11px 12px;    /* tile                            */
+  --gap-tight:  6px;
+  --gap-row:    8px;
+  --gap-pane:   12px;
+
+  /* ─── Shadows ─────────────────────────────────────────────── */
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.4);
+  --shadow-md: 0 8px 24px rgba(0,0,0,0.45), 0 1px 0 rgba(255,255,255,0.04) inset;
+  --shadow-lg: 0 24px 64px rgba(0,0,0,0.55), 0 1px 0 rgba(255,255,255,0.04) inset;
+  --shadow-tray: 0 18px 56px rgba(0,0,0,0.55), 0 0 0 0.5px rgba(255,255,255,0.05) inset;
+  --shadow-accent-ring:    0 0 0 3px var(--accent-soft), 0 1px 0 rgba(255,255,255,0.12) inset;
+  --shadow-recording-ring: 0 0 0 3px var(--recording-ring), 0 1px 0 rgba(255,255,255,0.15) inset;
+
+  /* ─── Backdrop blur ───────────────────────────────────────── */
+  --blur-thin:   blur(10px);
+  --blur-medium: blur(14px);
+  --blur-thick:  blur(20px) saturate(1.4);
+
+  /* ─── Motion ─────────────────────────────────────────────── */
+  --dur-instant: 80ms;
+  --dur-quick:   120ms;
+  --dur-smooth:  160ms;
+  --dur-settle:  240ms;
+  --ease-ds:        cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-ds-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* Per-variant accent — applied via .accent-red / .accent-blue / .accent-green wrapper */
+.accent-red    { --accent: oklch(0.62 0.18 25);  --accent-soft: oklch(0.62 0.18 25 / 0.16); --accent-fg: #fff; }
+.accent-blue   { --accent: oklch(0.62 0.18 250); --accent-soft: oklch(0.62 0.18 250 / 0.16); --accent-fg: #fff; }
+.accent-green  { --accent: oklch(0.62 0.13 155); --accent-soft: oklch(0.62 0.13 155 / 0.16); --accent-fg: #fff; }
+
+/* Window chrome — macOS-ish */
+.mac-window {
+  background: var(--bg-window);
+  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-lg);
+  color: var(--fg-primary);
+  font-family: var(--font-system);
+  font-size: 13px;
+  line-height: 1.4;
+  overflow: hidden;
+  position: relative;
+}
+.mac-titlebar {
+  height: 38px;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border-faint);
+  background: linear-gradient(to bottom, #2a2a2c, #232325);
+  user-select: none;
+}
+.mac-traffic { display: flex; gap: 8px; }
+.mac-traffic > span {
+  width: 12px; height: 12px; border-radius: 50%;
+  display: inline-block;
+  box-shadow: inset 0 0 0 0.5px rgba(0,0,0,0.4);
+}
+.mac-traffic .close   { background: #ff5f57; }
+.mac-traffic .min     { background: #febc2e; }
+.mac-traffic .max     { background: #28c840; }
+.mac-titlebar .title {
+  position: absolute; left: 0; right: 0; text-align: center;
+  font-size: 13px; font-weight: 500; color: var(--fg-primary);
+  letter-spacing: -0.01em; pointer-events: none;
+}
+
+/* Common helpers */
+.hairline { background: var(--border-faint); height: 1px; }
+.muted { color: var(--fg-secondary); }
+.faint { color: var(--fg-tertiary); }
+
+.btn-primary {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border: none;
+  border-radius: var(--r-sm);
+  padding: 6px 12px;
+  font: 500 13px var(--font-system);
+  letter-spacing: -0.005em;
+  box-shadow: 0 1px 0 rgba(255,255,255,0.12) inset, 0 1px 2px rgba(0,0,0,0.3);
+  cursor: pointer;
+}
+.btn-secondary {
+  background: var(--bg-elevated);
+  color: var(--fg-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  padding: 5px 11px;
+  font: 500 13px var(--font-system);
+  cursor: pointer;
+}
+.btn-ghost {
+  background: transparent;
+  color: var(--fg-primary);
+  border: none;
+  border-radius: var(--r-sm);
+  padding: 5px 9px;
+  font: 400 13px var(--font-system);
+  cursor: pointer;
+}
+.btn-ghost:hover { background: var(--bg-hover); }
+
+/* Inputs */
+.input, .select {
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  color: var(--fg-primary);
+  padding: 5px 9px;
+  font: 400 13px var(--font-system);
+  height: 26px;
+}
+.select {
+  padding-right: 24px;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12' fill='none' stroke='%23a8a8ad' stroke-width='1.25'><path d='M3 5l3 3 3-3'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 7px center;
+}
+
+/* Toggle (macOS-like) */
+.toggle { position: relative; width: 32px; height: 20px; border-radius: 999px; background: #3a3a3c; transition: background 0.15s; cursor: pointer; flex-shrink: 0; }
+.toggle::after { content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 999px; background: #fff; transition: left 0.15s; box-shadow: 0 1px 2px rgba(0,0,0,0.4); }
+.toggle.on { background: var(--accent); }
+.toggle.on::after { left: 14px; }
+
+/* Slider (range input) — same family as .toggle: #3a3a3c track, 16px white
+   knob, accent fill. The component sets --fill inline to the value percent
+   so the track reads filled-to-the-thumb like the native macOS slider. */
+.slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 16px;
+  margin: 0;
+  background: transparent;
+}
+.slider::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(to right, var(--accent) var(--fill, 100%), #3a3a3c var(--fill, 100%));
+}
+.slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -6px; /* center 16px knob on the 4px track */
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.4);
+  cursor: pointer;
+}
+.slider:disabled { opacity: 0.4; }
+.slider:disabled::-webkit-slider-thumb { cursor: not-allowed; }
+
+/* Segmented control */
+.segmented { display: inline-flex; background: var(--bg-input); border: 1px solid var(--border-subtle); border-radius: var(--r-sm); padding: 2px; gap: 2px; }
+.segmented.full { display: flex; width: 100%; }
+.segmented.full > button { flex: 1; }
+.segmented > button { background: transparent; border: none; color: var(--fg-secondary); padding: 3px 10px; font: 500 12px var(--font-system); border-radius: 4px; cursor: pointer; }
+.segmented > button.on { background: var(--bg-elevated); color: var(--fg-primary); box-shadow: 0 1px 0 rgba(255,255,255,0.06) inset, 0 1px 2px rgba(0,0,0,0.3); }
+
+/* Keycap */
+.kbd {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 20px; height: 20px; padding: 0 5px;
+  background: var(--bg-elevated); border: 1px solid var(--border-subtle);
+  border-bottom-color: rgba(0,0,0,0.4);
+  border-radius: 4px;
+  font: 500 11px var(--font-system);
+  color: var(--fg-primary);
+}
+
+/* Section labels in settings */
+.row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 9px 14px; gap: 16px; min-height: 36px;
+}
+.row + .row { border-top: 1px solid var(--border-faint); }
+.row-label { color: var(--fg-primary); font-weight: 400; }
+.row-help { color: var(--fg-tertiary); font-size: 11px; margin-top: 2px; line-height: 1.35; }
+
+.card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-faint);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+
+/* Recording indicator — both `.rec-dot` and `.ds-rec-dot` are supported */
+@keyframes rec-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 oklch(0.62 0.18 25 / 0.5); }
+  50%      { box-shadow: 0 0 0 4px oklch(0.62 0.18 25 / 0); }
+}
+@keyframes ds-rec-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 oklch(0.62 0.18 25 / 0.5); }
+  50%      { box-shadow: 0 0 0 4px oklch(0.62 0.18 25 / 0); }
+}
+.rec-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: oklch(0.62 0.18 25);
+  box-shadow: 0 0 0 0 oklch(0.62 0.18 25 / 0.6);
+  animation: rec-pulse 1.6s ease-out infinite;
+  flex-shrink: 0;
+}
+.ds-rec-dot {
+  width: 8px; height: 8px; border-radius: var(--r-pill);
+  background: var(--recording);
+  animation: ds-rec-pulse 1.6s ease-out infinite;
+}
+
+/* Wallpaper used behind floating webcam / review */
+.desktop-wallpaper {
+  background:
+    radial-gradient(1200px 600px at 20% 0%, #2a2030 0%, transparent 60%),
+    radial-gradient(900px 500px at 90% 100%, #1a2230 0%, transparent 60%),
+    #15161a;
+}
+
+/* Focus ring */
+.focus-ring:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* Scrollbar polish */
+.scroll::-webkit-scrollbar { width: 8px; height: 8px; }
+.scroll::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 999px; }
+.scroll::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.14); }
