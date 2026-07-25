@@ -4,6 +4,16 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-25 — Window enumeration: deleted the com.apple.* allowlist (predicate #7)
+
+The window picker/dropdown filter (`Engine.swift filterShareableWindows`) had an opt-in allowlist of ~32 Apple bundle IDs: any `com.apple.*` window not on the list was rejected. It was backwards — every Apple app was invisible until someone hand-added it. Apple News surfaced the bug (typed a home address into a co-pilot demo; News wasn't listed, so it vanished from both surfaces and, pre-commit-1, the picker's rect hit-test silently selected the window behind it), but News was just the first case hit — Preview, Maps, Music, Safari-not-in-list, Pages, Keynote all had the same latent problem.
+
+**Deleted predicate #7 and the `appleAllowlist` constant entirely** (no denylist, no empty placeholder). Verified directly that the allowlist was doing no work the structural predicates weren't: of **257** `com.apple.*` windows in a live raw enumeration, `layer != 0` (77), `< 100px` (132), and `!isOnScreen` (44) already removed **253** — only **4** reached predicate #7. The system chrome a denylist would target is all `layer != 0`: Dock enumerates at layer 20 / -2147483624 (never 0); Control Center, Spotlight, Notification Center, SystemUIServer, WindowManager have **no** on-screen ≥100px window at all. The only `com.apple.*` bundles with a layer-0 on-screen ≥100px window are real apps (Messages, Notes, …) plus `com.apple.ProblemReporter` (crash dialogs) — all legitimate capture targets. So `layer != 0 + <100px + offscreen` is the real chrome filter; the allowlist only ever rejected real apps by omission.
+
+Paired with the same-day commit 1 (z-order-honest hit-test: the picker now emits the full front-to-back stack of on-screen layer-0 windows and shows no highlight when the frontmost window under the cursor isn't one we enumerated, instead of falling through to the window behind). Together: real apps appear and select correctly; the no-highlight path is reserved for genuinely unenumerable surfaces.
+
+---
+
 ## 2026-07-19 — V2 teardown (commit 6, FINAL — the V2-elimination arc is done)
 
 The V2 ffmpeg export machinery is deleted. Every zoom/webcam/watermark MP4 and GIF renders on cicompositor (V3); the plain-MP4 tail and plain-GIF tail go straight to ffmpeg. No V2 path, no `use_v3_compositor` flag, no fallback — a V3 runtime failure fails the export loudly. Diff-stat: **+352 / −3227** across edit.rs, composite.rs, settings.rs, lib.rs, Cargo.toml. Suite 44/0.
