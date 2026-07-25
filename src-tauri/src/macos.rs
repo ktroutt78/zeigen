@@ -1,8 +1,6 @@
-use objc2::declare::ClassBuilder;
 use objc2::msg_send;
-use objc2::runtime::{AnyClass, AnyObject, Bool, Sel};
-use objc2::{sel, Encode, Encoding, RefEncode};
-use std::sync::OnceLock;
+use objc2::runtime::AnyObject;
+use objc2::{Encode, Encoding, RefEncode};
 use tauri::{AppHandle, Manager};
 
 #[repr(C)]
@@ -107,51 +105,5 @@ pub fn set_window_frame_cg(
         let _: () = msg_send![ns_window, setFrame: frame display: true];
     }
 
-    Ok(())
-}
-
-extern "C" fn zeigen_can_become_key(_this: &AnyObject, _cmd: Sel) -> Bool {
-    Bool::YES
-}
-
-// A borderless NSWindow (Tauri decorations:false) returns NO from
-// canBecomeKeyWindow, so macOS never routes mouseMoved or keyDown to it and
-// setFocus can't key it -- only a click force-activates it. That breaks the
-// hover picker (highlight needs mouseMoved) and Esc (needs keyDown). Reparent
-// the window to a runtime subclass of its *own* class (preserving Tauri/wry
-// behavior, overriding only canBecomeKeyWindow -> YES) so it can be keyed
-// programmatically. The subclass is registered once and shared.
-fn keyable_subclass_of(superclass: &AnyClass) -> *const AnyClass {
-    static KEYABLE: OnceLock<usize> = OnceLock::new();
-    let ptr = KEYABLE.get_or_init(|| {
-        let mut builder = ClassBuilder::new("ZeigenKeyableWindow", superclass)
-            .expect("ZeigenKeyableWindow already registered");
-        unsafe {
-            builder.add_method(
-                sel!(canBecomeKeyWindow),
-                zeigen_can_become_key as extern "C" fn(_, _) -> Bool,
-            );
-        }
-        builder.register() as *const AnyClass as usize
-    });
-    *ptr as *const AnyClass
-}
-
-#[tauri::command]
-pub fn allow_become_key_window(app: AppHandle, label: String) -> Result<(), String> {
-    let window = app
-        .get_webview_window(&label)
-        .ok_or_else(|| format!("window not found: {label}"))?;
-    let ns_window = window
-        .ns_window()
-        .map_err(|e| format!("ns_window: {e}"))? as *mut AnyObject;
-    if ns_window.is_null() {
-        return Err("ns_window is null".into());
-    }
-    unsafe {
-        let current = (*ns_window).class();
-        let keyable = keyable_subclass_of(current);
-        objc2::ffi::object_setClass(ns_window.cast(), keyable.cast());
-    }
     Ok(())
 }

@@ -754,12 +754,10 @@ async function openWindowPickerOverlays(
               primaryCocoaHeight,
             });
             await invoke("make_capture_invisible", { label });
-            // Borderless windows can't be key by default, so setFocus is a
-            // no-op and hover (mouseMoved) stays dead until a priming click.
-            // Make the window keyable, THEN focus the primary overlay so hover
-            // is live immediately. Ordering matters: focus must follow the
-            // class swap, not race it.
-            await invoke("allow_become_key_window", { label });
+            // tao's window class already returns canBecomeKeyWindow = its
+            // focusable ivar (default true), so the overlay can be keyed --
+            // focus the primary one so hover (mouseMoved, key-window only) is
+            // live without a priming click.
             if (i === 0) await win.setFocus();
           } catch (e) {
             console.error(`[window-picker] ${label} setup failed`, e);
