@@ -655,6 +655,168 @@ async function openMarqueeOverlays(
   });
 }
 
+const WINDOW_PICKER_LABEL_PREFIX = "window-picker-";
+
+// Hover picker: one transparent always-on-top overlay per display, each
+// pre-loaded with the windows that sit on it (frames translated into that
+// display's coordinate space). The overlay highlights the frontmost window
+// under the cursor; a click selects it, a click on empty space or Cancel
+// dismisses. Resolves to the chosen SCWindow id, or null on cancel.
+//
+// KNOWN LIMITATION (deferred 2026-07-25): hover only works on the primary
+// display. macOS delivers mouseMoved events only to the *key* window, and
+// just one window can be key. Only overlay 0 is focused at creation
+// (`focus: i === 0`); the others can never become key because their
+// self-focus call lives in onPointerMove, which never fires without the
+// mouseMoved they don't get. (Marquee dodges this: mouseDragged is
+// delivered to non-key windows, mouseMoved is not.) The robust fix is one
+// overlay spanning the union of all displays; until then the Window
+// dropdown remains the fallback for secondary displays.
+async function openWindowPickerOverlays(
+  displays: DisplayShape[],
+  windows: WindowSource[],
+  stack: StackWindow[],
+): Promise<number | null> {
+  if (displays.length === 0) return null;
+
+  const monitors = await availableMonitors();
+  const primary =
+    monitors.find((m) => m.position.x === 0 && m.position.y === 0) ||
+    monitors[0];
+  const primaryCocoaHeight =
+    primary && primary.scaleFactor
+      ? primary.size.height / primary.scaleFactor
+      : 1080;
+
+  const labels: string[] = [];
+
+  for (let i = 0; i < displays.length; i++) {
+    const d = displays[i];
+    const label = `${WINDOW_PICKER_LABEL_PREFIX}${i}`;
+    labels.push(label);
+
+    // Windows whose frame intersects this display, translated to
+    // display-relative points (the overlay treats client coords as
+    // display-relative). Only on-screen windows can be highlighted.
+    const winsForDisplay = windows
+      .filter(
+        (w) =>
+          w.on_screen &&
+          w.x < d.x + d.width &&
+          w.x + w.width > d.x &&
+          w.y < d.y + d.height &&
+          w.y + w.height > d.y,
+      )
+      .map((w) => ({
+        id: w.id,
+        x: w.x - d.x,
+        y: w.y - d.y,
+        w: w.width,
+        h: w.height,
+        app: w.app,
+        title: w.title,
+        z: w.z,
+      }));
+
+    // The full occluder stack, translated to this display's coords and
+    // limited to windows intersecting it. Front-to-back order is preserved so
+    // the overlay can resolve the frontmost window (pickable or not) at a
+    // point. Kept as raw {id,rect} so the overlay stays z-order-honest even
+    // for windows absent from winsForDisplay.
+    const stackForDisplay = stack
+      .filter(
+        (s) =>
+          s.x < d.x + d.width &&
+          s.x + s.width > d.x &&
+          s.y < d.y + d.height &&
+          s.y + s.height > d.y,
+      )
+      .map((s) => ({
+        id: s.id,
+        x: s.x - d.x,
+        y: s.y - d.y,
+        w: s.width,
+        h: s.height,
+      }));
+
+    const params = new URLSearchParams({
+      display_index: String(i + 1),
+      wins: JSON.stringify(winsForDisplay),
+      stack: JSON.stringify(stackForDisplay),
+    });
+
+    const old = await WebviewWindow.getByLabel(label);
+    if (old) await old.close().catch(() => {});
+
+    new WebviewWindow(label, {
+      url: `/#window-picker?${params.toString()}`,
+      title: "Pick Window",
+      width: 400,
+      height: 400,
+      decorations: false,
+      transparent: true,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      resizable: false,
+      visibleOnAllWorkspaces: true,
+      shadow: false,
+      focus: i === 0,
+    });
+
+    void (async () => {
+      for (let attempt = 0; attempt < 50; attempt++) {
+        const win = await WebviewWindow.getByLabel(label);
+        if (win) {
+          try {
+            await invoke("set_window_frame_cg", {
+              label,
+              cgX: d.x,
+              cgY: d.y,
+              width: d.width,
+              height: d.height,
+              primaryCocoaHeight,
+            });
+            await invoke("make_capture_invisible", { label });
+            // tao's window class already returns canBecomeKeyWindow = its
+            // focusable ivar (default true), so the overlay can be keyed --
+            // focus the primary one so hover (mouseMoved, key-window only) is
+            // live without a priming click.
+            if (i === 0) await win.setFocus();
+          } catch (e) {
+            console.error(`[window-picker] ${label} setup failed`, e);
+          }
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      console.error(`[window-picker] ${label} window never registered`);
+    })();
+  }
+
+  return new Promise<number | null>(async (resolve) => {
+    const closeAll = async () => {
+      for (const label of labels) {
+        const w = await WebviewWindow.getByLabel(label);
+        if (w) await w.close().catch(() => {});
+      }
+    };
+    const unlistens: Array<() => void> = [];
+    const finish = async (result: number | null) => {
+      unlistens.forEach((u) => u());
+      await closeAll();
+      resolve(result);
+    };
+    unlistens.push(
+      await listen<{ id: number }>("window-picker-selected", (e) => {
+        finish(e.payload?.id ?? null);
+      }),
+    );
+    unlistens.push(
+      await listen("window-picker-cancelled", () => finish(null)),
+    );
+  });
+}
+
 type ReviewOpenArgs = {
   // Logical scratch identity — what discard/save/clipboard pin against.
   // Always set; for phase 15 c3 webcam recordings the file at this path
@@ -725,6 +887,19 @@ type WindowSource = {
   width: number;
   height: number;
   on_screen: boolean;
+  // Front-to-back stacking index from the engine (0 = frontmost). Used by
+  // the hover picker to resolve the frontmost window under the cursor.
+  z: number;
+};
+// One entry in the full front-to-back stack of on-screen layer-0 windows
+// (index 0 = frontmost), pickable or not. The picker uses it to detect when
+// the frontmost window under the cursor is one we didn't enumerate.
+type StackWindow = {
+  id: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 };
 type Mic = { uid: string; name: string };
 type Device = { index: number; name: string };
@@ -757,7 +932,7 @@ type FinalizedRecording = {
 
 type EngineEvent =
   | { event: "ready"; version: string }
-  | { event: "enumerated"; displays: Display[]; microphones: Mic[]; windows: WindowSource[] }
+  | { event: "enumerated"; displays: Display[]; microphones: Mic[]; windows: WindowSource[]; window_stack?: StackWindow[] }
   | { event: "started"; started_at: string }
   | { event: "progress"; frames: number; dropped: number; elapsed_s: number }
   | { event: "paused"; elapsed_s: number }
@@ -796,9 +971,49 @@ const ERROR_MESSAGES: Record<string, string> = {
   INTERNAL: "The recorder hit an unexpected error and had to stop.",
 };
 
+// Trigger a fresh engine enumerate and resolve with THAT result, so the
+// picker sees the current window z-order instead of whatever the last mount /
+// hardware-change enumerate left in state (a stale stack is what made a
+// maximized window shadow everything behind it). Resolves null on timeout or
+// a failed invoke (e.g. permission denied) so the caller falls back to cached
+// state rather than hanging.
+type FreshEnum = {
+  displays: Display[];
+  windows: WindowSource[];
+  windowStack: StackWindow[];
+};
+async function freshEnumerate(): Promise<FreshEnum | null> {
+  let resolveFn!: (v: FreshEnum | null) => void;
+  const done = new Promise<FreshEnum | null>((r) => {
+    resolveFn = r;
+  });
+  const unlisten = await listen<EngineEvent>("engine-event", (e) => {
+    if (e.payload.event !== "enumerated") return;
+    const ev = e.payload;
+    resolveFn({
+      displays: ev.displays,
+      windows: ev.windows ?? [],
+      windowStack: ev.window_stack ?? [],
+    });
+  });
+  const timer = setTimeout(() => resolveFn(null), 2000);
+  try {
+    await invoke("engine_enumerate");
+  } catch {
+    resolveFn(null);
+  }
+  try {
+    return await done;
+  } finally {
+    clearTimeout(timer);
+    unlisten();
+  }
+}
+
 function App() {
   const [displays, setDisplays] = useState<Display[]>([]);
   const [windows, setWindows] = useState<WindowSource[]>([]);
+  const [windowStack, setWindowStack] = useState<StackWindow[]>([]);
   const [mics, setMics] = useState<Mic[]>([]);
   const [cameras, setCameras] = useState<Device[]>([]);
   const [sourceKind, setSourceKind] = useState<SourceKind>("display");
@@ -875,6 +1090,7 @@ function App() {
             setDisplays(displays);
             setMics(mics);
             setWindows(wins);
+            setWindowStack(ev.window_stack ?? []);
             setSelectedDisplay((prev) => prev ?? displays[0]?.id ?? null);
             // Prefer the built-in mic by default: Bluetooth headsets (e.g.
             // AirPods) sort first alphabetically but degrade to low-quality
@@ -1396,6 +1612,37 @@ function App() {
     if (result) setSelectedArea(result);
     // On cancel (result null) the prior selection (if any) is preserved
     // per the "selection persists across mode-switches" locked decision.
+  };
+
+  // Live-hover window picker: highlight the window under the cursor across all
+  // displays, click to select it (returns here and sets the Window source),
+  // click empty space or Cancel to dismiss.
+  const openWindowPicker = async () => {
+    // Re-enumerate on open so the hit-test uses the CURRENT z-order, not the
+    // frozen mount/hardware-change snapshot. Block on the fresh result (no
+    // spinner — the small enumerate latency is honest); fall back to cached
+    // state if it times out or fails.
+    const t0 = performance.now();
+    const fresh = await freshEnumerate();
+    console.info(
+      `[window-picker] re-enumerate ${(performance.now() - t0).toFixed(0)}ms${
+        fresh ? "" : " (timeout/failed, using cached)"
+      }`,
+    );
+    const src = fresh ?? { displays, windows, windowStack };
+    const shapes: DisplayShape[] = src.displays.map((d) => ({
+      x: d.x,
+      y: d.y,
+      width: d.width,
+      height: d.height,
+    }));
+    const picked = await openWindowPickerOverlays(
+      shapes,
+      src.windows,
+      src.windowStack,
+    );
+    if (picked != null) setSelectedWindow(picked);
+    // On cancel (null) the prior selection is left untouched.
   };
 
   // Click handler for the Selected Area picker tile. Routes:
@@ -1995,15 +2242,45 @@ function App() {
         ) : sourceKind === "window" ? (
           <>
             <RowLabel icon={I.window} label="Window" />
-            <WindowRow
-              windows={windows}
-              value={selectedWindow}
-              onChange={setSelectedWindow}
-              onIdentify={(w) =>
-                openIdentifyWindowOverlay(w).catch((e) => setError(String(e)))
-              }
-              disabled={recording}
-            />
+            {/* minWidth:0 on both the flex container (grid item) and the
+                WindowRow wrapper — without them the intermediate flex child
+                keeps min-width:auto and grows to the longest option's text,
+                widening the fixed 560px window into a scrollbar. WindowRow
+                clamps internally too; this preserves that chain across the
+                extra nesting the picker button adds. */}
+            <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+              <div style={{ flex: 1, minWidth: 0, overflow: "hidden" }}>
+                <WindowRow
+                  windows={windows}
+                  value={selectedWindow}
+                  onChange={setSelectedWindow}
+                  onIdentify={(w) =>
+                    openIdentifyWindowOverlay(w).catch((e) => setError(String(e)))
+                  }
+                  disabled={recording}
+                />
+              </div>
+              {/* Spike trigger for the hover picker (feel-check only). */}
+              <button
+                onClick={() =>
+                  openWindowPicker().catch((e) => setError(String(e)))
+                }
+                disabled={recording}
+                style={{
+                  padding: "6px 10px",
+                  fontSize: 12,
+                  fontFamily: "var(--font-system)",
+                  borderRadius: 6,
+                  border: "1px solid var(--border, rgba(255,255,255,0.14))",
+                  background: "transparent",
+                  color: "var(--fg-secondary, #ccc)",
+                  cursor: recording ? "default" : "pointer",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                Hover pick
+              </button>
+            </div>
           </>
         ) : (
           <>

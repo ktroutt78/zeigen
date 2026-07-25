@@ -28,6 +28,7 @@ Out of scope: real-time annotation, Windows/Linux, transcription, team features.
 - Use a single audio source to avoid sync drift.
 - LinkedIn has no direct upload API for personal profiles. Export path opens composer and relies on manual drag-in.
 - DisplayLink-driven displays enumerate via SCK/CGDisplay (so they record fine) but `NSWindow.setFrame` placement on them is unreliable — macOS doesn't officially support windows on virtual displays from third-party drivers. Identify-display button and countdown overlay won't render on a DisplayLink screen. No fix at the application layer.
+- macOS delivers `mouseMoved` events only to the *key* window, and only one window can be key at a time. So a hover-driven overlay built as one window per display works only on whichever overlay is key (the primary). Drag-driven overlays (marquee) are immune because `mouseDragged` reaches non-key windows. The window picker hits this: hover works on the primary display only; the Window dropdown is the fallback for secondary displays. Robust fix (deferred): one overlay spanning the union of all displays.
 
 ## Coding standards
 

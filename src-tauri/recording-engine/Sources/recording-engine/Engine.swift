@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreGraphics
 import CoreMedia
 import Foundation
 import ScreenCaptureKit
@@ -40,52 +41,12 @@ actor Engine {
                 mediaType: .audio,
                 position: .unspecified
             ).devices.map { MicInfo(uid: $0.uniqueID, name: $0.localizedName) }
-            let windows = filterShareableWindows(shareable.windows)
-            emit(.enumerated(displays: displays, microphones: mics, windows: windows))
+            let (windows, stack) = filterShareableWindows(shareable.windows)
+            emit(.enumerated(displays: displays, microphones: mics, windows: windows, stack: stack))
         } catch {
             emit(.error(code: "INTERNAL", message: "enumerate failed: \(error)"))
         }
     }
-
-    // Apple ships hundreds of background processes (Control Center, Siri,
-    // News widgets, etc.) that all expose SCWindows. Allowlist the Apple
-    // apps a user would plausibly want to capture; everything else under
-    // com.apple.* is rejected. Add to this list if a real Apple app is
-    // missing — better to undershoot than swamp the picker.
-    private static let appleAllowlist: Set<String> = [
-        "com.apple.Safari",
-        "com.apple.MobileSMS",
-        "com.apple.Music",
-        "com.apple.iCal",
-        "com.apple.Notes",
-        "com.apple.mail",
-        "com.apple.finder",
-        "com.apple.Terminal",
-        "com.apple.MobileSlideShow",
-        "com.apple.Preview",
-        "com.apple.iWork.Pages",
-        "com.apple.iWork.Numbers",
-        "com.apple.iWork.Keynote",
-        "com.apple.systempreferences",
-        "com.apple.dt.Xcode",
-        "com.apple.QuickTimePlayerX",
-        "com.apple.iBooksX",
-        "com.apple.AppStore",
-        "com.apple.Maps",
-        "com.apple.podcasts",
-        "com.apple.TV",
-        "com.apple.ScriptEditor2",
-        "com.apple.Console",
-        "com.apple.ActivityMonitor",
-        "com.apple.calculator",
-        "com.apple.Reminders",
-        "com.apple.shortcuts",
-        "com.apple.facetime",
-        "com.apple.iMovieApp",
-        "com.apple.garageband10",
-        "com.apple.dictionary",
-        "com.apple.freeform",
-    ]
 
     // Trim SCK's raw window list down to the set a user would plausibly pick
     // for capture. SCShareableContent returns ~everything: menubar items,
@@ -99,7 +60,6 @@ actor Engine {
     //  - < 100x100 (phantom 0-pt windows the OS keeps around)
     //  - !isOnScreen — SCK can't capture content of a window the OS
     //    isn't drawing; recording one would yield blank or stale frames
-    //  - com.apple.* and not in the allowlist (system noise)
     //  - app name contains "WebView" (Electron/Chromium sub-frames like
     //    "Microsoft Teams WebView" — the real surface is the sibling
     //    without the suffix)
@@ -108,7 +68,34 @@ actor Engine {
     // with identical (app, title) — different windowIDs, but functionally
     // the same surface from the user's POV. Keep the largest; the
     // smaller ones are usually dormant helper windows.
-    private func filterShareableWindows(_ windows: [SCWindow]) -> [WindowInfo] {
+    private func filterShareableWindows(_ windows: [SCWindow]) -> ([WindowInfo], [StackWindow]) {
+        // Front-to-back stacking order. SCShareableContent doesn't carry a
+        // reliable z-order, but CGWindowListCopyWindowInfo returns on-screen
+        // windows front-to-back — map each windowID to its index so the
+        // picker can resolve the frontmost window under the cursor.
+        let onScreen = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
+        ) as? [[String: Any]] ?? []
+        var zByID: [UInt32: Int] = [:]
+        // Occluder stack: every on-screen layer-0 window in front-to-back
+        // order, whether or not it survives the pickable filter below. The
+        // picker hit-tests against this so a window we dropped (e.g. a WebView
+        // sub-frame or a dedupe duplicate) blocks the highlight instead of
+        // falling through to the enumerated window behind it. Menu bar / Dock /
+        // Control Center are layer != 0 and excluded — not windows a user picks.
+        var stack: [StackWindow] = []
+        for (index, entry) in onScreen.enumerated() {
+            guard let num = entry[kCGWindowNumber as String] as? UInt32 else { continue }
+            zByID[num] = index
+            let layer = (entry[kCGWindowLayer as String] as? Int) ?? -1
+            if layer != 0 { continue }
+            guard let b = entry[kCGWindowBounds as String] as? [String: Any],
+                  let x = b["X"] as? Double, let y = b["Y"] as? Double,
+                  let w = b["Width"] as? Double, let h = b["Height"] as? Double
+            else { continue }
+            stack.append(StackWindow(id: num, x: Int(x), y: Int(y), width: Int(w), height: Int(h)))
+        }
+
         let candidates: [WindowInfo] = windows.compactMap { w -> WindowInfo? in
             guard let app = w.owningApplication else { return nil }
             let bundleID = app.bundleIdentifier
@@ -122,9 +109,6 @@ actor Engine {
             if w.windowLayer != 0 { return nil }
             if w.frame.width < 100 || w.frame.height < 100 { return nil }
             if !w.isOnScreen { return nil }
-            if bundleID.hasPrefix("com.apple.") && !Self.appleAllowlist.contains(bundleID) {
-                return nil
-            }
             if app.applicationName.contains("WebView") { return nil }
             return WindowInfo(
                 id: w.windowID,
@@ -135,7 +119,8 @@ actor Engine {
                 y: Int(w.frame.origin.y),
                 width: Int(w.frame.width),
                 height: Int(w.frame.height),
-                on_screen: w.isOnScreen
+                on_screen: w.isOnScreen,
+                z: zByID[w.windowID] ?? Int.max
             )
         }
 
@@ -150,7 +135,7 @@ actor Engine {
                 byKey[key] = w
             }
         }
-        return Array(byKey.values)
+        return (byKey.values.sorted { $0.z < $1.z }, stack)
     }
 
     private func handleStart(_ cmd: Command) async {

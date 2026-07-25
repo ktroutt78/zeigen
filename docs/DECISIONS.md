@@ -4,6 +4,48 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-25 — Window rects past a display edge are NORMAL, not a 2× scale bug (COMMIT 4 = no-op)
+
+Investigated a suspected 2× coordinate bug: on the Retina built-in (display bounds 408,1080 1512×982 pts, scale 2×), News's stack rect was global `937,1200 1390×823`, right edge x=2327 — 407 pts past the display's right edge, overflowing the 1512-wide overlay after the per-display translate. **No bug.** Closed without a code change.
+
+The picker's global→display translation is pure point subtraction (`x = s.x - d.x`, `y = s.y - d.y`; size unchanged), and **every source is the same global point space** — `SCDisplay.width` is points (`RecordingSession.swift`), `SCWindow.frame` is points, and `CGWindowListCopyWindowInfo` bounds are points *even on the 2× display* (proof: Podcasts fills 97% of the built-in at width **1473** = 1512×0.97, a point value; pixels would read ~2933). So the math is **scale-independent and correct at every scale** — the primary does not "work only because scale=1."
+
+The overflow is just a window extending past a display edge (drag a window partly off-screen, or move a wide window onto the narrower built-in). It is **not** a scale artifact — it appears at 1× too: on the 1× primary, Obsidian overflowed R=145/B=68, Chrome B=25, Music B=11; on the 1× left external, Excel R=2. Off-edge overhang is unreachable by the cursor (a display's cursor range is 0…displayWidth pts) and, here, News intersects no other display — so it can never cause a wrong pick. Don't re-investigate this as a scale bug.
+
+---
+
+## 2026-07-25 — NEVER isa-swizzle a tao/wry NSWindow (canBecomeKeyWindow crash)
+
+Attempted to fix the picker's priming-click by making the borderless overlay key-able: a Rust command reparented the overlay's `NSWindow` to a runtime subclass (`ZeigenKeyableWindow`) overriding `canBecomeKeyWindow -> YES`, via `object_setClass`. It crashed the app **instantly** on picker open — `EXC_BAD_ACCESS` reading ~0x8 in `-[NSObject superclass]`, called from `tao::platform_impl::platform::window::send_event`, off `routeMouseMovedEvent`.
+
+**Root cause (worth not rediscovering):** tao's `TaoWindow` overrides `sendEvent:` and calls super via `util::superclass(this)` = `[this superclass]` — it computes the super-target **dynamically from the live isa**, hard-assuming the window's class is *exactly* `TaoWindow` so that `[this superclass]` is `NSWindow`. `object_setClass` inserted `ZeigenKeyableWindow` between the instance and `TaoWindow`, so `[this superclass]` returned `TaoWindow`, and `[super sendEvent:]` re-entered tao's own `send_event` → unbounded recursion → stack overflow. It only fired once the window was key and received its first `mouseMoved`.
+
+**Rules:** (1) Never `object_setClass` / isa-swizzle a tao/wry-owned window — tao reads the live class to dispatch. (2) It was also unnecessary: `TaoWindow` **already** overrides `canBecomeKeyWindow` to return its `focusable` ivar (default true), so tao windows are key-able without any native surgery. Reverted (`40e20cd`). NOTE: this did **not** fix the priming-click — key-ability was not the cause, so the activation/priming-click problem remains **open**.
+
+---
+
+## 2026-07-25 — Window picker hit-test: z-order-honest + re-enumerate on open
+
+Two fixes to how the hover picker resolves a point to a window.
+
+**Commit 1 — z-order honesty (`8cc1d85`).** The overlay hit-tested only our *enumerated* rects, so hovering a window we'd filtered out silently fell through to the enumerated window **behind** it — a miss rendered as a wrong hit. Fix: the engine emits `window_stack`, the full front-to-back stack of on-screen **layer-0** windows (pickable or not), built from the `CGWindowListCopyWindowInfo` z-order already fetched for ordering. The overlay resolves a point against that stack and highlights only when the frontmost window under the cursor is one we enumerated; otherwise **no highlight** (and a click there does nothing — no wrong selection, no accidental cancel).
+
+**Commit 3 — re-enumerate on open (`9135203`).** `window_stack` (and the pickable list) were frozen at the last mount / hardware-change enumerate, so a maximized window that was frontmost *then* shadowed everything behind it in stack order — across three displays only VS Code and News ever won any hover, even though every app enumerated with valid rects. Fix: `openWindowPicker` triggers a fresh `engine_enumerate` on open and awaits *that* `enumerated` event (one-shot listener, 2s timeout, cached-state fallback), feeding its windows + stack to the overlay. Blocks on the fresh result with **no spinner** (the small enumerate latency is honest, not masked); round-trip ms logged to console. **Front-to-back first-match is deliberately kept** — a genuinely occluded window shouldn't be selectable; the defect was stale *ordering*, not the matching rule.
+
+Still open, untouched: the 2× Retina **coordinate overflow** (window rects on the 2× built-in exceed that display's point bounds — `CGWindowList` bounds vs the display-origin translation), and the activation/priming-click problem.
+
+---
+
+## 2026-07-25 — Window enumeration: deleted the com.apple.* allowlist (predicate #7)
+
+The window picker/dropdown filter (`Engine.swift filterShareableWindows`) had an opt-in allowlist of ~32 Apple bundle IDs: any `com.apple.*` window not on the list was rejected. It was backwards — every Apple app was invisible until someone hand-added it. Apple News surfaced the bug (typed a home address into a co-pilot demo; News wasn't listed, so it vanished from both surfaces and, pre-commit-1, the picker's rect hit-test silently selected the window behind it), but News was just the first case hit — Preview, Maps, Music, Safari-not-in-list, Pages, Keynote all had the same latent problem.
+
+**Deleted predicate #7 and the `appleAllowlist` constant entirely** (no denylist, no empty placeholder). Verified directly that the allowlist was doing no work the structural predicates weren't: of **257** `com.apple.*` windows in a live raw enumeration, `layer != 0` (77), `< 100px` (132), and `!isOnScreen` (44) already removed **253** — only **4** reached predicate #7. The system chrome a denylist would target is all `layer != 0`: Dock enumerates at layer 20 / -2147483624 (never 0); Control Center, Spotlight, Notification Center, SystemUIServer, WindowManager have **no** on-screen ≥100px window at all. The only `com.apple.*` bundles with a layer-0 on-screen ≥100px window are real apps (Messages, Notes, …) plus `com.apple.ProblemReporter` (crash dialogs) — all legitimate capture targets. So `layer != 0 + <100px + offscreen` is the real chrome filter; the allowlist only ever rejected real apps by omission.
+
+Paired with the same-day commit 1 (z-order-honest hit-test: the picker now emits the full front-to-back stack of on-screen layer-0 windows and shows no highlight when the frontmost window under the cursor isn't one we enumerated, instead of falling through to the window behind). Together: real apps appear and select correctly; the no-highlight path is reserved for genuinely unenumerable surfaces.
+
+---
+
 ## 2026-07-19 — V2 teardown (commit 6, FINAL — the V2-elimination arc is done)
 
 The V2 ffmpeg export machinery is deleted. Every zoom/webcam/watermark MP4 and GIF renders on cicompositor (V3); the plain-MP4 tail and plain-GIF tail go straight to ffmpeg. No V2 path, no `use_v3_compositor` flag, no fallback — a V3 runtime failure fails the export loudly. Diff-stat: **+352 / −3227** across edit.rs, composite.rs, settings.rs, lib.rs, Cargo.toml. Suite 44/0.

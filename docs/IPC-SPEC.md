@@ -106,7 +106,8 @@ Emitted once on startup, before any commands are processed.
       "title": "Zeigen — github.com",
       "x": 240, "y": 120,
       "width": 1440, "height": 900,
-      "on_screen": true
+      "on_screen": true,
+      "z": 0
     }
   ]
 }
@@ -118,7 +119,7 @@ The `windows` array lists windows the user could plausibly capture. Filters appl
 - `windowLayer == 0` (normal app windows; menubar items, tooltips, popups excluded)
 - `width >= 100 && height >= 100` (skips 0-size phantom windows)
 
-`bundle_id` is omitted when SCK reports no bundle for the owning application. UI sorts and labels — the engine returns SCK's order. `on_screen: false` means the window exists but isn't visible (minimized, in another Space, behind a fullscreen app); UI may still offer it but identify-window won't render an overlay on it.
+`bundle_id` is omitted when SCK reports no bundle for the owning application. `z` is the front-to-back stacking index (0 = frontmost), sourced from `CGWindowListCopyWindowInfo`'s on-screen order because SCShareableContent carries no reliable z-order; the engine returns windows sorted by `z`, and a hover picker hit-testing an overlapping point picks the lowest `z` among the windows containing it. Windows absent from the on-screen list sort last. UI still re-sorts and labels as it sees fit. `on_screen: false` means the window exists but isn't visible (minimized, in another Space, behind a fullscreen app); UI may still offer it but identify-window won't render an overlay on it.
 
 ### `started`
 ```json
