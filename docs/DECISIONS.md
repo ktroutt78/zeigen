@@ -4,6 +4,20 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-25 — Redaction: frosted glass at export, static rects, blur is the safety lever
+
+Direction for the redaction feature (full plan: `docs/REDACTION-PLAN.md`). Recorded here because two decisions are load-bearing and must not be re-litigated silently.
+
+**Where + shape (settled):** redaction runs at **export** in the `cicompositor` seam, after zoom + motion-blur and before bubble/watermark/downscale. Capture path stays byte-for-byte untouched (prewarm/heartbeat/first-frame timing is not negotiable). Regions are **static rects** over a `[start,end]` time range — no motion, no cursor-follow, no per-frame tweening. Stored in the sidecar in **source-space fractional** coords (top-left origin), skip-if-empty so no-op sidecars stay byte-identical, transformed through the frame's `zoomAt`/`centerAt` so the rect stays glued to its content under zoom. After-zoom (not before) because the box must never be stored in output/screen space where a zoom span would slide content out from under it.
+
+**Style = frosted glass, NOT solid fill (settled):** heavy `CIGaussianBlur` + a translucent constant-color overlay (`a≈0.6`) + desaturation (`CIColorControls` sat≈0.5). Per-region light/dark tint, default light. No black censor boxes — the frosted look is the point.
+
+**Security posture — do NOT overclaim.** The blur is the safety lever; the overlay is aesthetics plus residual attenuation. CI source-over `out = a*C + (1-a)*B` is **linear and invertible** in float — a translucent overlay does not destroy the underlying pixels (only `a=1` solid fill does). The real erasing is heavy blur pushing high-freq residual below the 8-bit quantization floor; the overlay scales the survivor by `(1-a)` so recovery amplifies quantization/codec noise by `1/(1-a)` and swamps it. Practically unrecoverable against a viewer or casual "enhance," but **not** the zero-recovery guarantee of an opaque fill. This tradeoff is accepted because opaque boxes are ruled out by design.
+
+**Blur-radius floor is a SAFETY parameter.** `r = clamp(0.08*min(w,h), 16, 90)` output px. The floor (16) may rise during eye-tuning; it does not fall without a reason stated here. The `0.08` coefficient and cap are aesthetic and freely tunable.
+
+---
+
 ## 2026-07-25 — Window rects past a display edge are NORMAL, not a 2× scale bug (COMMIT 4 = no-op)
 
 Investigated a suspected 2× coordinate bug: on the Retina built-in (display bounds 408,1080 1512×982 pts, scale 2×), News's stack rect was global `937,1200 1390×823`, right edge x=2327 — 407 pts past the display's right edge, overflowing the 1512-wide overlay after the per-display translate. **No bug.** Closed without a code change.
