@@ -675,6 +675,7 @@ const WINDOW_PICKER_LABEL_PREFIX = "window-picker-";
 async function openWindowPickerOverlays(
   displays: DisplayShape[],
   windows: WindowSource[],
+  stack: StackWindow[],
 ): Promise<number | null> {
   if (displays.length === 0) return null;
 
@@ -717,9 +718,31 @@ async function openWindowPickerOverlays(
         z: w.z,
       }));
 
+    // The full occluder stack, translated to this display's coords and
+    // limited to windows intersecting it. Front-to-back order is preserved so
+    // the overlay can resolve the frontmost window (pickable or not) at a
+    // point. Kept as raw {id,rect} so the overlay stays z-order-honest even
+    // for windows absent from winsForDisplay.
+    const stackForDisplay = stack
+      .filter(
+        (s) =>
+          s.x < d.x + d.width &&
+          s.x + s.width > d.x &&
+          s.y < d.y + d.height &&
+          s.y + s.height > d.y,
+      )
+      .map((s) => ({
+        id: s.id,
+        x: s.x - d.x,
+        y: s.y - d.y,
+        w: s.width,
+        h: s.height,
+      }));
+
     const params = new URLSearchParams({
       display_index: String(i + 1),
       wins: JSON.stringify(winsForDisplay),
+      stack: JSON.stringify(stackForDisplay),
     });
 
     const old = await WebviewWindow.getByLabel(label);
@@ -868,6 +891,16 @@ type WindowSource = {
   // the hover picker to resolve the frontmost window under the cursor.
   z: number;
 };
+// One entry in the full front-to-back stack of on-screen layer-0 windows
+// (index 0 = frontmost), pickable or not. The picker uses it to detect when
+// the frontmost window under the cursor is one we didn't enumerate.
+type StackWindow = {
+  id: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
 type Mic = { uid: string; name: string };
 type Device = { index: number; name: string };
 type DeviceList = { video: Device[]; audio: Device[]; screens: Device[] };
@@ -899,7 +932,7 @@ type FinalizedRecording = {
 
 type EngineEvent =
   | { event: "ready"; version: string }
-  | { event: "enumerated"; displays: Display[]; microphones: Mic[]; windows: WindowSource[] }
+  | { event: "enumerated"; displays: Display[]; microphones: Mic[]; windows: WindowSource[]; window_stack?: StackWindow[] }
   | { event: "started"; started_at: string }
   | { event: "progress"; frames: number; dropped: number; elapsed_s: number }
   | { event: "paused"; elapsed_s: number }
@@ -941,6 +974,7 @@ const ERROR_MESSAGES: Record<string, string> = {
 function App() {
   const [displays, setDisplays] = useState<Display[]>([]);
   const [windows, setWindows] = useState<WindowSource[]>([]);
+  const [windowStack, setWindowStack] = useState<StackWindow[]>([]);
   const [mics, setMics] = useState<Mic[]>([]);
   const [cameras, setCameras] = useState<Device[]>([]);
   const [sourceKind, setSourceKind] = useState<SourceKind>("display");
@@ -1017,6 +1051,7 @@ function App() {
             setDisplays(displays);
             setMics(mics);
             setWindows(wins);
+            setWindowStack(ev.window_stack ?? []);
             setSelectedDisplay((prev) => prev ?? displays[0]?.id ?? null);
             // Prefer the built-in mic by default: Bluetooth headsets (e.g.
             // AirPods) sort first alphabetically but degrade to low-quality
@@ -1550,7 +1585,7 @@ function App() {
       width: d.width,
       height: d.height,
     }));
-    const picked = await openWindowPickerOverlays(shapes, windows);
+    const picked = await openWindowPickerOverlays(shapes, windows, windowStack);
     if (picked != null) setSelectedWindow(picked);
     // On cancel (null) the prior selection is left untouched.
   };

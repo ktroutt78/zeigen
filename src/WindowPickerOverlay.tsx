@@ -17,9 +17,14 @@ type PickWindow = {
   z: number; // front-to-back, 0 = frontmost
 };
 
+// One window in the full front-to-back occluder stack (index 0 = frontmost),
+// pickable or not. Same display-relative coords as PickWindow.
+type StackEntry = { id: number; x: number; y: number; w: number; h: number };
+
 type Params = {
   displayIndex: number;
   windows: PickWindow[];
+  stack: StackEntry[];
 };
 
 function readParams(): Params {
@@ -27,30 +32,51 @@ function readParams(): Params {
   const q = hash.indexOf("?");
   const params = new URLSearchParams(q >= 0 ? hash.slice(q + 1) : "");
   let windows: PickWindow[] = [];
+  let stack: StackEntry[] = [];
   try {
     windows = JSON.parse(params.get("wins") || "[]");
   } catch {
     windows = [];
   }
+  try {
+    stack = JSON.parse(params.get("stack") || "[]");
+  } catch {
+    stack = [];
+  }
   return {
     displayIndex: Number(params.get("display_index") ?? 1),
     windows,
+    stack,
   };
 }
 
-// Frontmost window under the point: among all windows whose rect contains it,
-// the one with the lowest z. Returns null when the cursor is over bare desktop.
-function hitTest(windows: PickWindow[], px: number, py: number): PickWindow | null {
-  let best: PickWindow | null = null;
-  for (const w of windows) {
-    if (px < w.x || px > w.x + w.w || py < w.y || py > w.y + w.h) continue;
-    if (!best || w.z < best.z) best = w;
+// Resolve what's under the point using the true OS z-order, not just our
+// enumerated rects. Walk the occluder stack front-to-back and take the first
+// window that contains the point:
+//  - it's pickable  -> that window (highlight + click selects)
+//  - not pickable    -> blocked: a window we didn't enumerate is in front, so
+//                       show no highlight rather than silently selecting the
+//                       pickable window behind it
+//  - nothing there   -> empty (bare desktop)
+function resolveAt(
+  stack: StackEntry[],
+  pickableById: Map<number, PickWindow>,
+  px: number,
+  py: number,
+): { win: PickWindow | null; blocked: boolean } {
+  for (const s of stack) {
+    if (px < s.x || px > s.x + s.w || py < s.y || py > s.y + s.h) continue;
+    const win = pickableById.get(s.id);
+    return win ? { win, blocked: false } : { win: null, blocked: true };
   }
-  return best;
+  return { win: null, blocked: false };
 }
 
 export default function WindowPickerOverlay() {
   const params = useRef<Params>(readParams()).current;
+  const pickableById = useRef(
+    new Map(params.windows.map((w) => [w.id, w])),
+  ).current;
   const [hovered, setHovered] = useState<PickWindow | null>(null);
 
   const cancel = useCallback(() => {
@@ -98,17 +124,24 @@ export default function WindowPickerOverlay() {
         .setFocus()
         .catch(() => {});
     }
-    const next = hitTest(params.windows, e.clientX, e.clientY);
+    const next = resolveAt(params.stack, pickableById, e.clientX, e.clientY).win;
     // Only re-render on a change of target, not every pixel of movement.
     setHovered((prev) => (prev?.id === next?.id ? prev : next));
   };
 
-  // Click commits: over a window -> select it; over bare desktop -> cancel.
+  // Click commits: over a pickable window -> select it; over bare desktop ->
+  // cancel. Over a window we didn't enumerate (blocked) -> do nothing, so a
+  // miss never becomes a wrong selection or an accidental dismiss.
   const onPointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
-    const hit = hitTest(params.windows, e.clientX, e.clientY);
-    if (hit) select(hit.id);
-    else cancel();
+    const { win, blocked } = resolveAt(
+      params.stack,
+      pickableById,
+      e.clientX,
+      e.clientY,
+    );
+    if (win) select(win.id);
+    else if (!blocked) cancel();
   };
 
   const label = useMemo(() => {

@@ -41,8 +41,8 @@ actor Engine {
                 mediaType: .audio,
                 position: .unspecified
             ).devices.map { MicInfo(uid: $0.uniqueID, name: $0.localizedName) }
-            let windows = filterShareableWindows(shareable.windows)
-            emit(.enumerated(displays: displays, microphones: mics, windows: windows))
+            let (windows, stack) = filterShareableWindows(shareable.windows)
+            emit(.enumerated(displays: displays, microphones: mics, windows: windows, stack: stack))
         } catch {
             emit(.error(code: "INTERNAL", message: "enumerate failed: \(error)"))
         }
@@ -109,7 +109,7 @@ actor Engine {
     // with identical (app, title) — different windowIDs, but functionally
     // the same surface from the user's POV. Keep the largest; the
     // smaller ones are usually dormant helper windows.
-    private func filterShareableWindows(_ windows: [SCWindow]) -> [WindowInfo] {
+    private func filterShareableWindows(_ windows: [SCWindow]) -> ([WindowInfo], [StackWindow]) {
         // Front-to-back stacking order. SCShareableContent doesn't carry a
         // reliable z-order, but CGWindowListCopyWindowInfo returns on-screen
         // windows front-to-back — map each windowID to its index so the
@@ -118,10 +118,23 @@ actor Engine {
             [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
         ) as? [[String: Any]] ?? []
         var zByID: [UInt32: Int] = [:]
+        // Occluder stack: every on-screen layer-0 window in front-to-back
+        // order, whether or not it survives the pickable filter below. The
+        // picker hit-tests against this so a window we dropped (e.g. an
+        // un-allowlisted app) blocks the highlight instead of falling through
+        // to the enumerated window behind it. Menu bar / Dock / Control Center
+        // are layer != 0 and excluded — they aren't windows a user picks.
+        var stack: [StackWindow] = []
         for (index, entry) in onScreen.enumerated() {
-            if let num = entry[kCGWindowNumber as String] as? UInt32 {
-                zByID[num] = index
-            }
+            guard let num = entry[kCGWindowNumber as String] as? UInt32 else { continue }
+            zByID[num] = index
+            let layer = (entry[kCGWindowLayer as String] as? Int) ?? -1
+            if layer != 0 { continue }
+            guard let b = entry[kCGWindowBounds as String] as? [String: Any],
+                  let x = b["X"] as? Double, let y = b["Y"] as? Double,
+                  let w = b["Width"] as? Double, let h = b["Height"] as? Double
+            else { continue }
+            stack.append(StackWindow(id: num, x: Int(x), y: Int(y), width: Int(w), height: Int(h)))
         }
 
         let candidates: [WindowInfo] = windows.compactMap { w -> WindowInfo? in
@@ -166,7 +179,7 @@ actor Engine {
                 byKey[key] = w
             }
         }
-        return byKey.values.sorted { $0.z < $1.z }
+        return (byKey.values.sorted { $0.z < $1.z }, stack)
     }
 
     private func handleStart(_ cmd: Command) async {

@@ -58,9 +58,21 @@ struct WindowInfo: Encodable {
     let z: Int
 }
 
+// The full front-to-back stack of on-screen, layer-0 windows (0 = frontmost),
+// including windows the pickable filter dropped. The hover picker uses this to
+// tell when the frontmost window under the cursor is one we did NOT enumerate,
+// so it can show no highlight instead of silently selecting the window behind.
+struct StackWindow: Encodable {
+    let id: UInt32
+    let x: Int
+    let y: Int
+    let width: Int
+    let height: Int
+}
+
 enum Event {
     case ready(version: String)
-    case enumerated(displays: [DisplayInfo], microphones: [MicInfo], windows: [WindowInfo])
+    case enumerated(displays: [DisplayInfo], microphones: [MicInfo], windows: [WindowInfo], stack: [StackWindow])
     case started(started_at: String)
     case progress(frames: Int, dropped: Int, elapsed_s: Double)
     case paused(elapsed_s: Double)
@@ -86,7 +98,7 @@ func emit(_ event: Event) {
     switch event {
     case .ready(let version):
         json = ["event": "ready", "version": version]
-    case .enumerated(let displays, let microphones, let windows):
+    case .enumerated(let displays, let microphones, let windows, let stack):
         json = [
             "event": "enumerated",
             "displays": displays.map { ["id": $0.id, "name": $0.name, "x": $0.x, "y": $0.y, "width": $0.width, "height": $0.height] },
@@ -106,6 +118,7 @@ func emit(_ event: Event) {
                 if let b = w.bundle_id { dict["bundle_id"] = b }
                 return dict
             },
+            "window_stack": stack.map { ["id": $0.id, "x": $0.x, "y": $0.y, "width": $0.width, "height": $0.height] },
         ]
     case .started(let started_at):
         json = ["event": "started", "started_at": started_at]
