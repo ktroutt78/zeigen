@@ -4,6 +4,16 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-25 — VideoToolbox mp4 bytes are non-deterministic; gate on DECODED PIXELS, not md5
+
+Trap worth flagging: an md5 over a cicompositor (or any `h264_videotoolbox`) OUTPUT MP4 is NOT a valid byte-identical gate. Running the SAME binary on the SAME input twice produces DIFFERENT container bytes run-to-run (mux/encoder metadata wobble) — `md5 base_a.mp4 != md5 base_b.mp4` even with zero code change. The DECODED PIXELS, however, are deterministic: `ffmpeg -i x.mp4 -f rawvideo -pix_fmt rgb24 - | md5` is stable and equal across runs.
+
+So to prove "this change leaves the export byte-identical," hash the decoded rawvideo, not the file. This is STRONGER than a container md5 (exact pixel equality, immune to container noise). Proven during redaction commit 2: baseline, redaction-absent, and empty-list all decode to `41b6b556…` while their file md5s differ.
+
+Why the V2-teardown md5 gate worked and this one can't: that gate was on a `-c:v copy` STREAM COPY (no re-encode → deterministic bytes by the copy contract). Anything that re-encodes through VideoToolbox forfeits byte determinism at the container level. Don't reach for file-md5 on a re-encoded output again — reach for the decoded-pixel hash.
+
+---
+
 ## 2026-07-25 — Redaction: frosted glass at export, static rects, blur is the safety lever
 
 Direction for the redaction feature (full plan: `docs/REDACTION-PLAN.md`). Recorded here because two decisions are load-bearing and must not be re-litigated silently.
