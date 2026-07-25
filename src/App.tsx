@@ -971,6 +971,45 @@ const ERROR_MESSAGES: Record<string, string> = {
   INTERNAL: "The recorder hit an unexpected error and had to stop.",
 };
 
+// Trigger a fresh engine enumerate and resolve with THAT result, so the
+// picker sees the current window z-order instead of whatever the last mount /
+// hardware-change enumerate left in state (a stale stack is what made a
+// maximized window shadow everything behind it). Resolves null on timeout or
+// a failed invoke (e.g. permission denied) so the caller falls back to cached
+// state rather than hanging.
+type FreshEnum = {
+  displays: Display[];
+  windows: WindowSource[];
+  windowStack: StackWindow[];
+};
+async function freshEnumerate(): Promise<FreshEnum | null> {
+  let resolveFn!: (v: FreshEnum | null) => void;
+  const done = new Promise<FreshEnum | null>((r) => {
+    resolveFn = r;
+  });
+  const unlisten = await listen<EngineEvent>("engine-event", (e) => {
+    if (e.payload.event !== "enumerated") return;
+    const ev = e.payload;
+    resolveFn({
+      displays: ev.displays,
+      windows: ev.windows ?? [],
+      windowStack: ev.window_stack ?? [],
+    });
+  });
+  const timer = setTimeout(() => resolveFn(null), 2000);
+  try {
+    await invoke("engine_enumerate");
+  } catch {
+    resolveFn(null);
+  }
+  try {
+    return await done;
+  } finally {
+    clearTimeout(timer);
+    unlisten();
+  }
+}
+
 function App() {
   const [displays, setDisplays] = useState<Display[]>([]);
   const [windows, setWindows] = useState<WindowSource[]>([]);
@@ -1579,13 +1618,29 @@ function App() {
   // displays, click to select it (returns here and sets the Window source),
   // click empty space or Cancel to dismiss.
   const openWindowPicker = async () => {
-    const shapes: DisplayShape[] = displays.map((d) => ({
+    // Re-enumerate on open so the hit-test uses the CURRENT z-order, not the
+    // frozen mount/hardware-change snapshot. Block on the fresh result (no
+    // spinner — the small enumerate latency is honest); fall back to cached
+    // state if it times out or fails.
+    const t0 = performance.now();
+    const fresh = await freshEnumerate();
+    console.info(
+      `[window-picker] re-enumerate ${(performance.now() - t0).toFixed(0)}ms${
+        fresh ? "" : " (timeout/failed, using cached)"
+      }`,
+    );
+    const src = fresh ?? { displays, windows, windowStack };
+    const shapes: DisplayShape[] = src.displays.map((d) => ({
       x: d.x,
       y: d.y,
       width: d.width,
       height: d.height,
     }));
-    const picked = await openWindowPickerOverlays(shapes, windows, windowStack);
+    const picked = await openWindowPickerOverlays(
+      shapes,
+      src.windows,
+      src.windowStack,
+    );
     if (picked != null) setSelectedWindow(picked);
     // On cancel (null) the prior selection is left untouched.
   };
