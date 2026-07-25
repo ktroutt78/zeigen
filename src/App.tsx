@@ -662,6 +662,16 @@ const WINDOW_PICKER_LABEL_PREFIX = "window-picker-";
 // display's coordinate space). The overlay highlights the frontmost window
 // under the cursor; a click selects it, a click on empty space or Cancel
 // dismisses. Resolves to the chosen SCWindow id, or null on cancel.
+//
+// KNOWN LIMITATION (deferred 2026-07-25): hover only works on the primary
+// display. macOS delivers mouseMoved events only to the *key* window, and
+// just one window can be key. Only overlay 0 is focused at creation
+// (`focus: i === 0`); the others can never become key because their
+// self-focus call lives in onPointerMove, which never fires without the
+// mouseMoved they don't get. (Marquee dodges this: mouseDragged is
+// delivered to non-key windows, mouseMoved is not.) The robust fix is one
+// overlay spanning the union of all displays; until then the Window
+// dropdown remains the fallback for secondary displays.
 async function openWindowPickerOverlays(
   displays: DisplayShape[],
   windows: WindowSource[],
