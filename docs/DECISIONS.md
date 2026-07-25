@@ -4,6 +4,28 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-25 — NEVER isa-swizzle a tao/wry NSWindow (canBecomeKeyWindow crash)
+
+Attempted to fix the picker's priming-click by making the borderless overlay key-able: a Rust command reparented the overlay's `NSWindow` to a runtime subclass (`ZeigenKeyableWindow`) overriding `canBecomeKeyWindow -> YES`, via `object_setClass`. It crashed the app **instantly** on picker open — `EXC_BAD_ACCESS` reading ~0x8 in `-[NSObject superclass]`, called from `tao::platform_impl::platform::window::send_event`, off `routeMouseMovedEvent`.
+
+**Root cause (worth not rediscovering):** tao's `TaoWindow` overrides `sendEvent:` and calls super via `util::superclass(this)` = `[this superclass]` — it computes the super-target **dynamically from the live isa**, hard-assuming the window's class is *exactly* `TaoWindow` so that `[this superclass]` is `NSWindow`. `object_setClass` inserted `ZeigenKeyableWindow` between the instance and `TaoWindow`, so `[this superclass]` returned `TaoWindow`, and `[super sendEvent:]` re-entered tao's own `send_event` → unbounded recursion → stack overflow. It only fired once the window was key and received its first `mouseMoved`.
+
+**Rules:** (1) Never `object_setClass` / isa-swizzle a tao/wry-owned window — tao reads the live class to dispatch. (2) It was also unnecessary: `TaoWindow` **already** overrides `canBecomeKeyWindow` to return its `focusable` ivar (default true), so tao windows are key-able without any native surgery. Reverted (`40e20cd`). NOTE: this did **not** fix the priming-click — key-ability was not the cause, so the activation/priming-click problem remains **open**.
+
+---
+
+## 2026-07-25 — Window picker hit-test: z-order-honest + re-enumerate on open
+
+Two fixes to how the hover picker resolves a point to a window.
+
+**Commit 1 — z-order honesty (`8cc1d85`).** The overlay hit-tested only our *enumerated* rects, so hovering a window we'd filtered out silently fell through to the enumerated window **behind** it — a miss rendered as a wrong hit. Fix: the engine emits `window_stack`, the full front-to-back stack of on-screen **layer-0** windows (pickable or not), built from the `CGWindowListCopyWindowInfo` z-order already fetched for ordering. The overlay resolves a point against that stack and highlights only when the frontmost window under the cursor is one we enumerated; otherwise **no highlight** (and a click there does nothing — no wrong selection, no accidental cancel).
+
+**Commit 3 — re-enumerate on open (`9135203`).** `window_stack` (and the pickable list) were frozen at the last mount / hardware-change enumerate, so a maximized window that was frontmost *then* shadowed everything behind it in stack order — across three displays only VS Code and News ever won any hover, even though every app enumerated with valid rects. Fix: `openWindowPicker` triggers a fresh `engine_enumerate` on open and awaits *that* `enumerated` event (one-shot listener, 2s timeout, cached-state fallback), feeding its windows + stack to the overlay. Blocks on the fresh result with **no spinner** (the small enumerate latency is honest, not masked); round-trip ms logged to console. **Front-to-back first-match is deliberately kept** — a genuinely occluded window shouldn't be selectable; the defect was stale *ordering*, not the matching rule.
+
+Still open, untouched: the 2× Retina **coordinate overflow** (window rects on the 2× built-in exceed that display's point bounds — `CGWindowList` bounds vs the display-origin translation), and the activation/priming-click problem.
+
+---
+
 ## 2026-07-25 — Window enumeration: deleted the com.apple.* allowlist (predicate #7)
 
 The window picker/dropdown filter (`Engine.swift filterShareableWindows`) had an opt-in allowlist of ~32 Apple bundle IDs: any `com.apple.*` window not on the list was rejected. It was backwards — every Apple app was invisible until someone hand-added it. Apple News surfaced the bug (typed a home address into a co-pilot demo; News wasn't listed, so it vanished from both surfaces and, pre-commit-1, the picker's rect hit-test silently selected the window behind it), but News was just the first case hit — Preview, Maps, Music, Safari-not-in-list, Pages, Keynote all had the same latent problem.
