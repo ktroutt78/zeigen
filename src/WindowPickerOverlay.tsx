@@ -75,11 +75,23 @@ export default function WindowPickerOverlay() {
     return () => window.removeEventListener("keydown", onKey);
   }, [cancel]);
 
-  // Focus this display's overlay the first time the pointer enters it, so its
-  // clicks land immediately (a non-key borderless window would otherwise spend
-  // the first click just becoming key) and Esc has a chance to work.
+  // Grab key focus the instant the overlay mounts. macOS delivers mouseMoved
+  // only to the key window, so hover-to-highlight (the whole selection model)
+  // is dead until this overlay is key. Focusing on mount makes hover live
+  // immediately with no priming click; `focus: true` at creation is racy
+  // because the async reposition and the app already being frontmost can drop
+  // key status before the pointer ever enters.
   const focusedRef = useRef(false);
+  useEffect(() => {
+    focusedRef.current = true;
+    getCurrentWebviewWindow()
+      .setFocus()
+      .catch(() => {});
+  }, []);
+
   const onPointerMove = (e: React.PointerEvent) => {
+    // Recovery fallback: if key was lost (e.g. a click landed elsewhere first),
+    // reclaim it when the pointer re-enters.
     if (!focusedRef.current) {
       focusedRef.current = true;
       getCurrentWebviewWindow()
