@@ -4,6 +4,16 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-25 — Window rects past a display edge are NORMAL, not a 2× scale bug (COMMIT 4 = no-op)
+
+Investigated a suspected 2× coordinate bug: on the Retina built-in (display bounds 408,1080 1512×982 pts, scale 2×), News's stack rect was global `937,1200 1390×823`, right edge x=2327 — 407 pts past the display's right edge, overflowing the 1512-wide overlay after the per-display translate. **No bug.** Closed without a code change.
+
+The picker's global→display translation is pure point subtraction (`x = s.x - d.x`, `y = s.y - d.y`; size unchanged), and **every source is the same global point space** — `SCDisplay.width` is points (`RecordingSession.swift`), `SCWindow.frame` is points, and `CGWindowListCopyWindowInfo` bounds are points *even on the 2× display* (proof: Podcasts fills 97% of the built-in at width **1473** = 1512×0.97, a point value; pixels would read ~2933). So the math is **scale-independent and correct at every scale** — the primary does not "work only because scale=1."
+
+The overflow is just a window extending past a display edge (drag a window partly off-screen, or move a wide window onto the narrower built-in). It is **not** a scale artifact — it appears at 1× too: on the 1× primary, Obsidian overflowed R=145/B=68, Chrome B=25, Music B=11; on the 1× left external, Excel R=2. Off-edge overhang is unreachable by the cursor (a display's cursor range is 0…displayWidth pts) and, here, News intersects no other display — so it can never cause a wrong pick. Don't re-investigate this as a scale bug.
+
+---
+
 ## 2026-07-25 — NEVER isa-swizzle a tao/wry NSWindow (canBecomeKeyWindow crash)
 
 Attempted to fix the picker's priming-click by making the borderless overlay key-able: a Rust command reparented the overlay's `NSWindow` to a runtime subclass (`ZeigenKeyableWindow`) overriding `canBecomeKeyWindow -> YES`, via `object_setClass`. It crashed the app **instantly** on picker open — `EXC_BAD_ACCESS` reading ~0x8 in `-[NSObject superclass]`, called from `tao::platform_impl::platform::window::send_event`, off `routeMouseMovedEvent`.
