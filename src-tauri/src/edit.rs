@@ -74,6 +74,13 @@ pub struct SidecarState {
     // the re-encode, an empty one must never leave the -c:v copy path.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub zoom: Vec<ZoomKeyframe>,
+    // Frosted-glass redaction panels (REDACTION-PLAN). Empty = no redaction and
+    // serializes to ABSENT — same Vec::is_empty convention as zoom and
+    // bubble_position_log — so a no-redaction sidecar stays byte-identical to a
+    // pre-redaction one and rides the unchanged export path. Declared LAST so an
+    // empty track never perturbs the serialized field order of existing sidecars.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub redactions: Vec<RedactionRegion>,
 }
 
 // One point on the zoom curve (V3-PLAN C.2). Zoom state between keyframes
@@ -151,6 +158,40 @@ pub struct Annotation {
 pub struct Position {
     pub x: f64,
     pub y: f64,
+}
+
+// One frosted-glass redaction panel (REDACTION-PLAN §1, §3). The rect is in
+// source-frame FRACTIONS, top-left origin — same convention as
+// Annotation.position — so it survives the 2x backing scale and the export
+// downscale unchanged (no pixel space to get wrong). The compositor transforms
+// it through the active zoom (zoomAt/centerAt) so the panel stays glued to the
+// content it covers; nothing here tracks motion — the rect is static in source
+// space. Time range is original-timeline seconds, the same basis as
+// Annotation.start_time and the compositor's tSrc gate.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct RedactionRegion {
+    // Top-left corner and size, all source-frame fractions in 0..1.
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    // Seconds on the original timeline.
+    pub start: f64,
+    pub end: f64,
+    // Frost tint. Light (white frost) is the default and reads best over dark
+    // and mid content; Dark (smoked glass) is for light-heavy content where a
+    // white frost would blend in. Defaults to Light when absent so hand-written
+    // regions need not spell it out.
+    #[serde(default)]
+    pub tint: RedactionTint,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum RedactionTint {
+    #[default]
+    Light,
+    Dark,
 }
 
 pub fn sidecar_path(source: &Path) -> PathBuf {
@@ -1842,6 +1883,7 @@ mod tests {
             bubble_zone: None,
             annotation_color: Some("#FF3B30".into()),
             zoom: vec![],
+            redactions: vec![],
         }
     }
 
@@ -1926,6 +1968,85 @@ mod tests {
         .unwrap();
         assert_eq!(sparse.ease, Ease::InOutCubic);
         assert!(!sparse.auto_generated);
+    }
+
+    // Baseline invariant (REDACTION-PLAN §5, sidecar layer): an empty redaction
+    // track cannot serialize. pre_zoom_populated_state() carries redactions:
+    // vec![] and still produces the pinned pre-redaction bytes exactly — the
+    // field is invisible until a panel exists, so a no-redaction sidecar rides
+    // the unchanged export path. (The pin predates this field; equality to it IS
+    // the proof the empty track adds nothing.)
+    #[test]
+    fn empty_redactions_serializes_absent_byte_identical() {
+        let state = pre_zoom_populated_state();
+        assert!(state.redactions.is_empty());
+        assert_eq!(
+            serde_json::to_string_pretty(&state).unwrap(),
+            PRE_ZOOM_SIDECAR_PIN
+        );
+        // Untouched-recording shape is unchanged by the new field.
+        assert_eq!(
+            serde_json::to_string_pretty(&SidecarState::default()).unwrap(),
+            "{\n  \"annotations\": []\n}"
+        );
+    }
+
+    // A wiped track written as "redactions": [] (hand edit) parses and
+    // re-serializes with the key gone — not as [] and not as null.
+    #[test]
+    fn redactions_empty_array_input_normalizes_to_absent() {
+        let mut with_empty: serde_json::Value =
+            serde_json::from_str(PRE_ZOOM_SIDECAR_PIN).unwrap();
+        with_empty["redactions"] = serde_json::json!([]);
+        let state: SidecarState = serde_json::from_value(with_empty).unwrap();
+        assert_eq!(state, pre_zoom_populated_state());
+        assert_eq!(
+            serde_json::to_string_pretty(&state).unwrap(),
+            PRE_ZOOM_SIDECAR_PIN
+        );
+    }
+
+    // A non-empty track survives serialize -> parse -> serialize with no loss,
+    // in memory and through the disk path. An omitted tint defaults to Light.
+    #[test]
+    fn redactions_round_trip_losslessly() {
+        let mut state = pre_zoom_populated_state();
+        state.redactions = vec![
+            RedactionRegion {
+                x: 0.12,
+                y: 0.34,
+                w: 0.25,
+                h: 0.08,
+                start: 2.0,
+                end: 9.5,
+                tint: RedactionTint::Light,
+            },
+            RedactionRegion {
+                x: 0.5,
+                y: 0.6,
+                w: 0.3,
+                h: 0.12,
+                start: 0.0,
+                end: 4.0,
+                tint: RedactionTint::Dark,
+            },
+        ];
+        let json = serde_json::to_string_pretty(&state).unwrap();
+        let reparsed: SidecarState = serde_json::from_str(&json).unwrap();
+        assert_eq!(reparsed, state);
+
+        let dir = std::env::temp_dir().join(format!("zeigen-redact-rt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("recording-rt.mp4");
+        write_sidecar_path(&source, &state).unwrap();
+        assert_eq!(read_sidecar_path(&source).unwrap().unwrap(), state);
+
+        // tint is optional on input and defaults to Light.
+        let sparse: RedactionRegion = serde_json::from_str(
+            r#"{"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4, "start": 1.0, "end": 2.0}"#,
+        )
+        .unwrap();
+        assert_eq!(sparse.tint, RedactionTint::Light);
     }
 
     // GATE 1 (teardown) — the plain-MP4 tail (run_plain_mp4) survives the removal

@@ -65,6 +65,22 @@ type ZoomSegment = {
   auto_generated: boolean;
 };
 
+// Mirror of src-tauri/src/edit.rs::RedactionRegion. One frosted-glass panel.
+// x/y/w/h are source-frame fractions (top-left origin), like a zoom center's
+// cxf/cyf — resolution-independent, so no 2x-backing or downscale space to get
+// wrong. start/end are seconds on the original recording timeline. Static in
+// source space; the compositor transforms it through the active zoom at export.
+type RedactionTint = "light" | "dark";
+type RedactionRegion = {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  start: number;
+  end: number;
+  tint?: RedactionTint;
+};
+
 const ZOOM_DEFAULT_DURATION = 3;
 const ZOOM_MIN_DURATION = 0.5;
 // V3-PLAN C.1 calm rules: 600ms ease-in-out ramps, 2.5x scale cap.
@@ -268,6 +284,11 @@ type SidecarState = {
   // sidecar stays byte-identical to a pre-zoom one (the step-2 governing
   // invariant — Rust's skip_serializing_if enforces the same on its side).
   zoom?: ZoomKeyframe[];
+  // Frosted-glass redaction panels. Undefined/empty = no redaction; same
+  // skip-when-empty invariant as zoom, so a no-redaction sidecar stays
+  // byte-identical to a pre-redaction one (Rust's skip_serializing_if mirrors
+  // this). The draw UI (commit 4) writes the field only when a panel exists.
+  redactions?: RedactionRegion[];
 };
 
 const EMPTY_STATE: SidecarState = {
@@ -277,6 +298,7 @@ const EMPTY_STATE: SidecarState = {
   bubble_roundness: null,
   bubble_zone: null,
   zoom: [],
+  redactions: [],
 };
 
 const SIDECAR_DEBOUNCE_MS = 350;
