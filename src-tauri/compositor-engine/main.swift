@@ -151,6 +151,34 @@ let elevOffsetFrac = Double(env["BUBBLE_ELEV_OFFSET_FRAC"] ?? "0.05")!     // do
 let elevOffsetXFrac = Double(env["BUBBLE_ELEV_OFFSET_X_FRAC"] ?? "0.05")!  // right
 let elevAlpha = Double(env["BUBBLE_ELEV_ALPHA"] ?? "0.48")!
 
+// --- Redaction (REDACTION-PLAN): frosted-glass panels over static source-space
+// rects, active over [start,end] on the ORIGINAL timeline. Env REDACT_REGIONS = a
+// path to a JSON array of {x,y,w,h,start,end,tint}; x/y/w/h are source-frame
+// fractions, top-left origin, and tint is "light"|"dark". Applied AFTER zoom +
+// motion-blur and BEFORE the bubble/watermark, so the panel covers exactly the
+// composed screen content the viewer sees, and the rect is transformed through the
+// SAME zoom so it stays glued to its content. Absent/empty -> nothing runs and the
+// frame path is byte-identical to pre-feature (Vec::is_empty on the Rust side).
+struct Redaction { let x, y, w, h, start, end: Double; let dark: Bool }
+var redactions: [Redaction] = []
+if let rp = env["REDACT_REGIONS"], let data = FileManager.default.contents(atPath: rp) {
+    struct JRedact: Decodable { let x, y, w, h, start, end: Double; let tint: String? }
+    guard let js = try? JSONDecoder().decode([JRedact].self, from: data) else { fail("bad REDACT_REGIONS json") }
+    redactions = js.map { Redaction(x: $0.x, y: $0.y, w: $0.w, h: $0.h,
+        start: $0.start, end: $0.end, dark: ($0.tint ?? "light") == "dark") }
+}
+// Frosted-glass tuning. alpha = overlay opacity (aesthetics + residual attenuation);
+// radius = clamp(k*min(w,h), floor, cap) in output px. The FLOOR is a SAFETY
+// parameter (REDACTION-PLAN §3, DECISIONS 2026-07-25) — heavy blur is what erases
+// the text; it may rise but not fall without a stated reason. saturation mutes
+// color bleed. Defaults are the plan's starting values; tuned by eye later.
+let redactAlpha = Double(env["REDACT_ALPHA"] ?? "0.6")!
+let redactRadiusK = Double(env["REDACT_RADIUS_K"] ?? "0.08")!
+let redactRadiusFloor = Double(env["REDACT_RADIUS_FLOOR"] ?? "16")!
+let redactRadiusCap = Double(env["REDACT_RADIUS_CAP"] ?? "90")!
+let redactSaturation = Double(env["REDACT_SATURATION"] ?? "0.5")!
+let redactDebug = env["REDACT_DEBUG"] == "on"
+
 try? FileManager.default.removeItem(at: outURL)
 
 let asset = AVURLAsset(url: inURL)
@@ -501,6 +529,51 @@ writerInput.requestMediaDataWhenReady(on: queue) {
                     "inputCenter": CIVector(x: Wd / 2, y: Hd / 2),
                     "inputAmount": blurAmount])
                 .cropped(to: CGRect(x: 0, y: 0, width: W, height: H))
+        }
+
+        // --- Frosted-glass redaction. Each active region: transform its source-space
+        // rect through the CURRENT zoom into output space, clip to frame, and paint a
+        // frosted panel (heavy blur + desat + translucent tint) over the content.
+        // Guarded on !isEmpty so a no-redaction export never enters here and stays
+        // byte-identical to pre-feature.
+        if !redactions.isEmpty {
+            let winOx = qx - hw, winOy = qy - hh   // zoom crop origin in source CI px
+            for r in redactions where t >= r.start && t <= r.end {
+                // Source rect in CI bottom-left px (r.* are top-left fractions).
+                let sx = r.x * Wd
+                let sy = Hd - (r.y + r.h) * Hd
+                let sw = r.w * Wd, sh = r.h * Hd
+                // Map to output (post-zoom) space: (src - winOrigin) * s. At s==1,
+                // winOrigin==0 and s==1, so an unzoomed region lands on its own pixels.
+                let ox = (sx - winOx) * s, oy = (sy - winOy) * s
+                let region = CGRect(x: ox, y: oy, width: sw * s, height: sh * s)
+                    .intersection(CGRect(x: 0, y: 0, width: Wd, height: Hd))
+                if region.isNull || region.isEmpty { continue }
+                let radius = min(max(redactRadiusK * min(region.width, region.height),
+                                     redactRadiusFloor), redactRadiusCap)
+                if redactDebug {
+                    FileHandle.standardError.write(String(format:
+                        "REDACT t=%.3f region=%.1f,%.1f %.1fx%.1f radius=%.2f\n",
+                        t, region.minX, region.minY, region.width, region.height, radius)
+                        .data(using: .utf8)!)
+                }
+                // Blur the region's OWN content, edge-clamped so the panel is a clean
+                // rectangle rather than bleeding surrounding sharp pixels inward.
+                let base = out.cropped(to: region)
+                var frost = base.clampedToExtent()
+                    .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: radius])
+                    .cropped(to: region)
+                if redactSaturation < 0.999 {
+                    frost = frost.applyingFilter("CIColorControls",
+                        parameters: [kCIInputSaturationKey: redactSaturation])
+                }
+                // Translucent tint: out = a*C + (1-a)*frost (source-over). The tint is
+                // aesthetics + residual attenuation; the blur above is the real erase.
+                let g: CGFloat = r.dark ? 0.1 : 1.0
+                let tint = CIImage(color: CIColor(red: g, green: g, blue: g,
+                    alpha: CGFloat(redactAlpha))).cropped(to: region)
+                out = tint.composited(over: frost).composited(over: out)
+            }
         }
 
         // Screen-anchored webcam bubble (before watermark; on the final frame). Pull
