@@ -8,6 +8,15 @@ import { Icon, I, P } from "./components/icons";
 import SegmentTrack from "./components/SegmentTrack";
 import Waveform from "./Waveform";
 import ScrubPreview from "./ScrubPreview";
+import {
+  sourceRectToOutputRect,
+  redactRadius,
+  redactionsPayload,
+  REDACT_ALPHA,
+  REDACT_SATURATION,
+  type Rect,
+  type RedactionRegion,
+} from "./redaction";
 
 // Review window. Left column is player + timeline; right column is an
 // accordion panel (Trim / Bubble / Zoom / Watermark / Export sections plus a
@@ -65,21 +74,9 @@ type ZoomSegment = {
   auto_generated: boolean;
 };
 
-// Mirror of src-tauri/src/edit.rs::RedactionRegion. One frosted-glass panel.
-// x/y/w/h are source-frame fractions (top-left origin), like a zoom center's
-// cxf/cyf — resolution-independent, so no 2x-backing or downscale space to get
-// wrong. start/end are seconds on the original recording timeline. Static in
-// source space; the compositor transforms it through the active zoom at export.
-type RedactionTint = "light" | "dark";
-type RedactionRegion = {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  start: number;
-  end: number;
-  tint?: RedactionTint;
-};
+// RedactionRegion / RedactionTint now live in ./redaction (imported above), the
+// single source of the rect-through-zoom transform + frost constants shared with
+// the compositor. SidecarState below still references them.
 
 const ZOOM_DEFAULT_DURATION = 3;
 const ZOOM_MIN_DURATION = 0.5;
@@ -212,6 +209,21 @@ type ZoomEditor = {
   // the stage: un-suppresses the live zoom transform (so the motion is
   // visible) and hides the crop-box edit layer for the duration.
   looping: boolean;
+};
+
+// Stage overlay + right-panel Redact section share this.
+type RedactionEditor = {
+  regions: RedactionRegion[];
+  selectedIndex: number | null;
+  select: (i: number | null) => void;
+  update: (i: number, patch: Partial<RedactionRegion>) => void;
+  remove: (i: number) => void;
+  clearAll: () => void;
+  // Commit a freshly drawn source-space rect (fractions), select it.
+  add: (rect: { x: number; y: number; w: number; h: number }) => void;
+  // True while the Redact tool is active — enables the draw surface and, while
+  // paused, suppresses the live zoom so the box is drawn on the flat frame.
+  active: boolean;
 };
 
 // V2 Step 2: the ONE constant zone the export bakes the webcam bubble at.
@@ -457,6 +469,12 @@ function statesEqual(a: SidecarState, b: SidecarState, duration: number | null):
   for (let i = 0; i < za.length; i++) {
     if (JSON.stringify(za[i]) !== JSON.stringify(zb[i])) return false;
   }
+  const ra = a.redactions ?? [];
+  const rb = b.redactions ?? [];
+  if (ra.length !== rb.length) return false;
+  for (let i = 0; i < ra.length; i++) {
+    if (JSON.stringify(ra[i]) !== JSON.stringify(rb[i])) return false;
+  }
   return true;
 }
 
@@ -476,13 +494,15 @@ function isLogicallyEmpty(s: SidecarState, duration: number | null): boolean {
   const noRoundness = s.bubble_roundness == null;
   const noZone = s.bubble_zone == null;
   const noZoom = !s.zoom || s.zoom.length === 0;
+  const noRedactions = !s.redactions || s.redactions.length === 0;
   return (
     normalizeTrim(s.trim, duration) == null &&
     noBubble &&
     noThumb &&
     noRoundness &&
     noZone &&
-    noZoom
+    noZoom &&
+    noRedactions
   );
 }
 
@@ -499,6 +519,7 @@ function sidecarWritePayload(s: SidecarState, duration: number): SidecarState {
     bubble_roundness: s.bubble_roundness ?? null,
     bubble_zone: s.bubble_zone ?? undefined,
     zoom: s.zoom && s.zoom.length > 0 ? s.zoom : undefined,
+    redactions: redactionsPayload(s.redactions ?? []),
   };
 }
 
@@ -628,6 +649,14 @@ export default function Review() {
   // step-2 keyframe schema — converted on read and in currentState below.
   const [zoomSegments, setZoomSegments] = useState<ZoomSegment[]>([]);
   const [zoomSelectedIndex, setZoomSelectedIndex] = useState<number | null>(null);
+
+  // Redaction panels (REDACTION-PLAN). Stored source-space; drawn on the flat
+  // frame, previewed through the active zoom via the shared ./redaction transform.
+  const [redactions, setRedactions] = useState<RedactionRegion[]>([]);
+  const [redactSelectedIndex, setRedactSelectedIndex] = useState<number | null>(null);
+  // True while the Redact tool is active — the stage then suppresses zoom while
+  // paused (draw on the flat frame) and enables the drag-to-draw surface.
+  const [redactMode, setRedactMode] = useState(false);
   // Flips true once the mount-time read_sidecar settles. Gates the zoom
   // auto-load below so it never runs before we know whether the sidecar
   // already carried a zoom track (which would double-suggest).
@@ -801,6 +830,45 @@ export default function Review() {
     setZoomSelectedIndex(null);
   }, []);
 
+  // --- Redaction editing (mirrors the zoom callbacks). Regions are source-space
+  // fractional rects; the overlay draws them and the panel edits time/tint.
+  const selectRedaction = useCallback((i: number | null) => {
+    setRedactSelectedIndex(i);
+  }, []);
+  const updateRedaction = useCallback((i: number, patch: Partial<RedactionRegion>) => {
+    setRedactions((prev) => prev.map((r, k) => (k === i ? { ...r, ...patch } : r)));
+  }, []);
+  const deleteRedaction = useCallback((i: number) => {
+    setRedactions((prev) => prev.filter((_, k) => k !== i));
+    setRedactSelectedIndex(null);
+  }, []);
+  const clearAllRedactions = useCallback(() => {
+    setRedactions([]);
+    setRedactSelectedIndex(null);
+  }, []);
+  // Commit a freshly-drawn box (source-space fractions, normalized so w/h > 0).
+  // Defaults to the whole clip and a light frost; selects it for editing.
+  const addRedaction = useCallback(
+    (rect: { x: number; y: number; w: number; h: number }) => {
+      if (duration == null) return;
+      const region: RedactionRegion = {
+        x: rect.x,
+        y: rect.y,
+        w: rect.w,
+        h: rect.h,
+        start: 0,
+        end: duration,
+        tint: "light",
+      };
+      setRedactions((prev) => {
+        const next = [...prev, region];
+        Promise.resolve().then(() => setRedactSelectedIndex(next.length - 1));
+        return next;
+      });
+    },
+    [duration],
+  );
+
   // Step 5 suggestion detection — the manual "Re-suggest" button. Runs the
   // C.1 heuristic over the cursor telemetry on the Rust side; the result
   // replaces auto_generated segments only. Suggestions overlapping a manual
@@ -924,6 +992,7 @@ export default function Review() {
             bubble_roundness: state.bubble_roundness ?? null,
             bubble_zone: state.bubble_zone ?? null,
             zoom: state.zoom ?? [],
+            redactions: state.redactions ?? [],
           });
           if (state.trim) setTrim(state.trim);
           if (state.bubble_position_log) setBubblePositionLog(state.bubble_position_log);
@@ -932,6 +1001,9 @@ export default function Review() {
           if (state.bubble_zone != null) setBubbleZone(state.bubble_zone);
           if (state.zoom && state.zoom.length > 0) {
             setZoomSegments(zoomKeyframesToSegments(state.zoom));
+          }
+          if (state.redactions && state.redactions.length > 0) {
+            setRedactions(state.redactions);
           }
         } else {
           setSnapshot(EMPTY_STATE);
@@ -1036,8 +1108,9 @@ export default function Review() {
       bubble_roundness: bubbleRoundness,
       bubble_zone: bubbleZone,
       zoom: zoomSegmentsToKeyframes(zoomSegments),
+      redactions,
     }),
-    [trim, bubblePositionLog, thumbnailTime, bubbleRoundness, bubbleZone, zoomSegments],
+    [trim, bubblePositionLog, thumbnailTime, bubbleRoundness, bubbleZone, zoomSegments, redactions],
   );
 
   const dirty = useMemo(
@@ -1712,6 +1785,17 @@ export default function Review() {
     looping: loopingZoom,
   };
 
+  const redactionEditor: RedactionEditor = {
+    regions: redactions,
+    selectedIndex: redactSelectedIndex,
+    select: selectRedaction,
+    update: updateRedaction,
+    remove: deleteRedaction,
+    clearAll: clearAllRedactions,
+    add: addRedaction,
+    active: redactMode,
+  };
+
   const thumbnailControls: ThumbnailControls = {
     thumbnailTime,
     setThumbnailTime,
@@ -1790,6 +1874,7 @@ export default function Review() {
             opacity: wmOpacity,
           }}
           zoom={zoomEditor}
+          redact={redactionEditor}
           thumbnailTime={thumbnailTime}
           bubbleRoundness={bubbleRoundness}
           bubbleZone={effectiveZone}
@@ -1797,6 +1882,8 @@ export default function Review() {
         <ExportPanel
           sourcePath={sourcePath}
           zoom={zoomEditor}
+          redact={redactionEditor}
+          onToolChange={(id) => setRedactMode(id === "redact")}
           thumbnail={thumbnailControls}
           bubbleZone={effectiveZone}
           onBubbleZone={setBubbleZone}
@@ -1970,6 +2057,7 @@ type LeftColumnProps = {
   audioStart: number | null;
   watermarkPreview: WatermarkPreview;
   zoom: ZoomEditor;
+  redact: RedactionEditor;
   // Timeline marker only — the thumbnail picker itself lives in the right
   // panel's Export section.
   thumbnailTime: number | null;
@@ -2012,6 +2100,7 @@ function LeftColumn(props: LeftColumnProps) {
         playbackRate={props.playbackRate}
         watermarkPreview={props.watermarkPreview}
         zoom={props.zoom}
+        redact={props.redact}
       />
       <Timeline
         assetUrl={props.assetUrl}
@@ -2253,6 +2342,7 @@ type VideoStageProps = {
   playbackRate: number;
   watermarkPreview: WatermarkPreview;
   zoom: ZoomEditor;
+  redact: RedactionEditor;
 };
 
 function VideoStage(props: VideoStageProps) {
@@ -2280,6 +2370,10 @@ function VideoStage(props: VideoStageProps) {
   const zoomEditing = props.zoom.selectedIndex != null;
   const zoomLooping = props.zoom.looping;
   const videoRefForZoom = props.videoRef;
+  // While the Redact tool is active AND paused, hold the frame flat so a box is
+  // drawn in true source space (no zoom to invert). Playing in the tool un-holds
+  // it, so the frost tracks the magnified content — the live coverage check.
+  const redactFlat = props.redact.active && !props.playing;
   useEffect(() => {
     const video = videoRefForZoom.current;
     // V2 Step 3: the transform drives the wrapper around the video. The
@@ -2290,7 +2384,7 @@ function VideoStage(props: VideoStageProps) {
       layer.style.transform = "";
       layer.style.transformOrigin = "";
     };
-    if (zoomSegs.length === 0 || (zoomEditing && !zoomLooping) || !videoDims) {
+    if (zoomSegs.length === 0 || (zoomEditing && !zoomLooping) || redactFlat || !videoDims) {
       reset();
       return;
     }
@@ -2325,7 +2419,7 @@ function VideoStage(props: VideoStageProps) {
       cancelAnimationFrame(raf);
       reset();
     };
-  }, [zoomSegs, zoomEditing, zoomLooping, videoDims, videoRefForZoom]);
+  }, [zoomSegs, zoomEditing, zoomLooping, redactFlat, videoDims, videoRefForZoom]);
 
   const onStageClick = (e: React.MouseEvent) => {
     // Click on the empty stage background = deselect any zoom, which leaves
@@ -2432,6 +2526,14 @@ function VideoStage(props: VideoStageProps) {
               }}
             />
           )}
+        <RedactionLayer
+          stageRef={stageRef}
+          videoDims={videoDims}
+          editor={props.redact}
+          zoomSegs={props.zoom.segments}
+          videoRef={props.videoRef}
+          flat={redactFlat}
+        />
         <PlayerOverlay
           playing={props.playing}
           duration={props.duration}
@@ -2857,6 +2959,150 @@ function ZoomEditLayer({
           <circle cx={13} cy={13} r={1.8} fill="var(--zoom)" />
         </svg>
       </div>
+    </div>
+  );
+}
+
+// Frosted-glass redaction overlay. Every region is positioned + blurred by the
+// SHARED ./redaction transform at the current playhead, so the preview honors the
+// active zoom exactly as the compositor does (proven by redaction-gate/transform-
+// pin.ts). While `flat` (Redact tool active + paused) the zoom is held identity so
+// the box is authored in true source space, and a crosshair draw surface is armed.
+// Box styles are written imperatively in an rAF (the zoom-preview pattern) so the
+// frost tracks a zoom ramp without a React re-render per frame.
+function RedactionLayer({
+  stageRef,
+  videoDims,
+  editor,
+  zoomSegs,
+  videoRef,
+  flat,
+}: {
+  stageRef: React.MutableRefObject<HTMLDivElement | null>;
+  videoDims: { w: number; h: number } | null;
+  editor: RedactionEditor;
+  zoomSegs: ZoomSegment[];
+  videoRef: React.MutableRefObject<HTMLVideoElement | null>;
+  flat: boolean;
+}) {
+  const size = useStageSize(stageRef);
+  const boxRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const [pending, setPending] = useState<Rect | null>(null);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !videoDims || editor.regions.length === 0) return;
+    let raf = 0;
+    const tick = () => {
+      raf = requestAnimationFrame(tick);
+      const stage = stageRef.current;
+      if (!stage) return;
+      const rect = stage.getBoundingClientRect();
+      const b = contentBox({ width: rect.width, height: rect.height }, videoDims);
+      const dsx = videoDims.w > 0 ? b.w / videoDims.w : 0;
+      const t = video.currentTime;
+      editor.regions.forEach((region, i) => {
+        const node = boxRefs.current[i];
+        if (!node) return;
+        const active = t >= region.start && t <= region.end;
+        const zoom = flat ? null : zoomAt(zoomSegs, t);
+        const out = active ? sourceRectToOutputRect(region, zoom, videoDims.w, videoDims.h) : null;
+        if (!out) {
+          node.style.display = "none";
+          return;
+        }
+        node.style.display = "block";
+        node.style.left = `${b.x + out.x * dsx}px`;
+        node.style.top = `${b.y + out.y * dsx}px`;
+        node.style.width = `${out.w * dsx}px`;
+        node.style.height = `${out.h * dsx}px`;
+        // Same radius formula the compositor uses (output px), shown at the
+        // preview's display scale. Alpha + saturation are the shared constants.
+        const radiusStage = redactRadius(out.w, out.h) * dsx;
+        const tint = region.tint === "dark" ? "18, 18, 18" : "255, 255, 255";
+        const filter = `blur(${radiusStage}px) saturate(${REDACT_SATURATION})`;
+        node.style.backdropFilter = filter;
+        node.style.setProperty("-webkit-backdrop-filter", filter);
+        node.style.background = `rgba(${tint}, ${REDACT_ALPHA})`;
+      });
+    };
+    tick();
+    return () => cancelAnimationFrame(raf);
+  }, [editor.regions, zoomSegs, videoDims, videoRef, stageRef, flat, size]);
+
+  if (!videoDims) return null;
+  const b = contentBox({ width: size.width, height: size.height }, videoDims);
+
+  const startDraw = (e: React.PointerEvent) => {
+    const stage = stageRef.current;
+    if (!stage || !videoDims) return;
+    e.preventDefault();
+    const rect = stage.getBoundingClientRect();
+    const box = contentBox({ width: rect.width, height: rect.height }, videoDims);
+    const anchor = toContentFrac({ x: e.clientX - rect.left, y: e.clientY - rect.top }, box);
+    const rectFrom = (ev: { clientX: number; clientY: number }): Rect => {
+      const cur = toContentFrac({ x: ev.clientX - rect.left, y: ev.clientY - rect.top }, box);
+      return {
+        x: Math.min(anchor.x, cur.x),
+        y: Math.min(anchor.y, cur.y),
+        w: Math.abs(cur.x - anchor.x),
+        h: Math.abs(cur.y - anchor.y),
+      };
+    };
+    const onMove = (ev: PointerEvent) => setPending(rectFrom(ev));
+    const onUp = (ev: PointerEvent) => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      const r = rectFrom(ev);
+      setPending(null);
+      // Ignore accidental taps; a real box is at least ~1% of the frame each side.
+      if (r.w > 0.01 && r.h > 0.01) editor.add(r);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    setPending(rectFrom(e));
+  };
+
+  return (
+    <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
+      {editor.regions.map((_, i) => (
+        <div
+          key={i}
+          ref={(el) => {
+            boxRefs.current[i] = el;
+          }}
+          style={{
+            position: "absolute",
+            display: "none",
+            borderRadius: 2,
+            border:
+              editor.selectedIndex === i
+                ? "1.5px solid var(--zoom)"
+                : "1px solid rgba(255,255,255,0.4)",
+            pointerEvents: "none",
+          }}
+        />
+      ))}
+      {pending && (
+        <div
+          style={{
+            position: "absolute",
+            left: b.x + pending.x * b.w,
+            top: b.y + pending.y * b.h,
+            width: pending.w * b.w,
+            height: pending.h * b.h,
+            border: "1.5px dashed var(--zoom)",
+            background: "rgba(255,255,255,0.15)",
+            pointerEvents: "none",
+          }}
+        />
+      )}
+      {editor.active && flat && (
+        <div
+          onPointerDown={startDraw}
+          style={{ position: "absolute", inset: 0, cursor: "crosshair", pointerEvents: "auto", touchAction: "none" }}
+        />
+      )}
     </div>
   );
 }
@@ -3678,8 +3924,8 @@ type SaveSpec = {
 // mirrors the working flow: Trim, Bubble, Zoom, Watermark, Mark. A persisted
 // id from an older build (e.g. "export"/"annotate"/"share") falls back to the
 // default.
-type ToolId = "trim" | "bubble" | "zoom" | "watermark" | "mark";
-const TOOL_IDS: ToolId[] = ["trim", "bubble", "zoom", "watermark", "mark"];
+type ToolId = "trim" | "bubble" | "zoom" | "redact" | "watermark" | "mark";
+const TOOL_IDS: ToolId[] = ["trim", "bubble", "zoom", "redact", "watermark", "mark"];
 const DEFAULT_TOOL: ToolId = "trim";
 // Key versioned away from the old "review-panel-open-section" accordion format.
 const TOOL_LS_KEY = "review-panel-active-tool";
@@ -3807,6 +4053,8 @@ function ZonePicker({
 function ExportPanel({
   sourcePath,
   zoom,
+  redact,
+  onToolChange,
   thumbnail,
   bubbleZone,
   onBubbleZone,
@@ -3835,6 +4083,10 @@ function ExportPanel({
 }: {
   sourcePath: string | null;
   zoom: ZoomEditor;
+  redact: RedactionEditor;
+  // Fired when the active tool changes (and on mount) so the parent can put the
+  // stage into redact-draw mode. Optional so other ExportPanel call sites needn't.
+  onToolChange?: (id: ToolId) => void;
   thumbnail: ThumbnailControls;
   // V2 Step 2: effective bubble zone (explicit pick or migration default),
   // the setter for an explicit pick, and whether this recording has a webcam
@@ -3888,6 +4140,11 @@ function ExportPanel({
       return id;
     });
   }, []);
+  // Keep the stage's redact-draw mode in sync with the active tool (also fires on
+  // mount, so a restored "redact" tool arms the draw surface immediately).
+  useEffect(() => {
+    onToolChange?.(activeTool);
+  }, [activeTool, onToolChange]);
 
   // Thumbnail popover — moved here from the old top toolbar. capturedTime
   // is grabbed at open so the preview shows the exact frame the user had
@@ -4047,7 +4304,7 @@ function ExportPanel({
           overflow is impossible by construction (full-width rows only). */}
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", padding: "10px 12px 12px" }}>
         {/* Tool toolbar — one active tool; the contextual card below swaps to match. */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 4, marginBottom: 6 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 4, marginBottom: 6 }}>
           <ToolTile
             label="Trim"
             active={activeTool === "trim"}
@@ -4067,6 +4324,12 @@ function ExportPanel({
             active={activeTool === "zoom"}
             onClick={() => setActiveTool("zoom")}
             icon={<Icon d={<><circle cx="7" cy="7" r="4" /><path d="M10 10l3.5 3.5M5.2 7h3.6M7 5.2v3.6" /></>} size={17} stroke={1.4} />}
+          />
+          <ToolTile
+            label="Redact"
+            active={activeTool === "redact"}
+            onClick={() => setActiveTool("redact")}
+            icon={<Icon d={<><rect x="2.5" y="4.5" width="11" height="7" rx="1.5" /><path d="M4.5 6.5h7M4.5 9.5h5" /></>} size={17} stroke={1.4} />}
           />
           <ToolTile
             label="Watermark"
@@ -4190,6 +4453,124 @@ function ExportPanel({
               </div>
             )}
           </div>
+            </div>
+          </>
+        )}
+
+        {activeTool === "redact" && (
+          <>
+            <div style={RAIL_EYEBROW}>Redact</div>
+            <div style={CTX_CARD}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <div style={{ fontSize: 11, color: "var(--fg-tertiary)", lineHeight: 1.4 }}>
+                  Drag on the paused video to frost over anything sensitive. Press{" "}
+                  <span className="kbd">Space</span> to preview the panel tracking the
+                  zoom. Boxes stay glued to what they cover.
+                </div>
+                {redact.regions.length > 0 && (
+                  <button
+                    className="btn-secondary"
+                    style={{ height: 26, fontSize: 11.5 }}
+                    onClick={redact.clearAll}
+                    disabled={busy}
+                  >
+                    Clear all
+                  </button>
+                )}
+                {redact.regions.length === 0 ? (
+                  <div style={{ fontSize: 11, color: "var(--fg-tertiary)" }}>
+                    No panels yet. Drag a box on the video to add one.
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    {redact.regions.map((r, i) => (
+                      <div
+                        key={i}
+                        onClick={() => redact.select(i)}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 6,
+                          padding: "4px 6px",
+                          borderRadius: 6,
+                          cursor: "pointer",
+                          background:
+                            redact.selectedIndex === i ? "var(--bg-elevated)" : "transparent",
+                          border:
+                            redact.selectedIndex === i
+                              ? "1px solid var(--border-subtle)"
+                              : "1px solid transparent",
+                        }}
+                      >
+                        <span style={{ flex: 1, fontSize: 11.5 }}>Panel {i + 1}</span>
+                        <button
+                          className="btn-secondary"
+                          style={{ height: 22, fontSize: 10.5, padding: "0 6px" }}
+                          title="Frost tint — pick the one that reads over this content"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            redact.update(i, { tint: r.tint === "dark" ? "light" : "dark" });
+                          }}
+                        >
+                          {r.tint === "dark" ? "Dark" : "Light"}
+                        </button>
+                        <button
+                          className="btn-secondary"
+                          style={{ height: 22, fontSize: 10.5, padding: "0 6px" }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            redact.remove(i);
+                          }}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {redact.selectedIndex != null &&
+                  redact.regions[redact.selectedIndex] &&
+                  duration != null && (
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <Field label="Start (s)">
+                        <input
+                          type="number"
+                          min={0}
+                          max={duration}
+                          step={0.1}
+                          value={Number(redact.regions[redact.selectedIndex].start.toFixed(1))}
+                          onChange={(e) => {
+                            const i = redact.selectedIndex;
+                            if (i == null) return;
+                            const end = redact.regions[i].end;
+                            redact.update(i, {
+                              start: Math.max(0, Math.min(Number(e.target.value), end)),
+                            });
+                          }}
+                          style={{ width: "100%" }}
+                        />
+                      </Field>
+                      <Field label="End (s)">
+                        <input
+                          type="number"
+                          min={0}
+                          max={duration}
+                          step={0.1}
+                          value={Number(redact.regions[redact.selectedIndex].end.toFixed(1))}
+                          onChange={(e) => {
+                            const i = redact.selectedIndex;
+                            if (i == null) return;
+                            const start = redact.regions[i].start;
+                            redact.update(i, {
+                              end: Math.min(duration, Math.max(Number(e.target.value), start)),
+                            });
+                          }}
+                          style={{ width: "100%" }}
+                        />
+                      </Field>
+                    </div>
+                  )}
+              </div>
             </div>
           </>
         )}
