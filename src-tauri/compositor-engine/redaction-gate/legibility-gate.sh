@@ -92,15 +92,19 @@ gate_card light
 gate_card dark
 
 # ---- TEETH: a forced below-floor cell must fall under the big-text stroke ----
-say ""; say "==== TEETH — cell floor is meaningful ===="
+say ""; say "==== TEETH — the stroke clamp is meaningful ===="
+# Safety now rides the runtime stroke clamp (cell >= 1.5x MEASURED stroke), not a
+# fixed floor. Teeth: a cell of 16 forced on the big region falls under 1.5x its
+# measured stroke, so the geometric check rejects it (and the compositor would clamp
+# it up). This is the boundary the eye-check confirmed (cell 16 leaked, >=24 held).
 read bx by bw bh <<<"$(grep '^ITEM big ' "$WORK/m-light.txt" | awk '{print $3,$4,$5,$6}')"
 p=$(python3 -c "print(max(4.0,0.05*$bh))")
 bfx=$(python3 -c "print(($bx-$p)/$W)"); bfy=$(python3 -c "print(($by-$p)/$H)"); bfw=$(python3 -c "print(($bw+2*$p)/$W)"); bfh=$(python3 -c "print(($bh+2*$p)/$H)")
 bstroke=$("$RH" stroke "$WORK/c-light.mp4" $bfx $bfy $bfw $bfh | sed -E 's/STROKE ([0-9.]+).*/\1/')
-say "  big stroke=$bstroke ; a cell of 16 (below floor 24) => ratio $(python3 -c "print('%.2f'%(16/$bstroke))")x"
-python3 -c "exit(0 if 16 < $bstroke else 1)" \
-  && ok "teeth: forced cell 16 is below the big-text stroke ($bstroke) — gate would reject it" \
-  || bad "teeth: cell 16 exceeds stroke $bstroke — floor no longer meaningful"
+say "  big stroke=$bstroke ; a forced cell of 16 => ratio $(python3 -c "print('%.2f'%(16/$bstroke))")x (need >= 1.5x)"
+python3 -c "exit(0 if 16 < 1.5*$bstroke else 1)" \
+  && ok "teeth: forced cell 16 is below 1.5x the measured stroke ($bstroke) — rejected/clamped up" \
+  || bad "teeth: cell 16 clears 1.5x stroke $bstroke — clamp no longer meaningful"
 
 # ---- ADVISORY: discriminability D (not a hard fail) ----
 say ""; say "==== ADVISORY — discriminability D (block-pattern leak, accepted limit) ===="

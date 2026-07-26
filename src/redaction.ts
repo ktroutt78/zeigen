@@ -10,7 +10,9 @@
 // value is tuned by eye later, it must change in BOTH places — main.swift's default
 // and here — or the preview stops matching the export. See DECISIONS 2026-07-25.
 
-export type RedactionTint = "light" | "dark";
+// "auto" (default): the compositor picks a dark frost over light content / light
+// over dark, sampled once per region. "light"/"dark" force it (manual override).
+export type RedactionTint = "auto" | "light" | "dark";
 export type RedactionRegion = {
   x: number;
   y: number;

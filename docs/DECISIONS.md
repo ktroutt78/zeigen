@@ -4,6 +4,22 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-26 (part 2) — Redaction coverage fixes: cell floor lowered, safety moves to a runtime stroke-clamp; adaptive tint; edge-aligned grid
+
+Owner eye-check on the first pixelate build: UNREADABLE holds (pixelate works), but the panels rendered as a scatter of blocks with gaps, not solid frosted rectangles. Three mechanisms, all fixed (main.swift):
+
+1. **Cell floor 24 -> 10.** The fixed floor of 24 was calibrated on big-bold stroke ~25px and OVER-BLOCKED small text (stroke ~5px) into 2-3 giant tiles. Lowering it makes small boxes a proper mosaic. **Safety no longer rides this floor** — see #2 — so the change doesn't erode the guarantee. K also 0.4 -> 0.3 (finer, aesthetic).
+
+2. **Safety is now a RUNTIME stroke-clamp, not a fixed floor.** The compositor samples each region's text stroke width once (2*inkArea/inkPerimeter, same estimator as the gate harness) and clamps `cell = max(proxyCell, 1.5 * measured_stroke)`, logging when the clamp binds. So the cell is guaranteed >= 1.5x the ACTUAL stroke per region — a small box over thick strokes can't slip under, which a fixed floor couldn't guarantee. The 1.5x margin is the safety parameter now; it does not come down without a logged reason. Gate re-run on the corpus: every item clears stroke by 2.25-3.49x, hardened OCR reads nothing (incl. the smallest cells 12/18), teeth hold.
+
+3. **Adaptive tint (default), replacing the light/dark default.** A light frost on a light card was invisible (0.6 white on 0.97 -> imperceptible), which was the real cause of the "gaps" — the tint covered the full rect but you couldn't see it. `RedactionTint::Auto` (now the default) samples the region's mean luminance ONCE (held for the region's duration — no per-frame re-sample, no flicker) and picks a dark frost over light content / light over dark. Manual Light/Dark remain as an escape hatch. Wired through compositor + edit.rs + redaction.ts + the Review 3-way toggle.
+
+4. **Grid edge-aligned to the region.** CIPixellate `inputCenter` was set to the region corner, which centers a CELL on the corner so cells straddle the box edge by half a cell (tiles overhang the outline). Fixed by translating the region to origin, pixelating with a cell EDGE at 0 (`inputCenter = cell/2`), cropping, translating back.
+
+KNOWN FOLLOW-UP (still open): the Review PREVIEW still renders a blur backdrop-filter, not the pixelate+adaptive-tint treatment — preview no longer matches export. Next task after this eye-check confirms the treatment.
+
+---
+
 ## 2026-07-26 — Redaction base layer is PIXELATE, not gaussian blur (blur is out)
 
 **Gaussian blur cannot redact large bold text. Do not re-propose it.** Proven empirically (redaction-gate): blur PRESERVES glyph shape at every radius — the shape lives in the low frequencies gaussian keeps — and the translucent overlay is a linear, INVERTIBLE composite. So contrast-recovery (min/max stretch + sharpen + upscale, i.e. undo the overlay) reads the secret straight back: hardened OCR read `$849` cleanly through the frost at radius 48, 90, AND 120 (a blur wider than half the digit height). To actually destroy large-text shape with blur you need a radius approaching the full glyph height — an opaque blob, not frosted glass. The earlier gradient gate reported a 14x safety margin on text that was trivially readable by eye; that gate measured spectral edge attenuation, which is blind to the low-frequency shape that carries legibility for large text.

@@ -159,13 +159,19 @@ let elevAlpha = Double(env["BUBBLE_ELEV_ALPHA"] ?? "0.48")!
 // composed screen content the viewer sees, and the rect is transformed through the
 // SAME zoom so it stays glued to its content. Absent/empty -> nothing runs and the
 // frame path is byte-identical to pre-feature (Vec::is_empty on the Rust side).
-struct Redaction { let x, y, w, h, start, end: Double; let dark: Bool }
+// tint: "auto" (default) samples the region's mean luminance ONCE and picks a dark
+// frost over light content / light frost over dark content, held for the region's
+// duration (no per-frame re-sample -> no flicker). "light"/"dark" force it.
+enum Tint { case auto, light, dark }
+struct Redaction { let x, y, w, h, start, end: Double; let tint: Tint }
 var redactions: [Redaction] = []
 if let rp = env["REDACT_REGIONS"], let data = FileManager.default.contents(atPath: rp) {
     struct JRedact: Decodable { let x, y, w, h, start, end: Double; let tint: String? }
     guard let js = try? JSONDecoder().decode([JRedact].self, from: data) else { fail("bad REDACT_REGIONS json") }
-    redactions = js.map { Redaction(x: $0.x, y: $0.y, w: $0.w, h: $0.h,
-        start: $0.start, end: $0.end, dark: ($0.tint ?? "light") == "dark") }
+    redactions = js.map {
+        let tint: Tint = $0.tint == "light" ? .light : $0.tint == "dark" ? .dark : .auto
+        return Redaction(x: $0.x, y: $0.y, w: $0.w, h: $0.h, start: $0.start, end: $0.end, tint: tint)
+    }
 }
 // Frosted-glass tuning. alpha = overlay opacity (aesthetics + residual attenuation);
 // radius = clamp(k*min(w,h), floor, cap) in output px. The FLOOR is a SAFETY
@@ -188,9 +194,18 @@ let redactDebug = env["REDACT_DEBUG"] == "on"
 // not come down without a logged reason; K/CAP are aesthetic. REDACT_CELL forces an
 // absolute cell for calibration sweeps.
 let redactMode = env["REDACT_MODE"] ?? "pixelate"
-let redactCellK = Double(env["REDACT_CELL_K"] ?? "0.4")!
-let redactCellFloor = Double(env["REDACT_CELL_FLOOR"] ?? "24")!
+let redactCellK = Double(env["REDACT_CELL_K"] ?? "0.3")!
+// FLOOR lowered from 24 -> 10 (DECISIONS 2026-07-26 part 2): the fixed 24 was
+// calibrated on big-bold stroke ~25px and over-blocked SMALL text (stroke ~5px) into
+// 2-3 giant tiles. Safety no longer rides this floor — it rides the runtime
+// stroke-clamp below (cell >= MARGIN * MEASURED stroke), so the proxy can be aesthetic.
+let redactCellFloor = Double(env["REDACT_CELL_FLOOR"] ?? "10")!
 let redactCellCap = Double(env["REDACT_CELL_CAP"] ?? "220")!
+// SAFETY: the mosaic cell must exceed the region's MEASURED text stroke width or the
+// glyph survives (cell 16 leaked / 24 held at stroke 25). The proxy above picks a
+// cell for looks; this clamps it UP to MARGIN x the stroke measured per region, so
+// safety is measured, not assumed. 1.5 does not come down without a logged reason.
+let redactStrokeMargin = Double(env["REDACT_CELL_STROKE_MARGIN"] ?? "1.5")!
 let redactCellForce = Double(env["REDACT_CELL"] ?? "")
 
 try? FileManager.default.removeItem(at: outURL)
@@ -454,6 +469,54 @@ if bubbleWebcam != nil {
 }
 var lastBubble: CIImage? = nil
 
+// Per-region redaction sample: mean luminance (adaptive tint) + stroke width (cell
+// safety clamp), computed ONCE the first time a region is active and HELD for its
+// whole duration — no per-frame re-sample, so a static region over changing content
+// can't flicker (owner requirement 2026-07-26). Keyed by region index.
+var redactSampled: [Int: (dark: Bool, stroke: Double)] = [:]
+func sampleRegion(_ img: CIImage, _ rect: CGRect) -> (dark: Bool, stroke: Double) {
+    let w = max(1, Int(rect.width.rounded())), h = max(1, Int(rect.height.rounded()))
+    var buf = [UInt8](repeating: 0, count: w * h * 4)
+    let shifted = img.transformed(by: CGAffineTransform(translationX: -rect.minX, y: -rect.minY))
+    ciContext.render(shifted, toBitmap: &buf, rowBytes: w * 4,
+        bounds: CGRect(x: 0, y: 0, width: w, height: h), format: .RGBA8, colorSpace: cs709)
+    func lumaAt(_ i: Int) -> Double {
+        0.299 * Double(buf[i]) + 0.587 * Double(buf[i + 1]) + 0.114 * Double(buf[i + 2])
+    }
+    var sum = 0.0, lo = 255.0, hi = 0.0
+    var i = 0
+    while i < w * h * 4 {
+        let l = lumaAt(i)
+        sum += l; if l < lo { lo = l }; if l > hi { hi = l }
+        i += 4
+    }
+    let mean = sum / Double(w * h)
+    // Adaptive tint: dark frost over light content, light frost over dark content, so
+    // the panel is always perceptible (a light frost on a light card was invisible).
+    let dark = mean >= 128
+    // Stroke width ~ 2*inkArea/inkPerimeter (same estimator as the gate harness).
+    let mid = (lo + hi) / 2
+    var darkCount = 0
+    i = 0
+    while i < w * h * 4 { if lumaAt(i) < mid { darkCount += 1 }; i += 4 }
+    let inkIsDark = darkCount <= w * h - darkCount
+    func ink(_ x: Int, _ y: Int) -> Bool {
+        let l = lumaAt((y * w + x) * 4)
+        return inkIsDark ? l < mid : l >= mid
+    }
+    var area = 0, perim = 0
+    for y in 0..<h {
+        for x in 0..<w where ink(x, y) {
+            area += 1
+            let edge = x == 0 || y == 0 || x == w - 1 || y == h - 1
+                || !ink(x - 1, y) || !ink(x + 1, y) || !ink(x, y - 1) || !ink(x, y + 1)
+            if edge { perim += 1 }
+        }
+    }
+    let stroke = perim > 0 ? 2.0 * Double(area) / Double(perim) : 0
+    return (dark, stroke)
+}
+
 // CFR resampling: emit output frames on a fixed `fps` grid instead of 1:1 with the
 // VFR source. SCK skips unchanged (idle) frames, so the capture is VFR — a zoom keyed
 // off frame PTS then lurches across an idle gap (the V3 stutter). For each output tick
@@ -552,7 +615,7 @@ writerInput.requestMediaDataWhenReady(on: queue) {
         // byte-identical to pre-feature.
         if !redactions.isEmpty {
             let winOx = qx - hw, winOy = qy - hh   // zoom crop origin in source CI px
-            for r in redactions where t >= r.start && t <= r.end {
+            for (ri, r) in redactions.enumerated() where t >= r.start && t <= r.end {
                 // Source rect in CI bottom-left px (r.* are top-left fractions).
                 let sx = r.x * Wd
                 let sy = Hd - (r.y + r.h) * Hd
@@ -563,35 +626,58 @@ writerInput.requestMediaDataWhenReady(on: queue) {
                 let region = CGRect(x: ox, y: oy, width: sw * s, height: sh * s)
                     .intersection(CGRect(x: 0, y: 0, width: Wd, height: Hd))
                 if region.isNull || region.isEmpty { continue }
+                // Sample the region's content ONCE (mean luma + stroke) from the
+                // pre-redaction frame, then hold — no per-frame re-sample.
+                let sample = redactSampled[ri] ?? {
+                    let s0 = sampleRegion(out, region); redactSampled[ri] = s0; return s0
+                }()
                 let minDim = min(region.width, region.height)
                 let radius = min(max(redactRadiusK * minDim, redactRadiusFloor), redactRadiusCap)
-                let cell = redactCellForce ?? min(max(redactCellK * minDim, redactCellFloor), redactCellCap)
+                // Cell: proxy for looks, then CLAMPED UP to MARGIN x measured stroke so
+                // safety is measured per region, not assumed (a small box over thick
+                // strokes can't slip under). Log when the stroke clamp binds.
+                let proxyCell = min(max(redactCellK * minDim, redactCellFloor), redactCellCap)
+                let safeCell = redactStrokeMargin * sample.stroke
+                var cell = max(proxyCell, safeCell)
+                if let forced = redactCellForce { cell = forced }
+                let clamped = safeCell > proxyCell && redactCellForce == nil
                 if redactDebug {
                     FileHandle.standardError.write(String(format:
-                        "REDACT t=%.3f region=%.1f,%.1f %.1fx%.1f mode=%@ radius=%.2f cell=%.2f\n",
-                        t, region.minX, region.minY, region.width, region.height, redactMode, radius, cell)
-                        .data(using: .utf8)!)
+                        "REDACT t=%.3f region=%.1f,%.1f %.1fx%.1f mode=%@ radius=%.2f cell=%.2f stroke=%.2f clampUp=%@\n",
+                        t, region.minX, region.minY, region.width, region.height, redactMode,
+                        radius, cell, sample.stroke, clamped ? "yes" : "no").data(using: .utf8)!)
                 }
                 // Base layer over the region's OWN content, edge-clamped so the panel is
                 // a clean rectangle. Pixelate (mosaic, cell-quantized — destroys within-
                 // cell info) or the legacy shape-preserving gaussian blur.
-                let base = out.cropped(to: region).clampedToExtent()
                 var frost: CIImage
                 if redactMode == "pixelate" {
-                    frost = base.applyingFilter("CIPixellate", parameters: [
-                        kCIInputCenterKey: CIVector(x: region.minX, y: region.minY),
-                        kCIInputScaleKey: cell]).cropped(to: region)
+                    // Grid EDGE-aligned to the region origin: translate the region to
+                    // (0,0), pixelate with a cell edge at 0 (inputCenter = cell/2), crop,
+                    // translate back. Without this the grid is corner-CENTERED and cells
+                    // straddle the box edge by half a cell (tiles overhang the outline).
+                    let atOrigin = out.transformed(
+                        by: CGAffineTransform(translationX: -region.minX, y: -region.minY))
+                        .clampedToExtent()
+                    frost = atOrigin.applyingFilter("CIPixellate", parameters: [
+                        kCIInputCenterKey: CIVector(x: cell / 2, y: cell / 2),
+                        kCIInputScaleKey: cell])
+                        .cropped(to: CGRect(x: 0, y: 0, width: region.width, height: region.height))
+                        .transformed(by: CGAffineTransform(translationX: region.minX, y: region.minY))
                 } else {
-                    frost = base.applyingFilter("CIGaussianBlur",
-                        parameters: [kCIInputRadiusKey: radius]).cropped(to: region)
+                    frost = out.cropped(to: region).clampedToExtent()
+                        .applyingFilter("CIGaussianBlur",
+                            parameters: [kCIInputRadiusKey: radius]).cropped(to: region)
                 }
                 if redactSaturation < 0.999 {
                     frost = frost.applyingFilter("CIColorControls",
                         parameters: [kCIInputSaturationKey: redactSaturation])
                 }
-                // Translucent tint: out = a*C + (1-a)*frost (source-over). The tint is
-                // aesthetics + residual attenuation; the base layer is the real erase.
-                let g: CGFloat = r.dark ? 0.1 : 1.0
+                // Translucent tint, adaptive unless forced: out = a*C + (1-a)*frost.
+                // Dark frost over light content / light frost over dark, so the panel
+                // is always visible (a light frost on a light card vanished).
+                let dark = r.tint == .light ? false : r.tint == .dark ? true : sample.dark
+                let g: CGFloat = dark ? 0.12 : 0.95
                 let tint = CIImage(color: CIColor(red: g, green: g, blue: g,
                     alpha: CGFloat(redactAlpha))).cropped(to: region)
                 out = tint.composited(over: frost).composited(over: out)

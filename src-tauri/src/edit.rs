@@ -189,7 +189,11 @@ pub struct RedactionRegion {
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum RedactionTint {
+    // Auto (default): the compositor samples the region's mean luminance once and
+    // picks a dark frost over light content / light frost over dark, so the panel is
+    // always visible. Light/Dark force it (manual override / escape hatch).
     #[default]
+    Auto,
     Light,
     Dark,
 }
@@ -2103,12 +2107,12 @@ mod tests {
         write_sidecar_path(&source, &state).unwrap();
         assert_eq!(read_sidecar_path(&source).unwrap().unwrap(), state);
 
-        // tint is optional on input and defaults to Light.
+        // tint is optional on input and defaults to Auto (adaptive).
         let sparse: RedactionRegion = serde_json::from_str(
             r#"{"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4, "start": 1.0, "end": 2.0}"#,
         )
         .unwrap();
-        assert_eq!(sparse.tint, RedactionTint::Light);
+        assert_eq!(sparse.tint, RedactionTint::Auto);
     }
 
     // GATE 1 (teardown) — the plain-MP4 tail (run_plain_mp4) survives the removal

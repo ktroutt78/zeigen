@@ -16,6 +16,7 @@ import {
   REDACT_SATURATION,
   type Rect,
   type RedactionRegion,
+  type RedactionTint,
 } from "./redaction";
 
 // Review window. Left column is player + timeline; right column is an
@@ -858,7 +859,7 @@ export default function Review() {
         h: rect.h,
         start: 0,
         end: duration,
-        tint: "light",
+        tint: "auto",
       };
       setRedactions((prev) => {
         const next = [...prev, region];
@@ -4506,13 +4507,19 @@ function ExportPanel({
                         <button
                           className="btn-secondary"
                           style={{ height: 22, fontSize: 10.5, padding: "0 6px" }}
-                          title="Frost tint — pick the one that reads over this content"
+                          title="Frost tint: Auto adapts to the content; Light/Dark force it"
                           onClick={(e) => {
                             e.stopPropagation();
-                            redact.update(i, { tint: r.tint === "dark" ? "light" : "dark" });
+                            const next: RedactionTint =
+                              (r.tint ?? "auto") === "auto"
+                                ? "light"
+                                : r.tint === "light"
+                                  ? "dark"
+                                  : "auto";
+                            redact.update(i, { tint: next });
                           }}
                         >
-                          {r.tint === "dark" ? "Dark" : "Light"}
+                          {r.tint === "light" ? "Light" : r.tint === "dark" ? "Dark" : "Auto"}
                         </button>
                         <button
                           className="btn-secondary"
