@@ -178,14 +178,18 @@ let redactRadiusFloor = Double(env["REDACT_RADIUS_FLOOR"] ?? "16")!
 let redactRadiusCap = Double(env["REDACT_RADIUS_CAP"] ?? "90")!
 let redactSaturation = Double(env["REDACT_SATURATION"] ?? "0.5")!
 let redactDebug = env["REDACT_DEBUG"] == "on"
-// Base layer: "blur" (legacy gaussian — shape-preserving, invertible) or "pixelate"
-// (mosaic — quantizes within-cell info, NOT invertible the way blur is). Default
-// stays blur until the pixelate treatment is signed off. Cell size scales with the
-// region's feature size (like the blur radius); REDACT_CELL forces an absolute cell
-// for calibration sweeps.
-let redactMode = env["REDACT_MODE"] ?? "blur"
-let redactCellK = Double(env["REDACT_CELL_K"] ?? "0.5")!
-let redactCellFloor = Double(env["REDACT_CELL_FLOOR"] ?? "12")!
+// Base layer: "pixelate" (mosaic — quantizes within-cell info, NOT invertible) or
+// "blur" (legacy gaussian — shape-preserving + invertible, kept only for A/B; it
+// CANNOT redact large text, see DECISIONS 2026-07-26). Default = pixelate.
+//
+// CELL SIZE is the safety parameter (DECISIONS 2026-07-26): cell = clamp(K*minDim,
+// FLOOR, CAP). It must exceed the text stroke width or the mosaic preserves the
+// glyph (cell 16 leaked, 24 held on big bold). FLOOR is the safety floor — it does
+// not come down without a logged reason; K/CAP are aesthetic. REDACT_CELL forces an
+// absolute cell for calibration sweeps.
+let redactMode = env["REDACT_MODE"] ?? "pixelate"
+let redactCellK = Double(env["REDACT_CELL_K"] ?? "0.4")!
+let redactCellFloor = Double(env["REDACT_CELL_FLOOR"] ?? "24")!
 let redactCellCap = Double(env["REDACT_CELL_CAP"] ?? "220")!
 let redactCellForce = Double(env["REDACT_CELL"] ?? "")
 

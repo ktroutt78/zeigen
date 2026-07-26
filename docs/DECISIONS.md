@@ -4,6 +4,26 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-26 — Redaction base layer is PIXELATE, not gaussian blur (blur is out)
+
+**Gaussian blur cannot redact large bold text. Do not re-propose it.** Proven empirically (redaction-gate): blur PRESERVES glyph shape at every radius — the shape lives in the low frequencies gaussian keeps — and the translucent overlay is a linear, INVERTIBLE composite. So contrast-recovery (min/max stretch + sharpen + upscale, i.e. undo the overlay) reads the secret straight back: hardened OCR read `$849` cleanly through the frost at radius 48, 90, AND 120 (a blur wider than half the digit height). To actually destroy large-text shape with blur you need a radius approaching the full glyph height — an opaque blob, not frosted glass. The earlier gradient gate reported a 14x safety margin on text that was trivially readable by eye; that gate measured spectral edge attenuation, which is blind to the low-frequency shape that carries legibility for large text.
+
+**Pixelate (CIPixellate mosaic) replaces it.** Mosaic QUANTIZES within-cell information (each cell = one average) rather than spreading it, so it is not invertible the way blur is — contrast-recovery has nothing to amplify. Hardened OCR reads nothing at cell >= ~24px on the same `$849`. The translucent tint still composites on top for the frosted look. cicompositor `REDACT_MODE` selects blur|pixelate; **default = pixelate** (2026-07-26).
+
+## 2026-07-26 — Redaction gate = readability (Bar A); distinguishability leak is a KNOWN, accepted limit
+
+The gate enforces READABILITY, not distinguishability. **Hardened contrast-recovery OCR reading any secret token = hard fail.** The decoy-based DISCRIMINABILITY number `D` (redaction-gate discriminability.sh — render true + decoys, treat each, measure how much of the sharp true-vs-decoy difference survives; the shared layout/envelope cancels, which is why it's the only measure that isn't confounded) is reported as an ADVISORY, not a hard fail.
+
+Why D is advisory: pixelate is unreadable (OCR/eye) but its block-average pattern still DISTINGUISHES values — D stays ~0.46 for pixelate vs 0.12 for the (legible) current blur. Exploiting that requires an attacker with the EXACT layout AND a candidate value list to match against. **That is not the threat.** The threat is someone watching a shared demo video reading an address/balance. Pixelate defeats that.
+
+**KNOWN ACCEPTED LIMITATION (documented, not an oversight):** pixelate at readability-defeating cells leaves a coarse block pattern that a forensic attacker with a candidate list and the exact layout could partially match (D ~0.35–0.46 in the fixture). Collapsing D too would require cells approaching the whole region (near-solid, no frosted look). If you ever redact something where a small candidate list is plausible (a yes/no, a value from a known short enumeration), THIS treatment is NOT enough — use a solid fill for that case. For high-entropy secrets (addresses, arbitrary balances) it is sufficient.
+
+## 2026-07-26 — CELL SIZE is the redaction safety parameter (replaces the blur-radius floor)
+
+`cell = clamp(REDACT_CELL_K * min(region.w, region.h), REDACT_CELL_FLOOR, REDACT_CELL_CAP)`. The cell must EXCEED the text's stroke width or the mosaic preserves the glyph — measured: cell 16 leaked (`5849`) on the big bold `$849` (stroke ~20px), cell >= 24 held. Same discipline as the retired radius floor: the FLOOR is a safety parameter — it gets teeth in the gate (a cell below the floor must fail the readability check loudly), and **it does not come down without a reason recorded here.** K and CAP are aesthetic knobs (blockiness) and freely tunable by eye. `REDACT_CELL` forces an absolute cell for calibration sweeps.
+
+---
+
 ## 2026-07-25 — VideoToolbox mp4 bytes are non-deterministic; gate on DECODED PIXELS, not md5
 
 Trap worth flagging: an md5 over a cicompositor (or any `h264_videotoolbox`) OUTPUT MP4 is NOT a valid byte-identical gate. Running the SAME binary on the SAME input twice produces DIFFERENT container bytes run-to-run (mux/encoder metadata wobble) — `md5 base_a.mp4 != md5 base_b.mp4` even with zero code change. The DECODED PIXELS, however, are deterministic: `ffmpeg -i x.mp4 -f rawvideo -pix_fmt rgb24 - | md5` is stable and equal across runs.

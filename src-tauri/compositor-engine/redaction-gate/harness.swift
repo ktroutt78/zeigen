@@ -327,6 +327,32 @@ func cmd_band(_ a: [String]) {
     print(String(format: "BAND retain=%.4f bcorr=%.4f r1=%d r2=%d", retain, pearson(bc, bt), r1, r2))
 }
 
+// --- stroke: estimate text stroke width in a region (from the SHARP control) ---
+// The mosaic must have cell > stroke width or the glyph survives (cell 16 leaked,
+// 24 held). Stroke width ~ 2 * inkArea / inkPerimeter: a stroke of width w and
+// length L has area wL and perimeter ~2L, so area/perimeter ~ w/2. Robust, geometric,
+// and (unlike OCR) reliable enough to give the cell floor teeth in the gate.
+func cmd_stroke(_ a: [String]) {
+    guard a.count >= 6 else { die("stroke video fx fy fw fh") }
+    let (w, h, l) = luma2d(cropCG(midFrame(a[1]), Double(a[2])!, Double(a[3])!, Double(a[4])!, Double(a[5])!))
+    // Binarize: ink = the minority class either side of the midrange luma.
+    let lo = l.min() ?? 0, hi = l.max() ?? 255
+    let mid = (lo + hi) / 2
+    var darkCount = 0
+    for v in l where v < mid { darkCount += 1 }
+    let inkIsDark = darkCount <= l.count - darkCount
+    func ink(_ i: Int) -> Bool { inkIsDark ? l[i] < mid : l[i] >= mid }
+    var area = 0, perim = 0
+    for y in 0..<h { for x in 0..<w where ink(y*w + x) {
+        area += 1
+        let edge = x == 0 || y == 0 || x == w-1 || y == h-1
+            || !ink(y*w + x-1) || !ink(y*w + x+1) || !ink((y-1)*w + x) || !ink((y+1)*w + x)
+        if edge { perim += 1 }
+    } }
+    let stroke = perim > 0 ? 2.0 * Double(area) / Double(perim) : 0
+    print(String(format: "STROKE %.2f area=%d perim=%d", stroke, area, perim))
+}
+
 let args = CommandLine.arguments
 guard args.count >= 2 else { die("subcommand: scene|ocr|struct|band") }
 switch args[1] {
@@ -337,5 +363,6 @@ case "ocr": cmd_ocr(Array(args.dropFirst()))
 case "ocr2": cmd_ocr2(Array(args.dropFirst()))
 case "struct": cmd_struct(Array(args.dropFirst()))
 case "band": cmd_band(Array(args.dropFirst()))
+case "stroke": cmd_stroke(Array(args.dropFirst()))
 default: die("unknown subcommand \(args[1])")
 }

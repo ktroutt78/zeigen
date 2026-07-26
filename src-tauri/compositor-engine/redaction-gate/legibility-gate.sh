@@ -1,94 +1,112 @@
 #!/bin/bash
-# Redaction LEGIBILITY gate (REDACTION-PLAN, rebuilt 2026-07-26 after the gradient
-# gate shipped readable text). Two independent FAIL conditions per redacted region:
+# Redaction LEGIBILITY gate (pixelate era, 2026-07-26). Bar A = READABILITY.
+# Per redacted region, two checks:
 #
-#   OCR      — Vision reads the region of the exported frame (raw + 3x upscale). If it
-#              recognizes any real token of the secret, FAIL. OCR is a hard-fail
-#              TRIGGER only; OCR failing to read does NOT pass the region (Vision
-#              missing text a human reads is exactly the false-pass we must not trust).
-#   STRUCT   — the real backstop. Low-frequency structural correlation between the
-#              sharp control export and the redacted export at legibility-critical
-#              resolution, z-normalized so the frost's tint/contrast don't count —
-#              only whether the glyph SHAPE survived. High correlation = legible = FAIL.
-#              This catches large bold text whose shape lives below the blur cutoff,
-#              which gradient energy went blind to.
+#   GEOMETRIC (the teeth) — cell size must exceed the text stroke width, or the
+#     mosaic preserves the glyph (measured: cell 16 leaked, 24 held; stroke ~25 on
+#     big bold). Reliable and reproducible, unlike OCR. FAIL if cell < 1.5*stroke.
+#     The cell FLOOR is the safety parameter (DECISIONS 2026-07-26): it does not
+#     come down without a logged reason. Teeth are demonstrated below: a forced
+#     below-floor cell (16) falls under the big-text stroke width.
+#   HARDENED OCR (hard fail) — Vision after contrast-recovery (undo the overlay) +
+#     sharpen + upscale, raw and enlarged. Reading any real token of the secret =
+#     FAIL. OCR is noisy, so it is a hard-fail TRIGGER, never a pass on its own; the
+#     geometric check is what proves safety.
 #
-# Neither replaces the owner's real-footage eye-check; both must pass for the build.
+# DISCRIMINABILITY D (redaction-gate discriminability.sh) is reported ADVISORY only
+# (DECISIONS 2026-07-26): pixelate is unreadable but its block pattern still
+# distinguishes values against a candidate list — a known, accepted limitation.
 #
-# Corpus is representative (large bold KPI numbers + small labels/values, light and
-# dark cards) and box margins are swept. Usage: ./legibility-gate.sh [struct_threshold]
+# Neither replaces the owner's real-footage eye-check. Usage: ./legibility-gate.sh
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 FF=/opt/homebrew/bin/ffmpeg
-STRUCT_TH="${1:-}"   # empty => calibration mode (report only, no verdict)
-WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
-RH="$WORK/rh"
-CICO="$WORK/cico"
-echo "building compositor + harness..."
+[ -x "$FF" ] || FF=$(command -v ffmpeg) || { echo "ffmpeg not found"; exit 2; }
+WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
+RH="$WORK/rh"; CICO="$WORK/cico"
+MARGIN=1.5   # cell must be at least this multiple of stroke width
+PASS=1
+ok(){ printf 'PASS  %s\n' "$*"; }
+bad(){ printf 'FAIL  %s\n' "$*"; PASS=0; }
+say(){ printf '%s\n' "$*"; }
+# VideoToolbox occasionally writes a 0-byte file under rapid invocation; retry.
+xport(){ local out="${!#}" t; for t in 1 2 3 4 5; do env "$@" >/dev/null 2>&1; [ -s "$out" ] && return 0; done; echo "EXPORT FAILED: $out" >&2; return 1; }
+tokhit(){ python3 -c "
+import re
+secret=re.sub(r'[^A-Za-z0-9]',' ','''$1''')
+toks=[t for t in secret.split() if len(t)>=3]
+ocr='''$2'''.lower()
+print('HIT' if any(t.lower() in ocr for t in toks) else '-')"; }
+
+say "building compositor + harness..."
 swiftc -O "$HERE/../main.swift" -o "$CICO" 2>"$WORK/c.err" || { grep -i error "$WORK/c.err"|head; exit 2; }
 swiftc -O "$HERE/harness.swift" -o "$RH" 2>"$WORK/h.err" || { grep -i error "$WORK/h.err"|head; exit 2; }
+W=3024; H=1964
 
-# One redaction+probe pass over a scene. $1 card(light|dark) $2 margin-frac-of-h
-# $3 label $4.. extra env (e.g. destroyed-control params). Prints one line per item.
-run_case() {
-  local card=$1 marginf=$2 tag=$3; shift 3
-  local W=3024 H=1964
-  local scene="$WORK/scene-$tag.png" manifest="$WORK/items-$tag.txt"
-  "$RH" scene "$scene" $W $H "$card" > "$manifest"
-  local input="$WORK/in-$tag.mp4"
+gate_card() {
+  local card=$1
+  say ""; say "==== $card card — shipped pixelate defaults ===="
+  local scene="$WORK/s-$card.png" man="$WORK/m-$card.txt"
+  "$RH" scene "$scene" $W $H "$card" > "$man"
+  local input="$WORK/in-$card.mp4"
   "$FF" -y -loglevel error -loop 1 -i "$scene" -t 1 -r 30 -crf 12 -pix_fmt yuv420p -c:v libx264 "$input" 2>/dev/null
-  # Build one REDACT_REGIONS json covering every item (padded box), default tint.
-  local rjson="$WORK/red-$tag.json"
-  python3 - "$manifest" "$W" "$H" "$marginf" > "$rjson" <<'PY'
-import sys, json
-manifest, W, H, mf = sys.argv[1], float(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4])
-regs=[]
-for ln in open(manifest):
-    p=ln.split(); _id=p[1]; x,y,w,h=map(float,p[2:6])
-    pad=max(4.0, mf*h)
+  # Redact every item at once; capture per-region cell from the first frame's debug.
+  local rjson="$WORK/r-$card.json"
+  python3 - "$man" "$W" "$H" > "$rjson" <<'PY'
+import sys,json
+man,W,H=sys.argv[1],float(sys.argv[2]),float(sys.argv[3]); regs=[]
+for ln in open(man):
+    p=ln.split();
+    if len(p)<6: continue
+    x,y,w,h=map(float,p[2:6]); pad=max(4.0,0.05*h)
     regs.append({"x":(x-pad)/W,"y":(y-pad)/H,"w":(w+2*pad)/W,"h":(h+2*pad)/H,"start":0,"end":5,"tint":"light"})
 print(json.dumps(regs))
 PY
-  local ctrl="$WORK/ctrl-$tag.mp4" treat="$WORK/treat-$tag.mp4"
-  "$CICO" "$input" "$ctrl" >/dev/null 2>&1
-  REDACT_REGIONS="$rjson" "$@" "$CICO" "$input" "$treat" >/dev/null 2>&1
-  # Probe each item: OCR hit? structural correlation?
+  local ctrl="$WORK/c-$card.mp4" treat="$WORK/t-$card.mp4"
+  xport "$CICO" "$input" "$ctrl" || { bad "$card control export"; return; }
+  xport REDACT_REGIONS="$rjson" REDACT_DEBUG=on "$CICO" "$input" "$treat" || { bad "$card treated export"; return; }
+  # per-region cell values (first frame): one REDACT line per region, in json order.
+  # (bash 3.2 on macOS has no mapfile.)
+  cells=()
+  while IFS= read -r cl; do cells+=("$cl"); done < <(env REDACT_REGIONS="$rjson" REDACT_DEBUG=on "$CICO" "$input" "$WORK/dbg.mp4" 2>&1 >/dev/null | grep -m5 'REDACT ' | sed -E 's/.*cell=([0-9.]+).*/\1/')
+  local i=0
   while read -r _ id x y w h text; do
-    local pad fx fy fw fh
-    pad=$(python3 -c "print(max(4.0,$marginf*$h))")
+    local pad fx fy fw fh cell stroke ratio ocr hit
+    pad=$(python3 -c "print(max(4.0,0.05*$h))")
     fx=$(python3 -c "print(($x-$pad)/$W)"); fy=$(python3 -c "print(($y-$pad)/$H)")
     fw=$(python3 -c "print(($w+2*$pad)/$W)"); fh=$(python3 -c "print(($h+2*$pad)/$H)")
-    local ocr octrl corr hit
-    ocr=$("$RH" ocr "$treat" $fx $fy $fw $fh | sed 's/^OCR //' | tr '\n' '|')
-    octrl=$("$RH" ocr "$ctrl" $fx $fy $fw $fh | sed 's/^OCR //' | tr '\n' '|')
-    corr=$("$RH" struct "$ctrl" "$treat" $fx $fy $fw $fh | sed 's/^CORR //')
-    # OCR hit = any 3+ char alnum token of the secret appears in the OCR output.
-    hit=$(python3 -c "
-import re,sys
-secret=re.sub(r'[^A-Za-z0-9]',' ',' '.join('''$text'''.split()))
-toks=[t for t in secret.split() if len(t)>=3]
-ocr='''$ocr'''.lower()
-print('HIT' if any(t.lower() in ocr for t in toks) else '-')
-")
-    printf '  [%s/%s] %-8s corr=%-7s ocr=%-3s  \"%s\"  read:[%s]  (sharp-OCR:[%s])\n' \
-      "$card" "$tag" "$id" "$corr" "$hit" "$(echo $text)" "${ocr%|}" "${octrl%|}"
-  done < "$manifest"
+    cell=${cells[$i]:-0}
+    stroke=$("$RH" stroke "$ctrl" $fx $fy $fw $fh | sed -E 's/STROKE ([0-9.]+).*/\1/')
+    ratio=$(python3 -c "print('%.2f'%($cell/$stroke if $stroke>0.1 else 99))")
+    ocr=$("$RH" ocr2 "$treat" $fx $fy $fw $fh | sed 's/OCR //' | tr '\n' '|')
+    hit=$(tokhit "$text" "${ocr%|}")
+    say "  $id: cell=$cell stroke=$stroke ratio=${ratio}x ocr=[${ocr%|}]"
+    python3 -c "exit(0 if $cell >= $MARGIN*$stroke else 1)" \
+      && : || bad "$card/$id cell $cell < ${MARGIN}x stroke $stroke (glyph may survive)"
+    [ "$hit" = "HIT" ] && bad "$card/$id hardened OCR READ the secret [$ocr]"
+    i=$((i+1))
+  done < "$man"
 }
 
-echo ""
-echo "==== CURRENT PARAMETERS (must FAIL big + small) ===="
-run_case light 0.05 L-tight
-run_case light 0.30 L-loose
-run_case dark  0.05 D-tight
+gate_card light
+gate_card dark
 
-echo ""
-echo "==== DESTROYED CONTROL (heavy blur — gate must PASS this) ===="
-run_case light 0.05 DESTROYED REDACT_RADIUS_FLOOR=400 REDACT_RADIUS_K=0.6 REDACT_ALPHA=0.85
+# ---- TEETH: a forced below-floor cell must fall under the big-text stroke ----
+say ""; say "==== TEETH — cell floor is meaningful ===="
+read bx by bw bh <<<"$(grep '^ITEM big ' "$WORK/m-light.txt" | awk '{print $3,$4,$5,$6}')"
+p=$(python3 -c "print(max(4.0,0.05*$bh))")
+bfx=$(python3 -c "print(($bx-$p)/$W)"); bfy=$(python3 -c "print(($by-$p)/$H)"); bfw=$(python3 -c "print(($bw+2*$p)/$W)"); bfh=$(python3 -c "print(($bh+2*$p)/$H)")
+bstroke=$("$RH" stroke "$WORK/c-light.mp4" $bfx $bfy $bfw $bfh | sed -E 's/STROKE ([0-9.]+).*/\1/')
+say "  big stroke=$bstroke ; a cell of 16 (below floor 24) => ratio $(python3 -c "print('%.2f'%(16/$bstroke))")x"
+python3 -c "exit(0 if 16 < $bstroke else 1)" \
+  && ok "teeth: forced cell 16 is below the big-text stroke ($bstroke) — gate would reject it" \
+  || bad "teeth: cell 16 exceeds stroke $bstroke — floor no longer meaningful"
 
-echo ""
-echo "(corr = low-freq shape correlation vs sharp control; higher = more legible."
-echo " ocr HIT = Vision read a real token of the secret.)"
-if [ -z "$STRUCT_TH" ]; then
-  echo "Calibration mode: no verdict. Re-run with a threshold once the separation is clear."
-fi
+# ---- ADVISORY: discriminability D (not a hard fail) ----
+say ""; say "==== ADVISORY — discriminability D (block-pattern leak, accepted limit) ===="
+dbig=$(bash "$HERE/discriminability.sh" big '$849' '$135,$672,$908,$314,$567' 2>/dev/null | grep 'D(median' | sed 's/^ *//')
+say "  big \$849 pixelate: $dbig  (advisory; see DECISIONS 2026-07-26)"
+
+say ""
+if [ $PASS -eq 1 ]; then say "===== LEGIBILITY GATE: ALL PASS (eye-check still required) ====="; else say "===== LEGIBILITY GATE: FAILURES ABOVE ====="; fi
+exit $((1-PASS))
