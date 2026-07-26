@@ -178,6 +178,16 @@ let redactRadiusFloor = Double(env["REDACT_RADIUS_FLOOR"] ?? "16")!
 let redactRadiusCap = Double(env["REDACT_RADIUS_CAP"] ?? "90")!
 let redactSaturation = Double(env["REDACT_SATURATION"] ?? "0.5")!
 let redactDebug = env["REDACT_DEBUG"] == "on"
+// Base layer: "blur" (legacy gaussian — shape-preserving, invertible) or "pixelate"
+// (mosaic — quantizes within-cell info, NOT invertible the way blur is). Default
+// stays blur until the pixelate treatment is signed off. Cell size scales with the
+// region's feature size (like the blur radius); REDACT_CELL forces an absolute cell
+// for calibration sweeps.
+let redactMode = env["REDACT_MODE"] ?? "blur"
+let redactCellK = Double(env["REDACT_CELL_K"] ?? "0.5")!
+let redactCellFloor = Double(env["REDACT_CELL_FLOOR"] ?? "12")!
+let redactCellCap = Double(env["REDACT_CELL_CAP"] ?? "220")!
+let redactCellForce = Double(env["REDACT_CELL"] ?? "")
 
 try? FileManager.default.removeItem(at: outURL)
 
@@ -549,26 +559,34 @@ writerInput.requestMediaDataWhenReady(on: queue) {
                 let region = CGRect(x: ox, y: oy, width: sw * s, height: sh * s)
                     .intersection(CGRect(x: 0, y: 0, width: Wd, height: Hd))
                 if region.isNull || region.isEmpty { continue }
-                let radius = min(max(redactRadiusK * min(region.width, region.height),
-                                     redactRadiusFloor), redactRadiusCap)
+                let minDim = min(region.width, region.height)
+                let radius = min(max(redactRadiusK * minDim, redactRadiusFloor), redactRadiusCap)
+                let cell = redactCellForce ?? min(max(redactCellK * minDim, redactCellFloor), redactCellCap)
                 if redactDebug {
                     FileHandle.standardError.write(String(format:
-                        "REDACT t=%.3f region=%.1f,%.1f %.1fx%.1f radius=%.2f\n",
-                        t, region.minX, region.minY, region.width, region.height, radius)
+                        "REDACT t=%.3f region=%.1f,%.1f %.1fx%.1f mode=%@ radius=%.2f cell=%.2f\n",
+                        t, region.minX, region.minY, region.width, region.height, redactMode, radius, cell)
                         .data(using: .utf8)!)
                 }
-                // Blur the region's OWN content, edge-clamped so the panel is a clean
-                // rectangle rather than bleeding surrounding sharp pixels inward.
-                let base = out.cropped(to: region)
-                var frost = base.clampedToExtent()
-                    .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: radius])
-                    .cropped(to: region)
+                // Base layer over the region's OWN content, edge-clamped so the panel is
+                // a clean rectangle. Pixelate (mosaic, cell-quantized — destroys within-
+                // cell info) or the legacy shape-preserving gaussian blur.
+                let base = out.cropped(to: region).clampedToExtent()
+                var frost: CIImage
+                if redactMode == "pixelate" {
+                    frost = base.applyingFilter("CIPixellate", parameters: [
+                        kCIInputCenterKey: CIVector(x: region.minX, y: region.minY),
+                        kCIInputScaleKey: cell]).cropped(to: region)
+                } else {
+                    frost = base.applyingFilter("CIGaussianBlur",
+                        parameters: [kCIInputRadiusKey: radius]).cropped(to: region)
+                }
                 if redactSaturation < 0.999 {
                     frost = frost.applyingFilter("CIColorControls",
                         parameters: [kCIInputSaturationKey: redactSaturation])
                 }
                 // Translucent tint: out = a*C + (1-a)*frost (source-over). The tint is
-                // aesthetics + residual attenuation; the blur above is the real erase.
+                // aesthetics + residual attenuation; the base layer is the real erase.
                 let g: CGFloat = r.dark ? 0.1 : 1.0
                 let tint = CIImage(color: CIColor(red: g, green: g, blue: g,
                     alpha: CGFloat(redactAlpha))).cropped(to: region)

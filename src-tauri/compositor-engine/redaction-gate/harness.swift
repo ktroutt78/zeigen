@@ -67,63 +67,93 @@ func cropCG(_ img: CGImage, _ fx: Double, _ fy: Double, _ fw: Double, _ fh: Doub
 // --- scene: representative dashboard corpus ---
 struct Item { let id: String; let text: String; let bold: Bool; let size: Double; let xf: Double; let basef: Double }
 
-func cmd_scene(_ a: [String]) {
-    guard a.count >= 5 else { die("scene out W H light|dark") }
-    let out = a[1], W = Int(a[2])!, H = Int(a[3])!, dark = a[4] == "dark"
+// The corpus deliberately spans the failing spectrum: large bold display numbers
+// (shape lives in low frequency — the gradient gate's blind spot), medium bold, and
+// small regular labels/values. `text` may be overridden for decoys (same layout).
+func sceneItems(_ W: Int) -> [Item] {
     let s = Double(W) / 1512.0
-    let ctx = rgbaContext(W, H)
-    // Card background (light or dark) with a slightly different panel behind it.
-    let bg: CGFloat = dark ? 0.09 : 0.97
-    ctx.setFillColor(red: bg, green: bg, blue: bg + (dark ? 0.02 : 0.0), alpha: 1)
-    ctx.fill(CGRect(x: 0, y: 0, width: W, height: H))
-    let fg: CGFloat = dark ? 0.92 : 0.10
-    let muted: CGFloat = dark ? 0.62 : 0.40
-
-    // The corpus deliberately spans the failing spectrum: large bold display
-    // numbers (shape lives in low frequency — the gradient gate's blind spot),
-    // medium bold, and small regular labels/values.
-    let items: [Item] = [
+    return [
         Item(id: "label",   text: "SAFE TO SPEND NOW",        bold: false, size: 22 * s, xf: 0.08, basef: 0.20),
         Item(id: "big",     text: "$849",                     bold: true,  size: 96 * s, xf: 0.08, basef: 0.36),
         Item(id: "medkpi",  text: "$1,284.57",                bold: true,  size: 52 * s, xf: 0.58, basef: 0.34),
         Item(id: "balance", text: "Balance today  $2,109.44", bold: false, size: 26 * s, xf: 0.08, basef: 0.58),
         Item(id: "caption", text: "Account ending 4471",      bold: false, size: 16 * s, xf: 0.08, basef: 0.68),
     ]
-    let Hd = Double(H), Wd = Double(W)
-    // Draw one item's line at its baseline into `into` with the given color.
-    func draw(_ it: Item, into: CGContext, color: CGFloat, alpha: CGFloat) {
-        let font = CTFontCreateWithName((it.bold ? "Helvetica-Bold" : "Helvetica") as CFString, it.size, nil)
-        let attrs: [NSAttributedString.Key: Any] = [
-            NSAttributedString.Key(kCTFontAttributeName as String): font,
-            NSAttributedString.Key(kCTForegroundColorAttributeName as String):
-                CGColor(red: color, green: color, blue: color, alpha: alpha),
-        ]
-        let line = CTLineCreateWithAttributedString(NSAttributedString(string: it.text, attributes: attrs))
-        into.textPosition = CGPoint(x: it.xf * Wd, y: Hd - it.basef * Hd) // baseline, CG bottom-left
-        CTLineDraw(line, into)
-    }
-    for it in items {
-        // Exact ink bbox: draw the item ALONE opaque on a cleared canvas, scan alpha.
-        let scratch = rgbaContext(W, H)
-        scratch.clear(CGRect(x: 0, y: 0, width: W, height: H))
-        draw(it, into: scratch, color: 1, alpha: 1)
-        let sp = scratch.data!.bindMemory(to: UInt8.self, capacity: W * H * 4)
-        var minX = W, minY = H, maxX = 0, maxY = 0, found = false
-        for y in 0..<H {
-            for x in 0..<W where sp[(y * W + x) * 4 + 3] > 10 {
-                found = true
-                if x < minX { minX = x }; if x > maxX { maxX = x }
-                if y < minY { minY = y }; if y > maxY { maxY = y }
-            }
-        }
-        guard found else { die("item \(it.id) drew nothing") }
-        print(String(format: "ITEM %@ %d %d %d %d %@",
-            it.id, minX, minY, maxX - minX + 1, maxY - minY + 1, it.text))
-        // Draw onto the real scene at its intended color.
-        let color: CGFloat = it.id == "label" || it.id == "caption" ? muted : fg
-        draw(it, into: ctx, color: color, alpha: 1)
+}
+func drawItem(_ it: Item, text: String, into: CGContext, W: Int, H: Int, color: CGFloat, alpha: CGFloat) {
+    let font = CTFontCreateWithName((it.bold ? "Helvetica-Bold" : "Helvetica") as CFString, it.size, nil)
+    let attrs: [NSAttributedString.Key: Any] = [
+        NSAttributedString.Key(kCTFontAttributeName as String): font,
+        NSAttributedString.Key(kCTForegroundColorAttributeName as String):
+            CGColor(red: color, green: color, blue: color, alpha: alpha),
+    ]
+    let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attrs))
+    into.textPosition = CGPoint(x: it.xf * Double(W), y: Double(H) - it.basef * Double(H))
+    CTLineDraw(line, into)
+}
+// Ink bbox of an item's text drawn alone on a cleared canvas (top-left px).
+func inkBBox(_ it: Item, text: String, W: Int, H: Int) -> (Int, Int, Int, Int) {
+    let scratch = rgbaContext(W, H)
+    scratch.clear(CGRect(x: 0, y: 0, width: W, height: H))
+    drawItem(it, text: text, into: scratch, W: W, H: H, color: 1, alpha: 1)
+    let sp = scratch.data!.bindMemory(to: UInt8.self, capacity: W * H * 4)
+    var minX = W, minY = H, maxX = 0, maxY = 0, found = false
+    for y in 0..<H { for x in 0..<W where sp[(y * W + x) * 4 + 3] > 10 {
+        found = true
+        if x < minX { minX = x }; if x > maxX { maxX = x }
+        if y < minY { minY = y }; if y > maxY { maxY = y }
+    } }
+    guard found else { die("item \(it.id) drew nothing") }
+    return (minX, minY, maxX - minX + 1, maxY - minY + 1)
+}
+func cardFill(_ ctx: CGContext, _ W: Int, _ H: Int, dark: Bool) {
+    let bg: CGFloat = dark ? 0.09 : 0.97
+    ctx.setFillColor(red: bg, green: bg, blue: bg + (dark ? 0.02 : 0.0), alpha: 1)
+    ctx.fill(CGRect(x: 0, y: 0, width: W, height: H))
+}
+func itemColor(_ id: String, dark: Bool) -> CGFloat {
+    let fg: CGFloat = dark ? 0.92 : 0.10, muted: CGFloat = dark ? 0.62 : 0.40
+    return id == "label" || id == "caption" ? muted : fg
+}
+
+func cmd_scene(_ a: [String]) {
+    guard a.count >= 5 else { die("scene out W H light|dark") }
+    let out = a[1], W = Int(a[2])!, H = Int(a[3])!, dark = a[4] == "dark"
+    let ctx = rgbaContext(W, H)
+    cardFill(ctx, W, H, dark: dark)
+    for it in sceneItems(W) {
+        let (x, y, w, h) = inkBBox(it, text: it.text, W: W, H: H)
+        print(String(format: "ITEM %@ %d %d %d %d %@", it.id, x, y, w, h, it.text))
+        drawItem(it, text: it.text, into: ctx, W: W, H: H, color: itemColor(it.id, dark: dark), alpha: 1)
     }
     savePNG(ctx.makeImage()!, out)
+}
+
+// --- renderitem: one dashboard item with a substituted value (for decoys) ---
+// Draws item `id` with `text` on the card; prints "BBOX x y w h" (top-left px).
+func cmd_renderitem(_ a: [String]) {
+    guard a.count >= 7 else { die("renderitem out W H light|dark id text") }
+    let out = a[1], W = Int(a[2])!, H = Int(a[3])!, dark = a[4] == "dark", id = a[5]
+    let text = a[6...].joined(separator: " ")
+    guard let it = sceneItems(W).first(where: { $0.id == id }) else { die("unknown item \(id)") }
+    let ctx = rgbaContext(W, H)
+    cardFill(ctx, W, H, dark: dark)
+    drawItem(it, text: text, into: ctx, W: W, H: H, color: itemColor(id, dark: dark), alpha: 1)
+    savePNG(ctx.makeImage()!, out)
+    let (x, y, w, h) = inkBBox(it, text: text, W: W, H: H)
+    print(String(format: "BBOX %d %d %d %d", x, y, w, h))
+}
+
+// --- dist: RMS luma difference of a region between two videos' mid frames ---
+func cmd_dist(_ a: [String]) {
+    guard a.count >= 7 else { die("dist videoA videoB fx fy fw fh") }
+    let fx = Double(a[3])!, fy = Double(a[4])!, fw = Double(a[5])!, fh = Double(a[6])!
+    let (_, _, la) = luma2d(cropCG(midFrame(a[1]), fx, fy, fw, fh))
+    let (_, _, lb) = luma2d(cropCG(midFrame(a[2]), fx, fy, fw, fh))
+    let n = min(la.count, lb.count)
+    var s = 0.0
+    for i in 0..<n { let d = la[i] - lb[i]; s += d * d }
+    print(String(format: "DIST %.5f", (s / Double(max(1, n))).squareRoot()))
 }
 
 // --- ocr: Vision text recognition of a region (raw + upscaled) ---
@@ -301,8 +331,10 @@ let args = CommandLine.arguments
 guard args.count >= 2 else { die("subcommand: scene|ocr|struct|band") }
 switch args[1] {
 case "scene": cmd_scene(Array(args.dropFirst()))
+case "renderitem": cmd_renderitem(Array(args.dropFirst()))
+case "dist": cmd_dist(Array(args.dropFirst()))
 case "ocr": cmd_ocr(Array(args.dropFirst()))
- case "ocr2": cmd_ocr2(Array(args.dropFirst()))
+case "ocr2": cmd_ocr2(Array(args.dropFirst()))
 case "struct": cmd_struct(Array(args.dropFirst()))
 case "band": cmd_band(Array(args.dropFirst()))
 default: die("unknown subcommand \(args[1])")
