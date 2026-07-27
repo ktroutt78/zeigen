@@ -10,7 +10,6 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   sourceRectToOutputRect,
-  redactRadius,
   type RedactionRegion,
 } from "../../../src/redaction.ts";
 
@@ -83,23 +82,24 @@ for (const c of cases) {
     continue;
   }
   if (tsRect === null) { console.log(`FAIL ${c.name}: compositor drew a region but TS clipped it away`); failures++; continue; }
-  // "REDACT t=.. region=minX,minY WxH radius=.." — minX/minY are CI BOTTOM-LEFT px.
-  const m = line.match(/region=([\d.]+),([\d.]+) ([\d.]+)x([\d.]+) radius=([\d.]+)/);
+  // "REDACT t=.. region=minX,minY WxH mode=.. radius=.. cell=.." — we pin the GEOMETRY
+  // (the region rect); minX/minY are CI BOTTOM-LEFT px. The cell/radius values are
+  // validated separately by legibility-gate.sh, so parse only the region here.
+  const m = line.match(/region=([\d.]+),([\d.]+) ([\d.]+)x([\d.]+)/);
   if (!m) { console.log(`FAIL ${c.name}: unparseable: ${line}`); failures++; continue; }
-  const [sMinX, sMinY, sW, sH, sRad] = m.slice(1).map(Number);
+  const [sMinX, sMinY, sW, sH] = m.slice(1).map(Number);
 
   const tsMinX = tsRect.x;
   const tsMinY = c.H - (tsRect.y + tsRect.h); // top-left -> bottom-left
-  const tsRad = redactRadius(tsRect.w, tsRect.h);
 
   const d = (a: number, b: number) => Math.abs(a - b);
   const TOL = 1.0; // sub-pixel: rounding across the two languages
-  const ok = d(tsMinX, sMinX) < TOL && d(tsMinY, sMinY) < TOL && d(tsRect.w, sW) < TOL && d(tsRect.h, sH) < TOL && d(tsRad, sRad) < 0.05;
+  const ok = d(tsMinX, sMinX) < TOL && d(tsMinY, sMinY) < TOL && d(tsRect.w, sW) < TOL && d(tsRect.h, sH) < TOL;
   const tag = ok ? "PASS" : "FAIL";
   if (!ok) failures++;
   console.log(
-    `${tag} ${c.name}: swift[x=${sMinX} y=${sMinY} ${sW}x${sH} r=${sRad}] ` +
-    `ts[x=${tsMinX.toFixed(1)} y=${tsMinY.toFixed(1)} ${tsRect.w.toFixed(1)}x${tsRect.h.toFixed(1)} r=${tsRad.toFixed(2)}]`,
+    `${tag} ${c.name}: swift[x=${sMinX} y=${sMinY} ${sW}x${sH}] ` +
+    `ts[x=${tsMinX.toFixed(1)} y=${tsMinY.toFixed(1)} ${tsRect.w.toFixed(1)}x${tsRect.h.toFixed(1)}]`,
   );
 }
 
