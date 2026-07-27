@@ -4437,6 +4437,15 @@ function ExportPanel({
   // Which tool is active (exclusive), persisted so the rail reopens the way
   // the user last left it (pure UI chrome — localStorage, not settings.json).
   const shiftRef = useShiftHeldRef();
+  // TEMP debug: last redaction row click — event shiftKey vs the key-tracked ref,
+  // which index, which branch. Rendered live in the Redact card so we can see what
+  // actually fires on a shift-click. Remove once multi-select is confirmed.
+  const [redactDbg, setRedactDbg] = useState<{
+    evt: boolean;
+    ref: boolean;
+    i: number;
+    branch: string;
+  } | null>(null);
   const [activeTool, setActiveToolState] = useState<ToolId>(loadActiveTool);
   const setActiveTool = useCallback((id: ToolId) => {
     setActiveToolState((prev) => {
@@ -4767,6 +4776,27 @@ function ExportPanel({
             <div style={RAIL_EYEBROW}>Redact</div>
             <div style={CTX_CARD}>
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {/* TEMP debug readout — updates on every panel-row click. */}
+                <div
+                  style={{
+                    fontFamily: "var(--font-mono)",
+                    fontSize: 10,
+                    lineHeight: 1.5,
+                    color: "var(--accent)",
+                    background: "var(--bg-elevated)",
+                    border: "1px solid var(--border-subtle)",
+                    borderRadius: 4,
+                    padding: "4px 6px",
+                    whiteSpace: "pre-wrap",
+                  }}
+                >
+                  {`last click: evtShift=${redactDbg ? redactDbg.evt : "-"} refShift=${
+                    redactDbg ? redactDbg.ref : "-"
+                  } clicked=#${redactDbg ? redactDbg.i : "-"} -> ${redactDbg ? redactDbg.branch : "-"}\n`}
+                  {`state: selectedSet=[${redact.selectedSet.join(",")}] primary=${String(
+                    redact.selectedIndex,
+                  )}`}
+                </div>
                 <div style={{ fontSize: 11, color: "var(--fg-tertiary)", lineHeight: 1.4 }}>
                   Drag on the paused video to frost over anything sensitive. Press{" "}
                   <span className="kbd">Space</span> to preview the panel tracking the
@@ -4796,11 +4826,17 @@ function ExportPanel({
                         key={i}
                         // Plain click = focus (collapse set); shift-click = toggle in the
                         // batch that Set/Full-clip apply to.
-                        onClick={(e) =>
-                          e.shiftKey || shiftRef.current
-                            ? redact.shiftSelect(i)
-                            : redact.select(i)
-                        }
+                        onClick={(e) => {
+                          const shift = e.shiftKey || shiftRef.current;
+                          setRedactDbg({
+                            evt: e.shiftKey,
+                            ref: shiftRef.current,
+                            i,
+                            branch: shift ? "shiftSelect" : "select",
+                          });
+                          if (shift) redact.shiftSelect(i);
+                          else redact.select(i);
+                        }}
                         style={{
                           display: "flex",
                           alignItems: "center",
