@@ -3520,11 +3520,20 @@ function Timeline(props: TimelineProps) {
       endSkim();
       return;
     }
+    const rect = track.getBoundingClientRect();
+    // HOLD when the pointer is outside the track horizontally. The panel is to the
+    // RIGHT, so mousing toward it used to sweep the playhead to the clip end (timeAt
+    // clamps to [0,1]). Freezing on horizontal exit keeps the frame you left — the one
+    // "Set to playhead" reads — instead of dragging it to the end as you leave.
+    if (clientX < rect.left - 1 || clientX > rect.right + 1) {
+      endSkim();
+      return;
+    }
     if (!skimmingRef.current) {
       skimmingRef.current = true;
       props.onScrubStart();
     }
-    props.seek(timeAt(clientX, track.getBoundingClientRect(), props.duration));
+    props.seek(timeAt(clientX, rect, props.duration));
   };
   const endSkim = () => {
     if (skimmingRef.current) {
@@ -3748,7 +3757,7 @@ function Timeline(props: TimelineProps) {
             // own pointerdown, so this only fires for bare hover.
             if (e.buttons === 0) skimSeek(e.clientX);
           }}
-          onPointerLeave={endSkim}
+          onPointerLeave={onTrackPointerLeave}
         >
           <SegmentTrack
             segments={props.zoom.segments}
@@ -3807,7 +3816,7 @@ function Timeline(props: TimelineProps) {
           <div
             style={{ position: "relative", height: 10 }}
             onPointerMove={(e) => { if (e.buttons === 0) skimSeek(e.clientX); }}
-            onPointerLeave={endSkim}
+            onPointerLeave={onTrackPointerLeave}
           >
             {mergeIntervals(props.redact.regions).map((iv, k) => (
               <div
@@ -3830,7 +3839,7 @@ function Timeline(props: TimelineProps) {
             <div
               style={{ position: "relative", height: 40, marginTop: 4 }}
               onPointerMove={(e) => { if (e.buttons === 0) skimSeek(e.clientX); }}
-              onPointerLeave={endSkim}
+              onPointerLeave={onTrackPointerLeave}
             >
               {props.redact.selectedIndex != null && props.redact.regions[props.redact.selectedIndex] ? (
                 <SegmentTrack
