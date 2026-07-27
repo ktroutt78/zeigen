@@ -222,6 +222,8 @@ type RedactionEditor = {
   selectedSet: number[];
   select: (i: number | null) => void;
   shiftSelect: (i: number) => void;
+  // Toggle: put every region in the set (batch timing hits all) / deselect all.
+  selectAll: () => void;
   update: (i: number, patch: Partial<RedactionRegion>) => void;
   // Apply a per-region patch to every member of the batch set (the panel controls).
   patchSet: (fn: (r: RedactionRegion) => Partial<RedactionRegion>) => void;
@@ -938,6 +940,19 @@ export default function Review() {
     setRedactions([]);
     setRedactSel({ primary: null, set: [] });
   }, []);
+  // Select all / deselect all (toggle). All in the set -> batch timing hits every
+  // region in one click. Primary stays; becomes the first region if none was set.
+  const selectAllRedactions = useCallback(() => {
+    setRedactSel((prev) => {
+      const n = redactions.length;
+      if (n === 0) return { primary: null, set: [] };
+      if (prev.set.length === n) return { primary: null, set: [] }; // deselect all
+      return {
+        primary: prev.primary ?? 0,
+        set: Array.from({ length: n }, (_, k) => k),
+      };
+    });
+  }, [redactions]);
   // Commit a freshly-drawn box (source-space fractions, normalized so w/h > 0).
   // Default range = the WHOLE clip — most redactions stay up the entire time, so trim
   // the exceptions rather than extend the rule. Adaptive tint; selects it (primary).
@@ -1885,6 +1900,7 @@ export default function Review() {
     selectedSet: redactSel.set,
     select: selectRedaction,
     shiftSelect: shiftSelectRedaction,
+    selectAll: selectAllRedactions,
     update: updateRedaction,
     patchSet: patchRedactionSet,
     remove: deleteRedaction,
@@ -4437,15 +4453,6 @@ function ExportPanel({
   // Which tool is active (exclusive), persisted so the rail reopens the way
   // the user last left it (pure UI chrome — localStorage, not settings.json).
   const shiftRef = useShiftHeldRef();
-  // TEMP debug: last redaction row click — event shiftKey vs the key-tracked ref,
-  // which index, which branch. Rendered live in the Redact card so we can see what
-  // actually fires on a shift-click. Remove once multi-select is confirmed.
-  const [redactDbg, setRedactDbg] = useState<{
-    evt: boolean;
-    ref: boolean;
-    i: number;
-    branch: string;
-  } | null>(null);
   const [activeTool, setActiveToolState] = useState<ToolId>(loadActiveTool);
   const setActiveTool = useCallback((id: ToolId) => {
     setActiveToolState((prev) => {
@@ -4776,40 +4783,21 @@ function ExportPanel({
             <div style={RAIL_EYEBROW}>Redact</div>
             <div style={CTX_CARD}>
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {/* TEMP debug readout — updates on every panel-row click. */}
-                <div
-                  style={{
-                    fontFamily: "var(--font-mono)",
-                    fontSize: 10,
-                    lineHeight: 1.5,
-                    color: "var(--accent)",
-                    background: "var(--bg-elevated)",
-                    border: "1px solid var(--border-subtle)",
-                    borderRadius: 4,
-                    padding: "4px 6px",
-                    whiteSpace: "pre-wrap",
-                  }}
-                >
-                  {`last click: evtShift=${redactDbg ? redactDbg.evt : "-"} refShift=${
-                    redactDbg ? redactDbg.ref : "-"
-                  } clicked=#${redactDbg ? redactDbg.i : "-"} -> ${redactDbg ? redactDbg.branch : "-"}\n`}
-                  {`state: selectedSet=[${redact.selectedSet.join(",")}] primary=${String(
-                    redact.selectedIndex,
-                  )}`}
-                </div>
                 <div style={{ fontSize: 11, color: "var(--fg-tertiary)", lineHeight: 1.4 }}>
                   Drag on the paused video to frost over anything sensitive. Press{" "}
                   <span className="kbd">Space</span> to preview the panel tracking the
                   zoom. Boxes stay glued to what they cover.
                 </div>
-                {redact.regions.length > 0 && (
+                {redact.regions.length > 1 && (
                   <button
                     className="btn-secondary"
                     style={{ height: 26, fontSize: 11.5 }}
-                    onClick={redact.clearAll}
-                    disabled={busy}
+                    onClick={redact.selectAll}
+                    title="Put every panel in the batch so Set / Full clip apply to all"
                   >
-                    Clear all
+                    {redact.selectedSet.length === redact.regions.length
+                      ? "Deselect all"
+                      : "Select all"}
                   </button>
                 )}
                 {redact.regions.length === 0 ? (
@@ -4827,14 +4815,7 @@ function ExportPanel({
                         // Plain click = focus (collapse set); shift-click = toggle in the
                         // batch that Set/Full-clip apply to.
                         onClick={(e) => {
-                          const shift = e.shiftKey || shiftRef.current;
-                          setRedactDbg({
-                            evt: e.shiftKey,
-                            ref: shiftRef.current,
-                            i,
-                            branch: shift ? "shiftSelect" : "select",
-                          });
-                          if (shift) redact.shiftSelect(i);
+                          if (e.shiftKey || shiftRef.current) redact.shiftSelect(i);
                           else redact.select(i);
                         }}
                         style={{
@@ -4987,6 +4968,27 @@ function ExportPanel({
                       </div>
                     );
                   })()}
+                {/* Clear all DELETES the panels — styled destructive (red) and parked
+                    at the bottom, well away from the neutral "Select all" up top, so the
+                    two can't be confused. */}
+                {redact.regions.length > 0 && (
+                  <button
+                    className="btn-secondary"
+                    style={{
+                      height: 24,
+                      fontSize: 11,
+                      marginTop: 6,
+                      alignSelf: "flex-start",
+                      color: "oklch(0.72 0.19 25)",
+                      borderColor: "oklch(0.55 0.16 25 / 0.55)",
+                    }}
+                    onClick={redact.clearAll}
+                    disabled={busy}
+                    title="Delete every redaction panel (not undoable)"
+                  >
+                    Clear all (delete)
+                  </button>
+                )}
               </div>
             </div>
           </>
