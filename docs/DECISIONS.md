@@ -4,6 +4,81 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-27 — Redaction cell FLOOR reverted 10 -> 24; the floor is the guarantee, not the stroke-clamp; OCR is not a sufficient readability oracle
+
+Owner eye-check caught an EXPORTED short small-values strip (a wide, ~30px-tall row) rendering LEGIBLE — digit shapes and decimal placement discernible — while the preview showed a solid panel. Diagnosis (reproduced, `docs`/scratch):
+
+- The strip got cell **11.1** (`proxy = 0.3*min(w,h) = 0.3*37`), stroke measured **3.67** (accurate — the estimator was NOT fooled), clampUp **no**. Forcing cell 22 on the same strip destroys it; the old floor of 24 would have set cell 24 and caught it. Coverage was FULL (not partial) — the panel spanned the drawn rect; the mosaic at cell 11 simply preserved digit structure.
+- **Root cause: the floor drop 24 -> 10 (2026-07-26 part 2) removed the real protection, and the stroke-clamp did NOT replace it.** The clamp is keyed to STROKE width, but stroke (~3.7) is ~1/4 of a character; `cell > 1.5*stroke = 5.5` is satisfied while a digit (~14px wide, 29px tall) still survives. The lowered floor bought marginally finer small-text mosaic and cost a legible export — a bad trade for a guarantee feature.
+
+**Decisions:**
+1. **FLOOR = 24 (known-safe), restored.** The floor is THE readability guarantee. The stroke-clamp stays as a SECONDARY check (catches small-box-over-thick-strokes) but is explicitly NOT the guarantee. Do not lower the floor again without eye-validated tuning across text sizes.
+2. **A char-height ratio is NOT a valid replacement.** Own data: big text was safe at cell/charH 0.33 while the strip failed at 0.38 — the ratio isn't predictive (dense small values rows are more guessable from context). Don't swap one insufficient rule for another unvalidated one.
+3. **Hardened contrast-recovery OCR is a NECESSARY trigger but demonstrably NOT SUFFICIENT as the readability oracle.** Evidence: it read NOTHING off this strip (false pass) that the owner's eye read clearly. The automated checks (OCR + geometric cell/stroke) NARROW the search; they do not CLEAR the build. The owner's eye is the final gate. The legibility gate must state this.
+4. **Preview parity is safety-relevant, not cosmetic.** The blur preview showed solid coverage over content the pixelate export left legible — actively reassuring about safety it cannot verify. Preview must render the SAME pixelate + adaptive tint at the SAME cell size as the export (done 2026-07-27).
+
+---
+
+## 2026-07-26 (part 2) — Redaction coverage fixes: cell floor lowered, safety moves to a runtime stroke-clamp; adaptive tint; edge-aligned grid
+
+Owner eye-check on the first pixelate build: UNREADABLE holds (pixelate works), but the panels rendered as a scatter of blocks with gaps, not solid frosted rectangles. Three mechanisms, all fixed (main.swift):
+
+1. **Cell floor 24 -> 10.** The fixed floor of 24 was calibrated on big-bold stroke ~25px and OVER-BLOCKED small text (stroke ~5px) into 2-3 giant tiles. Lowering it makes small boxes a proper mosaic. **Safety no longer rides this floor** — see #2 — so the change doesn't erode the guarantee. K also 0.4 -> 0.3 (finer, aesthetic).
+
+2. **Safety is now a RUNTIME stroke-clamp, not a fixed floor.** The compositor samples each region's text stroke width once (2*inkArea/inkPerimeter, same estimator as the gate harness) and clamps `cell = max(proxyCell, 1.5 * measured_stroke)`, logging when the clamp binds. So the cell is guaranteed >= 1.5x the ACTUAL stroke per region — a small box over thick strokes can't slip under, which a fixed floor couldn't guarantee. The 1.5x margin is the safety parameter now; it does not come down without a logged reason. Gate re-run on the corpus: every item clears stroke by 2.25-3.49x, hardened OCR reads nothing (incl. the smallest cells 12/18), teeth hold.
+
+3. **Adaptive tint (default), replacing the light/dark default.** A light frost on a light card was invisible (0.6 white on 0.97 -> imperceptible), which was the real cause of the "gaps" — the tint covered the full rect but you couldn't see it. `RedactionTint::Auto` (now the default) samples the region's mean luminance ONCE (held for the region's duration — no per-frame re-sample, no flicker) and picks a dark frost over light content / light over dark. Manual Light/Dark remain as an escape hatch. Wired through compositor + edit.rs + redaction.ts + the Review 3-way toggle.
+
+4. **Grid edge-aligned to the region.** CIPixellate `inputCenter` was set to the region corner, which centers a CELL on the corner so cells straddle the box edge by half a cell (tiles overhang the outline). Fixed by translating the region to origin, pixelating with a cell EDGE at 0 (`inputCenter = cell/2`), cropping, translating back.
+
+KNOWN FOLLOW-UP (still open): the Review PREVIEW still renders a blur backdrop-filter, not the pixelate+adaptive-tint treatment — preview no longer matches export. Next task after this eye-check confirms the treatment.
+
+---
+
+## 2026-07-26 — Redaction base layer is PIXELATE, not gaussian blur (blur is out)
+
+**Gaussian blur cannot redact large bold text. Do not re-propose it.** Proven empirically (redaction-gate): blur PRESERVES glyph shape at every radius — the shape lives in the low frequencies gaussian keeps — and the translucent overlay is a linear, INVERTIBLE composite. So contrast-recovery (min/max stretch + sharpen + upscale, i.e. undo the overlay) reads the secret straight back: hardened OCR read `$849` cleanly through the frost at radius 48, 90, AND 120 (a blur wider than half the digit height). To actually destroy large-text shape with blur you need a radius approaching the full glyph height — an opaque blob, not frosted glass. The earlier gradient gate reported a 14x safety margin on text that was trivially readable by eye; that gate measured spectral edge attenuation, which is blind to the low-frequency shape that carries legibility for large text.
+
+**Pixelate (CIPixellate mosaic) replaces it.** Mosaic QUANTIZES within-cell information (each cell = one average) rather than spreading it, so it is not invertible the way blur is — contrast-recovery has nothing to amplify. Hardened OCR reads nothing at cell >= ~24px on the same `$849`. The translucent tint still composites on top for the frosted look. cicompositor `REDACT_MODE` selects blur|pixelate; **default = pixelate** (2026-07-26).
+
+## 2026-07-26 — Redaction gate = readability (Bar A); distinguishability leak is a KNOWN, accepted limit
+
+The gate enforces READABILITY, not distinguishability. **Hardened contrast-recovery OCR reading any secret token = hard fail.** The decoy-based DISCRIMINABILITY number `D` (redaction-gate discriminability.sh — render true + decoys, treat each, measure how much of the sharp true-vs-decoy difference survives; the shared layout/envelope cancels, which is why it's the only measure that isn't confounded) is reported as an ADVISORY, not a hard fail.
+
+Why D is advisory: pixelate is unreadable (OCR/eye) but its block-average pattern still DISTINGUISHES values — D stays ~0.46 for pixelate vs 0.12 for the (legible) current blur. Exploiting that requires an attacker with the EXACT layout AND a candidate value list to match against. **That is not the threat.** The threat is someone watching a shared demo video reading an address/balance. Pixelate defeats that.
+
+**KNOWN ACCEPTED LIMITATION (documented, not an oversight):** pixelate at readability-defeating cells leaves a coarse block pattern that a forensic attacker with a candidate list and the exact layout could partially match (D ~0.35–0.46 in the fixture). Collapsing D too would require cells approaching the whole region (near-solid, no frosted look). If you ever redact something where a small candidate list is plausible (a yes/no, a value from a known short enumeration), THIS treatment is NOT enough — use a solid fill for that case. For high-entropy secrets (addresses, arbitrary balances) it is sufficient.
+
+## 2026-07-26 — CELL SIZE is the redaction safety parameter (replaces the blur-radius floor)
+
+`cell = clamp(REDACT_CELL_K * min(region.w, region.h), REDACT_CELL_FLOOR, REDACT_CELL_CAP)`. The cell must EXCEED the text's stroke width or the mosaic preserves the glyph — measured: cell 16 leaked (`5849`) on the big bold `$849` (stroke ~20px), cell >= 24 held. Same discipline as the retired radius floor: the FLOOR is a safety parameter — it gets teeth in the gate (a cell below the floor must fail the readability check loudly), and **it does not come down without a reason recorded here.** K and CAP are aesthetic knobs (blockiness) and freely tunable by eye. `REDACT_CELL` forces an absolute cell for calibration sweeps.
+
+---
+
+## 2026-07-25 — VideoToolbox mp4 bytes are non-deterministic; gate on DECODED PIXELS, not md5
+
+Trap worth flagging: an md5 over a cicompositor (or any `h264_videotoolbox`) OUTPUT MP4 is NOT a valid byte-identical gate. Running the SAME binary on the SAME input twice produces DIFFERENT container bytes run-to-run (mux/encoder metadata wobble) — `md5 base_a.mp4 != md5 base_b.mp4` even with zero code change. The DECODED PIXELS, however, are deterministic: `ffmpeg -i x.mp4 -f rawvideo -pix_fmt rgb24 - | md5` is stable and equal across runs.
+
+So to prove "this change leaves the export byte-identical," hash the decoded rawvideo, not the file. This is STRONGER than a container md5 (exact pixel equality, immune to container noise). Proven during redaction commit 2: baseline, redaction-absent, and empty-list all decode to `41b6b556…` while their file md5s differ.
+
+Why the V2-teardown md5 gate worked and this one can't: that gate was on a `-c:v copy` STREAM COPY (no re-encode → deterministic bytes by the copy contract). Anything that re-encodes through VideoToolbox forfeits byte determinism at the container level. Don't reach for file-md5 on a re-encoded output again — reach for the decoded-pixel hash.
+
+---
+
+## 2026-07-25 — Redaction: frosted glass at export, static rects, blur is the safety lever
+
+Direction for the redaction feature (full plan: `docs/REDACTION-PLAN.md`). Recorded here because two decisions are load-bearing and must not be re-litigated silently.
+
+**Where + shape (settled):** redaction runs at **export** in the `cicompositor` seam, after zoom + motion-blur and before bubble/watermark/downscale. Capture path stays byte-for-byte untouched (prewarm/heartbeat/first-frame timing is not negotiable). Regions are **static rects** over a `[start,end]` time range — no motion, no cursor-follow, no per-frame tweening. Stored in the sidecar in **source-space fractional** coords (top-left origin), skip-if-empty so no-op sidecars stay byte-identical, transformed through the frame's `zoomAt`/`centerAt` so the rect stays glued to its content under zoom. After-zoom (not before) because the box must never be stored in output/screen space where a zoom span would slide content out from under it.
+
+**Style = frosted glass, NOT solid fill (settled):** heavy `CIGaussianBlur` + a translucent constant-color overlay (`a≈0.6`) + desaturation (`CIColorControls` sat≈0.5). Per-region light/dark tint, default light. No black censor boxes — the frosted look is the point.
+
+**Security posture — do NOT overclaim.** The blur is the safety lever; the overlay is aesthetics plus residual attenuation. CI source-over `out = a*C + (1-a)*B` is **linear and invertible** in float — a translucent overlay does not destroy the underlying pixels (only `a=1` solid fill does). The real erasing is heavy blur pushing high-freq residual below the 8-bit quantization floor; the overlay scales the survivor by `(1-a)` so recovery amplifies quantization/codec noise by `1/(1-a)` and swamps it. Practically unrecoverable against a viewer or casual "enhance," but **not** the zero-recovery guarantee of an opaque fill. This tradeoff is accepted because opaque boxes are ruled out by design.
+
+**Blur-radius floor is a SAFETY parameter.** `r = clamp(0.08*min(w,h), 16, 90)` output px. The floor (16) may rise during eye-tuning; it does not fall without a reason stated here. The `0.08` coefficient and cap are aesthetic and freely tunable.
+
+---
+
 ## 2026-07-25 — Window rects past a display edge are NORMAL, not a 2× scale bug (COMMIT 4 = no-op)
 
 Investigated a suspected 2× coordinate bug: on the Retina built-in (display bounds 408,1080 1512×982 pts, scale 2×), News's stack rect was global `937,1200 1390×823`, right edge x=2327 — 407 pts past the display's right edge, overflowing the 1512-wide overlay after the per-display translate. **No bug.** Closed without a code change.

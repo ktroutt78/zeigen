@@ -8,6 +8,16 @@ import { Icon, I, P } from "./components/icons";
 import SegmentTrack from "./components/SegmentTrack";
 import Waveform from "./Waveform";
 import ScrubPreview from "./ScrubPreview";
+import {
+  sourceRectToOutputRect,
+  redactCell,
+  redactionsPayload,
+  REDACT_ALPHA,
+  REDACT_SATURATION,
+  type Rect,
+  type RedactionRegion,
+  type RedactionTint,
+} from "./redaction";
 
 // Review window. Left column is player + timeline; right column is an
 // accordion panel (Trim / Bubble / Zoom / Watermark / Export sections plus a
@@ -64,6 +74,10 @@ type ZoomSegment = {
   center_y: number;
   auto_generated: boolean;
 };
+
+// RedactionRegion / RedactionTint now live in ./redaction (imported above), the
+// single source of the rect-through-zoom transform + frost constants shared with
+// the compositor. SidecarState below still references them.
 
 const ZOOM_DEFAULT_DURATION = 3;
 const ZOOM_MIN_DURATION = 0.5;
@@ -198,6 +212,30 @@ type ZoomEditor = {
   looping: boolean;
 };
 
+// Stage overlay + right-panel Redact section share this.
+type RedactionEditor = {
+  regions: RedactionRegion[];
+  // Primary selection (the focus): drives the timeline edit row + strong highlight.
+  selectedIndex: number | null;
+  // Batch set (shift-click): the regions Set Start / Set End / Full clip apply to.
+  // Always contains the primary. Single-select => [primary].
+  selectedSet: number[];
+  select: (i: number | null) => void;
+  shiftSelect: (i: number) => void;
+  // Toggle: put every region in the set (batch timing hits all) / deselect all.
+  selectAll: () => void;
+  update: (i: number, patch: Partial<RedactionRegion>) => void;
+  // Apply a per-region patch to every member of the batch set (the panel controls).
+  patchSet: (fn: (r: RedactionRegion) => Partial<RedactionRegion>) => void;
+  remove: (i: number) => void;
+  clearAll: () => void;
+  // Commit a freshly drawn source-space rect (fractions), select it as primary.
+  add: (rect: { x: number; y: number; w: number; h: number }) => void;
+  // True while the Redact tool is active — enables the draw surface and, while
+  // paused, suppresses the live zoom so the box is drawn on the flat frame.
+  active: boolean;
+};
+
 // V2 Step 2: the ONE constant zone the export bakes the webcam bubble at.
 // Wire values are the snake_case serde names of composite.rs's BubbleZone.
 type BubbleZone =
@@ -268,6 +306,11 @@ type SidecarState = {
   // sidecar stays byte-identical to a pre-zoom one (the step-2 governing
   // invariant — Rust's skip_serializing_if enforces the same on its side).
   zoom?: ZoomKeyframe[];
+  // Frosted-glass redaction panels. Undefined/empty = no redaction; same
+  // skip-when-empty invariant as zoom, so a no-redaction sidecar stays
+  // byte-identical to a pre-redaction one (Rust's skip_serializing_if mirrors
+  // this). The draw UI (commit 4) writes the field only when a panel exists.
+  redactions?: RedactionRegion[];
 };
 
 const EMPTY_STATE: SidecarState = {
@@ -277,6 +320,7 @@ const EMPTY_STATE: SidecarState = {
   bubble_roundness: null,
   bubble_zone: null,
   zoom: [],
+  redactions: [],
 };
 
 const SIDECAR_DEBOUNCE_MS = 350;
@@ -404,6 +448,43 @@ function fmt(s: number | null | undefined): string {
   return `${String(m).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
 }
 
+// Shift-held tracker. A click event's shiftKey proved unreliable in the WKWebView
+// (shift-click on a panel row read shiftKey=false, so multi-select fell back to
+// single-select), so we track Shift from window key events and read that ref in the
+// click handlers, OR-combined with the event's own shiftKey as a belt-and-suspenders.
+function useShiftHeldRef() {
+  const ref = useRef(false);
+  useEffect(() => {
+    const on = (e: KeyboardEvent) => {
+      ref.current = e.shiftKey;
+    };
+    const clear = () => {
+      ref.current = false;
+    };
+    window.addEventListener("keydown", on, true);
+    window.addEventListener("keyup", on, true);
+    window.addEventListener("blur", clear);
+    return () => {
+      window.removeEventListener("keydown", on, true);
+      window.removeEventListener("keyup", on, true);
+      window.removeEventListener("blur", clear);
+    };
+  }, []);
+  return ref;
+}
+
+// Duration with tenths (MM:SS.d). Redactions are typically 2-4s, where fmt()'s
+// 1-second resolution can't tell 2.6s from 3.4s — duration is the number being
+// judged, so it carries the extra digit. Start/end stay fmt() (precision there is
+// set-to-playhead / drag).
+function fmtDur(s: number | null | undefined): string {
+  if (s == null || !isFinite(s)) return "--:--.-";
+  const m = Math.floor(s / 60);
+  const ss = Math.floor(s % 60);
+  const tenth = Math.floor((s - Math.floor(s)) * 10);
+  return `${String(m).padStart(2, "0")}:${String(ss).padStart(2, "0")}.${tenth}`;
+}
+
 // Normalize trim: an "untrimmed" range [0, duration] is logically equivalent
 // to no trim at all. Storing the canonical form keeps dirty-detection honest
 // and keeps the sidecar file empty for clips with no edits.
@@ -435,6 +516,12 @@ function statesEqual(a: SidecarState, b: SidecarState, duration: number | null):
   for (let i = 0; i < za.length; i++) {
     if (JSON.stringify(za[i]) !== JSON.stringify(zb[i])) return false;
   }
+  const ra = a.redactions ?? [];
+  const rb = b.redactions ?? [];
+  if (ra.length !== rb.length) return false;
+  for (let i = 0; i < ra.length; i++) {
+    if (JSON.stringify(ra[i]) !== JSON.stringify(rb[i])) return false;
+  }
   return true;
 }
 
@@ -454,13 +541,15 @@ function isLogicallyEmpty(s: SidecarState, duration: number | null): boolean {
   const noRoundness = s.bubble_roundness == null;
   const noZone = s.bubble_zone == null;
   const noZoom = !s.zoom || s.zoom.length === 0;
+  const noRedactions = !s.redactions || s.redactions.length === 0;
   return (
     normalizeTrim(s.trim, duration) == null &&
     noBubble &&
     noThumb &&
     noRoundness &&
     noZone &&
-    noZoom
+    noZoom &&
+    noRedactions
   );
 }
 
@@ -477,6 +566,7 @@ function sidecarWritePayload(s: SidecarState, duration: number): SidecarState {
     bubble_roundness: s.bubble_roundness ?? null,
     bubble_zone: s.bubble_zone ?? undefined,
     zoom: s.zoom && s.zoom.length > 0 ? s.zoom : undefined,
+    redactions: redactionsPayload(s.redactions ?? []),
   };
 }
 
@@ -606,6 +696,21 @@ export default function Review() {
   // step-2 keyframe schema — converted on read and in currentState below.
   const [zoomSegments, setZoomSegments] = useState<ZoomSegment[]>([]);
   const [zoomSelectedIndex, setZoomSelectedIndex] = useState<number | null>(null);
+
+  // Redaction panels (REDACTION-PLAN). Stored source-space; drawn on the flat
+  // frame, previewed through the active zoom via the shared ./redaction transform.
+  const [redactions, setRedactions] = useState<RedactionRegion[]>([]);
+  // Selection = a PRIMARY (the focus: drives the timeline edit row, the strong
+  // highlight, single-region edits) plus a SET for batch timing (shift-click). The
+  // primary is always in the set; a plain click collapses the set to just it.
+  const [redactSel, setRedactSel] = useState<{ primary: number | null; set: number[] }>({
+    primary: null,
+    set: [],
+  });
+  const redactSelectedIndex = redactSel.primary;
+  // True while the Redact tool is active — the stage then suppresses zoom while
+  // paused (draw on the flat frame) and enables the drag-to-draw surface.
+  const [redactMode, setRedactMode] = useState(false);
   // Flips true once the mount-time read_sidecar settles. Gates the zoom
   // auto-load below so it never runs before we know whether the sidecar
   // already carried a zoom track (which would double-suggest).
@@ -779,6 +884,100 @@ export default function Review() {
     setZoomSelectedIndex(null);
   }, []);
 
+  // --- Redaction editing (mirrors the zoom callbacks). Regions are source-space
+  // fractional rects; the overlay draws them and the panel edits time/tint.
+  // Plain click: primary = i, collapse the set to just it (single-select behavior).
+  const selectRedaction = useCallback((i: number | null) => {
+    setRedactSel(i == null ? { primary: null, set: [] } : { primary: i, set: [i] });
+  }, []);
+  // Shift-click: toggle i in the batch set. Adding focuses it (new primary);
+  // removing the primary re-focuses the last remaining member.
+  const shiftSelectRedaction = useCallback((i: number) => {
+    setRedactSel((prev) => {
+      const has = prev.set.includes(i);
+      const set = has ? prev.set.filter((x) => x !== i) : [...prev.set, i];
+      const primary = !has
+        ? i
+        : prev.primary === i
+          ? set.length
+            ? set[set.length - 1]
+            : null
+          : prev.primary;
+      return { primary, set };
+    });
+  }, []);
+  const updateRedaction = useCallback((i: number, patch: Partial<RedactionRegion>) => {
+    setRedactions((prev) => prev.map((r, k) => (k === i ? { ...r, ...patch } : r)));
+  }, []);
+  // Batch patch: apply a per-region patch fn to every member of the current set —
+  // the panel's Set Start / Set End / Full clip. fn receives each region so per-region
+  // clamps (start<=end etc.) stay correct across the batch.
+  const patchRedactionSet = useCallback(
+    (fn: (r: RedactionRegion) => Partial<RedactionRegion>) => {
+      setRedactSel((sel) => {
+        setRedactions((prev) => prev.map((r, k) => (sel.set.includes(k) ? { ...r, ...fn(r) } : r)));
+        return sel;
+      });
+    },
+    [],
+  );
+  const deleteRedaction = useCallback((i: number) => {
+    setRedactions((prev) => prev.filter((_, k) => k !== i));
+    // Drop i from the selection and shift indices above it down by one.
+    setRedactSel((prev) => {
+      const remap = (x: number) => (x > i ? x - 1 : x);
+      const set = prev.set.filter((x) => x !== i).map(remap);
+      const primary =
+        prev.primary == null || prev.primary === i
+          ? set.length
+            ? set[set.length - 1]
+            : null
+          : remap(prev.primary);
+      return { primary, set };
+    });
+  }, []);
+  const clearAllRedactions = useCallback(() => {
+    setRedactions([]);
+    setRedactSel({ primary: null, set: [] });
+  }, []);
+  // Select all / deselect all (toggle). All in the set -> batch timing hits every
+  // region in one click. Primary stays; becomes the first region if none was set.
+  const selectAllRedactions = useCallback(() => {
+    setRedactSel((prev) => {
+      const n = redactions.length;
+      if (n === 0) return { primary: null, set: [] };
+      if (prev.set.length === n) return { primary: null, set: [] }; // deselect all
+      return {
+        primary: prev.primary ?? 0,
+        set: Array.from({ length: n }, (_, k) => k),
+      };
+    });
+  }, [redactions]);
+  // Commit a freshly-drawn box (source-space fractions, normalized so w/h > 0).
+  // Default range = the WHOLE clip — most redactions stay up the entire time, so trim
+  // the exceptions rather than extend the rule. Adaptive tint; selects it (primary).
+  const addRedaction = useCallback(
+    (rect: { x: number; y: number; w: number; h: number }) => {
+      if (duration == null) return;
+      const region: RedactionRegion = {
+        x: rect.x,
+        y: rect.y,
+        w: rect.w,
+        h: rect.h,
+        start: 0,
+        end: duration,
+        tint: "auto",
+      };
+      setRedactions((prev) => {
+        const next = [...prev, region];
+        const idx = next.length - 1;
+        Promise.resolve().then(() => setRedactSel({ primary: idx, set: [idx] }));
+        return next;
+      });
+    },
+    [duration],
+  );
+
   // Step 5 suggestion detection — the manual "Re-suggest" button. Runs the
   // C.1 heuristic over the cursor telemetry on the Rust side; the result
   // replaces auto_generated segments only. Suggestions overlapping a manual
@@ -902,6 +1101,7 @@ export default function Review() {
             bubble_roundness: state.bubble_roundness ?? null,
             bubble_zone: state.bubble_zone ?? null,
             zoom: state.zoom ?? [],
+            redactions: state.redactions ?? [],
           });
           if (state.trim) setTrim(state.trim);
           if (state.bubble_position_log) setBubblePositionLog(state.bubble_position_log);
@@ -910,6 +1110,9 @@ export default function Review() {
           if (state.bubble_zone != null) setBubbleZone(state.bubble_zone);
           if (state.zoom && state.zoom.length > 0) {
             setZoomSegments(zoomKeyframesToSegments(state.zoom));
+          }
+          if (state.redactions && state.redactions.length > 0) {
+            setRedactions(state.redactions);
           }
         } else {
           setSnapshot(EMPTY_STATE);
@@ -1014,8 +1217,9 @@ export default function Review() {
       bubble_roundness: bubbleRoundness,
       bubble_zone: bubbleZone,
       zoom: zoomSegmentsToKeyframes(zoomSegments),
+      redactions,
     }),
-    [trim, bubblePositionLog, thumbnailTime, bubbleRoundness, bubbleZone, zoomSegments],
+    [trim, bubblePositionLog, thumbnailTime, bubbleRoundness, bubbleZone, zoomSegments, redactions],
   );
 
   const dirty = useMemo(
@@ -1690,6 +1894,21 @@ export default function Review() {
     looping: loopingZoom,
   };
 
+  const redactionEditor: RedactionEditor = {
+    regions: redactions,
+    selectedIndex: redactSelectedIndex,
+    selectedSet: redactSel.set,
+    select: selectRedaction,
+    shiftSelect: shiftSelectRedaction,
+    selectAll: selectAllRedactions,
+    update: updateRedaction,
+    patchSet: patchRedactionSet,
+    remove: deleteRedaction,
+    clearAll: clearAllRedactions,
+    add: addRedaction,
+    active: redactMode,
+  };
+
   const thumbnailControls: ThumbnailControls = {
     thumbnailTime,
     setThumbnailTime,
@@ -1768,6 +1987,7 @@ export default function Review() {
             opacity: wmOpacity,
           }}
           zoom={zoomEditor}
+          redact={redactionEditor}
           thumbnailTime={thumbnailTime}
           bubbleRoundness={bubbleRoundness}
           bubbleZone={effectiveZone}
@@ -1775,6 +1995,8 @@ export default function Review() {
         <ExportPanel
           sourcePath={sourcePath}
           zoom={zoomEditor}
+          redact={redactionEditor}
+          onToolChange={(id) => setRedactMode(id === "redact")}
           thumbnail={thumbnailControls}
           bubbleZone={effectiveZone}
           onBubbleZone={setBubbleZone}
@@ -1948,6 +2170,7 @@ type LeftColumnProps = {
   audioStart: number | null;
   watermarkPreview: WatermarkPreview;
   zoom: ZoomEditor;
+  redact: RedactionEditor;
   // Timeline marker only — the thumbnail picker itself lives in the right
   // panel's Export section.
   thumbnailTime: number | null;
@@ -1990,6 +2213,7 @@ function LeftColumn(props: LeftColumnProps) {
         playbackRate={props.playbackRate}
         watermarkPreview={props.watermarkPreview}
         zoom={props.zoom}
+        redact={props.redact}
       />
       <Timeline
         assetUrl={props.assetUrl}
@@ -2004,6 +2228,7 @@ function LeftColumn(props: LeftColumnProps) {
         onScrubEnd={props.onScrubEnd}
         audioStart={props.audioStart}
         zoom={props.zoom}
+        redact={props.redact}
         thumbnailTime={props.thumbnailTime}
       />
     </div>
@@ -2231,6 +2456,7 @@ type VideoStageProps = {
   playbackRate: number;
   watermarkPreview: WatermarkPreview;
   zoom: ZoomEditor;
+  redact: RedactionEditor;
 };
 
 function VideoStage(props: VideoStageProps) {
@@ -2258,6 +2484,10 @@ function VideoStage(props: VideoStageProps) {
   const zoomEditing = props.zoom.selectedIndex != null;
   const zoomLooping = props.zoom.looping;
   const videoRefForZoom = props.videoRef;
+  // While the Redact tool is active AND paused, hold the frame flat so a box is
+  // drawn in true source space (no zoom to invert). Playing in the tool un-holds
+  // it, so the frost tracks the magnified content — the live coverage check.
+  const redactFlat = props.redact.active && !props.playing;
   useEffect(() => {
     const video = videoRefForZoom.current;
     // V2 Step 3: the transform drives the wrapper around the video. The
@@ -2268,7 +2498,7 @@ function VideoStage(props: VideoStageProps) {
       layer.style.transform = "";
       layer.style.transformOrigin = "";
     };
-    if (zoomSegs.length === 0 || (zoomEditing && !zoomLooping) || !videoDims) {
+    if (zoomSegs.length === 0 || (zoomEditing && !zoomLooping) || redactFlat || !videoDims) {
       reset();
       return;
     }
@@ -2303,7 +2533,7 @@ function VideoStage(props: VideoStageProps) {
       cancelAnimationFrame(raf);
       reset();
     };
-  }, [zoomSegs, zoomEditing, zoomLooping, videoDims, videoRefForZoom]);
+  }, [zoomSegs, zoomEditing, zoomLooping, redactFlat, videoDims, videoRefForZoom]);
 
   const onStageClick = (e: React.MouseEvent) => {
     // Click on the empty stage background = deselect any zoom, which leaves
@@ -2410,6 +2640,14 @@ function VideoStage(props: VideoStageProps) {
               }}
             />
           )}
+        <RedactionLayer
+          stageRef={stageRef}
+          videoDims={videoDims}
+          editor={props.redact}
+          zoomSegs={props.zoom.segments}
+          videoRef={props.videoRef}
+          flat={redactFlat}
+        />
         <PlayerOverlay
           playing={props.playing}
           duration={props.duration}
@@ -2839,6 +3077,246 @@ function ZoomEditLayer({
   );
 }
 
+// Frosted-glass redaction overlay. Every region is positioned + blurred by the
+// SHARED ./redaction transform at the current playhead, so the preview honors the
+// active zoom exactly as the compositor does (proven by redaction-gate/transform-
+// pin.ts). While `flat` (Redact tool active + paused) the zoom is held identity so
+// the box is authored in true source space, and a crosshair draw surface is armed.
+// Box styles are written imperatively in an rAF (the zoom-preview pattern) so the
+// frost tracks a zoom ramp without a React re-render per frame.
+function RedactionLayer({
+  stageRef,
+  videoDims,
+  editor,
+  zoomSegs,
+  videoRef,
+  flat,
+}: {
+  stageRef: React.MutableRefObject<HTMLDivElement | null>;
+  videoDims: { w: number; h: number } | null;
+  editor: RedactionEditor;
+  zoomSegs: ZoomSegment[];
+  videoRef: React.MutableRefObject<HTMLVideoElement | null>;
+  flat: boolean;
+}) {
+  const size = useStageSize(stageRef);
+  const shiftRef = useShiftHeldRef();
+  const boxRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const offRef = useRef<HTMLCanvasElement | null>(null);
+  // Adaptive-tint cache (dark? per region) — sampled once, held, so a static region
+  // over changing content can't flicker (mirrors the export). Cleared when the region
+  // set changes (effect re-subscribes).
+  const tintCache = useRef<Map<number, boolean>>(new Map());
+  const [pending, setPending] = useState<Rect | null>(null);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !videoDims || editor.regions.length === 0) return;
+    tintCache.current.clear();
+    if (!offRef.current) offRef.current = document.createElement("canvas");
+    let raf = 0;
+    const tick = () => {
+      raf = requestAnimationFrame(tick);
+      const stage = stageRef.current;
+      const canvas = canvasRef.current;
+      if (!stage || !canvas) return;
+      const rect = stage.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const cw = Math.round(rect.width), ch = Math.round(rect.height);
+      if (canvas.width !== cw * dpr || canvas.height !== ch * dpr) {
+        canvas.width = cw * dpr;
+        canvas.height = ch * dpr;
+        canvas.style.width = `${cw}px`;
+        canvas.style.height = `${ch}px`;
+      }
+      const ctx = canvas.getContext("2d");
+      const off = offRef.current;
+      const offCtx = off?.getContext("2d");
+      if (!ctx || !off || !offCtx) return;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, cw, ch);
+      const b = contentBox({ width: rect.width, height: rect.height }, videoDims);
+      const dsx = videoDims.w > 0 ? b.w / videoDims.w : 0;
+      const t = video.currentTime;
+      const vW = video.videoWidth || videoDims.w, vH = video.videoHeight || videoDims.h;
+      editor.regions.forEach((region, i) => {
+        const node = boxRefs.current[i];
+        const active = t >= region.start && t <= region.end;
+        const zoom = flat ? null : zoomAt(zoomSegs, t);
+        const out = active ? sourceRectToOutputRect(region, zoom, videoDims.w, videoDims.h) : null;
+        if (!out) {
+          if (node) node.style.display = "none";
+          return;
+        }
+        const rx = b.x + out.x * dsx, ry = b.y + out.y * dsx, rw = out.w * dsx, rh = out.h * dsx;
+        // Transparent selection/click box, positioned over the mosaic.
+        if (node) {
+          node.style.display = "block";
+          node.style.left = `${rx}px`;
+          node.style.top = `${ry}px`;
+          node.style.width = `${rw}px`;
+          node.style.height = `${rh}px`;
+        }
+        if (rw < 1 || rh < 1) return;
+        // MOSAIC — the SAME pixelate the export applies: cell in OUTPUT px (matches the
+        // compositor), so preview = export. Sample the region's source content, average
+        // down to nx x ny, then upscale pixelated. This is the safety-critical part —
+        // if the export leaves content legible, the preview now shows it legible too.
+        const cellOut = redactCell(out.w, out.h);
+        const nx = Math.max(1, Math.round(out.w / cellOut));
+        const ny = Math.max(1, Math.round(out.h / cellOut));
+        off.width = nx;
+        off.height = ny;
+        offCtx.imageSmoothingEnabled = true;
+        try {
+          offCtx.drawImage(video, region.x * vW, region.y * vH, region.w * vW, region.h * vH, 0, 0, nx, ny);
+        } catch {
+          return; // video frame not ready yet
+        }
+        // Adaptive tint (dark frost over light content / light over dark), sampled once.
+        // Manual light/dark override wins. If pixel readback is blocked (tainted asset
+        // canvas), fall back to dark — correct for light dashboards; use manual override
+        // on dark content.
+        let dark: boolean;
+        if (region.tint === "light") dark = false;
+        else if (region.tint === "dark") dark = true;
+        else {
+          const cached = tintCache.current.get(i);
+          if (cached != null) dark = cached;
+          else {
+            let d = true;
+            try {
+              const px = offCtx.getImageData(0, 0, nx, ny).data;
+              let sum = 0;
+              for (let k = 0; k < px.length; k += 4)
+                sum += 0.299 * px[k] + 0.587 * px[k + 1] + 0.114 * px[k + 2];
+              d = sum / (nx * ny) >= 128;
+            } catch {
+              d = true;
+            }
+            tintCache.current.set(i, d);
+            dark = d;
+          }
+        }
+        ctx.imageSmoothingEnabled = false;
+        ctx.filter = `saturate(${REDACT_SATURATION})`;
+        ctx.drawImage(off, 0, 0, nx, ny, rx, ry, rw, rh);
+        ctx.filter = "none";
+        const g = dark ? 18 : 242;
+        ctx.fillStyle = `rgba(${g}, ${g}, ${g}, ${REDACT_ALPHA})`;
+        ctx.fillRect(rx, ry, rw, rh);
+      });
+    };
+    tick();
+    return () => cancelAnimationFrame(raf);
+  }, [editor.regions, zoomSegs, videoDims, videoRef, stageRef, flat, size]);
+
+  if (!videoDims) return null;
+  const b = contentBox({ width: size.width, height: size.height }, videoDims);
+
+  const startDraw = (e: React.PointerEvent) => {
+    const stage = stageRef.current;
+    if (!stage || !videoDims) return;
+    e.preventDefault();
+    const rect = stage.getBoundingClientRect();
+    const box = contentBox({ width: rect.width, height: rect.height }, videoDims);
+    const anchor = toContentFrac({ x: e.clientX - rect.left, y: e.clientY - rect.top }, box);
+    const rectFrom = (ev: { clientX: number; clientY: number }): Rect => {
+      const cur = toContentFrac({ x: ev.clientX - rect.left, y: ev.clientY - rect.top }, box);
+      return {
+        x: Math.min(anchor.x, cur.x),
+        y: Math.min(anchor.y, cur.y),
+        w: Math.abs(cur.x - anchor.x),
+        h: Math.abs(cur.y - anchor.y),
+      };
+    };
+    const onMove = (ev: PointerEvent) => setPending(rectFrom(ev));
+    const onUp = (ev: PointerEvent) => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      const r = rectFrom(ev);
+      setPending(null);
+      // Ignore accidental taps; a real box is at least ~1% of the frame each side.
+      if (r.w > 0.01 && r.h > 0.01) editor.add(r);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    setPending(rectFrom(e));
+  };
+
+  return (
+    <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
+      {/* The frosted mosaic is painted here (pixelate + adaptive tint, same as export).
+          Interaction layers (draw surface, selection boxes) sit above it, transparent. */}
+      <canvas ref={canvasRef} style={{ position: "absolute", left: 0, top: 0, pointerEvents: "none" }} />
+      {/* Draw surface (below the boxes) so a click on a box selects it while a drag on
+          empty frame still draws a new one. Only while editing (tool active, paused). */}
+      {editor.active && flat && (
+        <div
+          onPointerDown={startDraw}
+          style={{ position: "absolute", inset: 0, cursor: "crosshair", pointerEvents: "auto", touchAction: "none" }}
+        />
+      )}
+      {editor.regions.map((_, i) => (
+        <div
+          key={i}
+          ref={(el) => {
+            boxRefs.current[i] = el;
+          }}
+          // Clickable to select while the tool is active — drives the same state as the
+          // panel row + timeline lane. Plain click = focus (primary); shift-click =
+          // toggle in the batch set. stopPropagation so it doesn't reach the draw surface.
+          onPointerDown={
+            editor.active
+              ? (e) => {
+                  e.stopPropagation();
+                  if (e.shiftKey || shiftRef.current) editor.shiftSelect(i);
+                  else editor.select(i);
+                }
+              : undefined
+          }
+          style={{
+            position: "absolute",
+            display: "none",
+            borderRadius: 2,
+            // Primary = strong accent + ring; other batch members = dimmer accent ring
+            // (so the batch is obvious on the frame); else faint white.
+            border:
+              editor.selectedIndex === i
+                ? "2px solid var(--accent)"
+                : editor.selectedSet.includes(i)
+                  ? "1.5px solid var(--accent-soft)"
+                  : "1px solid rgba(255,255,255,0.5)",
+            boxShadow:
+              editor.selectedIndex === i
+                ? "0 0 0 3px var(--accent-soft)"
+                : editor.selectedSet.includes(i)
+                  ? "0 0 0 2px var(--accent-soft)"
+                  : "none",
+            pointerEvents: editor.active ? "auto" : "none",
+            cursor: editor.active ? "pointer" : "default",
+          }}
+        />
+      ))}
+      {pending && (
+        <div
+          style={{
+            position: "absolute",
+            left: b.x + pending.x * b.w,
+            top: b.y + pending.y * b.h,
+            width: pending.w * b.w,
+            height: pending.h * b.h,
+            border: "1.5px dashed var(--redact)",
+            background: "var(--redact-soft)",
+            pointerEvents: "none",
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
 function useStageSize(stageRef: React.MutableRefObject<HTMLDivElement | null>) {
   const [size, setSize] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
   useEffect(() => {
@@ -3005,12 +3483,29 @@ type TimelineProps = {
   onScrubEnd: () => void;
   audioStart: number | null;
   zoom: ZoomEditor;
+  redact: RedactionEditor;
   thumbnailTime: number | null;
 };
+
+// Union of redaction intervals for the collapsed overview bar — overlaps merge
+// into one continuous span ("is anything redacted here", not which region).
+function mergeIntervals(regs: { start: number; end: number }[]): { start: number; end: number }[] {
+  const sorted = regs.map((r) => ({ start: r.start, end: r.end })).sort((a, b) => a.start - b.start);
+  const out: { start: number; end: number }[] = [];
+  for (const iv of sorted) {
+    const last = out[out.length - 1];
+    if (last && iv.start <= last.end) last.end = Math.max(last.end, iv.end);
+    else out.push({ ...iv });
+  }
+  return out;
+}
 
 function Timeline(props: TimelineProps) {
   const trackRef = useRef<HTMLDivElement | null>(null);
   const [hover, setHover] = useState<{ time: number; rect: DOMRect } | null>(null);
+  // Redaction lane disclosure: collapsed (merged overview only) vs expanded
+  // (overview + an editable row for the selected region). Pure UI chrome.
+  const [redactExpanded, setRedactExpanded] = useState(false);
   // Hover-scrub (Model A): true while a bare-hover skim is driving the playhead,
   // so onScrubStart/End fire once per skim session (webcam bubble aligns once at
   // the end, not per tick). Reset when a drag ends so the two stay in sync.
@@ -3134,11 +3629,20 @@ function Timeline(props: TimelineProps) {
       endSkim();
       return;
     }
+    const rect = track.getBoundingClientRect();
+    // HOLD when the pointer is outside the track horizontally. The panel is to the
+    // RIGHT, so mousing toward it used to sweep the playhead to the clip end (timeAt
+    // clamps to [0,1]). Freezing on horizontal exit keeps the frame you left — the one
+    // "Set to playhead" reads — instead of dragging it to the end as you leave.
+    if (clientX < rect.left - 1 || clientX > rect.right + 1) {
+      endSkim();
+      return;
+    }
     if (!skimmingRef.current) {
       skimmingRef.current = true;
       props.onScrubStart();
     }
-    props.seek(timeAt(clientX, track.getBoundingClientRect(), props.duration));
+    props.seek(timeAt(clientX, rect, props.duration));
   };
   const endSkim = () => {
     if (skimmingRef.current) {
@@ -3362,7 +3866,7 @@ function Timeline(props: TimelineProps) {
             // own pointerdown, so this only fires for bare hover.
             if (e.buttons === 0) skimSeek(e.clientX);
           }}
-          onPointerLeave={endSkim}
+          onPointerLeave={onTrackPointerLeave}
         >
           <SegmentTrack
             segments={props.zoom.segments}
@@ -3391,6 +3895,90 @@ function Timeline(props: TimelineProps) {
             ramp={ZOOM_RAMP_S}
             style={{ top: 4 }}
           />
+        </div>
+      )}
+
+      {/* Redaction lane (teal, distinct from the violet zoom lane). Collapsed:
+          a merged read-only overview bar (where anything is redacted). Expanded:
+          the overview plus one editable SegmentTrack row bound to the SELECTED
+          region — the "overview + focus" model. No bounds (redactions overlap
+          freely) and no ramp. Regions are drawn on the video; this lane trims
+          timing. */}
+      {props.redact.regions.length > 0 && props.duration != null && (
+        <div style={{ position: "relative", marginTop: 16 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, height: 14, marginBottom: 2 }}>
+            <button
+              onClick={() => setRedactExpanded((v) => !v)}
+              title={redactExpanded ? "Collapse redaction lane" : "Expand to edit each region's range"}
+              style={{
+                width: 16, height: 14, padding: 0, lineHeight: "14px", fontSize: 9,
+                background: "transparent", border: "none", color: "var(--redact)", cursor: "pointer",
+              }}
+            >
+              {redactExpanded ? "▾" : "▸"}
+            </button>
+            <span style={{ fontSize: 9, letterSpacing: "0.06em", color: "var(--redact)", fontWeight: 600 }}>
+              REDACTIONS
+            </span>
+          </div>
+          {/* Merged overview — read-only; the playhead skims over it like the track. */}
+          <div
+            style={{ position: "relative", height: 10 }}
+            onPointerMove={(e) => { if (e.buttons === 0) skimSeek(e.clientX); }}
+            onPointerLeave={onTrackPointerLeave}
+          >
+            {mergeIntervals(props.redact.regions).map((iv, k) => (
+              <div
+                key={k}
+                style={{
+                  position: "absolute",
+                  left: `${(iv.start / props.duration!) * 100}%`,
+                  width: `${((iv.end - iv.start) / props.duration!) * 100}%`,
+                  top: 0, height: 10,
+                  background: "var(--redact-soft)",
+                  border: "1px solid var(--redact)",
+                  borderRadius: 3,
+                  pointerEvents: "none",
+                }}
+              />
+            ))}
+          </div>
+          {/* Focus edit row — the selected region only, draggable/resizable. */}
+          {redactExpanded && (
+            <div
+              style={{ position: "relative", height: 40, marginTop: 4 }}
+              onPointerMove={(e) => { if (e.buttons === 0) skimSeek(e.clientX); }}
+              onPointerLeave={onTrackPointerLeave}
+            >
+              {props.redact.selectedIndex != null && props.redact.regions[props.redact.selectedIndex] ? (
+                <SegmentTrack
+                  segments={[props.redact.regions[props.redact.selectedIndex]]}
+                  duration={props.duration}
+                  selectedIndex={0}
+                  onSelect={(i) => { if (i == null) props.redact.select(null); }}
+                  onChange={(_i, p) => {
+                    const ri = props.redact.selectedIndex;
+                    if (ri != null) props.redact.update(ri, p);
+                  }}
+                  onDragHover={(t) => {
+                    const track = trackRef.current;
+                    if (t == null || !track) { setHover(null); return; }
+                    setHover({ time: t, rect: track.getBoundingClientRect() });
+                  }}
+                  label={() => `redaction ${(props.redact.selectedIndex ?? 0) + 1}`}
+                  alwaysBand
+                  bandHeight={36}
+                  color="var(--redact)"
+                  colorSoft="var(--redact-soft)"
+                  style={{ top: 2 }}
+                />
+              ) : (
+                <div style={{ fontSize: 11, color: "var(--fg-tertiary)", padding: "10px 2px" }}>
+                  Select a redaction (panel row or its box on the video) to edit its range here.
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -3656,8 +4244,8 @@ type SaveSpec = {
 // mirrors the working flow: Trim, Bubble, Zoom, Watermark, Mark. A persisted
 // id from an older build (e.g. "export"/"annotate"/"share") falls back to the
 // default.
-type ToolId = "trim" | "bubble" | "zoom" | "watermark" | "mark";
-const TOOL_IDS: ToolId[] = ["trim", "bubble", "zoom", "watermark", "mark"];
+type ToolId = "trim" | "bubble" | "zoom" | "redact" | "watermark" | "mark";
+const TOOL_IDS: ToolId[] = ["trim", "bubble", "zoom", "redact", "watermark", "mark"];
 const DEFAULT_TOOL: ToolId = "trim";
 // Key versioned away from the old "review-panel-open-section" accordion format.
 const TOOL_LS_KEY = "review-panel-active-tool";
@@ -3785,6 +4373,8 @@ function ZonePicker({
 function ExportPanel({
   sourcePath,
   zoom,
+  redact,
+  onToolChange,
   thumbnail,
   bubbleZone,
   onBubbleZone,
@@ -3813,6 +4403,10 @@ function ExportPanel({
 }: {
   sourcePath: string | null;
   zoom: ZoomEditor;
+  redact: RedactionEditor;
+  // Fired when the active tool changes (and on mount) so the parent can put the
+  // stage into redact-draw mode. Optional so other ExportPanel call sites needn't.
+  onToolChange?: (id: ToolId) => void;
   thumbnail: ThumbnailControls;
   // V2 Step 2: effective bubble zone (explicit pick or migration default),
   // the setter for an explicit pick, and whether this recording has a webcam
@@ -3858,6 +4452,7 @@ function ExportPanel({
 
   // Which tool is active (exclusive), persisted so the rail reopens the way
   // the user last left it (pure UI chrome — localStorage, not settings.json).
+  const shiftRef = useShiftHeldRef();
   const [activeTool, setActiveToolState] = useState<ToolId>(loadActiveTool);
   const setActiveTool = useCallback((id: ToolId) => {
     setActiveToolState((prev) => {
@@ -3866,6 +4461,11 @@ function ExportPanel({
       return id;
     });
   }, []);
+  // Keep the stage's redact-draw mode in sync with the active tool (also fires on
+  // mount, so a restored "redact" tool arms the draw surface immediately).
+  useEffect(() => {
+    onToolChange?.(activeTool);
+  }, [activeTool, onToolChange]);
 
   // Thumbnail popover — moved here from the old top toolbar. capturedTime
   // is grabbed at open so the preview shows the exact frame the user had
@@ -4025,7 +4625,7 @@ function ExportPanel({
           overflow is impossible by construction (full-width rows only). */}
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", padding: "10px 12px 12px" }}>
         {/* Tool toolbar — one active tool; the contextual card below swaps to match. */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 4, marginBottom: 6 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 4, marginBottom: 6 }}>
           <ToolTile
             label="Trim"
             active={activeTool === "trim"}
@@ -4045,6 +4645,12 @@ function ExportPanel({
             active={activeTool === "zoom"}
             onClick={() => setActiveTool("zoom")}
             icon={<Icon d={<><circle cx="7" cy="7" r="4" /><path d="M10 10l3.5 3.5M5.2 7h3.6M7 5.2v3.6" /></>} size={17} stroke={1.4} />}
+          />
+          <ToolTile
+            label="Redact"
+            active={activeTool === "redact"}
+            onClick={() => setActiveTool("redact")}
+            icon={<Icon d={<><rect x="2.5" y="4.5" width="11" height="7" rx="1.5" /><path d="M4.5 6.5h7M4.5 9.5h5" /></>} size={17} stroke={1.4} />}
           />
           <ToolTile
             label="Watermark"
@@ -4168,6 +4774,222 @@ function ExportPanel({
               </div>
             )}
           </div>
+            </div>
+          </>
+        )}
+
+        {activeTool === "redact" && (
+          <>
+            <div style={RAIL_EYEBROW}>Redact</div>
+            <div style={CTX_CARD}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <div style={{ fontSize: 11, color: "var(--fg-tertiary)", lineHeight: 1.4 }}>
+                  Drag on the paused video to frost over anything sensitive. Press{" "}
+                  <span className="kbd">Space</span> to preview the panel tracking the
+                  zoom. Boxes stay glued to what they cover.
+                </div>
+                {redact.regions.length > 1 && (
+                  <button
+                    className="btn-secondary"
+                    style={{ height: 26, fontSize: 11.5 }}
+                    onClick={redact.selectAll}
+                    title="Put every panel in the batch so Set / Full clip apply to all"
+                  >
+                    {redact.selectedSet.length === redact.regions.length
+                      ? "Deselect all"
+                      : "Select all"}
+                  </button>
+                )}
+                {redact.regions.length === 0 ? (
+                  <div style={{ fontSize: 11, color: "var(--fg-tertiary)" }}>
+                    No panels yet. Drag a box on the video to add one.
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    {redact.regions.map((r, i) => {
+                      const isPrimary = redact.selectedIndex === i;
+                      const inSet = redact.selectedSet.includes(i);
+                      return (
+                      <div
+                        key={i}
+                        // Plain click = focus (collapse set); shift-click = toggle in the
+                        // batch that Set/Full-clip apply to.
+                        onClick={(e) => {
+                          if (e.shiftKey || shiftRef.current) redact.shiftSelect(i);
+                          else redact.select(i);
+                        }}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 6,
+                          padding: "4px 6px",
+                          borderRadius: 6,
+                          cursor: "pointer",
+                          userSelect: "none",
+                          // Primary = strong accent; other batch members = soft tint only;
+                          // same state language as the video box + timeline lane.
+                          background: isPrimary
+                            ? "var(--accent-soft)"
+                            : inSet
+                              ? "var(--accent-soft)"
+                              : "transparent",
+                          border: isPrimary
+                            ? "1px solid var(--accent)"
+                            : inSet
+                              ? "1px solid var(--accent-soft)"
+                              : "1px solid transparent",
+                          opacity: inSet || isPrimary ? 1 : 0.9,
+                        }}
+                      >
+                        <span style={{ flex: 1, fontSize: 11.5 }}>
+                          Panel {i + 1}
+                          <span
+                            style={{
+                              color: "var(--fg-tertiary)",
+                              marginLeft: 6,
+                              fontFamily: "var(--font-mono)",
+                              fontVariantNumeric: "tabular-nums",
+                            }}
+                          >
+                            {fmtDur(r.end - r.start)}
+                          </span>
+                        </span>
+                        <button
+                          className="btn-secondary"
+                          style={{ height: 22, fontSize: 10.5, padding: "0 6px" }}
+                          title="Frost tint: Auto adapts to the content; Light/Dark force it"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const next: RedactionTint =
+                              (r.tint ?? "auto") === "auto"
+                                ? "light"
+                                : r.tint === "light"
+                                  ? "dark"
+                                  : "auto";
+                            redact.update(i, { tint: next });
+                          }}
+                        >
+                          {r.tint === "light" ? "Light" : r.tint === "dark" ? "Dark" : "Auto"}
+                        </button>
+                        <button
+                          className="btn-secondary"
+                          style={{ height: 22, fontSize: 10.5, padding: "0 6px" }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            redact.remove(i);
+                          }}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                      );
+                    })}
+                  </div>
+                )}
+                {redact.selectedIndex != null &&
+                  redact.regions[redact.selectedIndex] &&
+                  duration != null &&
+                  (() => {
+                    const i = redact.selectedIndex;
+                    if (i == null) return null;
+                    // Readouts show the PRIMARY; the buttons apply to the whole batch
+                    // set (per-region clamped, so start<=end holds for each).
+                    const reg = redact.regions[i];
+                    const count = redact.selectedSet.length;
+                    const now = () => thumbnail.getCurrentTime();
+                    const setStart = () =>
+                      redact.patchSet((r) => ({ start: Math.max(0, Math.min(now(), r.end)) }));
+                    const setEnd = () =>
+                      redact.patchSet((r) => ({ end: Math.min(duration, Math.max(now(), r.start)) }));
+                    const setFull = () => redact.patchSet(() => ({ start: 0, end: duration }));
+                    const allFull = redact.selectedSet.every((k) => {
+                      const rr = redact.regions[k];
+                      return rr && rr.start <= 0.001 && rr.end >= duration - 0.001;
+                    });
+                    const mono = {
+                      fontFamily: "var(--font-mono)",
+                      fontVariantNumeric: "tabular-nums" as const,
+                    };
+                    return (
+                      <div
+                        style={{
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: 6,
+                          marginTop: 2,
+                          paddingTop: 6,
+                          borderTop: "1px solid var(--border-faint)",
+                        }}
+                      >
+                        <div style={{ fontSize: 10, letterSpacing: "0.04em", color: "var(--accent)", fontWeight: 600 }}>
+                          {count > 1 ? `${count} PANELS RANGE` : `PANEL ${i + 1} RANGE`}
+                        </div>
+                        <div style={{ display: "flex", gap: 8 }}>
+                          {(["start", "end"] as const).map((edge) => (
+                            <div key={edge} style={{ flex: 1 }}>
+                              <div style={{ fontSize: 10, color: "var(--fg-tertiary)", textTransform: "capitalize" }}>
+                                {edge}
+                              </div>
+                              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                <span style={{ ...mono, fontSize: 12 }}>
+                                  {fmt(edge === "start" ? reg.start : reg.end)}
+                                </span>
+                                <button
+                                  className="btn-secondary"
+                                  style={{ height: 20, fontSize: 10, padding: "0 6px" }}
+                                  title={`Set ${edge} to the playhead`}
+                                  onClick={edge === "start" ? setStart : setEnd}
+                                >
+                                  Set
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                          <div style={{ display: "flex", alignItems: "flex-end" }}>
+                            <button
+                              className="btn-secondary"
+                              style={{ height: 20, fontSize: 10, padding: "0 8px" }}
+                              title={count > 1 ? "Reset the selected regions to the whole clip" : "Reset this region to the whole clip"}
+                              disabled={allFull}
+                              onClick={setFull}
+                            >
+                              Full clip
+                            </button>
+                          </div>
+                        </div>
+                        <div style={{ fontSize: 11, color: "var(--fg-secondary)" }}>
+                          Duration <span style={{ ...mono, color: "var(--fg-primary)" }}>{fmtDur(reg.end - reg.start)}</span>
+                          <span style={{ color: "var(--fg-tertiary)", marginLeft: 8 }}>
+                            {count > 1
+                              ? `· applies to all ${count} selected (shift-click to change the set)`
+                              : "· Set jumps to the playhead; drag the timeline lane to trim"}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })()}
+                {/* Clear all DELETES the panels — styled destructive (red) and parked
+                    at the bottom, well away from the neutral "Select all" up top, so the
+                    two can't be confused. */}
+                {redact.regions.length > 0 && (
+                  <button
+                    className="btn-secondary"
+                    style={{
+                      height: 24,
+                      fontSize: 11,
+                      marginTop: 6,
+                      alignSelf: "flex-start",
+                      color: "oklch(0.72 0.19 25)",
+                      borderColor: "oklch(0.55 0.16 25 / 0.55)",
+                    }}
+                    onClick={redact.clearAll}
+                    disabled={busy}
+                    title="Delete every redaction panel (not undoable)"
+                  >
+                    Clear all (delete)
+                  </button>
+                )}
+              </div>
             </div>
           </>
         )}

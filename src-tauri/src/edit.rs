@@ -74,6 +74,13 @@ pub struct SidecarState {
     // the re-encode, an empty one must never leave the -c:v copy path.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub zoom: Vec<ZoomKeyframe>,
+    // Frosted-glass redaction panels (REDACTION-PLAN). Empty = no redaction and
+    // serializes to ABSENT — same Vec::is_empty convention as zoom and
+    // bubble_position_log — so a no-redaction sidecar stays byte-identical to a
+    // pre-redaction one and rides the unchanged export path. Declared LAST so an
+    // empty track never perturbs the serialized field order of existing sidecars.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub redactions: Vec<RedactionRegion>,
 }
 
 // One point on the zoom curve (V3-PLAN C.2). Zoom state between keyframes
@@ -151,6 +158,44 @@ pub struct Annotation {
 pub struct Position {
     pub x: f64,
     pub y: f64,
+}
+
+// One frosted-glass redaction panel (REDACTION-PLAN §1, §3). The rect is in
+// source-frame FRACTIONS, top-left origin — same convention as
+// Annotation.position — so it survives the 2x backing scale and the export
+// downscale unchanged (no pixel space to get wrong). The compositor transforms
+// it through the active zoom (zoomAt/centerAt) so the panel stays glued to the
+// content it covers; nothing here tracks motion — the rect is static in source
+// space. Time range is original-timeline seconds, the same basis as
+// Annotation.start_time and the compositor's tSrc gate.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct RedactionRegion {
+    // Top-left corner and size, all source-frame fractions in 0..1.
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    // Seconds on the original timeline.
+    pub start: f64,
+    pub end: f64,
+    // Frost tint. Light (white frost) is the default and reads best over dark
+    // and mid content; Dark (smoked glass) is for light-heavy content where a
+    // white frost would blend in. Defaults to Light when absent so hand-written
+    // regions need not spell it out.
+    #[serde(default)]
+    pub tint: RedactionTint,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum RedactionTint {
+    // Auto (default): the compositor samples the region's mean luminance once and
+    // picks a dark frost over light content / light frost over dark, so the panel is
+    // always visible. Light/Dark force it (manual override / escape hatch).
+    #[default]
+    Auto,
+    Light,
+    Dark,
 }
 
 pub fn sidecar_path(source: &Path) -> PathBuf {
@@ -566,6 +611,87 @@ struct V3Render {
     caveat: Option<String>,
 }
 
+// Pure construction of the cicompositor invocation (args + env) from already-
+// resolved inputs — no probing, no file I/O, so it can be pinned byte-for-byte in
+// tests exactly like build_plain_mp4_args. v3_render does the probing/JSON-writing
+// and hands the resolved paths here. Redaction is the LAST env and is added ONLY
+// when redact_json is Some, so an empty redaction list yields a command byte-
+// identical to the pre-redaction one.
+#[allow(clippy::too_many_arguments)]
+fn build_compositor_command(
+    bin: &Path,
+    screen_path: &Path,
+    video_only: &Path,
+    src_dims: (u32, u32),
+    out_dims: (u32, u32),
+    trim: Option<(f64, f64)>,
+    zoom_json: Option<&Path>,
+    webcam: Option<&Path>,
+    bubble: Option<&crate::composite::V3BubbleAssets>,
+    fps: f64,
+    watermark: Option<&Watermark>,
+    redact_json: Option<&Path>,
+) -> Command {
+    let (w, h) = src_dims;
+    let (out_w, out_h) = out_dims;
+    let mut cmd = Command::new(bin);
+    cmd.arg(screen_path).arg(video_only).arg("identity");
+    // Below-source target -> compositor appends a terminal Lanczos downscale to
+    // these even, aspect-matched dims. Equal to source -> not set, output == source.
+    if (out_w, out_h) != (w, h) {
+        cmd.env("OUTPUT_WIDTH", out_w.to_string())
+            .env("OUTPUT_HEIGHT", out_h.to_string());
+    }
+    if let Some(zj) = zoom_json {
+        cmd.env("ZOOM_SEGMENTS", zj);
+    }
+    // Trim window (original-timeline seconds). Compositor renders only this span and
+    // rebases output PTS to 0; the audio mux trims the screen audio to match.
+    if let Some((tin, tout)) = trim {
+        cmd.env("TRIM_IN", format!("{tin:.6}"))
+            .env("TRIM_OUT", format!("{tout:.6}"));
+    }
+    if let (Some(wc), Some(b)) = (webcam, bubble) {
+        // Webcam A/V lead, trim-aware — mirrors composite.rs build_webcam_overlay
+        // (pad_lead / wc_skip) but in frames. Untrimmed: trim_in=0 -> pad_lead=lead,
+        // wc_skip=0, so BUBBLE_LEAD_FRAMES=round(lead*fps) and no skip (byte-identical
+        // to before). Trimmed: pad_lead=(lead-trim_in).max(0) freezes the residual
+        // lead; wc_skip=(trim_in-lead).max(0) drops the webcam front, so at output
+        // t=0 the bubble shows content from (trim_in-lead) — the same 105ms lead as
+        // the untrimmed start. Shadow alpha/radius-k stay at cicompositor defaults.
+        let lead_secs = crate::composite::WEBCAM_LEAD_MS / 1000.0;
+        let trim_in = trim.map(|(a, _)| a).unwrap_or(0.0);
+        let lead_frames = ((lead_secs - trim_in).max(0.0) * fps).round().max(0.0) as i64;
+        let skip_frames = ((trim_in - lead_secs).max(0.0) * fps).round().max(0.0) as i64;
+        cmd.env("BUBBLE_WEBCAM", wc)
+            .env("BUBBLE_MASK_PNG", &b.mask_path)
+            .env("BUBBLE_SHADOW_PNG", &b.shadow_path)
+            .env("BUBBLE_DIAMETER", b.diameter.to_string())
+            .env("BUBBLE_ZONE", b.zone.code())
+            // Padding scales with the compositing frame width so the bubble holds
+            // its relative inset at backing resolution (default would stay 30px).
+            .env("BUBBLE_PADDING", crate::composite::resolve_padding_px(w).to_string())
+            .env("BUBBLE_LEAD_FRAMES", lead_frames.to_string());
+        if skip_frames > 0 {
+            cmd.env("BUBBLE_WEBCAM_SKIP_FRAMES", skip_frames.to_string());
+        }
+    }
+    if let Some(wm) = watermark {
+        cmd.env("WATERMARK_PNG", &wm.logo_path)
+            .env("WATERMARK_CORNER", wm.corner.code())
+            .env("WATERMARK_OPACITY", format!("{}", wm.opacity));
+        if let Some(sf) = wm.scale_frac {
+            cmd.env("WATERMARK_SCALE_FRAC", format!("{sf}"));
+        }
+    }
+    // Frosted-glass redaction panels (REDACTION-PLAN). Added last and only when
+    // present; absent -> the pre-redaction command exactly.
+    if let Some(rj) = redact_json {
+        cmd.env("REDACT_REGIONS", rj);
+    }
+    cmd
+}
+
 // Shared V3 render half: cicompositor renders zoom + bubble + watermark to a
 // video-only mp4 (downscaled to `resolution` if below source). No audio, no GIF
 // palette — the caller appends its own tail. Drives on_progress across [0.02,
@@ -680,6 +806,21 @@ fn v3_render(
         Some(p)
     };
 
+    // Redaction -> REDACT_REGIONS JSON. The sidecar rect is ALREADY in the shape the
+    // compositor consumes (source-space fractions, top-left origin; original-timeline
+    // seconds; tint "light"/"dark"), so it serializes straight through — no conversion
+    // like zoom's cx/w. Empty = None: no file, no env, so the command is byte-identical
+    // to a pre-redaction export (the compositor never enters its redaction branch).
+    let redact_json_path = if sidecar.redactions.is_empty() {
+        None
+    } else {
+        let json =
+            serde_json::to_string(&sidecar.redactions).map_err(|e| format!("redactions json: {e}"))?;
+        let p = temp_dir.join("redactions.json");
+        std::fs::write(&p, json).map_err(|e| format!("write redactions.json: {e}"))?;
+        Some(p)
+    };
+
     // Bubble mask + shadow PNGs (identical geometry to V2 build_webcam_overlay).
     let bubble = match &webcam {
         Some(_) => Some(crate::composite::build_v3_bubble_assets(
@@ -694,57 +835,23 @@ fn v3_render(
     };
 
     let video_only = temp_dir.join("v3-video.mp4");
-    let mut cmd = std::process::Command::new(&bin);
-    cmd.arg(screen_path).arg(&video_only).arg("identity");
-    // Below-source target -> compositor appends a terminal Lanczos downscale to
-    // these even, aspect-matched dims. Equal to source -> not set, output == source.
-    if (out_w, out_h) != (w, h) {
-        cmd.env("OUTPUT_WIDTH", out_w.to_string())
-            .env("OUTPUT_HEIGHT", out_h.to_string());
-    }
-    if let Some(zj) = &zoom_json_path {
-        cmd.env("ZOOM_SEGMENTS", zj);
-    }
-    // Trim window (original-timeline seconds). Compositor renders only this span and
-    // rebases output PTS to 0; the audio mux below trims the screen audio to match.
-    if let Some((tin, tout)) = trim {
-        cmd.env("TRIM_IN", format!("{tin:.6}"))
-            .env("TRIM_OUT", format!("{tout:.6}"));
-    }
-    if let (Some(wc), Some(b)) = (webcam.as_deref(), &bubble) {
-        // Webcam A/V lead, trim-aware — mirrors composite.rs build_webcam_overlay
-        // (pad_lead / wc_skip) but in frames. Untrimmed: trim_in=0 -> pad_lead=lead,
-        // wc_skip=0, so BUBBLE_LEAD_FRAMES=round(lead*fps) and no skip (byte-identical
-        // to before). Trimmed: pad_lead=(lead-trim_in).max(0) freezes the residual
-        // lead; wc_skip=(trim_in-lead).max(0) drops the webcam front, so at output
-        // t=0 the bubble shows content from (trim_in-lead) — the same 105ms lead as
-        // the untrimmed start. Shadow alpha/radius-k stay at cicompositor defaults.
-        let fps = probe_fps(screen_path);
-        let lead_secs = crate::composite::WEBCAM_LEAD_MS / 1000.0;
-        let trim_in = trim.map(|(a, _)| a).unwrap_or(0.0);
-        let lead_frames = ((lead_secs - trim_in).max(0.0) * fps).round().max(0.0) as i64;
-        let skip_frames = ((trim_in - lead_secs).max(0.0) * fps).round().max(0.0) as i64;
-        cmd.env("BUBBLE_WEBCAM", wc)
-            .env("BUBBLE_MASK_PNG", &b.mask_path)
-            .env("BUBBLE_SHADOW_PNG", &b.shadow_path)
-            .env("BUBBLE_DIAMETER", b.diameter.to_string())
-            .env("BUBBLE_ZONE", b.zone.code())
-            // Padding scales with the compositing frame width so the bubble holds
-            // its relative inset at backing resolution (default would stay 30px).
-            .env("BUBBLE_PADDING", crate::composite::resolve_padding_px(w).to_string())
-            .env("BUBBLE_LEAD_FRAMES", lead_frames.to_string());
-        if skip_frames > 0 {
-            cmd.env("BUBBLE_WEBCAM_SKIP_FRAMES", skip_frames.to_string());
-        }
-    }
-    if let Some(wm) = watermark {
-        cmd.env("WATERMARK_PNG", &wm.logo_path)
-            .env("WATERMARK_CORNER", wm.corner.code())
-            .env("WATERMARK_OPACITY", format!("{}", wm.opacity));
-        if let Some(sf) = wm.scale_frac {
-            cmd.env("WATERMARK_SCALE_FRAC", format!("{sf}"));
-        }
-    }
+    // fps is only needed for the bubble lead/skip math; probe it only when a webcam
+    // is present so the no-bubble path adds no extra probe (unchanged behavior).
+    let fps = if webcam.is_some() { probe_fps(screen_path) } else { 0.0 };
+    let mut cmd = build_compositor_command(
+        &bin,
+        screen_path,
+        &video_only,
+        (w, h),
+        (out_w, out_h),
+        trim,
+        zoom_json_path.as_deref(),
+        webcam.as_deref(),
+        bubble.as_ref(),
+        fps,
+        watermark,
+        redact_json_path.as_deref(),
+    );
     let comp = cmd
         .output()
         .map_err(|e| format!("spawn cicompositor: {e}"))?;
@@ -1842,6 +1949,7 @@ mod tests {
             bubble_zone: None,
             annotation_color: Some("#FF3B30".into()),
             zoom: vec![],
+            redactions: vec![],
         }
     }
 
@@ -1926,6 +2034,85 @@ mod tests {
         .unwrap();
         assert_eq!(sparse.ease, Ease::InOutCubic);
         assert!(!sparse.auto_generated);
+    }
+
+    // Baseline invariant (REDACTION-PLAN §5, sidecar layer): an empty redaction
+    // track cannot serialize. pre_zoom_populated_state() carries redactions:
+    // vec![] and still produces the pinned pre-redaction bytes exactly — the
+    // field is invisible until a panel exists, so a no-redaction sidecar rides
+    // the unchanged export path. (The pin predates this field; equality to it IS
+    // the proof the empty track adds nothing.)
+    #[test]
+    fn empty_redactions_serializes_absent_byte_identical() {
+        let state = pre_zoom_populated_state();
+        assert!(state.redactions.is_empty());
+        assert_eq!(
+            serde_json::to_string_pretty(&state).unwrap(),
+            PRE_ZOOM_SIDECAR_PIN
+        );
+        // Untouched-recording shape is unchanged by the new field.
+        assert_eq!(
+            serde_json::to_string_pretty(&SidecarState::default()).unwrap(),
+            "{\n  \"annotations\": []\n}"
+        );
+    }
+
+    // A wiped track written as "redactions": [] (hand edit) parses and
+    // re-serializes with the key gone — not as [] and not as null.
+    #[test]
+    fn redactions_empty_array_input_normalizes_to_absent() {
+        let mut with_empty: serde_json::Value =
+            serde_json::from_str(PRE_ZOOM_SIDECAR_PIN).unwrap();
+        with_empty["redactions"] = serde_json::json!([]);
+        let state: SidecarState = serde_json::from_value(with_empty).unwrap();
+        assert_eq!(state, pre_zoom_populated_state());
+        assert_eq!(
+            serde_json::to_string_pretty(&state).unwrap(),
+            PRE_ZOOM_SIDECAR_PIN
+        );
+    }
+
+    // A non-empty track survives serialize -> parse -> serialize with no loss,
+    // in memory and through the disk path. An omitted tint defaults to Light.
+    #[test]
+    fn redactions_round_trip_losslessly() {
+        let mut state = pre_zoom_populated_state();
+        state.redactions = vec![
+            RedactionRegion {
+                x: 0.12,
+                y: 0.34,
+                w: 0.25,
+                h: 0.08,
+                start: 2.0,
+                end: 9.5,
+                tint: RedactionTint::Light,
+            },
+            RedactionRegion {
+                x: 0.5,
+                y: 0.6,
+                w: 0.3,
+                h: 0.12,
+                start: 0.0,
+                end: 4.0,
+                tint: RedactionTint::Dark,
+            },
+        ];
+        let json = serde_json::to_string_pretty(&state).unwrap();
+        let reparsed: SidecarState = serde_json::from_str(&json).unwrap();
+        assert_eq!(reparsed, state);
+
+        let dir = std::env::temp_dir().join(format!("zeigen-redact-rt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("recording-rt.mp4");
+        write_sidecar_path(&source, &state).unwrap();
+        assert_eq!(read_sidecar_path(&source).unwrap().unwrap(), state);
+
+        // tint is optional on input and defaults to Auto (adaptive).
+        let sparse: RedactionRegion = serde_json::from_str(
+            r#"{"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4, "start": 1.0, "end": 2.0}"#,
+        )
+        .unwrap();
+        assert_eq!(sparse.tint, RedactionTint::Auto);
     }
 
     // GATE 1 (teardown) — the plain-MP4 tail (run_plain_mp4) survives the removal
@@ -2017,6 +2204,109 @@ mod tests {
 -c:v h264_videotoolbox -b:v 8M -profile:v high -pix_fmt yuv420p -tag:v avc1 -allow_sw 1 \
 -c:a aac -b:a 192k -movflags +faststart /S/out.mp4",
             "downscale-only command must be byte-identical to pre-teardown"
+        );
+    }
+
+    // Arg-vector + env PIN (REDACTION-PLAN commit 3) — the key gate. An empty
+    // redaction list must produce a cicompositor command byte-identical to the
+    // pre-redaction one; a non-empty list adds EXACTLY the REDACT_REGIONS env and
+    // nothing else. build_compositor_command is pure (no probing/IO), so we pin its
+    // args+env with fixed paths. The EXPECTED string below IS the pre-redaction
+    // capture; the refactor that extracted this builder is proven behavior-preserving
+    // by the run-the-compositor integration tests (v3_export_*), so this pin locks
+    // that the command does not drift and that redaction is purely additive.
+    #[test]
+    fn redaction_command_pin() {
+        use std::collections::BTreeSet;
+        use std::ffi::OsStr;
+        fn args_of(cmd: &Command) -> Vec<String> {
+            cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect()
+        }
+        fn envs_of(cmd: &Command) -> BTreeSet<String> {
+            cmd.get_envs()
+                .map(|(k, v): (&OsStr, Option<&OsStr>)| {
+                    format!(
+                        "{}={}",
+                        k.to_string_lossy(),
+                        v.map(|v| v.to_string_lossy().into_owned()).unwrap_or_default()
+                    )
+                })
+                .collect()
+        }
+        fn pin(cmd: &Command) -> String {
+            let envs: Vec<String> = envs_of(cmd).into_iter().collect(); // BTreeSet -> sorted
+            format!("ARGS: {}\nENV:\n{}", args_of(cmd).join(" "), envs.join("\n"))
+        }
+
+        let bin = Path::new("/S/cicompositor");
+        let screen = Path::new("/S/in.mp4");
+        let video_only = Path::new("/S/v3-video.mp4");
+        let zoom = Path::new("/S/zoom.json");
+        let redact = Path::new("/S/redactions.json");
+        let webcam = Path::new("/S/webcam.mp4");
+        let bubble = crate::composite::V3BubbleAssets {
+            mask_path: PathBuf::from("/S/mask.png"),
+            shadow_path: PathBuf::from("/S/shadow.png"),
+            diameter: 240,
+            zone: crate::composite::BubbleZone::BottomRight,
+        };
+        let wm = Watermark {
+            logo_path: PathBuf::from("/S/logo.png"),
+            corner: crate::composite::Corner::TopRight,
+            scale_frac: Some(0.08),
+            opacity: 0.9,
+        };
+        // Representative full config: downscale + zoom + bubble + watermark, no trim
+        // (keeps bubble lead/skip on the simple untrimmed path). Redaction ABSENT.
+        let mk = |rj: Option<&Path>| {
+            build_compositor_command(
+                bin, screen, video_only, (3024, 1964), (1920, 1246), None,
+                Some(zoom), Some(webcam), Some(&bubble), 30.0, Some(&wm), rj,
+            )
+        };
+        let base = mk(None);
+        let expected = "\
+ARGS: /S/in.mp4 /S/v3-video.mp4 identity
+ENV:
+BUBBLE_DIAMETER=240
+BUBBLE_LEAD_FRAMES=3
+BUBBLE_MASK_PNG=/S/mask.png
+BUBBLE_PADDING=60
+BUBBLE_SHADOW_PNG=/S/shadow.png
+BUBBLE_WEBCAM=/S/webcam.mp4
+BUBBLE_ZONE=br
+OUTPUT_HEIGHT=1246
+OUTPUT_WIDTH=1920
+WATERMARK_CORNER=tr
+WATERMARK_OPACITY=0.9
+WATERMARK_PNG=/S/logo.png
+WATERMARK_SCALE_FRAC=0.08
+ZOOM_SEGMENTS=/S/zoom.json";
+        assert_eq!(pin(&base), expected, "pre-redaction command must be byte-identical to today");
+
+        // Non-empty redaction: adds EXACTLY REDACT_REGIONS, args unchanged, nothing else.
+        let redacted = mk(Some(redact));
+        assert_eq!(args_of(&redacted), args_of(&base), "redaction must not touch args");
+        let added: Vec<String> = envs_of(&redacted).difference(&envs_of(&base)).cloned().collect();
+        let removed: Vec<String> = envs_of(&base).difference(&envs_of(&redacted)).cloned().collect();
+        assert_eq!(added, vec!["REDACT_REGIONS=/S/redactions.json".to_string()],
+            "redaction adds exactly the REDACT_REGIONS env");
+        assert!(removed.is_empty(), "redaction removes/changes no existing env: {removed:?}");
+    }
+
+    // The JSON v3_render writes to REDACT_REGIONS must carry EXACTLY the fields the
+    // compositor's JRedact decodes (main.swift): x,y,w,h,start,end,tint, tint as the
+    // snake_case string. This pins the wire format so the two sides can't drift — the
+    // gate fixtures in redaction-gate/ feed the compositor this exact shape.
+    #[test]
+    fn redaction_json_wire_format() {
+        let regions = vec![
+            RedactionRegion { x: 0.1, y: 0.2, w: 0.3, h: 0.05, start: 1.0, end: 4.0, tint: RedactionTint::Dark },
+            RedactionRegion { x: 0.5, y: 0.6, w: 0.2, h: 0.1, start: 0.0, end: 9.0, tint: RedactionTint::Light },
+        ];
+        assert_eq!(
+            serde_json::to_string(&regions).unwrap(),
+            r#"[{"x":0.1,"y":0.2,"w":0.3,"h":0.05,"start":1.0,"end":4.0,"tint":"dark"},{"x":0.5,"y":0.6,"w":0.2,"h":0.1,"start":0.0,"end":9.0,"tint":"light"}]"#
         );
     }
 

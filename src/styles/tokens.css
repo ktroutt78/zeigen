@@ -78,6 +78,10 @@
   --zoom:             oklch(0.66 0.17 300);
   --zoom-soft:        oklch(0.66 0.17 300 / 0.18);
 
+  /* Redaction — teal, distinct from zoom violet / accent blue for its timeline lane */
+  --redact:           oklch(0.68 0.12 195);
+  --redact-soft:      oklch(0.68 0.12 195 / 0.20);
+
   /* Success — iPhone connected, etc. Retuned into the refreshed palette
      (the wireframe dropped it by omission; the connected state still needs it). */
   --success:          oklch(0.66 0.15 155);
