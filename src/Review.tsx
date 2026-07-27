@@ -860,20 +860,18 @@ export default function Review() {
     setRedactSelectedIndex(null);
   }, []);
   // Commit a freshly-drawn box (source-space fractions, normalized so w/h > 0).
-  // Default range = playhead -> +3s, clamped to the clip (a sensible span you then
-  // trim on the timeline, not the whole clip); adaptive tint; selects it for editing.
+  // Default range = the WHOLE clip — most redactions stay up the entire time, so trim
+  // the exceptions rather than extend the rule. Adaptive tint; selects it for editing.
   const addRedaction = useCallback(
     (rect: { x: number; y: number; w: number; h: number }) => {
       if (duration == null) return;
-      const start = Math.max(0, Math.min(currentTime, duration));
-      const end = Math.min(duration, start + 3);
       const region: RedactionRegion = {
         x: rect.x,
         y: rect.y,
         w: rect.w,
         h: rect.h,
-        start,
-        end,
+        start: 0,
+        end: duration,
         tint: "auto",
       };
       setRedactions((prev) => {
@@ -882,7 +880,7 @@ export default function Review() {
         return next;
       });
     },
-    [duration, currentTime],
+    [duration],
   );
 
   // Step 5 suggestion detection — the manual "Re-suggest" button. Runs the
@@ -4764,6 +4762,8 @@ function ExportPanel({
                       redact.update(i, { start: Math.max(0, Math.min(now(), reg.end)) });
                     const setEnd = () =>
                       redact.update(i, { end: Math.min(duration, Math.max(now(), reg.start)) });
+                    const setFull = () => redact.update(i, { start: 0, end: duration });
+                    const isFull = reg.start <= 0.001 && reg.end >= duration - 0.001;
                     const mono = {
                       fontFamily: "var(--font-mono)",
                       fontVariantNumeric: "tabular-nums" as const,
@@ -4803,6 +4803,17 @@ function ExportPanel({
                               </div>
                             </div>
                           ))}
+                          <div style={{ display: "flex", alignItems: "flex-end" }}>
+                            <button
+                              className="btn-secondary"
+                              style={{ height: 20, fontSize: 10, padding: "0 8px" }}
+                              title="Reset this region to span the whole clip"
+                              disabled={isFull}
+                              onClick={setFull}
+                            >
+                              Full clip
+                            </button>
+                          </div>
                         </div>
                         <div style={{ fontSize: 11, color: "var(--fg-secondary)" }}>
                           Duration <span style={{ ...mono, color: "var(--fg-primary)" }}>{fmtDur(reg.end - reg.start)}</span>
