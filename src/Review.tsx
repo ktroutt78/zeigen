@@ -215,12 +215,19 @@ type ZoomEditor = {
 // Stage overlay + right-panel Redact section share this.
 type RedactionEditor = {
   regions: RedactionRegion[];
+  // Primary selection (the focus): drives the timeline edit row + strong highlight.
   selectedIndex: number | null;
+  // Batch set (shift-click): the regions Set Start / Set End / Full clip apply to.
+  // Always contains the primary. Single-select => [primary].
+  selectedSet: number[];
   select: (i: number | null) => void;
+  shiftSelect: (i: number) => void;
   update: (i: number, patch: Partial<RedactionRegion>) => void;
+  // Apply a per-region patch to every member of the batch set (the panel controls).
+  patchSet: (fn: (r: RedactionRegion) => Partial<RedactionRegion>) => void;
   remove: (i: number) => void;
   clearAll: () => void;
-  // Commit a freshly drawn source-space rect (fractions), select it.
+  // Commit a freshly drawn source-space rect (fractions), select it as primary.
   add: (rect: { x: number; y: number; w: number; h: number }) => void;
   // True while the Redact tool is active — enables the draw surface and, while
   // paused, suppresses the live zoom so the box is drawn on the flat frame.
@@ -666,7 +673,14 @@ export default function Review() {
   // Redaction panels (REDACTION-PLAN). Stored source-space; drawn on the flat
   // frame, previewed through the active zoom via the shared ./redaction transform.
   const [redactions, setRedactions] = useState<RedactionRegion[]>([]);
-  const [redactSelectedIndex, setRedactSelectedIndex] = useState<number | null>(null);
+  // Selection = a PRIMARY (the focus: drives the timeline edit row, the strong
+  // highlight, single-region edits) plus a SET for batch timing (shift-click). The
+  // primary is always in the set; a plain click collapses the set to just it.
+  const [redactSel, setRedactSel] = useState<{ primary: number | null; set: number[] }>({
+    primary: null,
+    set: [],
+  });
+  const redactSelectedIndex = redactSel.primary;
   // True while the Redact tool is active — the stage then suppresses zoom while
   // paused (draw on the flat frame) and enables the drag-to-draw surface.
   const [redactMode, setRedactMode] = useState(false);
@@ -845,23 +859,63 @@ export default function Review() {
 
   // --- Redaction editing (mirrors the zoom callbacks). Regions are source-space
   // fractional rects; the overlay draws them and the panel edits time/tint.
+  // Plain click: primary = i, collapse the set to just it (single-select behavior).
   const selectRedaction = useCallback((i: number | null) => {
-    setRedactSelectedIndex(i);
+    setRedactSel(i == null ? { primary: null, set: [] } : { primary: i, set: [i] });
+  }, []);
+  // Shift-click: toggle i in the batch set. Adding focuses it (new primary);
+  // removing the primary re-focuses the last remaining member.
+  const shiftSelectRedaction = useCallback((i: number) => {
+    setRedactSel((prev) => {
+      const has = prev.set.includes(i);
+      const set = has ? prev.set.filter((x) => x !== i) : [...prev.set, i];
+      const primary = !has
+        ? i
+        : prev.primary === i
+          ? set.length
+            ? set[set.length - 1]
+            : null
+          : prev.primary;
+      return { primary, set };
+    });
   }, []);
   const updateRedaction = useCallback((i: number, patch: Partial<RedactionRegion>) => {
     setRedactions((prev) => prev.map((r, k) => (k === i ? { ...r, ...patch } : r)));
   }, []);
+  // Batch patch: apply a per-region patch fn to every member of the current set —
+  // the panel's Set Start / Set End / Full clip. fn receives each region so per-region
+  // clamps (start<=end etc.) stay correct across the batch.
+  const patchRedactionSet = useCallback(
+    (fn: (r: RedactionRegion) => Partial<RedactionRegion>) => {
+      setRedactSel((sel) => {
+        setRedactions((prev) => prev.map((r, k) => (sel.set.includes(k) ? { ...r, ...fn(r) } : r)));
+        return sel;
+      });
+    },
+    [],
+  );
   const deleteRedaction = useCallback((i: number) => {
     setRedactions((prev) => prev.filter((_, k) => k !== i));
-    setRedactSelectedIndex(null);
+    // Drop i from the selection and shift indices above it down by one.
+    setRedactSel((prev) => {
+      const remap = (x: number) => (x > i ? x - 1 : x);
+      const set = prev.set.filter((x) => x !== i).map(remap);
+      const primary =
+        prev.primary == null || prev.primary === i
+          ? set.length
+            ? set[set.length - 1]
+            : null
+          : remap(prev.primary);
+      return { primary, set };
+    });
   }, []);
   const clearAllRedactions = useCallback(() => {
     setRedactions([]);
-    setRedactSelectedIndex(null);
+    setRedactSel({ primary: null, set: [] });
   }, []);
   // Commit a freshly-drawn box (source-space fractions, normalized so w/h > 0).
   // Default range = the WHOLE clip — most redactions stay up the entire time, so trim
-  // the exceptions rather than extend the rule. Adaptive tint; selects it for editing.
+  // the exceptions rather than extend the rule. Adaptive tint; selects it (primary).
   const addRedaction = useCallback(
     (rect: { x: number; y: number; w: number; h: number }) => {
       if (duration == null) return;
@@ -876,7 +930,8 @@ export default function Review() {
       };
       setRedactions((prev) => {
         const next = [...prev, region];
-        Promise.resolve().then(() => setRedactSelectedIndex(next.length - 1));
+        const idx = next.length - 1;
+        Promise.resolve().then(() => setRedactSel({ primary: idx, set: [idx] }));
         return next;
       });
     },
@@ -1802,8 +1857,11 @@ export default function Review() {
   const redactionEditor: RedactionEditor = {
     regions: redactions,
     selectedIndex: redactSelectedIndex,
+    selectedSet: redactSel.set,
     select: selectRedaction,
+    shiftSelect: shiftSelectRedaction,
     update: updateRedaction,
+    patchSet: patchRedactionSet,
     remove: deleteRedaction,
     clearAll: clearAllRedactions,
     add: addRedaction,
@@ -3164,14 +3222,15 @@ function RedactionLayer({
           ref={(el) => {
             boxRefs.current[i] = el;
           }}
-          // Clickable to select while the tool is active — selecting a box drives the
-          // same state as the panel row and the timeline lane. stopPropagation so the
-          // click doesn't fall through to the draw surface below.
+          // Clickable to select while the tool is active — drives the same state as the
+          // panel row + timeline lane. Plain click = focus (primary); shift-click =
+          // toggle in the batch set. stopPropagation so it doesn't reach the draw surface.
           onPointerDown={
             editor.active
               ? (e) => {
                   e.stopPropagation();
-                  editor.select(i);
+                  if (e.shiftKey) editor.shiftSelect(i);
+                  else editor.select(i);
                 }
               : undefined
           }
@@ -3179,12 +3238,20 @@ function RedactionLayer({
             position: "absolute",
             display: "none",
             borderRadius: 2,
-            // Accent selection — same state language as panel row + timeline lane.
+            // Primary = strong accent + ring; other batch members = dimmer accent ring
+            // (so the batch is obvious on the frame); else faint white.
             border:
               editor.selectedIndex === i
                 ? "2px solid var(--accent)"
-                : "1px solid rgba(255,255,255,0.5)",
-            boxShadow: editor.selectedIndex === i ? "0 0 0 3px var(--accent-soft)" : "none",
+                : editor.selectedSet.includes(i)
+                  ? "1.5px solid var(--accent-soft)"
+                  : "1px solid rgba(255,255,255,0.5)",
+            boxShadow:
+              editor.selectedIndex === i
+                ? "0 0 0 3px var(--accent-soft)"
+                : editor.selectedSet.includes(i)
+                  ? "0 0 0 2px var(--accent-soft)"
+                  : "none",
             pointerEvents: editor.active ? "auto" : "none",
             cursor: editor.active ? "pointer" : "default",
           }}
@@ -4694,10 +4761,15 @@ function ExportPanel({
                   </div>
                 ) : (
                   <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                    {redact.regions.map((r, i) => (
+                    {redact.regions.map((r, i) => {
+                      const isPrimary = redact.selectedIndex === i;
+                      const inSet = redact.selectedSet.includes(i);
+                      return (
                       <div
                         key={i}
-                        onClick={() => redact.select(i)}
+                        // Plain click = focus (collapse set); shift-click = toggle in the
+                        // batch that Set/Full-clip apply to.
+                        onClick={(e) => (e.shiftKey ? redact.shiftSelect(i) : redact.select(i))}
                         style={{
                           display: "flex",
                           alignItems: "center",
@@ -4705,14 +4777,20 @@ function ExportPanel({
                           padding: "4px 6px",
                           borderRadius: 6,
                           cursor: "pointer",
-                          // Unmistakable selection — accent tint + accent border, the
-                          // same state language as the video box and the timeline lane.
-                          background:
-                            redact.selectedIndex === i ? "var(--accent-soft)" : "transparent",
-                          border:
-                            redact.selectedIndex === i
-                              ? "1px solid var(--accent)"
+                          userSelect: "none",
+                          // Primary = strong accent; other batch members = soft tint only;
+                          // same state language as the video box + timeline lane.
+                          background: isPrimary
+                            ? "var(--accent-soft)"
+                            : inSet
+                              ? "var(--accent-soft)"
+                              : "transparent",
+                          border: isPrimary
+                            ? "1px solid var(--accent)"
+                            : inSet
+                              ? "1px solid var(--accent-soft)"
                               : "1px solid transparent",
+                          opacity: inSet || isPrimary ? 1 : 0.9,
                         }}
                       >
                         <span style={{ flex: 1, fontSize: 11.5 }}>
@@ -4756,7 +4834,8 @@ function ExportPanel({
                           Delete
                         </button>
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
                 {redact.selectedIndex != null &&
@@ -4765,14 +4844,20 @@ function ExportPanel({
                   (() => {
                     const i = redact.selectedIndex;
                     if (i == null) return null;
+                    // Readouts show the PRIMARY; the buttons apply to the whole batch
+                    // set (per-region clamped, so start<=end holds for each).
                     const reg = redact.regions[i];
+                    const count = redact.selectedSet.length;
                     const now = () => thumbnail.getCurrentTime();
                     const setStart = () =>
-                      redact.update(i, { start: Math.max(0, Math.min(now(), reg.end)) });
+                      redact.patchSet((r) => ({ start: Math.max(0, Math.min(now(), r.end)) }));
                     const setEnd = () =>
-                      redact.update(i, { end: Math.min(duration, Math.max(now(), reg.start)) });
-                    const setFull = () => redact.update(i, { start: 0, end: duration });
-                    const isFull = reg.start <= 0.001 && reg.end >= duration - 0.001;
+                      redact.patchSet((r) => ({ end: Math.min(duration, Math.max(now(), r.start)) }));
+                    const setFull = () => redact.patchSet(() => ({ start: 0, end: duration }));
+                    const allFull = redact.selectedSet.every((k) => {
+                      const rr = redact.regions[k];
+                      return rr && rr.start <= 0.001 && rr.end >= duration - 0.001;
+                    });
                     const mono = {
                       fontFamily: "var(--font-mono)",
                       fontVariantNumeric: "tabular-nums" as const,
@@ -4789,7 +4874,7 @@ function ExportPanel({
                         }}
                       >
                         <div style={{ fontSize: 10, letterSpacing: "0.04em", color: "var(--accent)", fontWeight: 600 }}>
-                          PANEL {i + 1} RANGE
+                          {count > 1 ? `${count} PANELS RANGE` : `PANEL ${i + 1} RANGE`}
                         </div>
                         <div style={{ display: "flex", gap: 8 }}>
                           {(["start", "end"] as const).map((edge) => (
@@ -4816,8 +4901,8 @@ function ExportPanel({
                             <button
                               className="btn-secondary"
                               style={{ height: 20, fontSize: 10, padding: "0 8px" }}
-                              title="Reset this region to span the whole clip"
-                              disabled={isFull}
+                              title={count > 1 ? "Reset the selected regions to the whole clip" : "Reset this region to the whole clip"}
+                              disabled={allFull}
                               onClick={setFull}
                             >
                               Full clip
@@ -4827,7 +4912,9 @@ function ExportPanel({
                         <div style={{ fontSize: 11, color: "var(--fg-secondary)" }}>
                           Duration <span style={{ ...mono, color: "var(--fg-primary)" }}>{fmtDur(reg.end - reg.start)}</span>
                           <span style={{ color: "var(--fg-tertiary)", marginLeft: 8 }}>
-                            · Set jumps to the playhead; drag the timeline lane to trim
+                            {count > 1
+                              ? `· applies to all ${count} selected (shift-click to change the set)`
+                              : "· Set jumps to the playhead; drag the timeline lane to trim"}
                           </span>
                         </div>
                       </div>
