@@ -446,6 +446,31 @@ function fmt(s: number | null | undefined): string {
   return `${String(m).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
 }
 
+// Shift-held tracker. A click event's shiftKey proved unreliable in the WKWebView
+// (shift-click on a panel row read shiftKey=false, so multi-select fell back to
+// single-select), so we track Shift from window key events and read that ref in the
+// click handlers, OR-combined with the event's own shiftKey as a belt-and-suspenders.
+function useShiftHeldRef() {
+  const ref = useRef(false);
+  useEffect(() => {
+    const on = (e: KeyboardEvent) => {
+      ref.current = e.shiftKey;
+    };
+    const clear = () => {
+      ref.current = false;
+    };
+    window.addEventListener("keydown", on, true);
+    window.addEventListener("keyup", on, true);
+    window.addEventListener("blur", clear);
+    return () => {
+      window.removeEventListener("keydown", on, true);
+      window.removeEventListener("keyup", on, true);
+      window.removeEventListener("blur", clear);
+    };
+  }, []);
+  return ref;
+}
+
 // Duration with tenths (MM:SS.d). Redactions are typically 2-4s, where fmt()'s
 // 1-second resolution can't tell 2.6s from 3.4s — duration is the number being
 // judged, so it carries the extra digit. Start/end stay fmt() (precision there is
@@ -3059,6 +3084,7 @@ function RedactionLayer({
   flat: boolean;
 }) {
   const size = useStageSize(stageRef);
+  const shiftRef = useShiftHeldRef();
   const boxRefs = useRef<(HTMLDivElement | null)[]>([]);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const offRef = useRef<HTMLCanvasElement | null>(null);
@@ -3229,7 +3255,7 @@ function RedactionLayer({
             editor.active
               ? (e) => {
                   e.stopPropagation();
-                  if (e.shiftKey) editor.shiftSelect(i);
+                  if (e.shiftKey || shiftRef.current) editor.shiftSelect(i);
                   else editor.select(i);
                 }
               : undefined
@@ -4410,6 +4436,7 @@ function ExportPanel({
 
   // Which tool is active (exclusive), persisted so the rail reopens the way
   // the user last left it (pure UI chrome — localStorage, not settings.json).
+  const shiftRef = useShiftHeldRef();
   const [activeTool, setActiveToolState] = useState<ToolId>(loadActiveTool);
   const setActiveTool = useCallback((id: ToolId) => {
     setActiveToolState((prev) => {
@@ -4769,7 +4796,11 @@ function ExportPanel({
                         key={i}
                         // Plain click = focus (collapse set); shift-click = toggle in the
                         // batch that Set/Full-clip apply to.
-                        onClick={(e) => (e.shiftKey ? redact.shiftSelect(i) : redact.select(i))}
+                        onClick={(e) =>
+                          e.shiftKey || shiftRef.current
+                            ? redact.shiftSelect(i)
+                            : redact.select(i)
+                        }
                         style={{
                           display: "flex",
                           alignItems: "center",
