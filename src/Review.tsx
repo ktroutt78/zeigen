@@ -10,7 +10,7 @@ import Waveform from "./Waveform";
 import ScrubPreview from "./ScrubPreview";
 import {
   sourceRectToOutputRect,
-  redactRadius,
+  redactCell,
   redactionsPayload,
   REDACT_ALPHA,
   REDACT_SATURATION,
@@ -3004,43 +3004,110 @@ function RedactionLayer({
 }) {
   const size = useStageSize(stageRef);
   const boxRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const offRef = useRef<HTMLCanvasElement | null>(null);
+  // Adaptive-tint cache (dark? per region) — sampled once, held, so a static region
+  // over changing content can't flicker (mirrors the export). Cleared when the region
+  // set changes (effect re-subscribes).
+  const tintCache = useRef<Map<number, boolean>>(new Map());
   const [pending, setPending] = useState<Rect | null>(null);
 
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !videoDims || editor.regions.length === 0) return;
+    tintCache.current.clear();
+    if (!offRef.current) offRef.current = document.createElement("canvas");
     let raf = 0;
     const tick = () => {
       raf = requestAnimationFrame(tick);
       const stage = stageRef.current;
-      if (!stage) return;
+      const canvas = canvasRef.current;
+      if (!stage || !canvas) return;
       const rect = stage.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const cw = Math.round(rect.width), ch = Math.round(rect.height);
+      if (canvas.width !== cw * dpr || canvas.height !== ch * dpr) {
+        canvas.width = cw * dpr;
+        canvas.height = ch * dpr;
+        canvas.style.width = `${cw}px`;
+        canvas.style.height = `${ch}px`;
+      }
+      const ctx = canvas.getContext("2d");
+      const off = offRef.current;
+      const offCtx = off?.getContext("2d");
+      if (!ctx || !off || !offCtx) return;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, cw, ch);
       const b = contentBox({ width: rect.width, height: rect.height }, videoDims);
       const dsx = videoDims.w > 0 ? b.w / videoDims.w : 0;
       const t = video.currentTime;
+      const vW = video.videoWidth || videoDims.w, vH = video.videoHeight || videoDims.h;
       editor.regions.forEach((region, i) => {
         const node = boxRefs.current[i];
-        if (!node) return;
         const active = t >= region.start && t <= region.end;
         const zoom = flat ? null : zoomAt(zoomSegs, t);
         const out = active ? sourceRectToOutputRect(region, zoom, videoDims.w, videoDims.h) : null;
         if (!out) {
-          node.style.display = "none";
+          if (node) node.style.display = "none";
           return;
         }
-        node.style.display = "block";
-        node.style.left = `${b.x + out.x * dsx}px`;
-        node.style.top = `${b.y + out.y * dsx}px`;
-        node.style.width = `${out.w * dsx}px`;
-        node.style.height = `${out.h * dsx}px`;
-        // Same radius formula the compositor uses (output px), shown at the
-        // preview's display scale. Alpha + saturation are the shared constants.
-        const radiusStage = redactRadius(out.w, out.h) * dsx;
-        const tint = region.tint === "dark" ? "18, 18, 18" : "255, 255, 255";
-        const filter = `blur(${radiusStage}px) saturate(${REDACT_SATURATION})`;
-        node.style.backdropFilter = filter;
-        node.style.setProperty("-webkit-backdrop-filter", filter);
-        node.style.background = `rgba(${tint}, ${REDACT_ALPHA})`;
+        const rx = b.x + out.x * dsx, ry = b.y + out.y * dsx, rw = out.w * dsx, rh = out.h * dsx;
+        // Transparent selection/click box, positioned over the mosaic.
+        if (node) {
+          node.style.display = "block";
+          node.style.left = `${rx}px`;
+          node.style.top = `${ry}px`;
+          node.style.width = `${rw}px`;
+          node.style.height = `${rh}px`;
+        }
+        if (rw < 1 || rh < 1) return;
+        // MOSAIC — the SAME pixelate the export applies: cell in OUTPUT px (matches the
+        // compositor), so preview = export. Sample the region's source content, average
+        // down to nx x ny, then upscale pixelated. This is the safety-critical part —
+        // if the export leaves content legible, the preview now shows it legible too.
+        const cellOut = redactCell(out.w, out.h);
+        const nx = Math.max(1, Math.round(out.w / cellOut));
+        const ny = Math.max(1, Math.round(out.h / cellOut));
+        off.width = nx;
+        off.height = ny;
+        offCtx.imageSmoothingEnabled = true;
+        try {
+          offCtx.drawImage(video, region.x * vW, region.y * vH, region.w * vW, region.h * vH, 0, 0, nx, ny);
+        } catch {
+          return; // video frame not ready yet
+        }
+        // Adaptive tint (dark frost over light content / light over dark), sampled once.
+        // Manual light/dark override wins. If pixel readback is blocked (tainted asset
+        // canvas), fall back to dark — correct for light dashboards; use manual override
+        // on dark content.
+        let dark: boolean;
+        if (region.tint === "light") dark = false;
+        else if (region.tint === "dark") dark = true;
+        else {
+          const cached = tintCache.current.get(i);
+          if (cached != null) dark = cached;
+          else {
+            let d = true;
+            try {
+              const px = offCtx.getImageData(0, 0, nx, ny).data;
+              let sum = 0;
+              for (let k = 0; k < px.length; k += 4)
+                sum += 0.299 * px[k] + 0.587 * px[k + 1] + 0.114 * px[k + 2];
+              d = sum / (nx * ny) >= 128;
+            } catch {
+              d = true;
+            }
+            tintCache.current.set(i, d);
+            dark = d;
+          }
+        }
+        ctx.imageSmoothingEnabled = false;
+        ctx.filter = `saturate(${REDACT_SATURATION})`;
+        ctx.drawImage(off, 0, 0, nx, ny, rx, ry, rw, rh);
+        ctx.filter = "none";
+        const g = dark ? 18 : 242;
+        ctx.fillStyle = `rgba(${g}, ${g}, ${g}, ${REDACT_ALPHA})`;
+        ctx.fillRect(rx, ry, rw, rh);
       });
     };
     tick();
@@ -3082,9 +3149,11 @@ function RedactionLayer({
 
   return (
     <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
-      {/* Draw surface FIRST (below the boxes) so a click on a box selects it while a
-          drag on empty frame still draws a new one. Only while editing (tool active,
-          paused/flat). */}
+      {/* The frosted mosaic is painted here (pixelate + adaptive tint, same as export).
+          Interaction layers (draw surface, selection boxes) sit above it, transparent. */}
+      <canvas ref={canvasRef} style={{ position: "absolute", left: 0, top: 0, pointerEvents: "none" }} />
+      {/* Draw surface (below the boxes) so a click on a box selects it while a drag on
+          empty frame still draws a new one. Only while editing (tool active, paused). */}
       {editor.active && flat && (
         <div
           onPointerDown={startDraw}

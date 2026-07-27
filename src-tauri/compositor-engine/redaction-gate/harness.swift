@@ -78,6 +78,9 @@ func sceneItems(_ W: Int) -> [Item] {
         Item(id: "medkpi",  text: "$1,284.57",                bold: true,  size: 52 * s, xf: 0.58, basef: 0.34),
         Item(id: "balance", text: "Balance today  $2,109.44", bold: false, size: 26 * s, xf: 0.08, basef: 0.58),
         Item(id: "caption", text: "Account ending 4471",      bold: false, size: 16 * s, xf: 0.08, basef: 0.68),
+        // Short wide small-values strip — the geometry that exported LEGIBLE at cell 11
+        // (DECISIONS 2026-07-27). Small text (15px) + short box is the hardest case.
+        Item(id: "values",  text: "$1,284.57    842.10    2,109.44    67.3%", bold: false, size: 15 * s, xf: 0.08, basef: 0.80),
     ]
 }
 func drawItem(_ it: Item, text: String, into: CGContext, W: Int, H: Int, color: CGFloat, alpha: CGFloat) {

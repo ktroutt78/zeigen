@@ -67,8 +67,9 @@ PY
   xport REDACT_REGIONS="$rjson" REDACT_DEBUG=on "$CICO" "$input" "$treat" || { bad "$card treated export"; return; }
   # per-region cell values (first frame): one REDACT line per region, in json order.
   # (bash 3.2 on macOS has no mapfile.)
+  local nitems; nitems=$(grep -c '^ITEM ' "$man")
   cells=()
-  while IFS= read -r cl; do cells+=("$cl"); done < <(env REDACT_REGIONS="$rjson" REDACT_DEBUG=on "$CICO" "$input" "$WORK/dbg.mp4" 2>&1 >/dev/null | grep -m5 'REDACT ' | sed -E 's/.*cell=([0-9.]+).*/\1/')
+  while IFS= read -r cl; do cells+=("$cl"); done < <(env REDACT_REGIONS="$rjson" REDACT_DEBUG=on "$CICO" "$input" "$WORK/dbg.mp4" 2>&1 >/dev/null | grep 'REDACT ' | head -n "$nitems" | sed -E 's/.*cell=([0-9.]+).*/\1/')
   local i=0
   while read -r _ id x y w h text; do
     local pad fx fy fw fh cell stroke ratio ocr hit
@@ -112,5 +113,12 @@ dbig=$(bash "$HERE/discriminability.sh" big '$849' '$135,$672,$908,$314,$567' 2>
 say "  big \$849 pixelate: $dbig  (advisory; see DECISIONS 2026-07-26)"
 
 say ""
-if [ $PASS -eq 1 ]; then say "===== LEGIBILITY GATE: ALL PASS (eye-check still required) ====="; else say "===== LEGIBILITY GATE: FAILURES ABOVE ====="; fi
+say "NOTE (DECISIONS 2026-07-27): these checks are NECESSARY, NOT SUFFICIENT. Hardened"
+say "OCR read NOTHING off a short small-values strip the owner's eye read clearly (cell"
+say "11, floor 10) — a false pass. The cell>1.5*stroke geometric check is likewise a"
+say "stroke check, not a legibility guarantee (stroke ~ 1/4 of a character). The FLOOR"
+say "(24) is the guarantee; the OWNER'S EYE is the final gate. This gate narrows the"
+say "search, it does not clear the build."
+say ""
+if [ $PASS -eq 1 ]; then say "===== LEGIBILITY GATE: ALL PASS (eye-check still required — see NOTE) ====="; else say "===== LEGIBILITY GATE: FAILURES ABOVE ====="; fi
 exit $((1-PASS))

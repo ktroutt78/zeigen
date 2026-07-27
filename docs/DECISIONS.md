@@ -4,6 +4,21 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-27 — Redaction cell FLOOR reverted 10 -> 24; the floor is the guarantee, not the stroke-clamp; OCR is not a sufficient readability oracle
+
+Owner eye-check caught an EXPORTED short small-values strip (a wide, ~30px-tall row) rendering LEGIBLE — digit shapes and decimal placement discernible — while the preview showed a solid panel. Diagnosis (reproduced, `docs`/scratch):
+
+- The strip got cell **11.1** (`proxy = 0.3*min(w,h) = 0.3*37`), stroke measured **3.67** (accurate — the estimator was NOT fooled), clampUp **no**. Forcing cell 22 on the same strip destroys it; the old floor of 24 would have set cell 24 and caught it. Coverage was FULL (not partial) — the panel spanned the drawn rect; the mosaic at cell 11 simply preserved digit structure.
+- **Root cause: the floor drop 24 -> 10 (2026-07-26 part 2) removed the real protection, and the stroke-clamp did NOT replace it.** The clamp is keyed to STROKE width, but stroke (~3.7) is ~1/4 of a character; `cell > 1.5*stroke = 5.5` is satisfied while a digit (~14px wide, 29px tall) still survives. The lowered floor bought marginally finer small-text mosaic and cost a legible export — a bad trade for a guarantee feature.
+
+**Decisions:**
+1. **FLOOR = 24 (known-safe), restored.** The floor is THE readability guarantee. The stroke-clamp stays as a SECONDARY check (catches small-box-over-thick-strokes) but is explicitly NOT the guarantee. Do not lower the floor again without eye-validated tuning across text sizes.
+2. **A char-height ratio is NOT a valid replacement.** Own data: big text was safe at cell/charH 0.33 while the strip failed at 0.38 — the ratio isn't predictive (dense small values rows are more guessable from context). Don't swap one insufficient rule for another unvalidated one.
+3. **Hardened contrast-recovery OCR is a NECESSARY trigger but demonstrably NOT SUFFICIENT as the readability oracle.** Evidence: it read NOTHING off this strip (false pass) that the owner's eye read clearly. The automated checks (OCR + geometric cell/stroke) NARROW the search; they do not CLEAR the build. The owner's eye is the final gate. The legibility gate must state this.
+4. **Preview parity is safety-relevant, not cosmetic.** The blur preview showed solid coverage over content the pixelate export left legible — actively reassuring about safety it cannot verify. Preview must render the SAME pixelate + adaptive tint at the SAME cell size as the export (done 2026-07-27).
+
+---
+
 ## 2026-07-26 (part 2) — Redaction coverage fixes: cell floor lowered, safety moves to a runtime stroke-clamp; adaptive tint; edge-aligned grid
 
 Owner eye-check on the first pixelate build: UNREADABLE holds (pixelate works), but the panels rendered as a scatter of blocks with gaps, not solid frosted rectangles. Three mechanisms, all fixed (main.swift):

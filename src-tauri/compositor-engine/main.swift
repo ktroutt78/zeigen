@@ -195,16 +195,18 @@ let redactDebug = env["REDACT_DEBUG"] == "on"
 // absolute cell for calibration sweeps.
 let redactMode = env["REDACT_MODE"] ?? "pixelate"
 let redactCellK = Double(env["REDACT_CELL_K"] ?? "0.3")!
-// FLOOR lowered from 24 -> 10 (DECISIONS 2026-07-26 part 2): the fixed 24 was
-// calibrated on big-bold stroke ~25px and over-blocked SMALL text (stroke ~5px) into
-// 2-3 giant tiles. Safety no longer rides this floor — it rides the runtime
-// stroke-clamp below (cell >= MARGIN * MEASURED stroke), so the proxy can be aesthetic.
-let redactCellFloor = Double(env["REDACT_CELL_FLOOR"] ?? "10")!
+// FLOOR = 24, the known-safe value (DECISIONS 2026-07-27). It was briefly dropped to
+// 10 for finer small-text mosaic, but that let a short small-values strip export
+// LEGIBLE (cell 11). The floor is THE safety guarantee — the stroke-clamp below is a
+// secondary check only, NOT the guarantee: stroke is ~1/4 of a character, so
+// cell > 1.5*stroke is satisfied while a digit still survives. Do not lower again
+// without eye-validated tuning across sizes (a ratio is not predictive — big text was
+// safe at cell/charH 0.33 while the strip failed at 0.38).
+let redactCellFloor = Double(env["REDACT_CELL_FLOOR"] ?? "24")!
 let redactCellCap = Double(env["REDACT_CELL_CAP"] ?? "220")!
-// SAFETY: the mosaic cell must exceed the region's MEASURED text stroke width or the
-// glyph survives (cell 16 leaked / 24 held at stroke 25). The proxy above picks a
-// cell for looks; this clamps it UP to MARGIN x the stroke measured per region, so
-// safety is measured, not assumed. 1.5 does not come down without a logged reason.
+// SECONDARY check (not the safety guarantee — the floor is): still clamp cell up to
+// MARGIN x the measured stroke, so a pathological small-box-over-thick-strokes case
+// can't slip under the floor. It essentially never fires while the floor is 24.
 let redactStrokeMargin = Double(env["REDACT_CELL_STROKE_MARGIN"] ?? "1.5")!
 let redactCellForce = Double(env["REDACT_CELL"] ?? "")
 

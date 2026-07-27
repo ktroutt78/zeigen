@@ -23,19 +23,25 @@ export type RedactionRegion = {
   tint?: RedactionTint;
 };
 
-// Frosted-glass parameters — identical to main.swift REDACT_* defaults.
+// Frosted-glass parameters — identical to main.swift REDACT_* defaults. The preview
+// (Review RedactionLayer) uses these so what's drawn on screen matches what ships.
 export const REDACT_ALPHA = 0.6; // overlay opacity (aesthetics + residual attenuation)
 export const REDACT_SATURATION = 0.5; // CIColorControls saturation
-export const REDACT_RADIUS_K = 0.08; // radius = k * min(w,h) ...
-export const REDACT_RADIUS_FLOOR = 16; // ... clamped to [floor, cap] in OUTPUT px.
-export const REDACT_RADIUS_CAP = 90; // FLOOR is a safety parameter (DECISIONS 2026-07-25).
+// Pixelate cell = clamp(K * min(w,h), FLOOR, CAP) in OUTPUT (post-zoom) px. FLOOR = 24
+// is THE readability safety parameter (DECISIONS 2026-07-27); do not lower without
+// eye-validated tuning. The compositor additionally clamps up to 1.5*measured-stroke
+// as a secondary check, which essentially never fires at floor 24 — so the preview's
+// proxy cell matches the export in practice.
+export const REDACT_CELL_K = 0.3;
+export const REDACT_CELL_FLOOR = 24;
+export const REDACT_CELL_CAP = 220;
 
-// Blur radius the compositor applies, in OUTPUT (post-zoom) pixels. min(w,h) is the
-// region's post-zoom size, so a magnified region gets a proportionally larger radius.
-export function redactRadius(outW: number, outH: number): number {
+// Mosaic cell the compositor applies, OUTPUT (post-zoom) px — a magnified region gets
+// proportionally larger cells, same as the export.
+export function redactCell(outW: number, outH: number): number {
   return Math.min(
-    Math.max(REDACT_RADIUS_K * Math.min(outW, outH), REDACT_RADIUS_FLOOR),
-    REDACT_RADIUS_CAP,
+    Math.max(REDACT_CELL_K * Math.min(outW, outH), REDACT_CELL_FLOOR),
+    REDACT_CELL_CAP,
   );
 }
 
