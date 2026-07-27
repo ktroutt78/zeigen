@@ -44,6 +44,10 @@ type SegmentTrackProps = {
   onAddAt?: (t: number) => void;
   // Positions the row inside its relatively-positioned parent.
   style?: React.CSSProperties;
+  // Lane accent (band border, pip, held-core, edge handles). Defaults to the zoom
+  // violet; the redaction lane passes its own teal so the two lanes read distinctly.
+  color?: string;
+  colorSoft?: string;
 };
 
 export default function SegmentTrack({
@@ -61,6 +65,8 @@ export default function SegmentTrack({
   bandHeight = 14,
   onAddAt,
   style,
+  color = "var(--zoom)",
+  colorSoft = "var(--zoom-soft)",
 }: SegmentTrackProps) {
   const rowRef = useRef<HTMLDivElement | null>(null);
   const pipTop = (bandHeight - 14) / 2;
@@ -207,7 +213,7 @@ export default function SegmentTrack({
                   height: bandHeight,
                   background: selected ? "rgba(255,255,255,0.12)" : "rgba(255,255,255,0.05)",
                   border: selected
-                    ? "1px solid var(--zoom)"
+                    ? `1px solid ${color}`
                     : "1px solid var(--border-faint)",
                   borderRadius: 3,
                   pointerEvents: "none",
@@ -225,7 +231,7 @@ export default function SegmentTrack({
                   width: `${Math.max(0, heldEndPct - heldStartPct)}%`,
                   top: 0,
                   height: bandHeight,
-                  background: "var(--zoom)",
+                  background: color,
                   opacity: selected ? 0.38 : 0.18,
                   borderRadius: 2,
                   pointerEvents: "none",
@@ -273,8 +279,8 @@ export default function SegmentTrack({
                   display: "inline-block",
                   padding: "1px 6px",
                   borderRadius: "var(--r-pill)",
-                  background: selected ? "var(--zoom-soft)" : "transparent",
-                  color: "var(--zoom)",
+                  background: selected ? colorSoft : "transparent",
+                  color: color,
                   lineHeight: "12px",
                   fontSize: 9,
                   fontWeight: 600,
@@ -289,8 +295,8 @@ export default function SegmentTrack({
             </div>
             {selected && (
               <>
-                <EdgeHandle pct={startPct} side="start" height={bandHeight} onPointerDown={onEdgeDown("start")} />
-                <EdgeHandle pct={endPct} side="end" height={bandHeight} onPointerDown={onEdgeDown("end")} />
+                <EdgeHandle pct={startPct} side="start" height={bandHeight} color={color} onPointerDown={onEdgeDown("start")} />
+                <EdgeHandle pct={endPct} side="end" height={bandHeight} color={color} onPointerDown={onEdgeDown("end")} />
               </>
             )}
           </div>
@@ -306,11 +312,13 @@ function EdgeHandle({
   pct,
   side,
   height,
+  color,
   onPointerDown,
 }: {
   pct: number;
   side: "start" | "end";
   height: number;
+  color: string;
   onPointerDown: (e: React.PointerEvent) => void;
 }) {
   return (
@@ -323,7 +331,7 @@ function EdgeHandle({
         width: 6,
         height,
         transform: side === "start" ? "translateX(-100%)" : "translateX(0)",
-        background: "var(--zoom)",
+        background: color,
         borderRadius: 2,
         cursor: "ew-resize",
         boxShadow: "0 1px 2px rgba(0,0,0,0.4)",

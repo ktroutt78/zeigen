@@ -439,6 +439,18 @@ function fmt(s: number | null | undefined): string {
   return `${String(m).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
 }
 
+// Duration with tenths (MM:SS.d). Redactions are typically 2-4s, where fmt()'s
+// 1-second resolution can't tell 2.6s from 3.4s — duration is the number being
+// judged, so it carries the extra digit. Start/end stay fmt() (precision there is
+// set-to-playhead / drag).
+function fmtDur(s: number | null | undefined): string {
+  if (s == null || !isFinite(s)) return "--:--.-";
+  const m = Math.floor(s / 60);
+  const ss = Math.floor(s % 60);
+  const tenth = Math.floor((s - Math.floor(s)) * 10);
+  return `${String(m).padStart(2, "0")}:${String(ss).padStart(2, "0")}.${tenth}`;
+}
+
 // Normalize trim: an "untrimmed" range [0, duration] is logically equivalent
 // to no trim at all. Storing the canonical form keeps dirty-detection honest
 // and keeps the sidecar file empty for clips with no edits.
@@ -848,17 +860,20 @@ export default function Review() {
     setRedactSelectedIndex(null);
   }, []);
   // Commit a freshly-drawn box (source-space fractions, normalized so w/h > 0).
-  // Defaults to the whole clip and a light frost; selects it for editing.
+  // Default range = playhead -> +3s, clamped to the clip (a sensible span you then
+  // trim on the timeline, not the whole clip); adaptive tint; selects it for editing.
   const addRedaction = useCallback(
     (rect: { x: number; y: number; w: number; h: number }) => {
       if (duration == null) return;
+      const start = Math.max(0, Math.min(currentTime, duration));
+      const end = Math.min(duration, start + 3);
       const region: RedactionRegion = {
         x: rect.x,
         y: rect.y,
         w: rect.w,
         h: rect.h,
-        start: 0,
-        end: duration,
+        start,
+        end,
         tint: "auto",
       };
       setRedactions((prev) => {
@@ -867,7 +882,7 @@ export default function Review() {
         return next;
       });
     },
-    [duration],
+    [duration, currentTime],
   );
 
   // Step 5 suggestion detection — the manual "Re-suggest" button. Runs the
@@ -2116,6 +2131,7 @@ function LeftColumn(props: LeftColumnProps) {
         onScrubEnd={props.onScrubEnd}
         audioStart={props.audioStart}
         zoom={props.zoom}
+        redact={props.redact}
         thumbnailTime={props.thumbnailTime}
       />
     </div>
@@ -3066,21 +3082,44 @@ function RedactionLayer({
 
   return (
     <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
+      {/* Draw surface FIRST (below the boxes) so a click on a box selects it while a
+          drag on empty frame still draws a new one. Only while editing (tool active,
+          paused/flat). */}
+      {editor.active && flat && (
+        <div
+          onPointerDown={startDraw}
+          style={{ position: "absolute", inset: 0, cursor: "crosshair", pointerEvents: "auto", touchAction: "none" }}
+        />
+      )}
       {editor.regions.map((_, i) => (
         <div
           key={i}
           ref={(el) => {
             boxRefs.current[i] = el;
           }}
+          // Clickable to select while the tool is active — selecting a box drives the
+          // same state as the panel row and the timeline lane. stopPropagation so the
+          // click doesn't fall through to the draw surface below.
+          onPointerDown={
+            editor.active
+              ? (e) => {
+                  e.stopPropagation();
+                  editor.select(i);
+                }
+              : undefined
+          }
           style={{
             position: "absolute",
             display: "none",
             borderRadius: 2,
+            // Accent selection — same state language as panel row + timeline lane.
             border:
               editor.selectedIndex === i
-                ? "1.5px solid var(--zoom)"
-                : "1px solid rgba(255,255,255,0.4)",
-            pointerEvents: "none",
+                ? "2px solid var(--accent)"
+                : "1px solid rgba(255,255,255,0.5)",
+            boxShadow: editor.selectedIndex === i ? "0 0 0 3px var(--accent-soft)" : "none",
+            pointerEvents: editor.active ? "auto" : "none",
+            cursor: editor.active ? "pointer" : "default",
           }}
         />
       ))}
@@ -3092,16 +3131,10 @@ function RedactionLayer({
             top: b.y + pending.y * b.h,
             width: pending.w * b.w,
             height: pending.h * b.h,
-            border: "1.5px dashed var(--zoom)",
-            background: "rgba(255,255,255,0.15)",
+            border: "1.5px dashed var(--redact)",
+            background: "var(--redact-soft)",
             pointerEvents: "none",
           }}
-        />
-      )}
-      {editor.active && flat && (
-        <div
-          onPointerDown={startDraw}
-          style={{ position: "absolute", inset: 0, cursor: "crosshair", pointerEvents: "auto", touchAction: "none" }}
         />
       )}
     </div>
@@ -3274,12 +3307,29 @@ type TimelineProps = {
   onScrubEnd: () => void;
   audioStart: number | null;
   zoom: ZoomEditor;
+  redact: RedactionEditor;
   thumbnailTime: number | null;
 };
+
+// Union of redaction intervals for the collapsed overview bar — overlaps merge
+// into one continuous span ("is anything redacted here", not which region).
+function mergeIntervals(regs: { start: number; end: number }[]): { start: number; end: number }[] {
+  const sorted = regs.map((r) => ({ start: r.start, end: r.end })).sort((a, b) => a.start - b.start);
+  const out: { start: number; end: number }[] = [];
+  for (const iv of sorted) {
+    const last = out[out.length - 1];
+    if (last && iv.start <= last.end) last.end = Math.max(last.end, iv.end);
+    else out.push({ ...iv });
+  }
+  return out;
+}
 
 function Timeline(props: TimelineProps) {
   const trackRef = useRef<HTMLDivElement | null>(null);
   const [hover, setHover] = useState<{ time: number; rect: DOMRect } | null>(null);
+  // Redaction lane disclosure: collapsed (merged overview only) vs expanded
+  // (overview + an editable row for the selected region). Pure UI chrome.
+  const [redactExpanded, setRedactExpanded] = useState(false);
   // Hover-scrub (Model A): true while a bare-hover skim is driving the playhead,
   // so onScrubStart/End fire once per skim session (webcam bubble aligns once at
   // the end, not per tick). Reset when a drag ends so the two stay in sync.
@@ -3660,6 +3710,90 @@ function Timeline(props: TimelineProps) {
             ramp={ZOOM_RAMP_S}
             style={{ top: 4 }}
           />
+        </div>
+      )}
+
+      {/* Redaction lane (teal, distinct from the violet zoom lane). Collapsed:
+          a merged read-only overview bar (where anything is redacted). Expanded:
+          the overview plus one editable SegmentTrack row bound to the SELECTED
+          region — the "overview + focus" model. No bounds (redactions overlap
+          freely) and no ramp. Regions are drawn on the video; this lane trims
+          timing. */}
+      {props.redact.regions.length > 0 && props.duration != null && (
+        <div style={{ position: "relative", marginTop: 16 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, height: 14, marginBottom: 2 }}>
+            <button
+              onClick={() => setRedactExpanded((v) => !v)}
+              title={redactExpanded ? "Collapse redaction lane" : "Expand to edit each region's range"}
+              style={{
+                width: 16, height: 14, padding: 0, lineHeight: "14px", fontSize: 9,
+                background: "transparent", border: "none", color: "var(--redact)", cursor: "pointer",
+              }}
+            >
+              {redactExpanded ? "▾" : "▸"}
+            </button>
+            <span style={{ fontSize: 9, letterSpacing: "0.06em", color: "var(--redact)", fontWeight: 600 }}>
+              REDACTIONS
+            </span>
+          </div>
+          {/* Merged overview — read-only; the playhead skims over it like the track. */}
+          <div
+            style={{ position: "relative", height: 10 }}
+            onPointerMove={(e) => { if (e.buttons === 0) skimSeek(e.clientX); }}
+            onPointerLeave={endSkim}
+          >
+            {mergeIntervals(props.redact.regions).map((iv, k) => (
+              <div
+                key={k}
+                style={{
+                  position: "absolute",
+                  left: `${(iv.start / props.duration!) * 100}%`,
+                  width: `${((iv.end - iv.start) / props.duration!) * 100}%`,
+                  top: 0, height: 10,
+                  background: "var(--redact-soft)",
+                  border: "1px solid var(--redact)",
+                  borderRadius: 3,
+                  pointerEvents: "none",
+                }}
+              />
+            ))}
+          </div>
+          {/* Focus edit row — the selected region only, draggable/resizable. */}
+          {redactExpanded && (
+            <div
+              style={{ position: "relative", height: 40, marginTop: 4 }}
+              onPointerMove={(e) => { if (e.buttons === 0) skimSeek(e.clientX); }}
+              onPointerLeave={endSkim}
+            >
+              {props.redact.selectedIndex != null && props.redact.regions[props.redact.selectedIndex] ? (
+                <SegmentTrack
+                  segments={[props.redact.regions[props.redact.selectedIndex]]}
+                  duration={props.duration}
+                  selectedIndex={0}
+                  onSelect={(i) => { if (i == null) props.redact.select(null); }}
+                  onChange={(_i, p) => {
+                    const ri = props.redact.selectedIndex;
+                    if (ri != null) props.redact.update(ri, p);
+                  }}
+                  onDragHover={(t) => {
+                    const track = trackRef.current;
+                    if (t == null || !track) { setHover(null); return; }
+                    setHover({ time: t, rect: track.getBoundingClientRect() });
+                  }}
+                  label={() => `redaction ${(props.redact.selectedIndex ?? 0) + 1}`}
+                  alwaysBand
+                  bandHeight={36}
+                  color="var(--redact)"
+                  colorSoft="var(--redact-soft)"
+                  style={{ top: 2 }}
+                />
+              ) : (
+                <div style={{ fontSize: 11, color: "var(--fg-tertiary)", padding: "10px 2px" }}>
+                  Select a redaction (panel row or its box on the video) to edit its range here.
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -4495,15 +4629,29 @@ function ExportPanel({
                           padding: "4px 6px",
                           borderRadius: 6,
                           cursor: "pointer",
+                          // Unmistakable selection — accent tint + accent border, the
+                          // same state language as the video box and the timeline lane.
                           background:
-                            redact.selectedIndex === i ? "var(--bg-elevated)" : "transparent",
+                            redact.selectedIndex === i ? "var(--accent-soft)" : "transparent",
                           border:
                             redact.selectedIndex === i
-                              ? "1px solid var(--border-subtle)"
+                              ? "1px solid var(--accent)"
                               : "1px solid transparent",
                         }}
                       >
-                        <span style={{ flex: 1, fontSize: 11.5 }}>Panel {i + 1}</span>
+                        <span style={{ flex: 1, fontSize: 11.5 }}>
+                          Panel {i + 1}
+                          <span
+                            style={{
+                              color: "var(--fg-tertiary)",
+                              marginLeft: 6,
+                              fontFamily: "var(--font-mono)",
+                              fontVariantNumeric: "tabular-nums",
+                            }}
+                          >
+                            {fmtDur(r.end - r.start)}
+                          </span>
+                        </span>
                         <button
                           className="btn-secondary"
                           style={{ height: 22, fontSize: 10.5, padding: "0 6px" }}
@@ -4537,46 +4685,65 @@ function ExportPanel({
                 )}
                 {redact.selectedIndex != null &&
                   redact.regions[redact.selectedIndex] &&
-                  duration != null && (
-                    <div style={{ display: "flex", gap: 8 }}>
-                      <Field label="Start (s)">
-                        <input
-                          type="number"
-                          min={0}
-                          max={duration}
-                          step={0.1}
-                          value={Number(redact.regions[redact.selectedIndex].start.toFixed(1))}
-                          onChange={(e) => {
-                            const i = redact.selectedIndex;
-                            if (i == null) return;
-                            const end = redact.regions[i].end;
-                            redact.update(i, {
-                              start: Math.max(0, Math.min(Number(e.target.value), end)),
-                            });
-                          }}
-                          style={{ width: "100%" }}
-                        />
-                      </Field>
-                      <Field label="End (s)">
-                        <input
-                          type="number"
-                          min={0}
-                          max={duration}
-                          step={0.1}
-                          value={Number(redact.regions[redact.selectedIndex].end.toFixed(1))}
-                          onChange={(e) => {
-                            const i = redact.selectedIndex;
-                            if (i == null) return;
-                            const start = redact.regions[i].start;
-                            redact.update(i, {
-                              end: Math.min(duration, Math.max(Number(e.target.value), start)),
-                            });
-                          }}
-                          style={{ width: "100%" }}
-                        />
-                      </Field>
-                    </div>
-                  )}
+                  duration != null &&
+                  (() => {
+                    const i = redact.selectedIndex;
+                    if (i == null) return null;
+                    const reg = redact.regions[i];
+                    const now = () => thumbnail.getCurrentTime();
+                    const setStart = () =>
+                      redact.update(i, { start: Math.max(0, Math.min(now(), reg.end)) });
+                    const setEnd = () =>
+                      redact.update(i, { end: Math.min(duration, Math.max(now(), reg.start)) });
+                    const mono = {
+                      fontFamily: "var(--font-mono)",
+                      fontVariantNumeric: "tabular-nums" as const,
+                    };
+                    return (
+                      <div
+                        style={{
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: 6,
+                          marginTop: 2,
+                          paddingTop: 6,
+                          borderTop: "1px solid var(--border-faint)",
+                        }}
+                      >
+                        <div style={{ fontSize: 10, letterSpacing: "0.04em", color: "var(--accent)", fontWeight: 600 }}>
+                          PANEL {i + 1} RANGE
+                        </div>
+                        <div style={{ display: "flex", gap: 8 }}>
+                          {(["start", "end"] as const).map((edge) => (
+                            <div key={edge} style={{ flex: 1 }}>
+                              <div style={{ fontSize: 10, color: "var(--fg-tertiary)", textTransform: "capitalize" }}>
+                                {edge}
+                              </div>
+                              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                <span style={{ ...mono, fontSize: 12 }}>
+                                  {fmt(edge === "start" ? reg.start : reg.end)}
+                                </span>
+                                <button
+                                  className="btn-secondary"
+                                  style={{ height: 20, fontSize: 10, padding: "0 6px" }}
+                                  title={`Set ${edge} to the playhead`}
+                                  onClick={edge === "start" ? setStart : setEnd}
+                                >
+                                  Set
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                        <div style={{ fontSize: 11, color: "var(--fg-secondary)" }}>
+                          Duration <span style={{ ...mono, color: "var(--fg-primary)" }}>{fmtDur(reg.end - reg.start)}</span>
+                          <span style={{ color: "var(--fg-tertiary)", marginLeft: 8 }}>
+                            · Set jumps to the playhead; drag the timeline lane to trim
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })()}
               </div>
             </div>
           </>
