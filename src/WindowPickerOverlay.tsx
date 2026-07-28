@@ -231,10 +231,15 @@ export default function WindowPickerOverlay() {
       )}
       <div
         style={{
+          // Vertically centered rather than bottom-anchored: with Esc gone the
+          // mouse paths are the only exit, so this hint must never be occluded
+          // by the Dock -- and the Dock can sit on any edge (bottom/left/right).
+          // Center sidesteps all of them without needing the display's
+          // visibleFrame.
           position: "absolute",
           left: "50%",
-          bottom: 22,
-          transform: "translateX(-50%)",
+          top: "50%",
+          transform: "translate(-50%, -50%)",
           padding: "8px 10px 8px 14px",
           borderRadius: 8,
           background: "rgba(0, 0, 0, 0.72)",
