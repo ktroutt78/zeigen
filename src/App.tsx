@@ -94,6 +94,12 @@ async function openBubble(deviceName: string, anchor: BubbleAnchor) {
     skipTaskbar: true,
     visibleOnAllWorkspaces: true,
     shadow: false,
+    // The bubble is never the frontmost/key window during recording, so the
+    // WKWebView's default acceptsFirstMouse=false swallows the first click on
+    // the Stop/pause pill as a key-transfer -- hence the "always double-click
+    // Stop" bug. Deliver that first click to the DOM instead. (DECISIONS
+    // 2026-07-28; separate from the picker key-steal.)
+    acceptFirstMouse: true,
   });
 
   win.once("tauri://created", async () => {
@@ -352,6 +358,11 @@ async function openTimerChip(anchor: BubbleAnchor | null = null) {
     visibleOnAllWorkspaces: true,
     shadow: false,
     focus: false,
+    // Not frontmost when another app is active, so the WKWebView's default
+    // acceptsFirstMouse=false swallows the first click on Start Recording /
+    // Stop as a key-transfer -- the "double-click when Zeigen isn't frontmost"
+    // bug. Deliver the first click to the DOM. (DECISIONS 2026-07-28.)
+    acceptFirstMouse: true,
   });
 
   win.once("tauri://created", async () => {
