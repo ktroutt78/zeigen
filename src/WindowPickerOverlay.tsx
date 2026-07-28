@@ -1,7 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { emit } from "@tauri-apps/api/event";
-import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { emit, listen } from "@tauri-apps/api/event";
 
 // A window in this overlay's display-relative point coordinates. The launcher
 // translates each SCWindow's global frame into the display it sits on, so the
@@ -26,6 +24,14 @@ type Params = {
   displayIndex: number;
   windows: PickWindow[];
   stack: StackEntry[];
+  // This display's CG global origin + size (points, top-left). The poller emits
+  // global CG points; the overlay self-maps local = global - origin and only
+  // highlights when the cursor is within [0,dispW]x[0,dispH]. Same space the
+  // window rects were translated from (w.x - originX in the launcher).
+  originX: number;
+  originY: number;
+  dispW: number;
+  dispH: number;
 };
 
 function readParams(): Params {
@@ -48,6 +54,10 @@ function readParams(): Params {
     displayIndex: Number(params.get("display_index") ?? 1),
     windows,
     stack,
+    originX: Number(params.get("origin_x") ?? 0),
+    originY: Number(params.get("origin_y") ?? 0),
+    dispW: Number(params.get("disp_w") ?? 0),
+    dispH: Number(params.get("disp_h") ?? 0),
   };
 }
 
@@ -102,69 +112,28 @@ export default function WindowPickerOverlay() {
     return () => window.removeEventListener("keydown", onKey);
   }, [cancel]);
 
-  // Grab key focus the instant the overlay mounts. macOS delivers mouseMoved
-  // only to the key window, so hover-to-highlight (the whole selection model)
-  // is dead until this overlay is key. Focusing on mount makes hover live
-  // immediately with no priming click; `focus: true` at creation is racy
-  // because the async reposition and the app already being frontmost can drop
-  // key status before the pointer ever enters.
-  const focusedRef = useRef(false);
-  const firstMoveProbedRef = useRef(false);
+  // Hover is driven by the native cursor poller (Slice 2, poller plan), NOT by
+  // key-window mouseMoved -- so every display's overlay highlights without a
+  // priming click and no overlay ever needs to be key. The poller emits global
+  // CG points; we self-map to this display and only highlight when the cursor
+  // is within our bounds (exactly one overlay owns any given point). Re-render
+  // only on a change of target.
   useEffect(() => {
-    // DIAGNOSTIC (branch activation-priming-click): probe why hover needs a
-    // priming click. All logging is native (stderr); this just times the calls
-    // across the mount timeline. Remove with the native probes before merge.
-    const win = getCurrentWebviewWindow();
-    const label = win.label;
-    const di = params.displayIndex;
-    const probe = (tag: string) =>
-      invoke("focus_probe", { label, tag: `d${di}:${tag}` }).catch(() => {});
-
-    probe("mount-before"); // baseline: app inactive, before we touch focus
-    focusedRef.current = true;
-    win.setFocus().catch(() => {});
-    probe("after-setFocus-0ms");
-    const timers: ReturnType<typeof setTimeout>[] = [];
-    timers.push(setTimeout(() => probe("after-setFocus-100ms"), 100));
-    // Modern-activation experiment on the PRIMARY only: one clean from-background
-    // attempt. If NSApplication.activate works it brings the app forward (itself
-    // the answer). Secondaries re-probe late to show whether the primary's
-    // activation keyed them too.
-    if (di === 1) {
-      timers.push(
-        setTimeout(() => {
-          invoke("try_activate_probe", { label }).catch(() => {});
-          timers.push(setTimeout(() => probe("after-activate-100ms"), 100));
-        }, 600),
-      );
-    } else {
-      timers.push(setTimeout(() => probe("late-700ms"), 700));
-    }
-    return () => timers.forEach(clearTimeout);
+    const un = listen<[number, number]>("picker-cursor", (e) => {
+      const [gx, gy] = e.payload;
+      const lx = gx - params.originX;
+      const ly = gy - params.originY;
+      if (lx < 0 || ly < 0 || lx > params.dispW || ly > params.dispH) {
+        setHovered((prev) => (prev === null ? prev : null));
+        return;
+      }
+      const next = resolveAt(params.stack, pickableById, lx, ly).win;
+      setHovered((prev) => (prev?.id === next?.id ? prev : next));
+    });
+    return () => {
+      un.then((f) => f());
+    };
   }, []);
-
-  const onPointerMove = (e: React.PointerEvent) => {
-    // DIAGNOSTIC: mouseMoved reaches only the key window, so this firing at all
-    // means the overlay became key. Log the first move per display.
-    if (!firstMoveProbedRef.current) {
-      firstMoveProbedRef.current = true;
-      invoke("focus_probe", {
-        label: getCurrentWebviewWindow().label,
-        tag: `d${params.displayIndex}:first-move`,
-      }).catch(() => {});
-    }
-    // Recovery fallback: if key was lost (e.g. a click landed elsewhere first),
-    // reclaim it when the pointer re-enters.
-    if (!focusedRef.current) {
-      focusedRef.current = true;
-      getCurrentWebviewWindow()
-        .setFocus()
-        .catch(() => {});
-    }
-    const next = resolveAt(params.stack, pickableById, e.clientX, e.clientY).win;
-    // Only re-render on a change of target, not every pixel of movement.
-    setHovered((prev) => (prev?.id === next?.id ? prev : next));
-  };
 
   // Click commits: over a pickable window -> select it; over bare desktop ->
   // cancel. Over a window we didn't enumerate (blocked) -> do nothing, so a
@@ -196,7 +165,6 @@ export default function WindowPickerOverlay() {
         userSelect: "none",
         background: "transparent",
       }}
-      onPointerMove={onPointerMove}
       onPointerDown={onPointerDown}
     >
       {hovered && (

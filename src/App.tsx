@@ -754,6 +754,12 @@ async function openWindowPickerOverlays(
       display_index: String(i + 1),
       wins: JSON.stringify(winsForDisplay),
       stack: JSON.stringify(stackForDisplay),
+      // This display's CG origin + size, so the overlay can self-map the
+      // poller's global CG cursor points to its own local coords (Slice 2).
+      origin_x: String(d.x),
+      origin_y: String(d.y),
+      disp_w: String(d.width),
+      disp_h: String(d.height),
     });
 
     const old = await WebviewWindow.getByLabel(label);
@@ -771,7 +777,10 @@ async function openWindowPickerOverlays(
       resizable: false,
       visibleOnAllWorkspaces: true,
       shadow: false,
-      focus: i === 0,
+      // Never focus/key an overlay: hover comes from the cursor poller, not
+      // key-window mouseMoved, so keying is unnecessary and keying one overlay
+      // steals key from the others (the priming-click root cause). Slice 2.
+      focus: false,
     });
 
     void (async () => {
@@ -788,11 +797,8 @@ async function openWindowPickerOverlays(
               primaryCocoaHeight,
             });
             await invoke("make_capture_invisible", { label });
-            // tao's window class already returns canBecomeKeyWindow = its
-            // focusable ivar (default true), so the overlay can be keyed --
-            // focus the primary one so hover (mouseMoved, key-window only) is
-            // live without a priming click.
-            if (i === 0) await win.setFocus();
+            // No setFocus: hover is poller-driven and keying an overlay only
+            // re-triggers the key-steal (DECISIONS 2026-07-28). Slice 2.
           } catch (e) {
             console.error(`[window-picker] ${label} setup failed`, e);
           }
