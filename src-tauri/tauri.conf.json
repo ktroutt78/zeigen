@@ -19,7 +19,8 @@
         "height": 760,
         "minWidth": 540,
         "minHeight": 760,
-        "resizable": false
+        "resizable": false,
+        "acceptFirstMouse": true
       }
     ],
     "security": {
