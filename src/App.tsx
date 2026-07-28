@@ -870,6 +870,10 @@ async function openReview(
     minHeight: 520,
     resizable: true,
     center: true,
+    // Heavily-used editor with many buttons; requiring an activating click
+    // first (normal macOS) is friction with no upside here. Deliver the first
+    // click. (DECISIONS 2026-07-28; same family as the recording-control fix.)
+    acceptFirstMouse: true,
   });
 
   win.once("tauri://error", (e) => {
