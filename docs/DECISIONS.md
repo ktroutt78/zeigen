@@ -4,6 +4,27 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-28 — Window-picker priming-click ROOT CAUSE = key-window exclusivity (NOT app activation); global monitor refuted on macOS 26
+
+Instrumented the picker (branch `activation-priming-click`, `focus_probe` + `try_activate_probe` in `macos.rs`, read-only, logs to `/tmp/zeigen-focus-probe.log`; removed before merge). Three findings, each of which someone will otherwise re-propose:
+
+**1. App activation was NOT the cause. Do not re-investigate it.** The leading hypothesis was that `makeKeyAndOrderFront:` won't key a window while the app is inactive, and only a click activates it. Refuted directly: **`isActive=true` on all 45 probe lines**, every surface, every timestamp. The app is always active during picker use. (Also: tao's `setFocus` already calls `activateIgnoringOtherApps: YES` after `makeKeyAndOrderFront:` — see `tao-0.34.8/util/async.rs:231` — so "activate before focusing" is already in the code path and is not the fix.) `try_activate_probe` using the MODERN `NSApplication.activate` "succeeded" (flipped d1 to key) but that is a red herring — it only handed key back to d1, which necessarily un-keyed whatever had it.
+
+**2. Root cause: key-window EXCLUSIVITY.** macOS allows exactly one key window per app, and macOS delivers `mouseMoved` (hover) only to the key window. The picker creates one borderless overlay per display, and each overlay calls `setFocus` on mount — so each steals key from the previous. At rest only the LAST overlay to mount is key; every other display is dead to hover until a physical click hands key to it (and takes it from the others). That is precisely the one-click-per-display symptom. Log evidence (run 1, `d1` mounts first):
+- `d1:mount-before` / `d1:after-setFocus-0ms` -> `isKey=true`; `d2`,`d3` mount -> `isKey=false`.
+- At +100ms (async `setFocus` settled): `d1 isKey=false`, `d2 isKey=false`, **`d3 isKey=true`** — last-mounted wins, d1 lost key.
+- `try-activate d1`: `before isKey=false -> after isKey=true`, then `d3:late-700ms isKey=false` — keying d1 broke d3.
+- `first-move` fires only on the key display; hovering a non-key display produced NO pointermove until a click made it key. (`level=5`, `collectionBehavior=0x1` identical on key and non-key lines — window level / all-spaces are NOT the discriminator; closes that door with data. Consistent with the 2026-07-25 finding that key-ability was never the problem.)
+- **Consequence for the fix:** this is unfixable by trying to make all N overlays key — key is exclusive by design. The fix must stop depending on key-window for hover (poller reads the cursor directly; see below) and drop the per-overlay `setFocus` calls entirely, killing the steal at the root.
+
+**3. `NSEvent.addGlobalMonitorForEvents` is REFUTED on macOS 26 — do not propose it.** It installs successfully but **silently delivers nothing** unless the process holds the **Input Monitoring** TCC permission (verified empirically during V3: a real click produced zero monitor callbacks while `IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)` returned denied). This was ALREADY discovered and documented — see the `CursorTracker.swift` header comment ("Why polling and not an observer"). It was proposed again here as the picker's hover mechanism, citing CursorTracker as precedent for "global monitor, no permission" — **the precedent says the exact opposite.** The working, permission-free pattern CursorTracker ships instead: **poll** the cursor via `CGEvent(source: nil)?.location` on a timer, and detect clicks via `CGEventSource.counterForEventType(.combinedSessionState, ...)` deltas — same "session-state family," no Input Monitoring, no Accessibility, no key window. That polling approach (not a monitor) is the sanctioned mechanism for the picker rework. Cross-reference: this entry <-> `CursorTracker.swift` header, so the next person finds it from either direction.
+
+**Not the cause / not a fix (also ruled out):** `object_setClass` to make an overlay key-able (crashes tao — see 2026-07-25); making the tao window an `NSPanel` "from the start" (tao hardcodes `TaoWindow : NSWindow`, `window.rs:409`, and always alloc's that class; any reclass re-enters tao's `send_event` `[this superclass]` assumption = same crash); the union-spanning single overlay (works in principle — one key window, hover everywhere — but reopens the cross-display coordinate translation across mixed 2x/1x displays that the per-display design exists to avoid; rejected).
+
+The button double-clicks (bubble Stop, Start Recording) are a SEPARATE mechanism with the same-ish trigger: the WKWebView's `acceptsFirstMouse` defaults false (wry `lib.rs:846`), so the click that keys a non-key window is swallowed instead of delivered to the DOM. Fixed independently via Tauri `acceptFirstMouse: true` on those window builders — no relation to the picker key-steal.
+
+---
+
 ## 2026-07-27 — Redaction cell FLOOR reverted 10 -> 24; the floor is the guarantee, not the stroke-clamp; OCR is not a sufficient readability oracle
 
 Owner eye-check caught an EXPORTED short small-values strip (a wide, ~30px-tall row) rendering LEGIBLE — digit shapes and decimal placement discernible — while the preview showed a solid panel. Diagnosis (reproduced, `docs`/scratch):
