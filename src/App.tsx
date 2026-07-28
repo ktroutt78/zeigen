@@ -804,6 +804,10 @@ async function openWindowPickerOverlays(
     })();
   }
 
+  // Slice 1 (poller plan): start the native cursor poller while the picker is
+  // open. Slice 2 wires overlays to its picker-cursor/picker-click events.
+  void invoke("picker_cursor_start");
+
   return new Promise<number | null>(async (resolve) => {
     const closeAll = async () => {
       for (const label of labels) {
@@ -813,6 +817,9 @@ async function openWindowPickerOverlays(
     };
     const unlistens: Array<() => void> = [];
     const finish = async (result: number | null) => {
+      // Single choke point for select, cancel, AND Esc -- stop the poller here
+      // so no 60 Hz timer survives a picker close on any exit path.
+      void invoke("picker_cursor_stop");
       unlistens.forEach((u) => u());
       await closeAll();
       resolve(result);
