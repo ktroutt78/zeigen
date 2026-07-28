@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { emit } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 
 // A window in this overlay's display-relative point coordinates. The launcher
@@ -108,14 +109,50 @@ export default function WindowPickerOverlay() {
   // because the async reposition and the app already being frontmost can drop
   // key status before the pointer ever enters.
   const focusedRef = useRef(false);
+  const firstMoveProbedRef = useRef(false);
   useEffect(() => {
+    // DIAGNOSTIC (branch activation-priming-click): probe why hover needs a
+    // priming click. All logging is native (stderr); this just times the calls
+    // across the mount timeline. Remove with the native probes before merge.
+    const win = getCurrentWebviewWindow();
+    const label = win.label;
+    const di = params.displayIndex;
+    const probe = (tag: string) =>
+      invoke("focus_probe", { label, tag: `d${di}:${tag}` }).catch(() => {});
+
+    probe("mount-before"); // baseline: app inactive, before we touch focus
     focusedRef.current = true;
-    getCurrentWebviewWindow()
-      .setFocus()
-      .catch(() => {});
+    win.setFocus().catch(() => {});
+    probe("after-setFocus-0ms");
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    timers.push(setTimeout(() => probe("after-setFocus-100ms"), 100));
+    // Modern-activation experiment on the PRIMARY only: one clean from-background
+    // attempt. If NSApplication.activate works it brings the app forward (itself
+    // the answer). Secondaries re-probe late to show whether the primary's
+    // activation keyed them too.
+    if (di === 1) {
+      timers.push(
+        setTimeout(() => {
+          invoke("try_activate_probe", { label }).catch(() => {});
+          timers.push(setTimeout(() => probe("after-activate-100ms"), 100));
+        }, 600),
+      );
+    } else {
+      timers.push(setTimeout(() => probe("late-700ms"), 700));
+    }
+    return () => timers.forEach(clearTimeout);
   }, []);
 
   const onPointerMove = (e: React.PointerEvent) => {
+    // DIAGNOSTIC: mouseMoved reaches only the key window, so this firing at all
+    // means the overlay became key. Log the first move per display.
+    if (!firstMoveProbedRef.current) {
+      firstMoveProbedRef.current = true;
+      invoke("focus_probe", {
+        label: getCurrentWebviewWindow().label,
+        tag: `d${params.displayIndex}:first-move`,
+      }).catch(() => {});
+    }
     // Recovery fallback: if key was lost (e.g. a click landed elsewhere first),
     // reclaim it when the pointer re-enters.
     if (!focusedRef.current) {

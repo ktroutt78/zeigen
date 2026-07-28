@@ -807,6 +807,8 @@ pub fn run() {
             quit_app,
             macos::make_capture_invisible,
             macos::set_window_frame_cg,
+            macos::focus_probe,
+            macos::try_activate_probe,
             bubble_position_event,
             edit::read_sidecar,
             edit::write_sidecar,
