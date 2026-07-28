@@ -135,20 +135,36 @@ export default function WindowPickerOverlay() {
     };
   }, []);
 
-  // Click commits: over a pickable window -> select it; over bare desktop ->
-  // cancel. Over a window we didn't enumerate (blocked) -> do nothing, so a
-  // miss never becomes a wrong selection or an accidental dismiss.
-  const onPointerDown = (e: React.PointerEvent) => {
-    if (e.button !== 0) return;
-    const { win, blocked } = resolveAt(
-      params.stack,
-      pickableById,
-      e.clientX,
-      e.clientY,
-    );
-    if (win) select(win.id);
-    else if (!blocked) cancel();
-  };
+  // Select/cancel are poller-driven too (Slice 3), so they work on every
+  // display with no key window and no priming click. The physical click still
+  // lands on this always-on-top overlay (harmlessly keying it) and does not
+  // leak to the app behind. Order: the on-screen Cancel button's rect wins
+  // (cancel regardless of any window behind it); then a pickable window ->
+  // select; bare desktop -> cancel; a window we didn't enumerate (blocked) ->
+  // nothing, so a miss is never a wrong pick or an accidental dismiss. Only the
+  // overlay whose display contains the point acts (self-filter).
+  const cancelBtnRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    const un = listen<[number, number]>("picker-click", (e) => {
+      const [gx, gy] = e.payload;
+      const lx = gx - params.originX;
+      const ly = gy - params.originY;
+      if (lx < 0 || ly < 0 || lx > params.dispW || ly > params.dispH) return;
+      // Window-relative == client coords here (the overlay spans the display),
+      // so the button's client rect is directly comparable to the local point.
+      const cb = cancelBtnRef.current?.getBoundingClientRect();
+      if (cb && lx >= cb.left && lx <= cb.right && ly >= cb.top && ly <= cb.bottom) {
+        cancel();
+        return;
+      }
+      const { win, blocked } = resolveAt(params.stack, pickableById, lx, ly);
+      if (win) select(win.id);
+      else if (!blocked) cancel();
+    });
+    return () => {
+      un.then((f) => f());
+    };
+  }, []);
 
   const label = useMemo(() => {
     if (!hovered) return null;
@@ -165,7 +181,6 @@ export default function WindowPickerOverlay() {
         userSelect: "none",
         background: "transparent",
       }}
-      onPointerDown={onPointerDown}
     >
       {hovered && (
         <div
@@ -237,12 +252,10 @@ export default function WindowPickerOverlay() {
           Click a window to select · click empty space to cancel
         </span>
         <button
-          // Guaranteed mouse exit — stop the event reaching the root so it
-          // cancels rather than being read as an empty-space click.
-          onPointerDown={(e) => {
-            e.stopPropagation();
-            cancel();
-          }}
+          // Hit-tested by the poller-click via this rect (Slice 3), so Cancel
+          // works on every display without a key window. No DOM handler -- the
+          // overlay isn't key, so a DOM click would need a priming click.
+          ref={cancelBtnRef}
           style={{
             padding: "4px 10px",
             borderRadius: 6,
