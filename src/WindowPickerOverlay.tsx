@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { emit } from "@tauri-apps/api/event";
-import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { emit, listen } from "@tauri-apps/api/event";
 
 // A window in this overlay's display-relative point coordinates. The launcher
 // translates each SCWindow's global frame into the display it sits on, so the
@@ -25,6 +24,14 @@ type Params = {
   displayIndex: number;
   windows: PickWindow[];
   stack: StackEntry[];
+  // This display's CG global origin + size (points, top-left). The poller emits
+  // global CG points; the overlay self-maps local = global - origin and only
+  // highlights when the cursor is within [0,dispW]x[0,dispH]. Same space the
+  // window rects were translated from (w.x - originX in the launcher).
+  originX: number;
+  originY: number;
+  dispW: number;
+  dispH: number;
 };
 
 function readParams(): Params {
@@ -47,6 +54,10 @@ function readParams(): Params {
     displayIndex: Number(params.get("display_index") ?? 1),
     windows,
     stack,
+    originX: Number(params.get("origin_x") ?? 0),
+    originY: Number(params.get("origin_y") ?? 0),
+    dispW: Number(params.get("disp_w") ?? 0),
+    dispH: Number(params.get("disp_h") ?? 0),
   };
 }
 
@@ -101,48 +112,59 @@ export default function WindowPickerOverlay() {
     return () => window.removeEventListener("keydown", onKey);
   }, [cancel]);
 
-  // Grab key focus the instant the overlay mounts. macOS delivers mouseMoved
-  // only to the key window, so hover-to-highlight (the whole selection model)
-  // is dead until this overlay is key. Focusing on mount makes hover live
-  // immediately with no priming click; `focus: true` at creation is racy
-  // because the async reposition and the app already being frontmost can drop
-  // key status before the pointer ever enters.
-  const focusedRef = useRef(false);
+  // Hover is driven by the native cursor poller (Slice 2, poller plan), NOT by
+  // key-window mouseMoved -- so every display's overlay highlights without a
+  // priming click and no overlay ever needs to be key. The poller emits global
+  // CG points; we self-map to this display and only highlight when the cursor
+  // is within our bounds (exactly one overlay owns any given point). Re-render
+  // only on a change of target.
   useEffect(() => {
-    focusedRef.current = true;
-    getCurrentWebviewWindow()
-      .setFocus()
-      .catch(() => {});
+    const un = listen<[number, number]>("picker-cursor", (e) => {
+      const [gx, gy] = e.payload;
+      const lx = gx - params.originX;
+      const ly = gy - params.originY;
+      if (lx < 0 || ly < 0 || lx > params.dispW || ly > params.dispH) {
+        setHovered((prev) => (prev === null ? prev : null));
+        return;
+      }
+      const next = resolveAt(params.stack, pickableById, lx, ly).win;
+      setHovered((prev) => (prev?.id === next?.id ? prev : next));
+    });
+    return () => {
+      un.then((f) => f());
+    };
   }, []);
 
-  const onPointerMove = (e: React.PointerEvent) => {
-    // Recovery fallback: if key was lost (e.g. a click landed elsewhere first),
-    // reclaim it when the pointer re-enters.
-    if (!focusedRef.current) {
-      focusedRef.current = true;
-      getCurrentWebviewWindow()
-        .setFocus()
-        .catch(() => {});
-    }
-    const next = resolveAt(params.stack, pickableById, e.clientX, e.clientY).win;
-    // Only re-render on a change of target, not every pixel of movement.
-    setHovered((prev) => (prev?.id === next?.id ? prev : next));
-  };
-
-  // Click commits: over a pickable window -> select it; over bare desktop ->
-  // cancel. Over a window we didn't enumerate (blocked) -> do nothing, so a
-  // miss never becomes a wrong selection or an accidental dismiss.
-  const onPointerDown = (e: React.PointerEvent) => {
-    if (e.button !== 0) return;
-    const { win, blocked } = resolveAt(
-      params.stack,
-      pickableById,
-      e.clientX,
-      e.clientY,
-    );
-    if (win) select(win.id);
-    else if (!blocked) cancel();
-  };
+  // Select/cancel are poller-driven too (Slice 3), so they work on every
+  // display with no key window and no priming click. The physical click still
+  // lands on this always-on-top overlay (harmlessly keying it) and does not
+  // leak to the app behind. Order: the on-screen Cancel button's rect wins
+  // (cancel regardless of any window behind it); then a pickable window ->
+  // select; bare desktop -> cancel; a window we didn't enumerate (blocked) ->
+  // nothing, so a miss is never a wrong pick or an accidental dismiss. Only the
+  // overlay whose display contains the point acts (self-filter).
+  const cancelBtnRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    const un = listen<[number, number]>("picker-click", (e) => {
+      const [gx, gy] = e.payload;
+      const lx = gx - params.originX;
+      const ly = gy - params.originY;
+      if (lx < 0 || ly < 0 || lx > params.dispW || ly > params.dispH) return;
+      // Window-relative == client coords here (the overlay spans the display),
+      // so the button's client rect is directly comparable to the local point.
+      const cb = cancelBtnRef.current?.getBoundingClientRect();
+      if (cb && lx >= cb.left && lx <= cb.right && ly >= cb.top && ly <= cb.bottom) {
+        cancel();
+        return;
+      }
+      const { win, blocked } = resolveAt(params.stack, pickableById, lx, ly);
+      if (win) select(win.id);
+      else if (!blocked) cancel();
+    });
+    return () => {
+      un.then((f) => f());
+    };
+  }, []);
 
   const label = useMemo(() => {
     if (!hovered) return null;
@@ -159,8 +181,6 @@ export default function WindowPickerOverlay() {
         userSelect: "none",
         background: "transparent",
       }}
-      onPointerMove={onPointerMove}
-      onPointerDown={onPointerDown}
     >
       {hovered && (
         <div
@@ -211,10 +231,15 @@ export default function WindowPickerOverlay() {
       )}
       <div
         style={{
+          // Vertically centered rather than bottom-anchored: with Esc gone the
+          // mouse paths are the only exit, so this hint must never be occluded
+          // by the Dock -- and the Dock can sit on any edge (bottom/left/right).
+          // Center sidesteps all of them without needing the display's
+          // visibleFrame.
           position: "absolute",
           left: "50%",
-          bottom: 22,
-          transform: "translateX(-50%)",
+          top: "50%",
+          transform: "translate(-50%, -50%)",
           padding: "8px 10px 8px 14px",
           borderRadius: 8,
           background: "rgba(0, 0, 0, 0.72)",
@@ -232,12 +257,10 @@ export default function WindowPickerOverlay() {
           Click a window to select · click empty space to cancel
         </span>
         <button
-          // Guaranteed mouse exit — stop the event reaching the root so it
-          // cancels rather than being read as an empty-space click.
-          onPointerDown={(e) => {
-            e.stopPropagation();
-            cancel();
-          }}
+          // Hit-tested by the poller-click via this rect (Slice 3), so Cancel
+          // works on every display without a key window. No DOM handler -- the
+          // overlay isn't key, so a DOM click would need a priming click.
+          ref={cancelBtnRef}
           style={{
             padding: "4px 10px",
             borderRadius: 6,

@@ -94,6 +94,12 @@ async function openBubble(deviceName: string, anchor: BubbleAnchor) {
     skipTaskbar: true,
     visibleOnAllWorkspaces: true,
     shadow: false,
+    // The bubble is never the frontmost/key window during recording, so the
+    // WKWebView's default acceptsFirstMouse=false swallows the first click on
+    // the Stop/pause pill as a key-transfer -- hence the "always double-click
+    // Stop" bug. Deliver that first click to the DOM instead. (DECISIONS
+    // 2026-07-28; separate from the picker key-steal.)
+    acceptFirstMouse: true,
   });
 
   win.once("tauri://created", async () => {
@@ -352,6 +358,11 @@ async function openTimerChip(anchor: BubbleAnchor | null = null) {
     visibleOnAllWorkspaces: true,
     shadow: false,
     focus: false,
+    // Not frontmost when another app is active, so the WKWebView's default
+    // acceptsFirstMouse=false swallows the first click on Start Recording /
+    // Stop as a key-transfer -- the "double-click when Zeigen isn't frontmost"
+    // bug. Deliver the first click to the DOM. (DECISIONS 2026-07-28.)
+    acceptFirstMouse: true,
   });
 
   win.once("tauri://created", async () => {
@@ -743,6 +754,12 @@ async function openWindowPickerOverlays(
       display_index: String(i + 1),
       wins: JSON.stringify(winsForDisplay),
       stack: JSON.stringify(stackForDisplay),
+      // This display's CG origin + size, so the overlay can self-map the
+      // poller's global CG cursor points to its own local coords (Slice 2).
+      origin_x: String(d.x),
+      origin_y: String(d.y),
+      disp_w: String(d.width),
+      disp_h: String(d.height),
     });
 
     const old = await WebviewWindow.getByLabel(label);
@@ -760,7 +777,10 @@ async function openWindowPickerOverlays(
       resizable: false,
       visibleOnAllWorkspaces: true,
       shadow: false,
-      focus: i === 0,
+      // Never focus/key an overlay: hover comes from the cursor poller, not
+      // key-window mouseMoved, so keying is unnecessary and keying one overlay
+      // steals key from the others (the priming-click root cause). Slice 2.
+      focus: false,
     });
 
     void (async () => {
@@ -777,11 +797,8 @@ async function openWindowPickerOverlays(
               primaryCocoaHeight,
             });
             await invoke("make_capture_invisible", { label });
-            // tao's window class already returns canBecomeKeyWindow = its
-            // focusable ivar (default true), so the overlay can be keyed --
-            // focus the primary one so hover (mouseMoved, key-window only) is
-            // live without a priming click.
-            if (i === 0) await win.setFocus();
+            // No setFocus: hover is poller-driven and keying an overlay only
+            // re-triggers the key-steal (DECISIONS 2026-07-28). Slice 2.
           } catch (e) {
             console.error(`[window-picker] ${label} setup failed`, e);
           }
@@ -793,6 +810,10 @@ async function openWindowPickerOverlays(
     })();
   }
 
+  // Slice 1 (poller plan): start the native cursor poller while the picker is
+  // open. Slice 2 wires overlays to its picker-cursor/picker-click events.
+  void invoke("picker_cursor_start");
+
   return new Promise<number | null>(async (resolve) => {
     const closeAll = async () => {
       for (const label of labels) {
@@ -802,6 +823,9 @@ async function openWindowPickerOverlays(
     };
     const unlistens: Array<() => void> = [];
     const finish = async (result: number | null) => {
+      // Single choke point for select, cancel, AND Esc -- stop the poller here
+      // so no 60 Hz timer survives a picker close on any exit path.
+      void invoke("picker_cursor_stop");
       unlistens.forEach((u) => u());
       await closeAll();
       resolve(result);
@@ -859,6 +883,10 @@ async function openReview(
     minHeight: 520,
     resizable: true,
     center: true,
+    // Heavily-used editor with many buttons; requiring an activating click
+    // first (normal macOS) is friction with no upside here. Deliver the first
+    // click. (DECISIONS 2026-07-28; same family as the recording-control fix.)
+    acceptFirstMouse: true,
   });
 
   win.once("tauri://error", (e) => {
