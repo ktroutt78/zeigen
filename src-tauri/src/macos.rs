@@ -280,7 +280,11 @@ pub fn picker_cursor_start(app: AppHandle) {
     let handle = std::thread::spawn(move || {
         let mut last_click =
             unsafe { CGEventSourceCounterForEventType(CG_COMBINED_SESSION_STATE, CG_EVENT_LEFT_MOUSE_DOWN) };
-        let mut tick: u64 = 0;
+        // On-change throttle: a stationary cursor emits nothing. At 60 Hz across
+        // three overlays that would be ~180 no-op messages/sec. Clicks still
+        // emit every time (they are events, not state).
+        let mut last_pos: Option<(f64, f64)> = None;
+        let mut moves: u64 = 0;
         while POLLER_RUN.load(Ordering::SeqCst) {
             let loc = unsafe {
                 let e = CGEventCreate(std::ptr::null_mut());
@@ -290,20 +294,24 @@ pub fn picker_cursor_start(app: AppHandle) {
                 }
                 p
             };
-            let _ = app.emit("picker-cursor", (loc.x, loc.y));
+            let pos = (loc.x, loc.y);
+            if last_pos != Some(pos) {
+                last_pos = Some(pos);
+                let _ = app.emit("picker-cursor", pos);
+                if moves % 15 == 0 {
+                    poller_log(&format!("[poller] pos x={:.1} y={:.1}", loc.x, loc.y));
+                }
+                moves += 1;
+            }
 
             let c = unsafe {
                 CGEventSourceCounterForEventType(CG_COMBINED_SESSION_STATE, CG_EVENT_LEFT_MOUSE_DOWN)
             };
             if c != last_click {
                 last_click = c;
-                let _ = app.emit("picker-click", (loc.x, loc.y));
+                let _ = app.emit("picker-click", pos);
                 poller_log(&format!("[poller] click x={:.1} y={:.1}", loc.x, loc.y));
             }
-            if tick % 15 == 0 {
-                poller_log(&format!("[poller] pos x={:.1} y={:.1}", loc.x, loc.y));
-            }
-            tick += 1;
             std::thread::sleep(Duration::from_millis(16));
         }
         poller_log("[poller] loop exited");
