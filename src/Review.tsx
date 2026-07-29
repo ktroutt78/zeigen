@@ -1970,6 +1970,11 @@ export default function Review() {
         style={{
           display: "grid",
           gridTemplateColumns: "1fr 320px",
+          // Clamp the single row to the container height so a tall column
+          // (the left video stage's aspect-ratio height at wide window sizes)
+          // can never inflate the row past the viewport and push the right
+          // panel's pinned footer off-screen. WebKit needs this explicitly.
+          gridTemplateRows: "minmax(0, 1fr)",
           flex: 1,
           minHeight: 0,
         }}
@@ -4670,7 +4675,11 @@ function ExportPanel({
     >
       {/* Sections scroll vertically if the window is short; horizontal
           overflow is impossible by construction (full-width rows only). */}
-      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", padding: "10px 12px 12px" }}>
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", padding: "10px 12px 12px", display: "flex", flexDirection: "column" }}>
+        {/* Tools + active panel: a flexShrink:0 block so its inner (block-flow)
+            layout is unchanged; the Export block below rides the same scroll
+            region with marginTop:auto. */}
+        <div style={{ flexShrink: 0 }}>
         {/* Tool toolbar — one active tool; the contextual card below swaps to match. */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 4, marginBottom: 6 }}>
           <ToolTile
@@ -5200,10 +5209,13 @@ function ExportPanel({
         )}
       </div>
 
-      {/* Export — permanent block, pinned above the lifecycle footer so it is
-          never clipped and never counts against the tool-panel scroll region. */}
-      <div style={{ padding: "10px 12px 12px", borderTop: "1px solid var(--border-faint)" }}>
-        <div style={{ ...RAIL_EYEBROW, marginBottom: 10 }}>Export</div>
+        {/* Export — rides the scroll region (not a fixed sibling), so the only
+            un-shrinkable bottom chrome is the 91px footer. marginTop:auto glues
+            it above the footer when there's room and lets it scroll WITH the
+            panel when the column is too short to afford it (short 1080p displays,
+            maximized). The footer can never be pushed off-screen. */}
+        <div style={{ flexShrink: 0, marginTop: "auto", paddingTop: 10, borderTop: "1px solid var(--border-faint)" }}>
+          <div style={{ ...RAIL_EYEBROW, marginBottom: 10 }}>Export</div>
         <Field label="Format">
           <div className="segmented full">
             {(["mp4", "gif"] as const).map((f) => (
@@ -5365,6 +5377,7 @@ function ExportPanel({
             disabled={busy}
           />
         )}
+        </div>
         </div>
       </div>
 
