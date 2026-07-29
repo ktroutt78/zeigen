@@ -87,6 +87,68 @@ pub struct SidecarState {
     // empty track never perturbs the serialized field order of existing sidecars.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub redactions: Vec<RedactionRegion>,
+    // Frame styling for the padded recording (BACKGROUND-PADDING-PLAN). All knobs
+    // 0 = the padding-0 no-op: the recording fills the canvas and no background
+    // shows. frame_is_noop drops both None and an all-zero struct, so a hand-
+    // written "frame": {} re-serializes to ABSENT — the Option<struct> analog of
+    // the empty-Vec collapse used by zoom/redactions. Declared AFTER redactions
+    // (with background) so an unset pair never perturbs the field order of
+    // existing sidecars; nothing renders it yet (Slice 1), so a set frame with no
+    // other edit must not yet leave the copy path — enforced by the export gate
+    // staying blind to it until Slice 1 wires has_background.
+    #[serde(default, skip_serializing_if = "frame_is_noop")]
+    pub frame: Option<FrameStyle>,
+    // Background canvas fill. Absent = no background = the padding-0 no-op, same
+    // skip-when-unset convention as frame.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<Background>,
+}
+
+// Frame styling for the padded recording (BACKGROUND-PADDING-PLAN §Q5). Every
+// value is the no-op at 0.0. padding is the fraction of the canvas consumed by
+// margin (content scale k = 1 - padding); corner_radius/shadow/inset are resolved
+// by the compositor's inset stage. Copy so it round-trips by value.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+pub struct FrameStyle {
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub padding: f64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub corner_radius: f64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub shadow: f64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub inset: f64,
+}
+
+impl FrameStyle {
+    fn is_noop(&self) -> bool {
+        self.padding == 0.0
+            && self.corner_radius == 0.0
+            && self.shadow == 0.0
+            && self.inset == 0.0
+    }
+}
+
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
+}
+
+// Drops both None and an all-zero FrameStyle so a wiped-to-zero panel serializes
+// to ABSENT (the empty-Vec collapse, for an Option<struct>).
+fn frame_is_noop(f: &Option<FrameStyle>) -> bool {
+    f.as_ref().map_or(true, FrameStyle::is_noop)
+}
+
+// Background canvas fill behind the padded recording. Gradient presets are
+// procedural (resolved by name in the compositor, no bundled assets); solid is a
+// "#RRGGBB" hex; image is an absolute path read at render time (watermark-logo
+// pattern). Absent = no background = the padding-0 no-op.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Background {
+    Gradient { preset: String },
+    Solid { hex: String },
+    Image { path: String },
 }
 
 // One point on the zoom curve (V3-PLAN C.2). Zoom state between keyframes
@@ -1958,6 +2020,8 @@ mod tests {
             annotation_color: Some("#FF3B30".into()),
             zoom: vec![],
             redactions: vec![],
+            frame: None,
+            background: None,
         }
     }
 
@@ -2121,6 +2185,92 @@ mod tests {
         )
         .unwrap();
         assert_eq!(sparse.tint, RedactionTint::Auto);
+    }
+
+    // BACKGROUND-PADDING-PLAN Slice 0 no-op proof: absent frame + background
+    // serialize to nothing, so a recording with no background/padding produces the
+    // pinned pre-feature bytes exactly and rides the unchanged (copy) export path.
+    // Equality to PRE_ZOOM_SIDECAR_PIN (which predates these fields) IS the proof
+    // they add nothing — proven, not asserted.
+    #[test]
+    fn frame_and_background_absent_serialize_byte_identical() {
+        let state = pre_zoom_populated_state();
+        assert!(state.frame.is_none() && state.background.is_none());
+        assert_eq!(
+            serde_json::to_string_pretty(&state).unwrap(),
+            PRE_ZOOM_SIDECAR_PIN
+        );
+        // Untouched-recording shape is unchanged by the two new fields.
+        assert_eq!(
+            serde_json::to_string_pretty(&SidecarState::default()).unwrap(),
+            "{\n  \"annotations\": []\n}"
+        );
+    }
+
+    // A wiped-to-zero panel written as "frame": {} (or all knobs 0) re-serializes
+    // with the key gone — not as {} and not as null. The Option<struct> analog of
+    // the empty-Vec collapse zoom/redactions get.
+    #[test]
+    fn frame_zeroed_normalizes_to_absent() {
+        let mut with_empty: serde_json::Value =
+            serde_json::from_str(PRE_ZOOM_SIDECAR_PIN).unwrap();
+        with_empty["frame"] = serde_json::json!({});
+        let state: SidecarState = serde_json::from_value(with_empty).unwrap();
+        assert_eq!(
+            serde_json::to_string_pretty(&state).unwrap(),
+            PRE_ZOOM_SIDECAR_PIN
+        );
+
+        let mut all_zero: serde_json::Value =
+            serde_json::from_str(PRE_ZOOM_SIDECAR_PIN).unwrap();
+        all_zero["frame"] =
+            serde_json::json!({"padding": 0.0, "corner_radius": 0.0, "shadow": 0.0, "inset": 0.0});
+        let state: SidecarState = serde_json::from_value(all_zero).unwrap();
+        assert_eq!(
+            serde_json::to_string_pretty(&state).unwrap(),
+            PRE_ZOOM_SIDECAR_PIN
+        );
+    }
+
+    // A non-noop frame + a background survive serialize -> parse -> serialize with
+    // no loss, in memory and through the disk path. Zero-valued frame knobs drop
+    // from the emitted JSON (skip_serializing_if), so only the set knob persists.
+    #[test]
+    fn frame_and_background_round_trip_losslessly() {
+        let mut state = pre_zoom_populated_state();
+        state.frame = Some(FrameStyle {
+            padding: 0.12,
+            corner_radius: 24.0,
+            shadow: 0.5,
+            inset: 0.0,
+        });
+        state.background = Some(Background::Gradient {
+            preset: "violet_dusk".into(),
+        });
+        let json = serde_json::to_string_pretty(&state).unwrap();
+        // inset == 0 is dropped; the three set knobs survive.
+        assert!(json.contains("\"padding\": 0.12"));
+        assert!(!json.contains("inset"));
+        let reparsed: SidecarState = serde_json::from_str(&json).unwrap();
+        assert_eq!(reparsed, state);
+
+        let dir = std::env::temp_dir().join(format!("zeigen-frame-rt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("recording-rt.mp4");
+        write_sidecar_path(&source, &state).unwrap();
+        assert_eq!(read_sidecar_path(&source).unwrap().unwrap(), state);
+
+        // Each background variant round-trips through its tagged form.
+        for bg in [
+            Background::Solid { hex: "#1E293B".into() },
+            Background::Image { path: "/tmp/bg.png".into() },
+        ] {
+            let mut s = pre_zoom_populated_state();
+            s.background = Some(bg.clone());
+            let reparsed: SidecarState =
+                serde_json::from_str(&serde_json::to_string_pretty(&s).unwrap()).unwrap();
+            assert_eq!(reparsed.background, Some(bg));
+        }
     }
 
     // GATE 1 (teardown) — the plain-MP4 tail (run_plain_mp4) survives the removal

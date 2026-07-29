@@ -328,7 +328,43 @@ type SidecarState = {
   // byte-identical to a pre-redaction one (Rust's skip_serializing_if mirrors
   // this). The draw UI (commit 4) writes the field only when a panel exists.
   redactions?: RedactionRegion[];
+  // Frame styling + background canvas (BACKGROUND-PADDING-PLAN). Both
+  // undefined = the padding-0/no-background no-op; the write path drops an
+  // all-zero frame and an unset background so a plain recording stays
+  // byte-identical (Rust's frame_is_noop / skip_serializing_if mirror this).
+  // Declared last so an unset pair never perturbs existing field order.
+  frame?: FrameStyle | null;
+  background?: Background | null;
 };
+
+// Mirror of Rust FrameStyle. Every knob is the no-op at 0. padding is the
+// fraction of the canvas taken by margin (content scale k = 1 - padding).
+type FrameStyle = {
+  padding?: number;
+  corner_radius?: number;
+  shadow?: number;
+  inset?: number;
+};
+
+// Mirror of Rust Background (tagged by `kind`). Gradient presets resolve by
+// name in the compositor (procedural, no bundled assets); solid is "#RRGGBB";
+// image is an absolute path read at render time.
+type Background =
+  | { kind: "gradient"; preset: string }
+  | { kind: "solid"; hex: string }
+  | { kind: "image"; path: string };
+
+// True when a frame carries no visible styling — drives skip-when-noop in the
+// write payload, the TS twin of Rust frame_is_noop.
+function frameIsNoop(f: FrameStyle | null | undefined): boolean {
+  return (
+    !f ||
+    ((f.padding ?? 0) === 0 &&
+      (f.corner_radius ?? 0) === 0 &&
+      (f.shadow ?? 0) === 0 &&
+      (f.inset ?? 0) === 0)
+  );
+}
 
 const EMPTY_STATE: SidecarState = {
   trim: null,
@@ -589,6 +625,8 @@ function sidecarWritePayload(s: SidecarState, duration: number): SidecarState {
     bubble_scale: s.bubble_scale ?? undefined,
     zoom: s.zoom && s.zoom.length > 0 ? s.zoom : undefined,
     redactions: redactionsPayload(s.redactions ?? []),
+    frame: frameIsNoop(s.frame) ? undefined : s.frame,
+    background: s.background ?? undefined,
   };
 }
 
