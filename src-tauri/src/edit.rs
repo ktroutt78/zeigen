@@ -60,6 +60,12 @@ pub struct SidecarState {
     // preview/legacy data — export reads it only for the bubble diameter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bubble_zone: Option<crate::composite::BubbleZone>,
+    // Review "Size" preset multiplier for the baked bubble diameter: 1.0 Normal,
+    // ~0.5 Small. None = Normal (unscaled) and is skipped when serialized, so
+    // untouched and pre-feature sidecars stay byte-identical — the same
+    // absent-unless-set convention as bubble_zone/roundness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bubble_scale: Option<f64>,
     // Global color for all text/arrow annotations, "#RRGGBB". None = white
     // (the pre-feature hardcode) — the review only writes the field when
     // annotations exist and the color is non-white, so legacy sidecars and
@@ -829,6 +835,7 @@ fn v3_render(
             &sidecar.bubble_position_log,
             sidecar.bubble_roundness,
             webcam_size,
+            sidecar.bubble_scale.unwrap_or(1.0),
             w,
         )?),
         None => None,
@@ -1947,6 +1954,7 @@ mod tests {
             thumbnail_time: Some(7.5),
             bubble_roundness: Some(0.35),
             bubble_zone: None,
+            bubble_scale: None,
             annotation_color: Some("#FF3B30".into()),
             zoom: vec![],
             redactions: vec![],

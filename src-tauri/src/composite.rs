@@ -105,13 +105,16 @@ const BUBBLE_REF_WIDTH: f64 = 1512.0;
 fn resolve_diameter_px(
     bubble_position_log: &[BubblePositionEntry],
     size: WebcamSize,
+    scale: f64,
     frame_width: u32,
 ) -> u32 {
     let frac = bubble_position_log
         .first()
         .and_then(|e| e.diameter_frac)
         .unwrap_or_else(|| size.frac());
-    (frac * frame_width as f64).round().max(1.0) as u32
+    // scale is the Review "Size" preset (1.0 Normal, ~0.5 Small); it multiplies
+    // the logged (or fallback) diameter. Padding off the pinned edge is unscaled.
+    (frac * scale * frame_width as f64).round().max(1.0) as u32
 }
 
 #[derive(Clone, Copy)]
@@ -198,13 +201,18 @@ pub(crate) fn resolve_padding_px(frame_width: u32) -> u32 {
 // as the diameter source); export ignores its positions. See
 // docs/V2-BUILD-STATE.md.
 //
-// Six zones on a 2x3 grid: top/bottom row x left/center/right column.
+// Nine zones on a 3x3 grid: top/center/bottom row x left/center/right column.
+// The center row (vertical middle) is user-pick-only — resolve_zone's migration
+// path only ever lands on the four corners.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BubbleZone {
     TopLeft,
     TopCenter,
     TopRight,
+    CenterLeft,
+    Center,
+    CenterRight,
     BottomLeft,
     BottomCenter,
     BottomRight,
@@ -217,6 +225,9 @@ impl BubbleZone {
             Self::TopLeft => "tl",
             Self::TopCenter => "tc",
             Self::TopRight => "tr",
+            Self::CenterLeft => "cl",
+            Self::Center => "cc",
+            Self::CenterRight => "cr",
             Self::BottomLeft => "bl",
             Self::BottomCenter => "bc",
             Self::BottomRight => "br",
@@ -385,10 +396,11 @@ pub(crate) fn build_v3_bubble_assets(
     bubble_position_log: &[BubblePositionEntry],
     bubble_roundness: Option<f64>,
     size: WebcamSize,
+    scale: f64,
     frame_width: u32,
 ) -> Result<V3BubbleAssets, String> {
     // Diameter source mirrors build_webcam_overlay exactly.
-    let diameter = resolve_diameter_px(bubble_position_log, size, frame_width);
+    let diameter = resolve_diameter_px(bubble_position_log, size, scale, frame_width);
     let mask_path = out_dir.join(mask_file_name("v3mask", diameter, bubble_roundness));
     render_alpha_mask(diameter, bubble_roundness, &mask_path)?;
     let shadow_padding = ((diameter as f64) * SHADOW_PADDING_FRAC).round() as u32;
