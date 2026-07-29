@@ -2120,7 +2120,11 @@ export default function Review() {
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "1fr 320px",
+          // Right region = vertical tool rail (~48px) + the 320px panel; the rail
+          // moved here from a horizontal row atop the panel (which had run out of
+          // width at 7 tools), buying back the panel's vertical space. Preview (1fr)
+          // takes the ~48px hit.
+          gridTemplateColumns: "1fr 368px",
           // Clamp the single row to the container height so a tall column
           // (the left video stage's aspect-ratio height at wide window sizes)
           // can never inflate the row past the viewport and push the right
@@ -4571,9 +4575,9 @@ type SaveSpec = {
 // mirrors the working flow: Trim, Bubble, Zoom, Watermark, Mark. A persisted
 // id from an older build (e.g. "export"/"annotate"/"share") falls back to the
 // default.
-type ToolId = "trim" | "bubble" | "zoom" | "redact" | "watermark" | "background" | "mark";
-const TOOL_IDS: ToolId[] = ["trim", "bubble", "zoom", "redact", "watermark", "background", "mark"];
-const DEFAULT_TOOL: ToolId = "trim";
+type ToolId = "bubble" | "zoom" | "redact" | "watermark" | "background" | "mark";
+const TOOL_IDS: ToolId[] = ["zoom", "bubble", "redact", "watermark", "background", "mark"];
+const DEFAULT_TOOL: ToolId = "zoom";
 // Key versioned away from the old "review-panel-open-section" accordion format.
 const TOOL_LS_KEY = "review-panel-active-tool";
 
@@ -5010,12 +5014,68 @@ function ExportPanel({
     <div
       style={{
         display: "flex",
-        flexDirection: "column",
+        flexDirection: "row",
         background: "var(--bg-sidebar)",
         minHeight: 0,
         overflow: "hidden",
       }}
     >
+      {/* Vertical tool rail (moved from a horizontal row that ran out of width at
+          7 tools; frees the panel's vertical space). Icon + label per tile — the
+          four rectangle-ish icons (Redact/Watermark/Frame/Mark) aren't distinct
+          enough to stand alone, and the rail has room for both. */}
+      <div
+        style={{
+          width: 48,
+          flexShrink: 0,
+          display: "flex",
+          flexDirection: "column",
+          gap: 2,
+          padding: "8px 2px",
+          borderRight: "1px solid var(--border-faint)",
+        }}
+      >
+        <ToolTile
+          label="Zoom"
+          active={activeTool === "zoom"}
+          onClick={() => setActiveTool("zoom")}
+          icon={<Icon d={<><circle cx="7" cy="7" r="4" /><path d="M10 10l3.5 3.5M5.2 7h3.6M7 5.2v3.6" /></>} size={17} stroke={1.4} />}
+        />
+        <ToolTile
+          label="Bubble"
+          active={activeTool === "bubble"}
+          disabled={!hasBubble}
+          title={hasBubble ? undefined : "No webcam bubble in this recording"}
+          onClick={() => setActiveTool("bubble")}
+          icon={<Icon d={<circle cx="8" cy="8" r="5" />} size={17} stroke={1.4} />}
+        />
+        <ToolTile
+          label="Redact"
+          active={activeTool === "redact"}
+          onClick={() => setActiveTool("redact")}
+          icon={<Icon d={<><rect x="2.5" y="4.5" width="11" height="7" rx="1.5" /><path d="M4.5 6.5h7M4.5 9.5h5" /></>} size={17} stroke={1.4} />}
+        />
+        <ToolTile
+          label="Watermark"
+          active={activeTool === "watermark"}
+          onClick={() => setActiveTool("watermark")}
+          icon={<Icon d={<><rect x="2.5" y="3.5" width="11" height="9" rx="1.5" /><path d="M5 11l2.2-2.6 1.5 1.7 1.3-1.5 1.5 2.4z" /></>} size={17} stroke={1.4} />}
+        />
+        <ToolTile
+          label="Frame"
+          active={activeTool === "background"}
+          onClick={() => setActiveTool("background")}
+          icon={<Icon d={<><rect x="2" y="3" width="12" height="10" rx="1.5" /><rect x="4.5" y="5.5" width="7" height="5" rx="1" /></>} size={17} stroke={1.4} />}
+        />
+        <ToolTile
+          label="Mark"
+          active={activeTool === "mark"}
+          onClick={() => setActiveTool("mark")}
+          icon={<Icon d={<path d="M4 2.5h8v11l-4-2.5-4 2.5z" />} size={17} stroke={1.4} />}
+        />
+      </div>
+      {/* Panel content column. */}
+      <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
       {/* Sections scroll vertically if the window is short; horizontal
           overflow is impossible by construction (full-width rows only). */}
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", padding: "10px 12px 12px", display: "flex", flexDirection: "column" }}>
@@ -5023,66 +5083,9 @@ function ExportPanel({
             layout is unchanged; the Export block below rides the same scroll
             region with marginTop:auto. */}
         <div style={{ flexShrink: 0 }}>
-        {/* Tool toolbar — one active tool; the contextual card below swaps to match. */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4, marginBottom: 6 }}>
-          <ToolTile
-            label="Trim"
-            active={activeTool === "trim"}
-            onClick={() => setActiveTool("trim")}
-            icon={<Icon d={<path d="M5 2v12M11 2v12M2 5h12M2 11h12" />} size={17} stroke={1.4} />}
-          />
-          <ToolTile
-            label="Bubble"
-            active={activeTool === "bubble"}
-            disabled={!hasBubble}
-            title={hasBubble ? undefined : "No webcam bubble in this recording"}
-            onClick={() => setActiveTool("bubble")}
-            icon={<Icon d={<circle cx="8" cy="8" r="5" />} size={17} stroke={1.4} />}
-          />
-          <ToolTile
-            label="Zoom"
-            active={activeTool === "zoom"}
-            onClick={() => setActiveTool("zoom")}
-            icon={<Icon d={<><circle cx="7" cy="7" r="4" /><path d="M10 10l3.5 3.5M5.2 7h3.6M7 5.2v3.6" /></>} size={17} stroke={1.4} />}
-          />
-          <ToolTile
-            label="Redact"
-            active={activeTool === "redact"}
-            onClick={() => setActiveTool("redact")}
-            icon={<Icon d={<><rect x="2.5" y="4.5" width="11" height="7" rx="1.5" /><path d="M4.5 6.5h7M4.5 9.5h5" /></>} size={17} stroke={1.4} />}
-          />
-          <ToolTile
-            label="Watermark"
-            active={activeTool === "watermark"}
-            onClick={() => setActiveTool("watermark")}
-            icon={<Icon d={<><rect x="2.5" y="3.5" width="11" height="9" rx="1.5" /><path d="M5 11l2.2-2.6 1.5 1.7 1.3-1.5 1.5 2.4z" /></>} size={17} stroke={1.4} />}
-          />
-          <ToolTile
-            label="Frame"
-            active={activeTool === "background"}
-            onClick={() => setActiveTool("background")}
-            icon={<Icon d={<><rect x="2" y="3" width="12" height="10" rx="1.5" /><rect x="4.5" y="5.5" width="7" height="5" rx="1" /></>} size={17} stroke={1.4} />}
-          />
-          <ToolTile
-            label="Mark"
-            active={activeTool === "mark"}
-            onClick={() => setActiveTool("mark")}
-            icon={<Icon d={<path d="M4 2.5h8v11l-4-2.5-4 2.5z" />} size={17} stroke={1.4} />}
-          />
-        </div>
-
-        {activeTool === "trim" && (
-          <>
-            <div style={RAIL_EYEBROW}>Trim</div>
-            <div style={CTX_CARD}>
-              <div style={{ fontSize: 11.5, color: "var(--fg-tertiary)", lineHeight: 1.4 }}>
-                Drag the handles on the timeline below to trim, or press{" "}
-                <span className="kbd">I</span> / <span className="kbd">O</span> to set the
-                in and out points at the playhead.
-              </div>
-            </div>
-          </>
-        )}
+        {/* Tool tiles live in the vertical rail (left). Trim was dropped — the
+            timeline below owns the handles + I/O keys, so its panel was only
+            instructions with no unique control. */}
 
         {activeTool === "bubble" && (
           <>
@@ -5882,6 +5885,7 @@ function ExportPanel({
           {I.trash}
           <span>Discard recording</span>
         </button>
+      </div>
       </div>
     </div>
   );
