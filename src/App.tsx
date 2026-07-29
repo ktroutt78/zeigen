@@ -878,9 +878,9 @@ async function openReview(
     url,
     title: "Screen Recording",
     width: 940,
-    height: 640,
+    height: 860,
     minWidth: 720,
-    minHeight: 520,
+    minHeight: 640,
     resizable: true,
     center: true,
     // Heavily-used editor with many buttons; requiring an activating click

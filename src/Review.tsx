@@ -5132,8 +5132,11 @@ function ExportPanel({
             onCancel={() => setPopoverOpen(false)}
           />
         )}
+      </div>
 
-        {/* Export — permanent block (not a tool) */}
+      {/* Export — permanent block, pinned above the lifecycle footer so it is
+          never clipped and never counts against the tool-panel scroll region. */}
+      <div style={{ padding: "10px 12px 12px", borderTop: "1px solid var(--border-faint)" }}>
         <div style={{ ...RAIL_EYEBROW, marginBottom: 10 }}>Export</div>
         <Field label="Format">
           <div className="segmented full">
