@@ -781,7 +781,13 @@ fn build_compositor_command(
                 cmd.env("BACKGROUND_KIND", "solid")
                     .env("BACKGROUND_SOLID_HEX", hex);
             }
-            Background::Gradient { .. } | Background::Image { .. } => {}
+            Background::Gradient { preset } => {
+                cmd.env("BACKGROUND_KIND", "gradient")
+                    .env("BACKGROUND_GRADIENT", preset);
+            }
+            // Image lands in Slice 5; until then it can't render, so it is not
+            // render-backed by has_background and never reaches here.
+            Background::Image { .. } => {}
         }
     }
     cmd
@@ -1438,8 +1444,10 @@ fn run_plain_mp4(
 // silently takes the copy path — the worst failure mode for this feature. Only Solid
 // is render-backed in Slice 1; gradient/image extend this match as they land.
 fn has_background(sidecar: &SidecarState) -> bool {
-    matches!(sidecar.background, Some(Background::Solid { .. }))
-        && sidecar.frame.map_or(false, |f| f.padding > 0.0)
+    matches!(
+        sidecar.background,
+        Some(Background::Solid { .. }) | Some(Background::Gradient { .. })
+    ) && sidecar.frame.map_or(false, |f| f.padding > 0.0)
 }
 
 pub(crate) fn run_edit_pipeline(
@@ -2518,6 +2526,50 @@ ZOOM_SEGMENTS=/S/zoom.json";
         s.background = None;
         s.frame = Some(FrameStyle { padding: 0.1, ..Default::default() });
         assert!(!has_background(&s), "padding with no background -> copy path");
+    }
+
+    // Slice 3: a gradient background gates the compositor and emits the preset name
+    // (BACKGROUND_KIND=gradient + BACKGROUND_GRADIENT), never the solid hex.
+    #[test]
+    fn gradient_background_gates_and_emits() {
+        use std::collections::BTreeSet;
+        use std::ffi::OsStr;
+        let mut s = pre_zoom_populated_state();
+        s.background = Some(Background::Gradient { preset: "indigo".into() });
+        s.frame = Some(FrameStyle { padding: 0.1, ..Default::default() });
+        assert!(has_background(&s), "gradient + padding must leave the copy path");
+
+        fn envs_of(cmd: &Command) -> BTreeSet<String> {
+            cmd.get_envs()
+                .map(|(k, v): (&OsStr, Option<&OsStr>)| {
+                    format!(
+                        "{}={}",
+                        k.to_string_lossy(),
+                        v.map(|v| v.to_string_lossy().into_owned()).unwrap_or_default()
+                    )
+                })
+                .collect()
+        }
+        let bin = Path::new("/S/cicompositor");
+        let mk = |fb: Option<(FrameStyle, &Background)>| {
+            build_compositor_command(
+                bin, Path::new("/S/in.mp4"), Path::new("/S/v3.mp4"), (1920, 1080), (1920, 1080),
+                None, None, None, None, 0.0, None, None, fb,
+            )
+        };
+        let bg = Background::Gradient { preset: "indigo".into() };
+        let frame = FrameStyle { padding: 0.1, ..Default::default() };
+        let added: Vec<String> =
+            envs_of(&mk(Some((frame, &bg)))).difference(&envs_of(&mk(None))).cloned().collect();
+        assert_eq!(
+            added,
+            vec![
+                "BACKGROUND_GRADIENT=indigo".to_string(),
+                "BACKGROUND_KIND=gradient".to_string(),
+                "FRAME_PADDING=0.1".to_string(),
+            ],
+            "gradient emits kind + preset name, no solid hex"
+        );
     }
 
     // Slice 1/2 additive-env pin. A fully-styled solid background emits padding + the

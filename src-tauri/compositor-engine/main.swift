@@ -188,11 +188,37 @@ let frameInsetFrac = Double(env["FRAME_INSET"] ?? "") ?? 0
 let shadowBlurK = Double(env["SHADOW_BLUR_K"] ?? "") ?? 0.85
 let shadowDyK = Double(env["SHADOW_DY_K"] ?? "") ?? 0.45
 let shadowAlphaK = Double(env["SHADOW_ALPHA_K"] ?? "") ?? 0.5
-let bgSolid: CIColor? = {
-    guard env["BACKGROUND_KIND"] == "solid", let hex = env["BACKGROUND_SOLID_HEX"] else { return nil }
-    return ciColor(hex: hex)
+// Procedural gradient presets (BACKGROUND-PADDING-PLAN Slice 3): name -> (top-left,
+// bottom-right) hex. Muted/deep so they read as BACKDROPS not subjects; one member per
+// hue family (graphite/indigo/teal/plum/ember) plus one light option (mist), spanning
+// cool->warm and dark->light. The rim + elevation shadow are the contrast backstops, so
+// the palette is free to run deep. Mirrored in the TS UI (Slice 4) for preview parity.
+let gradientPresets: [String: (String, String)] = [
+    "graphite": ("#414855", "#23272E"),
+    "indigo":   ("#3B3A8C", "#1E1B44"),
+    "teal":     ("#1F5E5C", "#0F3533"),
+    "plum":     ("#5B3A7A", "#2E1A44"),
+    "ember":    ("#9A4A2A", "#5C241A"),
+    "mist":     ("#EDF0F4", "#D2D9E2"),
+]
+// Background colors as (top-left, bottom-right): a solid repeats one color; a gradient
+// resolves its preset. nil = no background. bgIsGradient drives whether the canvas is a
+// CILinearGradient or a flat fill (the flat fill keeps the proven Slice 1 solid path).
+let bgIsGradient = env["BACKGROUND_KIND"] == "gradient"
+let bgColors: (CIColor, CIColor)? = {
+    switch env["BACKGROUND_KIND"] {
+    case "solid":
+        guard let hex = env["BACKGROUND_SOLID_HEX"], let c = ciColor(hex: hex) else { return nil }
+        return (c, c)
+    case "gradient":
+        guard let name = env["BACKGROUND_GRADIENT"], let (a, b) = gradientPresets[name],
+              let ca = ciColor(hex: a), let cb = ciColor(hex: b) else { return nil }
+        return (ca, cb)
+    default:
+        return nil
+    }
 }()
-let insetActive = framePadding > 0 && bgSolid != nil
+let insetActive = framePadding > 0 && bgColors != nil
 
 // --- Webcam bubble (Phase 4): a SECOND video stream, composited on the final zoomed
 // frame (screen-anchored, constant placement). Mask + shadow silhouette PNGs are
@@ -482,11 +508,22 @@ let Wd = Double(W), Hd = Double(H)
 // velocity-tracking state (a fixed source point's output-space motion frame to frame)
 var prevO0x = Wd / 2, prevO0y = Hd / 2, prevScale = 1.0, havePrev = false
 
-// Solid background canvas (WxH = source dims; canvas = source in v1). Static for the
-// whole render, so build it once like the bubble/watermark layers.
-let backgroundImage: CIImage? = insetActive
-    ? bgSolid.map { CIImage(color: $0).cropped(to: CGRect(x: 0, y: 0, width: Wd, height: Hd)) }
-    : nil
+// Background canvas (WxH = source dims; canvas = source in v1). Static for the whole
+// render, so build once. A gradient is a CILinearGradient light-corner (top-left) ->
+// deep-corner (bottom-right), so the built-in top-left light pairs with the downward
+// elevation shadow; a solid is the flat fill (proven Slice 1 path).
+let backgroundImage: CIImage? = {
+    guard insetActive, let (a, b) = bgColors else { return nil }
+    let canvas = CGRect(x: 0, y: 0, width: Wd, height: Hd)
+    guard bgIsGradient, let g = CIFilter(name: "CILinearGradient") else {
+        return CIImage(color: a).cropped(to: canvas)
+    }
+    g.setValue(CIVector(x: 0, y: Hd), forKey: "inputPoint0")   // top-left (CI y-up)
+    g.setValue(a, forKey: "inputColor0")
+    g.setValue(CIVector(x: Wd, y: 0), forKey: "inputPoint1")   // bottom-right
+    g.setValue(b, forKey: "inputColor1")
+    return (g.outputImage ?? CIImage(color: a)).cropped(to: canvas)
+}()
 
 // --- Frame styling geometry + static layers (BACKGROUND-PADDING-PLAN Slice 2). The
 // inset content occupies an integer (W*k)x(H*k) rect centered on the canvas; the corner
@@ -932,9 +969,10 @@ if writer.status == .completed {
     let dt = Date().timeIntervalSince(t0)
     // scenario is the ZOOM preset (always "identity" when env-driven); the inset note
     // surfaces background/padding so a padded render is visible without sampling pixels.
+    let bgDesc = bgIsGradient ? "gradient:\(env["BACKGROUND_GRADIENT"] ?? "?")" : "solid"
     let insetNote = insetActive
-        ? String(format: "  bg=solid pad=%.2f corner=%.3f shadow=%.2f inset=%.3f",
-                 framePadding, frameCornerFrac, frameShadow, frameInsetFrac)
+        ? String(format: "  bg=%@ pad=%.2f corner=%.3f shadow=%.2f inset=%.3f",
+                 bgDesc, framePadding, frameCornerFrac, frameShadow, frameInsetFrac)
         : ""
     print(String(format: "OK  %dx%d->%dx%d  %d frames  scenario=%@%@  wall=%.2fs",
                  W, H, outW, outH, frames, scenario, insetNote, dt))
