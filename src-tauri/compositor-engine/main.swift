@@ -113,7 +113,7 @@ let bubbleWebcam = env["BUBBLE_WEBCAM"]
 let bubbleMaskPath = env["BUBBLE_MASK_PNG"]
 let bubbleShadowPath = env["BUBBLE_SHADOW_PNG"]
 let bubbleDiameter = Double(env["BUBBLE_DIAMETER"] ?? "240")!
-let bubbleZone = env["BUBBLE_ZONE"] ?? "br"          // br|bl|tr|tl|bc|tc
+let bubbleZone = env["BUBBLE_ZONE"] ?? "br"          // {t,c,b}{l,c,r} 3x3 grid
 let bubbleShadowAlpha = Double(env["BUBBLE_SHADOW_ALPHA"] ?? "0.22")!
 // composite.rs gblur sigma=round(0.075*d); CIGaussianBlur radius = k*sigma (tuning knob).
 let bubbleShadowRadiusK = Double(env["BUBBLE_SHADOW_RADIUS_K"] ?? "3.0")!
@@ -437,10 +437,11 @@ if bubbleWebcam != nil {
     let d = bubbleDiameter
     let p = Double(env["BUBBLE_PADDING"] ?? "30")!   // composite.rs PADDING_PX; env override for the harness
     let hRight = bubbleZone.hasSuffix("r"), hCenter = bubbleZone.hasSuffix("c")
-    let vTop = bubbleZone.hasPrefix("t")
-    // ffmpeg top-left (top-left origin), ow=oh=d for the bubble.
+    let vTop = bubbleZone.hasPrefix("t"), vCenter = bubbleZone.hasPrefix("c")
+    // ffmpeg top-left (top-left origin), ow=oh=d for the bubble. Center row is
+    // vertically centered (no edge padding); mirrors Review's BubbleLayer.
     let bx = hRight ? (Wd - d - p) : (hCenter ? (Wd - d) / 2 : p)
-    let by = vTop ? p : (Hd - d - p)
+    let by = vTop ? p : (vCenter ? (Hd - d) / 2 : (Hd - d - p))
     bubbleTx = bx.rounded(); bubbleTy = (Hd - by - d).rounded()   // -> CI bottom-left
     // Bubble center in CI (bottom-left) coords; the shadow places relative to it.
     let bubbleCx = bubbleTx + d / 2, bubbleCy = bubbleTy + d / 2

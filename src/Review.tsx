@@ -242,16 +242,22 @@ type BubbleZone =
   | "top_left"
   | "top_center"
   | "top_right"
+  | "center_left"
+  | "center"
+  | "center_right"
   | "bottom_left"
   | "bottom_center"
   | "bottom_right";
 
-// The 6 zones in 2x3 row-major order (top row, then bottom row) for the
-// picker grid.
+// The 9 zones in 3x3 row-major order (top row, center row, bottom row) for the
+// picker grid. Wire values are composite.rs BubbleZone's snake_case serde names.
 const BUBBLE_ZONES: BubbleZone[] = [
   "top_left",
   "top_center",
   "top_right",
+  "center_left",
+  "center",
+  "center_right",
   "bottom_left",
   "bottom_center",
   "bottom_right",
@@ -261,14 +267,21 @@ const BUBBLE_ZONES: BubbleZone[] = [
 // Mirrors composite.rs PADDING_PX; used to offset the parked preview.
 const BUBBLE_ZONE_PADDING_PX = 30;
 
+// Bubble "Size" presets: Normal (1.0, the recorded diameter) and Small.
+// ~0.5x diameter -- starting value, tunable on eye-check. Baked at export
+// (resolve_diameter_px) and mirrored in the BubbleLayer preview.
+const BUBBLE_SMALL_SCALE = 0.5;
+
 function zoneHAlign(z: BubbleZone): "left" | "center" | "right" {
-  if (z === "top_left" || z === "bottom_left") return "left";
-  if (z === "top_center" || z === "bottom_center") return "center";
-  return "right";
+  if (z.endsWith("left")) return "left";
+  if (z.endsWith("right")) return "right";
+  return "center"; // top_center, bottom_center, center
 }
 
-function zoneVAlign(z: BubbleZone): "top" | "bottom" {
-  return z.startsWith("top") ? "top" : "bottom";
+function zoneVAlign(z: BubbleZone): "top" | "center" | "bottom" {
+  if (z.startsWith("top")) return "top";
+  if (z.startsWith("bottom")) return "bottom";
+  return "center"; // center_left, center, center_right
 }
 
 // Mirror of composite.rs resolve_zone's migration path: nearest of the FOUR
@@ -301,6 +314,10 @@ type SidecarState = {
   // byte-identical to pre-E1, so the slider only writes the field when the
   // user moves it off full circle.
   bubble_roundness?: number | null;
+  // Bubble "Size" preset multiplier: 1.0 Normal, ~0.5 Small. null/undefined =
+  // Normal (unscaled); only written when the user picks Small so untouched and
+  // pre-feature sidecars stay byte-identical (same convention as bubble_zone).
+  bubble_scale?: number | null;
   // Zoom layer keyframes (step-2 schema). Undefined/empty = no zoom; the
   // debounced save writes the field only when non-empty so a no-zoom
   // sidecar stays byte-identical to a pre-zoom one (the step-2 governing
@@ -319,6 +336,7 @@ const EMPTY_STATE: SidecarState = {
   thumbnail_time: null,
   bubble_roundness: null,
   bubble_zone: null,
+  bubble_scale: null,
   zoom: [],
   redactions: [],
 };
@@ -510,6 +528,9 @@ function statesEqual(a: SidecarState, b: SidecarState, duration: number | null):
   if ((bra == null) !== (brb == null)) return false;
   if (bra != null && brb != null && Math.abs(bra - brb) > 0.001) return false;
   if ((a.bubble_zone ?? null) !== (b.bubble_zone ?? null)) return false;
+  const bsa = a.bubble_scale ?? 1;
+  const bsb = b.bubble_scale ?? 1;
+  if (Math.abs(bsa - bsb) > 0.001) return false;
   const za = a.zoom ?? [];
   const zb = b.zoom ?? [];
   if (za.length !== zb.length) return false;
@@ -565,6 +586,7 @@ function sidecarWritePayload(s: SidecarState, duration: number): SidecarState {
     thumbnail_time: s.thumbnail_time ?? null,
     bubble_roundness: s.bubble_roundness ?? null,
     bubble_zone: s.bubble_zone ?? undefined,
+    bubble_scale: s.bubble_scale ?? undefined,
     zoom: s.zoom && s.zoom.length > 0 ? s.zoom : undefined,
     redactions: redactionsPayload(s.redactions ?? []),
   };
@@ -649,6 +671,8 @@ export default function Review() {
   // dirties the sidecar; untouched recordings keep bubble_zone absent and the
   // export re-derives the same default.
   const [bubbleZone, setBubbleZone] = useState<BubbleZone | null>(null);
+  // Bubble "Size" preset: 1.0 Normal (recorded diameter), BUBBLE_SMALL_SCALE Small.
+  const [bubbleScale, setBubbleScale] = useState(1);
   // Original-timeline timestamp for the user's chosen poster frame. null =
   // unset; export-time default (0.5s in) is applied on the Rust side.
   const [thumbnailTime, setThumbnailTime] = useState<number | null>(null);
@@ -1100,6 +1124,7 @@ export default function Review() {
             thumbnail_time: state.thumbnail_time ?? null,
             bubble_roundness: state.bubble_roundness ?? null,
             bubble_zone: state.bubble_zone ?? null,
+            bubble_scale: state.bubble_scale ?? null,
             zoom: state.zoom ?? [],
             redactions: state.redactions ?? [],
           });
@@ -1108,6 +1133,7 @@ export default function Review() {
           if (state.thumbnail_time != null) setThumbnailTime(state.thumbnail_time);
           if (state.bubble_roundness != null) setBubbleRoundness(state.bubble_roundness);
           if (state.bubble_zone != null) setBubbleZone(state.bubble_zone);
+          if (state.bubble_scale != null) setBubbleScale(state.bubble_scale);
           if (state.zoom && state.zoom.length > 0) {
             setZoomSegments(zoomKeyframesToSegments(state.zoom));
           }
@@ -1216,10 +1242,11 @@ export default function Review() {
       thumbnail_time: thumbnailTime,
       bubble_roundness: bubbleRoundness,
       bubble_zone: bubbleZone,
+      bubble_scale: bubbleScale === 1 ? null : bubbleScale,
       zoom: zoomSegmentsToKeyframes(zoomSegments),
       redactions,
     }),
-    [trim, bubblePositionLog, thumbnailTime, bubbleRoundness, bubbleZone, zoomSegments, redactions],
+    [trim, bubblePositionLog, thumbnailTime, bubbleRoundness, bubbleZone, bubbleScale, zoomSegments, redactions],
   );
 
   const dirty = useMemo(
@@ -1943,6 +1970,11 @@ export default function Review() {
         style={{
           display: "grid",
           gridTemplateColumns: "1fr 320px",
+          // Clamp the single row to the container height so a tall column
+          // (the left video stage's aspect-ratio height at wide window sizes)
+          // can never inflate the row past the viewport and push the right
+          // panel's pinned footer off-screen. WebKit needs this explicitly.
+          gridTemplateRows: "minmax(0, 1fr)",
           flex: 1,
           minHeight: 0,
         }}
@@ -1991,6 +2023,7 @@ export default function Review() {
           thumbnailTime={thumbnailTime}
           bubbleRoundness={bubbleRoundness}
           bubbleZone={effectiveZone}
+          bubbleScale={bubbleScale}
         />
         <ExportPanel
           sourcePath={sourcePath}
@@ -2000,6 +2033,8 @@ export default function Review() {
           thumbnail={thumbnailControls}
           bubbleZone={effectiveZone}
           onBubbleZone={setBubbleZone}
+          bubbleScale={bubbleScale}
+          onBubbleScale={setBubbleScale}
           hasBubble={hasBubble}
           lastSavedPath={lastSavedPath}
           lastSavedAt={lastSavedAt}
@@ -2179,6 +2214,8 @@ type LeftColumnProps = {
   bubbleRoundness: number | null;
   // V2 Step 2: resolved bubble zone for the parked preview.
   bubbleZone: BubbleZone;
+  // Bubble "Size" preset multiplier (1.0 Normal, ~0.5 Small) for the preview.
+  bubbleScale: number;
 };
 
 function LeftColumn(props: LeftColumnProps) {
@@ -2201,6 +2238,7 @@ function LeftColumn(props: LeftColumnProps) {
         bubblePositionLog={props.bubblePositionLog}
         bubbleRoundness={props.bubbleRoundness}
         bubbleZone={props.bubbleZone}
+        bubbleScale={props.bubbleScale}
         scrubbingRef={props.scrubbingRef}
         onLoadedMetadata={props.onLoadedMetadata}
         onTimeUpdate={props.onTimeUpdate}
@@ -2444,6 +2482,7 @@ type VideoStageProps = {
   bubblePositionLog: BubblePositionEntry[];
   bubbleRoundness: number | null;
   bubbleZone: BubbleZone;
+  bubbleScale: number;
   scrubbingRef: React.MutableRefObject<boolean>;
   onLoadedMetadata: () => void;
   onTimeUpdate: () => void;
@@ -2624,6 +2663,7 @@ function VideoStage(props: VideoStageProps) {
           bubblePositionLog={props.bubblePositionLog}
           bubbleRoundness={props.bubbleRoundness}
           bubbleZone={props.bubbleZone}
+          bubbleScale={props.bubbleScale}
           scrubbingRef={props.scrubbingRef}
           videoDims={props.watermarkPreview.videoDims}
         />
@@ -2687,6 +2727,7 @@ function BubbleLayer({
   bubblePositionLog,
   bubbleRoundness,
   bubbleZone,
+  bubbleScale,
   scrubbingRef,
   videoDims,
 }: {
@@ -2701,6 +2742,9 @@ function BubbleLayer({
   // caller falls back to the migration default). Only the position is
   // constant; the webcam <video> still plays via the sync layer.
   bubbleZone: BubbleZone;
+  // Bubble "Size" preset multiplier (1.0 Normal, ~0.5 Small); scales the
+  // preview diameter to mirror the export's resolve_diameter_px.
+  bubbleScale: number;
   // True during a timeline scrub / trim-handle drag. The sync layer skips
   // per-seek webcam aligns while set — otherwise the webcam decoder seeks
   // in lockstep with every completed scrub seek. Review's endScrub does
@@ -2834,10 +2878,11 @@ function BubbleLayer({
     const { x: cx, y: cy, w: cw, h: ch } = contentBox(stage, videoDims);
 
     const frac = bubblePositionLog[0].diameter_frac ?? DEFAULT_BUBBLE_DIAMETER_FRAC;
-    const cssDiameter = frac * cw;
+    // bubbleScale is the Review "Size" preset (1.0 Normal, ~0.5 Small); it
+    // multiplies the diameter here exactly as resolve_diameter_px does at export.
+    const cssDiameter = frac * cw * bubbleScale;
 
-    // Size is constant per recording — bubble resize was removed in
-    // phase 14 (be4aa02). Set once per effect run.
+    // Set once per effect run.
     w.style.width = `${cssDiameter}px`;
     w.style.height = `${cssDiameter}px`;
     w.style.visibility = "visible";
@@ -2860,7 +2905,9 @@ function BubbleLayer({
     const centerY =
       v === "top"
         ? cy + cssPad + cssDiameter / 2
-        : cy + ch - cssPad - cssDiameter / 2;
+        : v === "center"
+          ? cy + ch / 2
+          : cy + ch - cssPad - cssDiameter / 2;
     const tx = centerX - cssDiameter / 2;
     const ty = centerY - cssDiameter / 2;
     // transform order is right-to-left: scaleX(-1) flips around the element's
@@ -2879,6 +2926,7 @@ function BubbleLayer({
     webcamVideoRef,
     bubblePositionLog,
     bubbleZone,
+    bubbleScale,
     videoDims,
     stage.width,
     stage.height,
@@ -4336,7 +4384,7 @@ function ZonePicker({
   onChange: (z: BubbleZone) => void;
 }) {
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6 }}>
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 4 }}>
       {BUBBLE_ZONES.map((z) => {
         const selected = z === value;
         const h = zoneHAlign(z);
@@ -4388,6 +4436,8 @@ function ExportPanel({
   thumbnail,
   bubbleZone,
   onBubbleZone,
+  bubbleScale,
+  onBubbleScale,
   hasBubble,
   lastSavedPath,
   lastSavedAt,
@@ -4423,6 +4473,8 @@ function ExportPanel({
   // bubble at all (the section is hidden otherwise).
   bubbleZone: BubbleZone;
   onBubbleZone: (z: BubbleZone) => void;
+  bubbleScale: number;
+  onBubbleScale: (s: number) => void;
   hasBubble: boolean;
   lastSavedPath: string | null;
   lastSavedAt: number;
@@ -4633,7 +4685,11 @@ function ExportPanel({
     >
       {/* Sections scroll vertically if the window is short; horizontal
           overflow is impossible by construction (full-width rows only). */}
-      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", padding: "10px 12px 12px" }}>
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", padding: "10px 12px 12px", display: "flex", flexDirection: "column" }}>
+        {/* Tools + active panel: a flexShrink:0 block so its inner (block-flow)
+            layout is unchanged; the Export block below rides the same scroll
+            region with marginTop:auto. */}
+        <div style={{ flexShrink: 0 }}>
         {/* Tool toolbar — one active tool; the contextual card below swaps to match. */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 4, marginBottom: 6 }}>
           <ToolTile
@@ -4692,14 +4748,33 @@ function ExportPanel({
         {activeTool === "bubble" && (
           <>
             <div style={RAIL_EYEBROW}>Webcam bubble</div>
-            <div style={CTX_CARD}>
+            {/* Padding trimmed from the shared 12 so the 3x3 grid + Size row
+                clear the 338px scroll-free ceiling at 940x860 with margin,
+                without shrinking the (16/9, legible) position tiles. */}
+            <div style={{ ...CTX_CARD, padding: 8, marginBottom: 8 }}>
               {hasBubble ? (
                 <>
+                  <Field label="Size">
+                    <div className="segmented full">
+                      <button
+                        className={bubbleScale === 1 ? "on" : ""}
+                        onClick={() => onBubbleScale(1)}
+                      >
+                        Normal
+                      </button>
+                      <button
+                        className={bubbleScale !== 1 ? "on" : ""}
+                        onClick={() => onBubbleScale(BUBBLE_SMALL_SCALE)}
+                      >
+                        Small
+                      </button>
+                    </div>
+                  </Field>
                   <Field label="Position">
                     <ZonePicker value={bubbleZone} onChange={onBubbleZone} />
                   </Field>
-                  <div style={{ fontSize: 11, color: "var(--fg-tertiary)", lineHeight: 1.35 }}>
-                    The webcam bubble is baked at this fixed spot on export.
+                  <div style={{ fontSize: 10.5, color: "var(--fg-tertiary)", lineHeight: 1.2 }}>
+                    Size and position are baked on export.
                   </div>
                 </>
               ) : (
@@ -5142,9 +5217,15 @@ function ExportPanel({
             onCancel={() => setPopoverOpen(false)}
           />
         )}
+      </div>
 
-        {/* Export — permanent block (not a tool) */}
-        <div style={{ ...RAIL_EYEBROW, marginBottom: 10 }}>Export</div>
+        {/* Export — rides the scroll region (not a fixed sibling), so the only
+            un-shrinkable bottom chrome is the 91px footer. marginTop:auto glues
+            it above the footer when there's room and lets it scroll WITH the
+            panel when the column is too short to afford it (short 1080p displays,
+            maximized). The footer can never be pushed off-screen. */}
+        <div style={{ flexShrink: 0, marginTop: "auto", paddingTop: 10, borderTop: "1px solid var(--border-faint)" }}>
+          <div style={{ ...RAIL_EYEBROW, marginBottom: 10 }}>Export</div>
         <Field label="Format">
           <div className="segmented full">
             {(["mp4", "gif"] as const).map((f) => (
@@ -5306,6 +5387,7 @@ function ExportPanel({
             disabled={busy}
           />
         )}
+        </div>
         </div>
       </div>
 
