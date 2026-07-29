@@ -3112,7 +3112,17 @@ function RedactionLayer({
 
   useEffect(() => {
     const video = videoRef.current;
-    if (!video || !videoDims || editor.regions.length === 0) return;
+    if (!video || !videoDims || editor.regions.length === 0) {
+      // No regions to paint (deleted / cleared) or no frame source yet. The rAF
+      // loop below only ever repaints while regions exist and clears per frame,
+      // so on every early-out path we must wipe the canvas here — otherwise the
+      // last painted frost stays frozen on screen after the final region is
+      // removed (canvas isn't unmounted; the layer is always mounted).
+      const canvas = canvasRef.current;
+      const ctx = canvas?.getContext("2d");
+      if (canvas && ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+      return;
+    }
     tintCache.current.clear();
     if (!offRef.current) offRef.current = document.createElement("canvas");
     let raf = 0;
