@@ -4,6 +4,17 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-29 — Gradient/backdrop palette must be judged at full size in the real thin-margin view, NOT on whole-frame thumbnails
+
+The Slice 3 gradient palette was eye-checked on small whole-frame contact sheets (each gradient ~560px wide, the entire framed recording visible in one glance). It "passed." Installed at 1:1, the same gradients read as flat solid colors. Root cause of the bad methodology: the recording covers the center of the canvas, so the ONLY part of the background a viewer ever sees is a thin margin frame around the edges. A corner-to-corner linear gradient changes its full A→B range across the whole diagonal, so within any thin margin slice the LOCAL change is ~1–2 levels — imperceptible. On a shrunk whole-frame thumbnail the four corners sit adjacent and the eye catches the corner-to-corner delta; at full size through the margin it never sees a contiguous stretch of the transition. Proven by pixel-sampling the four canvas corners (gradient renders correctly — TL=stop A, BR=stop B) and by an A/B render: 2× contrast reads clearly at the same margin, while widening the margin at current contrast barely helps.
+
+RULES, so no future eye-check is set up the same way:
+- Judge any background/backdrop that is only seen through a margin at FULL SIZE, in the actual thin-frame view — never on a whole-frame thumbnail where corners sit adjacent.
+- For a gradient seen through a margin, CONTRAST (stop spread) is the readability lever, not margin size — the content covers the middle, so you only ever see slivers.
+- The muted-palette constraint ("backdrop must not compete with content") and "reads flat" are the same property from opposite sides. A retune has to prove BOTH per preset: reads as a gradient AND the lighter corner doesn't pull attention off dark content. If a hue can't do both, drop it rather than split the difference.
+
+This supersedes the Slice 3 "palette locked" note for the STOP VALUES only (the six hue families stand); the stops are being re-tuned for contrast.
+
 ## 2026-07-28 — Window-picker priming-click ROOT CAUSE = key-window exclusivity (NOT app activation); global monitor refuted on macOS 26
 
 Instrumented the picker (branch `activation-priming-click`, `focus_probe` + `try_activate_probe` in `macos.rs`, read-only, logs to `/tmp/zeigen-focus-probe.log`; removed before merge). Three findings, each of which someone will otherwise re-propose:

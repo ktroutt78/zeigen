@@ -188,18 +188,20 @@ let frameInsetFrac = Double(env["FRAME_INSET"] ?? "") ?? 0
 let shadowBlurK = Double(env["SHADOW_BLUR_K"] ?? "") ?? 0.85
 let shadowDyK = Double(env["SHADOW_DY_K"] ?? "") ?? 0.45
 let shadowAlphaK = Double(env["SHADOW_ALPHA_K"] ?? "") ?? 0.5
-// Procedural gradient presets (BACKGROUND-PADDING-PLAN Slice 3): name -> (top-left,
-// bottom-right) hex. Muted/deep so they read as BACKDROPS not subjects; one member per
-// hue family (graphite/indigo/teal/plum/ember) plus one light option (mist), spanning
-// cool->warm and dark->light. The rim + elevation shadow are the contrast backstops, so
-// the palette is free to run deep. Mirrored in the TS UI (Slice 4) for preview parity.
+// Procedural gradient presets (BACKGROUND-PADDING-PLAN Slice 3): name -> (light stop,
+// dark stop). Rendered VERTICAL, dark-top -> light-bottom (see backgroundImage), so the
+// full range lands across the top+bottom margins (the bands seen) rather than the thin
+// side slivers a diagonal crosses at an angle; stops are the steeper set so the gradient
+// reads through a Tight margin. One member per hue family (graphite/indigo/teal/plum/
+// ember) plus one light option (mist). The rim + elevation shadow are the contrast
+// backstops. Mirrored in the TS UI (Slice 4) for preview parity.
 let gradientPresets: [String: (String, String)] = [
-    "graphite": ("#414855", "#23272E"),
-    "indigo":   ("#3B3A8C", "#1E1B44"),
-    "teal":     ("#1F5E5C", "#0F3533"),
-    "plum":     ("#5B3A7A", "#2E1A44"),
-    "ember":    ("#9A4A2A", "#5C241A"),
-    "mist":     ("#EDF0F4", "#D2D9E2"),
+    "graphite": ("#69748A", "#111318"),
+    "indigo":   ("#5450A6", "#0F0D20"),
+    "teal":     ("#2B7A76", "#061A19"),
+    "plum":     ("#7F53A6", "#150B22"),
+    "ember":    ("#B85A32", "#2E0F09"),
+    "mist":     ("#F8FBFE", "#B2BECE"),
 ]
 // Background colors as (top-left, bottom-right): a solid repeats one color; a gradient
 // resolves its preset. nil = no background. bgIsGradient drives whether the canvas is a
@@ -518,10 +520,13 @@ let backgroundImage: CIImage? = {
     guard bgIsGradient, let g = CIFilter(name: "CILinearGradient") else {
         return CIImage(color: a).cropped(to: canvas)
     }
-    g.setValue(CIVector(x: 0, y: Hd), forKey: "inputPoint0")   // top-left (CI y-up)
-    g.setValue(a, forKey: "inputColor0")
-    g.setValue(CIVector(x: Wd, y: 0), forKey: "inputPoint1")   // bottom-right
-    g.setValue(b, forKey: "inputColor1")
+    // Vertical, dark-top -> light-bottom: the full A->B range lands across the TOP
+    // and BOTTOM margins (the bands you actually see), not the thin side margins a
+    // diagonal cuts across at an angle. b is the dark stop, a the light stop.
+    g.setValue(CIVector(x: 0, y: Hd), forKey: "inputPoint0")   // top (CI y-up)
+    g.setValue(b, forKey: "inputColor0")                        // dark at top
+    g.setValue(CIVector(x: 0, y: 0), forKey: "inputPoint1")     // bottom
+    g.setValue(a, forKey: "inputColor1")                        // light at bottom
     return (g.outputImage ?? CIImage(color: a)).cropped(to: canvas)
 }()
 

@@ -385,17 +385,26 @@ const DEFAULT_FRAME: FrameStyle = {
 const DEFAULT_SOLID_HEX = "#1E293B";
 
 // The six gradient presets, mirrored from the compositor's `gradientPresets`
-// table (main.swift). id = the name serialized to the sidecar; a/b are the
-// top-left -> bottom-right stops, used both for the swatch and the WYSIWYG
-// preview (CSS `to bottom right` = the compositor's corner-to-corner diagonal).
+// table (main.swift). id = the name serialized to the sidecar; a is the LIGHT
+// stop, b the DARK stop. Rendered VERTICAL, dark-top -> light-bottom (b at top,
+// a at bottom): the full range lands across the top and bottom margins (the
+// bands actually seen), not the thin side slivers a diagonal cut across. Stops
+// are the steeper set so the transition reads through a thin (Tight) margin.
 const GRADIENT_PRESETS: { id: string; a: string; b: string }[] = [
-  { id: "graphite", a: "#414855", b: "#23272E" },
-  { id: "indigo", a: "#3B3A8C", b: "#1E1B44" },
-  { id: "teal", a: "#1F5E5C", b: "#0F3533" },
-  { id: "plum", a: "#5B3A7A", b: "#2E1A44" },
-  { id: "ember", a: "#9A4A2A", b: "#5C241A" },
-  { id: "mist", a: "#EDF0F4", b: "#D2D9E2" },
+  { id: "graphite", a: "#69748A", b: "#111318" },
+  { id: "indigo", a: "#5450A6", b: "#0F0D20" },
+  { id: "teal", a: "#2B7A76", b: "#061A19" },
+  { id: "plum", a: "#7F53A6", b: "#150B22" },
+  { id: "ember", a: "#B85A32", b: "#2E0F09" },
+  { id: "mist", a: "#F8FBFE", b: "#B2BECE" },
 ];
+
+// CSS for a gradient preset — vertical `to bottom` from the dark stop (top) to
+// the light stop (bottom), matching the compositor. Shared by the swatch and
+// the preview canvas so both agree with the export.
+function gradientCss(a: string, b: string): string {
+  return `linear-gradient(to bottom, ${b}, ${a})`;
+}
 
 // CSS for a background choice — used by the swatches and the preview canvas.
 function backgroundCss(bg: Background | null | undefined, solidHex: string): string {
@@ -403,7 +412,7 @@ function backgroundCss(bg: Background | null | undefined, solidHex: string): str
   if (bg.kind === "solid") return bg.hex;
   if (bg.kind === "gradient") {
     const p = GRADIENT_PRESETS.find((g) => g.id === bg.preset);
-    return p ? `linear-gradient(to bottom right, ${p.a}, ${p.b})` : solidHex;
+    return p ? gradientCss(p.a, p.b) : solidHex;
   }
   return solidHex; // image lands in Slice 5
 }
@@ -5540,7 +5549,7 @@ function ExportPanel({
                     <BgSwatch
                       key={g.id}
                       label={g.id}
-                      css={`linear-gradient(to bottom right, ${g.a}, ${g.b})`}
+                      css={gradientCss(g.a, g.b)}
                       selected={bg.background?.kind === "gradient" && bg.background.preset === g.id}
                       onClick={() => bg.onPick({ kind: "gradient", preset: g.id })}
                     />
