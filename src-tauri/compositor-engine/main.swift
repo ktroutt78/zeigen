@@ -818,8 +818,11 @@ done.wait()
 if writer.status == .completed {
     if let vp = velLogPath { try? velLog.write(toFile: vp, atomically: true, encoding: .utf8) }
     let dt = Date().timeIntervalSince(t0)
-    print(String(format: "OK  %dx%d->%dx%d  %d frames  scenario=%@  wall=%.2fs",
-                 W, H, outW, outH, frames, scenario, dt))
+    // scenario is the ZOOM preset (always "identity" when env-driven); the inset note
+    // surfaces background/padding so a padded render is visible without sampling pixels.
+    let insetNote = insetActive ? String(format: "  bg=solid pad=%.2f", framePadding) : ""
+    print(String(format: "OK  %dx%d->%dx%d  %d frames  scenario=%@%@  wall=%.2fs",
+                 W, H, outW, outH, frames, scenario, insetNote, dt))
 } else {
     fail("writer status \(writer.status.rawValue): \(writer.error?.localizedDescription ?? "?")")
 }
