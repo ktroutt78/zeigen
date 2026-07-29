@@ -765,6 +765,17 @@ fn build_compositor_command(
     // emitted until Slice 2 renders them.
     if let Some((frame, bg)) = frame_bg {
         cmd.env("FRAME_PADDING", format!("{}", frame.padding));
+        // Slice 2 frame styling — each emitted only when set, so a padding-only frame
+        // stays a single FRAME_PADDING env (and a square/shadowless render omits them).
+        if frame.corner_radius > 0.0 {
+            cmd.env("FRAME_CORNER_RADIUS", format!("{}", frame.corner_radius));
+        }
+        if frame.shadow > 0.0 {
+            cmd.env("FRAME_SHADOW", format!("{}", frame.shadow));
+        }
+        if frame.inset > 0.0 {
+            cmd.env("FRAME_INSET", format!("{}", frame.inset));
+        }
         match bg {
             Background::Solid { hex } => {
                 cmd.env("BACKGROUND_KIND", "solid")
@@ -2509,11 +2520,12 @@ ZOOM_SEGMENTS=/S/zoom.json";
         assert!(!has_background(&s), "padding with no background -> copy path");
     }
 
-    // Slice 1 additive-env pin: an active solid background adds EXACTLY FRAME_PADDING +
-    // BACKGROUND_KIND + BACKGROUND_SOLID_HEX and touches nothing else. corner/shadow/
-    // inset are NOT emitted yet (Slice 2 renders them), proven by their absence here.
+    // Slice 1/2 additive-env pin. A fully-styled solid background emits padding + the
+    // three Slice 2 knobs + the solid pair and touches nothing else; a padding-only
+    // frame emits just FRAME_PADDING + solid (zeros skipped, so a Tight/Square/no-shadow
+    // render never carries dead env). Env is a sorted BTreeSet so order is irrelevant.
     #[test]
-    fn background_command_adds_exactly_frame_env() {
+    fn background_command_emits_active_frame_env() {
         use std::collections::BTreeSet;
         use std::ffi::OsStr;
         fn args_of(cmd: &Command) -> Vec<String> {
@@ -2534,8 +2546,6 @@ ZOOM_SEGMENTS=/S/zoom.json";
         let screen = Path::new("/S/in.mp4");
         let video_only = Path::new("/S/v3-video.mp4");
         let bg = Background::Solid { hex: "#1E293B".into() };
-        // A frame with every knob set — only padding renders in Slice 1.
-        let frame = FrameStyle { padding: 0.12, corner_radius: 24.0, shadow: 0.5, inset: 3.0 };
         let mk = |fb: Option<(FrameStyle, &Background)>| {
             build_compositor_command(
                 bin, screen, video_only, (1920, 1080), (1920, 1080), None,
@@ -2543,21 +2553,42 @@ ZOOM_SEGMENTS=/S/zoom.json";
             )
         };
         let base = mk(None);
-        let with_bg = mk(Some((frame, &bg)));
-        assert_eq!(args_of(&with_bg), args_of(&base), "background must not touch args");
+
+        // Fully styled: all four knobs set -> all six env vars.
+        let full = FrameStyle { padding: 0.12, corner_radius: 0.03, shadow: 0.6, inset: 0.004 };
+        let with_full = mk(Some((full, &bg)));
+        assert_eq!(args_of(&with_full), args_of(&base), "background must not touch args");
         let added: Vec<String> =
-            envs_of(&with_bg).difference(&envs_of(&base)).cloned().collect(); // sorted
-        let removed: Vec<String> =
-            envs_of(&base).difference(&envs_of(&with_bg)).cloned().collect();
+            envs_of(&with_full).difference(&envs_of(&base)).cloned().collect(); // sorted
         assert_eq!(
             added,
             vec![
                 "BACKGROUND_KIND=solid".to_string(),
                 "BACKGROUND_SOLID_HEX=#1E293B".to_string(),
+                "FRAME_CORNER_RADIUS=0.03".to_string(),
+                "FRAME_INSET=0.004".to_string(),
                 "FRAME_PADDING=0.12".to_string(),
+                "FRAME_SHADOW=0.6".to_string(),
             ],
-            "solid background adds exactly padding + solid env; corner/shadow/inset absent"
+            "fully-styled frame emits padding + corner + inset + shadow + solid pair"
         );
+
+        // Padding only (square, no shadow, no border) -> zeros skipped.
+        let pad_only = FrameStyle { padding: 0.1, ..Default::default() };
+        let with_pad = mk(Some((pad_only, &bg)));
+        let added_pad: Vec<String> =
+            envs_of(&with_pad).difference(&envs_of(&base)).cloned().collect();
+        assert_eq!(
+            added_pad,
+            vec![
+                "BACKGROUND_KIND=solid".to_string(),
+                "BACKGROUND_SOLID_HEX=#1E293B".to_string(),
+                "FRAME_PADDING=0.1".to_string(),
+            ],
+            "padding-only frame emits just padding + solid; corner/shadow/inset skipped"
+        );
+        let removed: Vec<String> =
+            envs_of(&base).difference(&envs_of(&with_pad)).cloned().collect();
         assert!(removed.is_empty(), "background removes/changes no existing env: {removed:?}");
     }
 

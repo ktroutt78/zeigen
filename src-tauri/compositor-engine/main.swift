@@ -25,6 +25,7 @@
 import Foundation
 import AVFoundation
 import CoreImage
+import CoreGraphics
 import VideoToolbox
 
 func fail(_ msg: String) -> Never {
@@ -111,7 +112,8 @@ let wmOpacity = Double(env["WATERMARK_OPACITY"] ?? "1.0")!
 // and watermark inset WITH the recording instead of drifting into the margin. Canvas =
 // source dims in v1, so the terminal downscale still caps the canvas to the output res.
 // Absent/0 padding or no background -> inactive, the frame passes through byte-identical.
-// Only solid is wired here; gradient/image and corner/shadow/inset are later slices.
+// Only solid is wired here; gradient/image are later slices. Slice 2 adds rounded
+// corners, a drop shadow, and an inset border on the inset content (below).
 func ciColor(hex: String) -> CIColor? {
     let s = (hex.hasPrefix("#") ? String(hex.dropFirst()) : hex)
         .trimmingCharacters(in: .whitespaces)
@@ -126,7 +128,58 @@ func ciColor(hex: String) -> CIColor? {
     }
     return CIColor(red: r, green: g, blue: b)
 }
+// Rounded-rect layers for the inset stage, drawn once with Core Graphics (static for
+// the whole render). Filled = the corner mask (white, used as alpha) and the shadow
+// silhouette (black). Stroked = the inset border. Neutral colors (black/white) are
+// color-space-safe under the compositor's NSNull working space. Origin bottom-left to
+// match CI; premultiplied-last alpha.
+func roundedBitmap(w: Int, h: Int, radius: CGFloat,
+                   draw: (CGContext, CGPath) -> Void) -> CIImage? {
+    guard w > 0, h > 0, let cs = CGColorSpace(name: CGColorSpace.sRGB),
+          let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8,
+                              bytesPerRow: 0, space: cs,
+                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+    else { return nil }
+    ctx.clear(CGRect(x: 0, y: 0, width: w, height: h))
+    let r = max(0, min(radius, CGFloat(min(w, h)) / 2))
+    let path = CGPath(roundedRect: CGRect(x: 0, y: 0, width: w, height: h),
+                      cornerWidth: r, cornerHeight: r, transform: nil)
+    draw(ctx, path)
+    return ctx.makeImage().map { CIImage(cgImage: $0) }
+}
+func roundedFill(w: Int, h: Int, radius: CGFloat, gray: CGFloat, alpha: CGFloat) -> CIImage? {
+    roundedBitmap(w: w, h: h, radius: radius) { ctx, path in
+        ctx.addPath(path)
+        ctx.setFillColor(red: gray, green: gray, blue: gray, alpha: alpha)
+        ctx.fillPath()
+    }
+}
+func roundedStroke(w: Int, h: Int, radius: CGFloat, lineWidth: CGFloat,
+                   gray: CGFloat, alpha: CGFloat) -> CIImage? {
+    // Inset the stroke rect by half the line width so the whole stroke lands INSIDE the
+    // content edge (an inner rim, not a fattened outer outline).
+    let inset = lineWidth / 2
+    guard w > 0, h > 0, let cs = CGColorSpace(name: CGColorSpace.sRGB),
+          let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8,
+                              bytesPerRow: 0, space: cs,
+                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+    else { return nil }
+    ctx.clear(CGRect(x: 0, y: 0, width: w, height: h))
+    let r = max(0, min(radius, CGFloat(min(w, h)) / 2) - inset)
+    let rect = CGRect(x: inset, y: inset, width: CGFloat(w) - lineWidth, height: CGFloat(h) - lineWidth)
+    let path = CGPath(roundedRect: rect, cornerWidth: r, cornerHeight: r, transform: nil)
+    ctx.addPath(path)
+    ctx.setStrokeColor(red: gray, green: gray, blue: gray, alpha: alpha)
+    ctx.setLineWidth(lineWidth)
+    ctx.strokePath()
+    return ctx.makeImage().map { CIImage(cgImage: $0) }
+}
 let framePadding = Double(env["FRAME_PADDING"] ?? "") ?? 0
+// corner radius + inset border width are fractions of the inset content's SHORT side
+// (resolution-independent, scale with the supersample); shadow is a 0..1 intensity.
+let frameCornerFrac = Double(env["FRAME_CORNER_RADIUS"] ?? "") ?? 0
+let frameShadow = Double(env["FRAME_SHADOW"] ?? "") ?? 0
+let frameInsetFrac = Double(env["FRAME_INSET"] ?? "") ?? 0
 let bgSolid: CIColor? = {
     guard env["BACKGROUND_KIND"] == "solid", let hex = env["BACKGROUND_SOLID_HEX"] else { return nil }
     return ciColor(hex: hex)
@@ -426,6 +479,52 @@ var prevO0x = Wd / 2, prevO0y = Hd / 2, prevScale = 1.0, havePrev = false
 let backgroundImage: CIImage? = insetActive
     ? bgSolid.map { CIImage(color: $0).cropped(to: CGRect(x: 0, y: 0, width: Wd, height: Hd)) }
     : nil
+
+// --- Frame styling geometry + static layers (BACKGROUND-PADDING-PLAN Slice 2). The
+// inset content occupies an integer (W*k)x(H*k) rect centered on the canvas; the corner
+// mask, drop shadow, and inset border are constant for the whole render, so build once.
+let insetK = 1.0 - framePadding
+let insetW = Int((Wd * insetK).rounded())
+let insetH = Int((Hd * insetK).rounded())
+let insetOx = ((Wd - Double(insetW)) / 2).rounded()   // content origin in canvas (CI bottom-left)
+let insetOy = ((Hd - Double(insetH)) / 2).rounded()
+let insetShort = Double(min(insetW, insetH))
+let cornerPx = CGFloat(frameCornerFrac * insetShort)
+
+// Rounded-corner alpha mask at content-local extent. nil when square -> the Slice 1
+// path (no masking, no resample cost) is preserved exactly.
+let contentMask: CIImage? = (insetActive && cornerPx >= 0.5)
+    ? roundedFill(w: insetW, h: insetH, radius: cornerPx, gray: 1.0, alpha: 1.0)
+    : nil
+
+// Background + drop shadow, composited once. Shadow = a black rounded silhouette
+// (matching the content corners), blurred and offset DOWN, placed under the content.
+// Blur/offset scale with content size; FRAME_SHADOW is the opacity intensity. A dark
+// shadow reads on LIGHT backgrounds; on DARK backgrounds the inset border carries the
+// edge separation — that is why both exist. Returns the bare bg when shadow is 0.
+let bgWithShadow: CIImage? = {
+    guard insetActive, let bg = backgroundImage else { return nil }
+    guard frameShadow > 0,
+          let sil = roundedFill(w: insetW, h: insetH, radius: cornerPx,
+                                gray: 0.0, alpha: CGFloat(min(1.0, 0.55 * frameShadow)))
+    else { return bg }
+    let blur = 0.030 * insetShort
+    let dy = 0.012 * insetShort
+    let shadow = sil.applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: blur])
+        .transformed(by: CGAffineTransform(translationX: insetOx, y: insetOy - dy))
+        .cropped(to: CGRect(x: 0, y: 0, width: Wd, height: Hd))
+    return shadow.composited(over: bg)
+}()
+
+// Inset border: a thin light rim on the content edge (canvas-placed). nil when 0.
+let borderLayer: CIImage? = {
+    guard insetActive, frameInsetFrac > 0 else { return nil }
+    let lw = max(1.0, CGFloat(frameInsetFrac * insetShort))
+    return roundedStroke(w: insetW, h: insetH, radius: cornerPx, lineWidth: lw,
+                         gray: 1.0, alpha: 0.5)?
+        .transformed(by: CGAffineTransform(translationX: insetOx, y: insetOy))
+        .cropped(to: CGRect(x: 0, y: 0, width: Wd, height: Hd))
+}()
 
 // Pre-scale the watermark once (constant for the whole recording) and precompute
 // its integer top-left. scale: width-based round(sw*frac) (aspect kept) or legacy
@@ -757,21 +856,25 @@ writerInput.requestMediaDataWhenReady(on: queue) {
             out = wm.composited(over: out)
         }
 
-        // Background canvas + padding inset (BACKGROUND-PADDING-PLAN Slice 1). Scale the
-        // finished WxH content UNIFORMLY by k = 1 - padding (one Lanczos pass, aspect
-        // kept — not stretched) and center it over the solid background. Runs after every
-        // overlay, so bubble/watermark inset WITH the recording; runs before downscale,
-        // so the canvas (= source dims) is what the terminal Lanczos caps to output res.
-        // Integer-snapped offset keeps the content on the pixel grid (sharp edges).
-        if insetActive, let bg = backgroundImage {
-            let k = 1.0 - framePadding
-            let content = out.cropped(to: CGRect(x: 0, y: 0, width: Wd, height: Hd))
+        // Background canvas + padding inset (BACKGROUND-PADDING-PLAN Slice 1/2). Scale the
+        // finished WxH content UNIFORMLY by k = 1 - padding (one Lanczos pass, aspect kept
+        // — not stretched), round its corners (Slice 2), and place it over the background
+        // (which already carries the drop shadow) — then lay the inset border on top. Runs
+        // after every overlay, so bubble/watermark inset WITH the recording; runs before
+        // downscale, so the canvas (= source dims) is what the terminal Lanczos caps to
+        // output res. Integer origin keeps the content on the pixel grid (sharp edges).
+        if insetActive, let base = bgWithShadow {
+            var content = out.cropped(to: CGRect(x: 0, y: 0, width: Wd, height: Hd))
                 .applyingFilter("CILanczosScaleTransform",
-                    parameters: [kCIInputScaleKey: k, kCIInputAspectRatioKey: 1.0])
-            let tx = (Wd * (1.0 - k) / 2.0).rounded()
-            let ty = (Hd * (1.0 - k) / 2.0).rounded()
-            out = content.transformed(by: CGAffineTransform(translationX: tx, y: ty))
-                .composited(over: bg)
+                    parameters: [kCIInputScaleKey: insetK, kCIInputAspectRatioKey: 1.0])
+                .cropped(to: CGRect(x: 0, y: 0, width: Double(insetW), height: Double(insetH)))
+            if let mask = contentMask {
+                content = content.applyingFilter("CIBlendWithMask",
+                    parameters: ["inputBackgroundImage": CIImage.empty(), "inputMaskImage": mask])
+            }
+            out = content.transformed(by: CGAffineTransform(translationX: insetOx, y: insetOy))
+                .composited(over: base)
+            if let border = borderLayer { out = border.composited(over: out) }
         }
 
         // Terminal downscale to the requested output dims — AFTER every overlay, so
@@ -820,7 +923,10 @@ if writer.status == .completed {
     let dt = Date().timeIntervalSince(t0)
     // scenario is the ZOOM preset (always "identity" when env-driven); the inset note
     // surfaces background/padding so a padded render is visible without sampling pixels.
-    let insetNote = insetActive ? String(format: "  bg=solid pad=%.2f", framePadding) : ""
+    let insetNote = insetActive
+        ? String(format: "  bg=solid pad=%.2f corner=%.3f shadow=%.2f inset=%.3f",
+                 framePadding, frameCornerFrac, frameShadow, frameInsetFrac)
+        : ""
     print(String(format: "OK  %dx%d->%dx%d  %d frames  scenario=%@%@  wall=%.2fs",
                  W, H, outW, outH, frames, scenario, insetNote, dt))
 } else {
