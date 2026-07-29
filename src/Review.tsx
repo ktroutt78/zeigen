@@ -373,12 +373,16 @@ function frameIsNoop(f: FrameStyle | null | undefined): boolean {
 // same wire contract the compositor reads.
 const FRAME_TIGHT = 0.06;
 const FRAME_WIDE = 0.12;
-const FRAME_ROUND = 0.035;
+// Rounding the outer frame clips real corner content — a screen capture reaches the
+// menu bar/edges, and our radius is far larger than a window's own ~10px curve — so
+// Square is the default and Rounded is opt-in at a restrained radius (fraction of the
+// content short side) that stays close to a native window corner when chosen.
+const FRAME_ROUND = 0.018;
 const FRAME_SHADOW = 1.0;
 const FRAME_RIM = 0.003;
 const DEFAULT_FRAME: FrameStyle = {
   padding: FRAME_WIDE,
-  corner_radius: FRAME_ROUND,
+  corner_radius: 0, // Square by default
   shadow: FRAME_SHADOW,
   inset: FRAME_RIM,
 };
