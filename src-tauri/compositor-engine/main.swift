@@ -180,6 +180,14 @@ let framePadding = Double(env["FRAME_PADDING"] ?? "") ?? 0
 let frameCornerFrac = Double(env["FRAME_CORNER_RADIUS"] ?? "") ?? 0
 let frameShadow = Double(env["FRAME_SHADOW"] ?? "") ?? 0
 let frameInsetFrac = Double(env["FRAME_INSET"] ?? "") ?? 0
+// Shadow geometry scales with the PADDING MARGIN (the space the shadow lives in), so it
+// fits at Tight and grows at Wide without ramming the frame edge — and it's an ELEVATION
+// shadow (broad/soft/offset into the clear margin), not an edge-hugging separator, so it
+// reads on light backgrounds even under high-contrast dark content. Internal knobs with
+// tuned defaults (unexposed; used for calibration).
+let shadowBlurK = Double(env["SHADOW_BLUR_K"] ?? "") ?? 0.85
+let shadowDyK = Double(env["SHADOW_DY_K"] ?? "") ?? 0.45
+let shadowAlphaK = Double(env["SHADOW_ALPHA_K"] ?? "") ?? 0.5
 let bgSolid: CIColor? = {
     guard env["BACKGROUND_KIND"] == "solid", let hex = env["BACKGROUND_SOLID_HEX"] else { return nil }
     return ciColor(hex: hex)
@@ -506,10 +514,11 @@ let bgWithShadow: CIImage? = {
     guard insetActive, let bg = backgroundImage else { return nil }
     guard frameShadow > 0,
           let sil = roundedFill(w: insetW, h: insetH, radius: cornerPx,
-                                gray: 0.0, alpha: CGFloat(min(1.0, 0.55 * frameShadow)))
+                                gray: 0.0, alpha: CGFloat(min(1.0, shadowAlphaK * frameShadow)))
     else { return bg }
-    let blur = 0.030 * insetShort
-    let dy = 0.012 * insetShort
+    let marginShort = framePadding * min(Wd, Hd) / 2   // the tighter (vertical) margin
+    let blur = shadowBlurK * marginShort
+    let dy = shadowDyK * marginShort
     let shadow = sil.applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: blur])
         .transformed(by: CGAffineTransform(translationX: insetOx, y: insetOy - dy))
         .cropped(to: CGRect(x: 0, y: 0, width: Wd, height: Hd))
