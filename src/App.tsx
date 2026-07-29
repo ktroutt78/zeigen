@@ -877,7 +877,7 @@ async function openReview(
   const win = new WebviewWindow(label, {
     url,
     title: "Screen Recording",
-    width: 940,
+    width: 1280,
     height: 860,
     minWidth: 720,
     minHeight: 640,
