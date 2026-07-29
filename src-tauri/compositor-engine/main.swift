@@ -104,6 +104,35 @@ let wmCorner = env["WATERMARK_CORNER"] ?? "tr"
 let wmScaleFrac = Double(env["WATERMARK_SCALE_FRAC"] ?? "")
 let wmOpacity = Double(env["WATERMARK_OPACITY"] ?? "1.0")!
 
+// --- Background canvas + padding (BACKGROUND-PADDING-PLAN Slice 1): a terminal inset
+// stage (after every overlay, before downscale) that scales the whole composed WxH
+// frame UNIFORMLY by k = 1 - FRAME_PADDING (aspect preserved — NOT stretched) and
+// centers it over a solid background. Because it runs after the overlays, the bubble
+// and watermark inset WITH the recording instead of drifting into the margin. Canvas =
+// source dims in v1, so the terminal downscale still caps the canvas to the output res.
+// Absent/0 padding or no background -> inactive, the frame passes through byte-identical.
+// Only solid is wired here; gradient/image and corner/shadow/inset are later slices.
+func ciColor(hex: String) -> CIColor? {
+    let s = (hex.hasPrefix("#") ? String(hex.dropFirst()) : hex)
+        .trimmingCharacters(in: .whitespaces)
+    guard s.count == 6, let v = UInt32(s, radix: 16) else { return nil }
+    let r = CGFloat((v >> 16) & 0xff) / 255.0
+    let g = CGFloat((v >> 8) & 0xff) / 255.0
+    let b = CGFloat(v & 0xff) / 255.0
+    // Tag sRGB so the fill matches the picked hex; CI converts to 709 at render.
+    if let srgb = CGColorSpace(name: CGColorSpace.sRGB),
+       let c = CIColor(red: r, green: g, blue: b, colorSpace: srgb) {
+        return c
+    }
+    return CIColor(red: r, green: g, blue: b)
+}
+let framePadding = Double(env["FRAME_PADDING"] ?? "") ?? 0
+let bgSolid: CIColor? = {
+    guard env["BACKGROUND_KIND"] == "solid", let hex = env["BACKGROUND_SOLID_HEX"] else { return nil }
+    return ciColor(hex: hex)
+}()
+let insetActive = framePadding > 0 && bgSolid != nil
+
 // --- Webcam bubble (Phase 4): a SECOND video stream, composited on the final zoomed
 // frame (screen-anchored, constant placement). Mask + shadow silhouette PNGs are
 // pre-rendered (by the harness now, by Rust reusing composite.rs later) and fed to
@@ -391,6 +420,12 @@ let t0 = Date()
 let Wd = Double(W), Hd = Double(H)
 // velocity-tracking state (a fixed source point's output-space motion frame to frame)
 var prevO0x = Wd / 2, prevO0y = Hd / 2, prevScale = 1.0, havePrev = false
+
+// Solid background canvas (WxH = source dims; canvas = source in v1). Static for the
+// whole render, so build it once like the bubble/watermark layers.
+let backgroundImage: CIImage? = insetActive
+    ? bgSolid.map { CIImage(color: $0).cropped(to: CGRect(x: 0, y: 0, width: Wd, height: Hd)) }
+    : nil
 
 // Pre-scale the watermark once (constant for the whole recording) and precompute
 // its integer top-left. scale: width-based round(sw*frac) (aspect kept) or legacy
@@ -720,6 +755,23 @@ writerInput.requestMediaDataWhenReady(on: queue) {
         // sharp), unaffected by zoom. Constant placement -> just source-over.
         if let wm = wmComposite {
             out = wm.composited(over: out)
+        }
+
+        // Background canvas + padding inset (BACKGROUND-PADDING-PLAN Slice 1). Scale the
+        // finished WxH content UNIFORMLY by k = 1 - padding (one Lanczos pass, aspect
+        // kept — not stretched) and center it over the solid background. Runs after every
+        // overlay, so bubble/watermark inset WITH the recording; runs before downscale,
+        // so the canvas (= source dims) is what the terminal Lanczos caps to output res.
+        // Integer-snapped offset keeps the content on the pixel grid (sharp edges).
+        if insetActive, let bg = backgroundImage {
+            let k = 1.0 - framePadding
+            let content = out.cropped(to: CGRect(x: 0, y: 0, width: Wd, height: Hd))
+                .applyingFilter("CILanczosScaleTransform",
+                    parameters: [kCIInputScaleKey: k, kCIInputAspectRatioKey: 1.0])
+            let tx = (Wd * (1.0 - k) / 2.0).rounded()
+            let ty = (Hd * (1.0 - k) / 2.0).rounded()
+            out = content.transformed(by: CGAffineTransform(translationX: tx, y: ty))
+                .composited(over: bg)
         }
 
         // Terminal downscale to the requested output dims — AFTER every overlay, so
