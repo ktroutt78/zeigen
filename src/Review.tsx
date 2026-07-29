@@ -2709,6 +2709,14 @@ function VideoStage(props: VideoStageProps) {
   const stageSize = useStageSize(stageRef);
   const bgActive = props.background != null && (props.frame?.padding ?? 0) > 0;
   const insetFrac = bgActive ? (props.frame?.padding ?? 0) : 0;
+  // Watermark placement (#3): on the recording with no background; in the canvas
+  // margin at a Wide background; dropped (no room) at a Tight background. The 0.09
+  // threshold mirrors edit.rs MARGIN_WATERMARK_MIN_PADDING.
+  const wmMode: "content" | "margin" | "off" = !bgActive
+    ? "content"
+    : insetFrac >= 0.09
+      ? "margin"
+      : "off";
   const insetBox = contentBox(stageSize, videoDims, insetFrac);
   const fullBox = contentBox(stageSize, videoDims, 0);
   const bgCss = backgroundCss(props.background, props.solidHex);
@@ -2941,6 +2949,7 @@ function VideoStage(props: VideoStageProps) {
           stageRef={stageRef}
           preview={props.watermarkPreview}
           insetFrac={insetFrac}
+          wmMode={wmMode}
         />
       </div>
     </div>
@@ -3235,14 +3244,49 @@ function WatermarkPreviewLayer({
   stageRef,
   preview,
   insetFrac,
+  wmMode,
 }: {
   stageRef: React.MutableRefObject<HTMLDivElement | null>;
   preview: WatermarkPreview;
   insetFrac: number;
+  // "content" = on the recording (default); "margin" = in the canvas margin (Wide
+  // background); "off" = dropped (background active but Tight — no room).
+  wmMode: "content" | "margin" | "off";
 }) {
   const stage = useStageSize(stageRef);
-  if (!preview.src || !preview.videoDims || stage.width === 0 || stage.height === 0) {
+  if (
+    wmMode === "off" ||
+    !preview.src ||
+    !preview.videoDims ||
+    stage.width === 0 ||
+    stage.height === 0
+  ) {
     return null;
+  }
+
+  // Margin watermark: sit in the top/bottom margin band per the corner, sized to the
+  // band, aligned to the content edge — mirrors the compositor's margin placement.
+  if (wmMode === "margin") {
+    const full = contentBox(stage, preview.videoDims, 0);
+    const inset = contentBox(stage, preview.videoDims, insetFrac);
+    const vMargin = inset.y - full.y;
+    const wmH = 0.55 * vMargin;
+    const vTop = preview.corner.startsWith("t");
+    const hRight = preview.corner.endsWith("r");
+    const topY = (vTop ? full.y + vMargin / 2 : inset.y + inset.h + vMargin / 2) - wmH / 2;
+    const xAnchor: React.CSSProperties = hRight
+      ? { right: stage.width - (inset.x + inset.w) }
+      : { left: inset.x };
+    return (
+      <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
+        <img
+          src={preview.src}
+          alt=""
+          draggable={false}
+          style={{ position: "absolute", top: topY, height: wmH, width: "auto", opacity: preview.opacity, ...xAnchor }}
+        />
+      </div>
+    );
   }
 
   // Contain-fit the video inside the 16:9 stage box (inset by padding when a
@@ -5009,6 +5053,9 @@ function ExportPanel({
   const gifResOptions = ["480p", "720p", "source"] as const;
   const saveDisabled = !sourcePath || saving;
   const formatLabel = format === "mp4" ? "MP4" : "GIF";
+  // Watermark has no room in a Tight margin (0.09 mirrors edit.rs); the tool greys but
+  // keeps its setting, so switching back to Wide restores it without redoing anything.
+  const wmMarginTight = bg.background != null && (bg.frame?.padding ?? 0) < 0.09;
 
   return (
     <div
@@ -5426,6 +5473,24 @@ function ExportPanel({
             <div style={RAIL_EYEBROW}>Watermark</div>
             <div style={CTX_CARD}>
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {/* #3: with a background on, the watermark moves to the margin (Wide) or is
+              greyed for lack of room (Tight) — the toggle stays set either way. */}
+          {bg.background != null && (
+            <div
+              style={{
+                fontSize: 10.5,
+                lineHeight: 1.3,
+                color:
+                  (bg.frame?.padding ?? 0) >= 0.09
+                    ? "var(--fg-tertiary)"
+                    : "var(--warning, #f5b400)",
+              }}
+            >
+              {(bg.frame?.padding ?? 0) >= 0.09
+                ? "With a background on, the watermark sits in the margin."
+                : "Watermark needs a Wide margin — no room at Tight. Switch to Wide to use it."}
+            </div>
+          )}
           {watermark.logoPath ? (
             <>
               <label
@@ -5435,13 +5500,15 @@ function ExportPanel({
                   gap: 8,
                   fontSize: 12.5,
                   color: "var(--fg-primary)",
-                  cursor: "pointer",
+                  cursor: wmMarginTight ? "not-allowed" : "pointer",
+                  opacity: wmMarginTight ? 0.45 : 1,
                 }}
               >
                 <input
                   type="checkbox"
                   className="accent-blue"
                   checked={watermark.apply}
+                  disabled={wmMarginTight}
                   onChange={watermark.onToggleApply}
                 />
                 <span>Apply watermark</span>

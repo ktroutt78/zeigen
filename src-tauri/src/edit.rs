@@ -752,6 +752,13 @@ fn build_compositor_command(
         if let Some(sf) = wm.scale_frac {
             cmd.env("WATERMARK_SCALE_FRAC", format!("{sf}"));
         }
+        // #3: with a Wide background active the watermark moves to the canvas margin.
+        // (Tight is already dropped upstream, so watermark here means Wide-or-no-bg.)
+        if let Some((frame, _)) = frame_bg {
+            if frame.padding >= MARGIN_WATERMARK_MIN_PADDING {
+                cmd.env("WATERMARK_IN_MARGIN", "1");
+            }
+        }
     }
     // Frosted-glass redaction panels (REDACTION-PLAN). Added last and only when
     // present; absent -> the pre-redaction command exactly.
@@ -1450,6 +1457,20 @@ fn has_background(sidecar: &SidecarState) -> bool {
     ) && sidecar.frame.map_or(false, |f| f.padding > 0.0)
 }
 
+// A margin watermark needs a Wide margin to fit; this threshold sits between the Tight
+// (0.06) and Wide (0.12) presets. Mirrored by the Review UI's grey-out rule.
+const MARGIN_WATERMARK_MIN_PADDING: f64 = 0.09;
+
+// When a background is active but the margin is too tight to seat a margin watermark,
+// the watermark is dropped entirely (there's no room, and it must NOT fall back onto the
+// content — the UI greys it). With no background it renders on content as before.
+fn watermark_dropped_tight(sidecar: &SidecarState) -> bool {
+    has_background(sidecar)
+        && sidecar
+            .frame
+            .map_or(false, |f| f.padding < MARGIN_WATERMARK_MIN_PADDING)
+}
+
 pub(crate) fn run_edit_pipeline(
     screen_path: &Path,
     webcam_segments: &[std::path::PathBuf],
@@ -1469,7 +1490,10 @@ pub(crate) fn run_edit_pipeline(
     if let PipelineMode::Gif { resolution, fps } = mode {
         let has_zoom = !zoom_keyframes_to_segments(&sidecar.zoom).is_empty();
         let has_webcam = !webcam_segments.is_empty();
-        let effective_wm = watermark.as_ref().filter(|w| w.logo_path.is_file());
+        let effective_wm = watermark
+            .as_ref()
+            .filter(|w| w.logo_path.is_file())
+            .filter(|_| !watermark_dropped_tight(sidecar));
         if has_zoom || has_webcam || effective_wm.is_some() || has_background(sidecar) {
             let note = run_v3_gif(
                 screen_path,
@@ -1497,7 +1521,10 @@ pub(crate) fn run_edit_pipeline(
         PipelineMode::Mp4 { resolution } => resolution,
         PipelineMode::Gif { .. } => unreachable!("GIF handled above"),
     };
-    let effective_wm = watermark.as_ref().filter(|w| w.logo_path.is_file());
+    let effective_wm = watermark
+        .as_ref()
+        .filter(|w| w.logo_path.is_file())
+        .filter(|_| !watermark_dropped_tight(sidecar));
     let has_zoom = !zoom_keyframes_to_segments(&sidecar.zoom).is_empty();
     let has_webcam = !webcam_segments.is_empty();
     if has_zoom || has_webcam || effective_wm.is_some() || has_background(sidecar) {
