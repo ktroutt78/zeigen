@@ -212,6 +212,11 @@ let gradientPresets: [String: (String, String)] = [
 // resolves its preset. nil = no background. bgIsGradient drives whether the canvas is a
 // CILinearGradient or a flat fill (the flat fill keeps the proven Slice 1 solid path).
 let bgIsGradient = env["BACKGROUND_KIND"] == "gradient"
+// User image background (Slice 5): an absolute path (watermark-logo pattern), loaded
+// and fill-cropped at render time. A set path keeps the inset active even if the file
+// later moves/deletes — the load falls back to a neutral solid (see backgroundImage).
+let bgIsImage = env["BACKGROUND_KIND"] == "image"
+let bgImagePath: String? = bgIsImage ? env["BACKGROUND_IMAGE"] : nil
 let bgColors: (CIColor, CIColor)? = {
     switch env["BACKGROUND_KIND"] {
     case "solid":
@@ -225,7 +230,7 @@ let bgColors: (CIColor, CIColor)? = {
         return nil
     }
 }()
-let insetActive = framePadding > 0 && bgColors != nil
+let insetActive = framePadding > 0 && (bgColors != nil || bgImagePath != nil)
 
 // --- Webcam bubble (Phase 4): a SECOND video stream, composited on the final zoomed
 // frame (screen-anchored, constant placement). Mask + shadow silhouette PNGs are
@@ -520,8 +525,41 @@ var prevO0x = Wd / 2, prevO0y = Hd / 2, prevScale = 1.0, havePrev = false
 // deep-corner (bottom-right), so the built-in top-left light pairs with the downward
 // elevation shadow; a solid is the flat fill (proven Slice 1 path).
 let backgroundImage: CIImage? = {
-    guard insetActive, let (a, b) = bgColors else { return nil }
+    guard insetActive else { return nil }
     let canvas = CGRect(x: 0, y: 0, width: Wd, height: Hd)
+    // User image (Slice 5): FILL-and-crop to the canvas — scale by max(W/w, H/h) so the
+    // image covers the canvas with aspect preserved, then center-crop the overflow (CSS
+    // `cover`; a mismatched aspect loses the long edge, never letterboxes). Rasterized
+    // ONCE here so the source Lanczos runs a single time no matter the resolution — a 6K
+    // wallpaper costs one scale for the whole render, not one per frame. A moved/deleted
+    // file (or an unreadable one) degrades to a neutral solid so the export stays valid
+    // instead of black; the background is cosmetic and not worth failing an export over.
+    if bgIsImage {
+        let fallback = CIImage(color: CIColor(red: 0.09, green: 0.10, blue: 0.12)).cropped(to: canvas)
+        // applyOrientationProperty bakes EXIF orientation into the pixels so a portrait
+        // phone photo (stored landscape + a rotation flag) is not rendered sideways.
+        guard let p = bgImagePath,
+              let img = CIImage(contentsOf: URL(fileURLWithPath: p),
+                                options: [.applyOrientationProperty: true]),
+              img.extent.width > 0, img.extent.height > 0 else { return fallback }
+        let ext = img.extent
+        let fill = max(Wd / ext.width, Hd / ext.height)
+        let scaled = img.applyingFilter("CILanczosScaleTransform",
+            parameters: [kCIInputScaleKey: fill, kCIInputAspectRatioKey: 1.0])
+        let se = scaled.extent
+        let placed = scaled
+            .transformed(by: CGAffineTransform(
+                translationX: ((Wd - se.width) / 2 - se.minX).rounded(),
+                y: ((Hd - se.height) / 2 - se.minY).rounded()))
+            .cropped(to: canvas)
+        // Flatten to a bitmap so per-frame compositing samples a canvas-sized image,
+        // never re-runs the fill Lanczos over the source.
+        if let cg = ciContext.createCGImage(placed, from: canvas) {
+            return CIImage(cgImage: cg)
+        }
+        return placed
+    }
+    guard let (a, b) = bgColors else { return nil }
     guard bgIsGradient, let g = CIFilter(name: "CILinearGradient") else {
         return CIImage(color: a).cropped(to: canvas)
     }
@@ -979,7 +1017,7 @@ if writer.status == .completed {
     let dt = Date().timeIntervalSince(t0)
     // scenario is the ZOOM preset (always "identity" when env-driven); the inset note
     // surfaces background/padding so a padded render is visible without sampling pixels.
-    let bgDesc = bgIsGradient ? "gradient:\(env["BACKGROUND_GRADIENT"] ?? "?")" : "solid"
+    let bgDesc = bgIsImage ? "image" : (bgIsGradient ? "gradient:\(env["BACKGROUND_GRADIENT"] ?? "?")" : "solid")
     let insetNote = insetActive
         ? String(format: "  bg=%@ pad=%.2f corner=%.3f shadow=%.2f inset=%.3f",
                  bgDesc, framePadding, frameCornerFrac, frameShadow, frameInsetFrac)

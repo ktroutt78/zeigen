@@ -791,9 +791,13 @@ fn build_compositor_command(
                 cmd.env("BACKGROUND_KIND", "gradient")
                     .env("BACKGROUND_GRADIENT", preset);
             }
-            // Image lands in Slice 5; until then it can't render, so it is not
-            // render-backed by has_background and never reaches here.
-            Background::Image { .. } => {}
+            // User image (Slice 5): the absolute path, read + fill-cropped by the
+            // compositor at render time (watermark-logo pattern). A missing file
+            // degrades to a neutral solid in the compositor, so the path is passed
+            // through as-is without an existence check here.
+            Background::Image { path } => {
+                cmd.env("BACKGROUND_KIND", "image").env("BACKGROUND_IMAGE", path);
+            }
         }
     }
     cmd
@@ -1452,7 +1456,9 @@ fn run_plain_mp4(
 fn has_background(sidecar: &SidecarState) -> bool {
     matches!(
         sidecar.background,
-        Some(Background::Solid { .. }) | Some(Background::Gradient { .. })
+        Some(Background::Solid { .. })
+            | Some(Background::Gradient { .. })
+            | Some(Background::Image { .. })
     ) && sidecar.frame.map_or(false, |f| f.padding > 0.0)
 }
 
@@ -2592,6 +2598,52 @@ ZOOM_SEGMENTS=/S/zoom.json";
                 "FRAME_PADDING=0.1".to_string(),
             ],
             "gradient emits kind + preset name, no solid hex"
+        );
+    }
+
+    // Slice 5: a user-image background gates the compositor and emits the absolute path
+    // (BACKGROUND_KIND=image + BACKGROUND_IMAGE), never a color/preset. A set path gates
+    // regardless of whether the file exists — the compositor degrades a missing file to a
+    // neutral solid rather than dropping to the copy path (which would export unpadded).
+    #[test]
+    fn image_background_gates_and_emits() {
+        use std::collections::BTreeSet;
+        use std::ffi::OsStr;
+        let mut s = pre_zoom_populated_state();
+        s.background = Some(Background::Image { path: "/tmp/wall.heic".into() });
+        s.frame = Some(FrameStyle { padding: 0.1, ..Default::default() });
+        assert!(has_background(&s), "image + padding must leave the copy path");
+
+        fn envs_of(cmd: &Command) -> BTreeSet<String> {
+            cmd.get_envs()
+                .map(|(k, v): (&OsStr, Option<&OsStr>)| {
+                    format!(
+                        "{}={}",
+                        k.to_string_lossy(),
+                        v.map(|v| v.to_string_lossy().into_owned()).unwrap_or_default()
+                    )
+                })
+                .collect()
+        }
+        let bin = Path::new("/S/cicompositor");
+        let mk = |fb: Option<(FrameStyle, &Background)>| {
+            build_compositor_command(
+                bin, Path::new("/S/in.mp4"), Path::new("/S/v3.mp4"), (1920, 1080), (1920, 1080),
+                None, None, None, None, 0.0, None, None, fb,
+            )
+        };
+        let bg = Background::Image { path: "/tmp/wall.heic".into() };
+        let frame = FrameStyle { padding: 0.1, ..Default::default() };
+        let added: Vec<String> =
+            envs_of(&mk(Some((frame, &bg)))).difference(&envs_of(&mk(None))).cloned().collect();
+        assert_eq!(
+            added,
+            vec![
+                "BACKGROUND_IMAGE=/tmp/wall.heic".to_string(),
+                "BACKGROUND_KIND=image".to_string(),
+                "FRAME_PADDING=0.1".to_string(),
+            ],
+            "image emits kind + absolute path, no color or preset"
         );
     }
 

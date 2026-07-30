@@ -422,7 +422,10 @@ function backgroundCss(bg: Background | null | undefined, solidHex: string): str
     const p = GRADIENT_PRESETS.find((g) => g.id === bg.preset);
     return p ? gradientCss(p.a, p.b) : solidHex;
   }
-  return solidHex; // image lands in Slice 5
+  // Image (Slice 5): fill-and-crop via CSS `cover`, matching the compositor's
+  // max-scale-then-center-crop. A missing file just fails to load (transparent);
+  // the export falls back to a neutral solid.
+  return `url("${convertFileSrc(bg.path)}") center center / cover no-repeat`;
 }
 
 const EMPTY_STATE: SidecarState = {
@@ -1423,6 +1426,21 @@ export default function Review() {
     setSolidHex(hex);
     setBackground((bg) => (bg?.kind === "solid" ? { kind: "solid", hex } : bg));
   }, []);
+  // Image background (Slice 5): pick any image; its absolute path rides the sidecar
+  // (watermark-logo pattern) and the compositor fill-crops it to the canvas. Picking
+  // installs a frame like any other background; cancelling leaves the choice unchanged.
+  const pickBackgroundImage = useCallback(async () => {
+    try {
+      const picked = await open({
+        multiple: false,
+        filters: [{ name: "Image", extensions: ["png", "jpg", "jpeg", "heic", "heif", "webp", "tiff", "bmp", "gif"] }],
+      });
+      if (typeof picked !== "string") return; // cancelled
+      pickBackground({ kind: "image", path: picked });
+    } catch (err) {
+      setError(`background image: ${err}`);
+    }
+  }, [pickBackground]);
 
   // V2 Step 2: the zone actually used for the parked preview + picker
   // highlight. An explicit pick wins; otherwise the migration default
@@ -2253,6 +2271,7 @@ export default function Review() {
             solidHex,
             windowSource: isWindowSource,
             onPick: pickBackground,
+            onPickImage: pickBackgroundImage,
             onMargin: setMarginPreset,
             onCorner: setCornerPreset,
             onSolidHex: changeSolidHex,
@@ -4744,13 +4763,18 @@ function BgSwatch({
   selected,
   onClick,
   none,
+  image,
 }: {
   label: string;
   css: string;
   selected: boolean;
   onClick: () => void;
   none?: boolean;
+  // Empty image-picker tile: shows a labeled placeholder (like `none`) until an
+  // image is chosen, at which point the caller passes the picked image as `css`.
+  image?: boolean;
 }) {
+  const placeholder = none ? "None" : image ? "Image" : null;
   return (
     <button
       onClick={onClick}
@@ -4760,14 +4784,14 @@ function BgSwatch({
         height: 34,
         borderRadius: 6,
         border: selected ? "1.5px solid var(--accent)" : "1px solid var(--border-subtle)",
-        background: none ? "var(--bg-input)" : css,
+        background: placeholder ? "var(--bg-input)" : css,
         cursor: "pointer",
         position: "relative",
         overflow: "hidden",
         padding: 0,
       }}
     >
-      {none && (
+      {placeholder && (
         <span
           style={{
             position: "absolute",
@@ -4779,7 +4803,7 @@ function BgSwatch({
             color: "var(--fg-tertiary)",
           }}
         >
-          None
+          {placeholder}
         </span>
       )}
     </button>
@@ -4867,6 +4891,7 @@ function ExportPanel({
     // edge, so Rounded is greyed for them (Square only).
     windowSource: boolean;
     onPick: (b: Background | null) => void;
+    onPickImage: () => void;
     onMargin: (p: "tight" | "wide") => void;
     onCorner: (p: "rounded" | "square") => void;
     onSolidHex: (hex: string) => void;
@@ -5598,6 +5623,17 @@ function ExportPanel({
                       onClick={() => bg.onPick({ kind: "gradient", preset: g.id })}
                     />
                   ))}
+                  <BgSwatch
+                    label={bg.background?.kind === "image" ? "Change image" : "Choose image"}
+                    css={
+                      bg.background?.kind === "image"
+                        ? `url("${convertFileSrc(bg.background.path)}") center center / cover no-repeat`
+                        : "var(--bg-input)"
+                    }
+                    image={bg.background?.kind !== "image"}
+                    selected={bg.background?.kind === "image"}
+                    onClick={bg.onPickImage}
+                  />
                 </div>
               </Field>
               {bg.background != null && (
