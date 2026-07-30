@@ -386,23 +386,29 @@ const FRAME_SHADOW = 1.0;
 const FRAME_RIM = 0.003;
 // Window captures come out of SCK with their own rounded corners and OPAQUE BLACK
 // (not alpha — capture is 4:2:0, no alpha anywhere in the pipeline) filling the gap
-// outside that arc. Over a background those gaps read as black wedges. Fix: clip the
-// content to a radius sized to sit just INSIDE the window's own ~11pt arc, so the
-// window edge + the black are both masked away, leaving one clean arc over the bg.
-// The clip is MANDATORY for window sources (it's the fix, not a style) — the Corners
-// control is hidden for them. Radius is point-based: macOS window corners are a near-
-// constant ~11pt regardless of window size, and 11/pointShort is scale-independent
-// (the capture-scale factor cancels through the compositor's fraction*insetShort).
-// Err slightly LARGE (a hair of clipped content is invisible; too small leaves the
-// black wedge, the visible failure), hence the +margin.
-const WINDOW_CORNER_PT = 11;
-const WINDOW_CORNER_MARGIN_PT = 2;
-// Fallback fraction when the window's point size is unknown (old/edge-case opens):
-// errs large so the black never survives, at the cost of over-clipping big windows.
-const WINDOW_CLIP_FALLBACK_FRAC = 0.02;
+// outside that arc. Over a background those gaps read as black crescents. Fix: clip the
+// content to a radius that fully COVERS the window's own corner, masking the window
+// edge + the black away and leaving one clean arc over the bg. MANDATORY for window
+// sources (the fix, not a style) — the Corners control is hidden for them. Point-based
+// (CLIP_PT/pointShort is scale-independent — the capture scale cancels through the
+// compositor's fraction*insetShort).
+//
+// The value is EMPIRICAL, measured on a real macOS 26 window capture (Podcasts, 1x),
+// NOT the ~11pt textbook radius: (1) macOS 26 windows measure ~18pt at the corner, far
+// rounder than older macOS; (2) our clip is a CIRCLE but the window corner is a
+// SQUIRCLE (continuous curve), so a circular mask must be ~1.5x the nominal radius to
+// cover the squircle's shoulders — 18 * 1.5 ~= 27. A radius sweep on the real capture
+// (docs/DECISIONS 2026-07-30 part 3) showed the black crescent gone at 28pt and still
+// present at 13pt. Err LARGE: over-clip is an invisible corner sliver; too small leaves
+// the visible black. If a future macOS changes the window radius, re-measure and revisit
+// (or switch to a squircle mask to match the shape with less over-clip).
+const WINDOW_CLIP_PT = 28;
+// Fallback fraction when the window's point size is unknown (edge-case opens): errs
+// large (~WINDOW_CLIP_PT over a typical ~800pt window) so the black never survives.
+const WINDOW_CLIP_FALLBACK_FRAC = 0.035;
 function windowClipCornerFrac(pointShort: number | null): number {
   return pointShort && pointShort > 0
-    ? (WINDOW_CORNER_PT + WINDOW_CORNER_MARGIN_PT) / pointShort
+    ? WINDOW_CLIP_PT / pointShort
     : WINDOW_CLIP_FALLBACK_FRAC;
 }
 const DEFAULT_FRAME: FrameStyle = {
@@ -898,7 +904,7 @@ export default function Review() {
   // 2026-07-29). Metadata: persisted but excluded from the dirty check.
   const [sourceKind, setSourceKind] = useState<string | null>(params.sourceKind);
   const isWindowSource = sourceKind === "window";
-  // Mandatory corner-clip radius for window captures (see WINDOW_CORNER_PT): kills
+  // Mandatory corner-clip radius for window captures (see WINDOW_CLIP_PT): kills
   // the SCK black-corner wedges. Sized from the window's point short side (from the
   // open params). Applied as the frame's corner_radius for window sources; the
   // Corners control is hidden for them since there's no choice to make.

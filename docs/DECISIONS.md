@@ -4,6 +4,25 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-30 (part 3) — The ACTUAL root cause of the window-corner black: the clip radius was too small — macOS 26 windows are ~18pt and a CIRCULAR clip of a SQUIRCLE needs ~1.5x. Verified on the real capture.
+
+Parts 1-2 were necessary groundwork but neither was the root cause. Found it by sampling the user's REAL raw capture (`~/Movies/Zeigen/.scratch/recording-<stamp>/sources/screen.mp4`, present while the Review window is open) plus its sidecar — NOT by eye or synthetic guess.
+
+Ground truth from the real capture (a Podcasts window, 1x, 1472x790):
+- The raw corners ARE pure black `rgb(0,0,0)` (confirms part-1 opaque-black; the shadow fix in part 2 left the window filling the frame, corners at frame corners — so part 2 works but was not the crescent's cause).
+- The window's OWN corner radius measures ~18px on the left edges, ~15px on the right (asymmetric — THAT is why the crescent was worse top-left: the left corner is genuinely rounder, so an undersized clip misses it more).
+- The sidecar's `corner_radius` was `0.016455… = 13/790` exactly → computed from the real `windowPointShort=790`, NOT the fallback. So the plumbing was fine; the CONSTANT was wrong.
+
+Two compounding reasons the ~11pt assumption failed: (1) macOS 26 ("Liquid Glass") windows are ~18pt at the corner, far rounder than the ~10-11pt older-macOS figure; (2) our clip mask is a CIRCLE (`CGPath(roundedRect:cornerWidth:)`) but the window corner is a SQUIRCLE, and a circular mask must be ~1.5x the nominal radius to cover the squircle's shoulders. So the effective clip needs ~18*1.5 ~= 27pt, not 13.
+
+A radius sweep on the real capture (13/18/21/24/27/28pt total): the black crescent shrank monotonically and was VISUALLY GONE at 28pt at all four corners (residual "black pixels" the checker flagged there were the app's own "..." UI dots, not a leak). Fix: `WINDOW_CLIP_PT = 28` (point-based, scale-independent) in Review.tsx, replacing the 11+2 split. Fallback fraction raised 0.02 -> 0.035 to match. Err large stands: over-clip is an invisible corner sliver; too small is the visible black.
+
+Two lessons logged so the next person doesn't repeat the four-round chase:
+- The macOS window corner radius is an EMPIRICAL, OS-version-dependent number — measure it on a real capture, do not trust the textbook ~10pt. If a future macOS changes it, re-measure. A squircle mask (superellipse) would match the shape with less over-clip and is the documented next-step if over-clipping ever bites or the circular look reads wrong.
+- HARNESS TRAP (cost a whole round): a corner checker MUST sample the CONTENT corners (compositor inset origin), not the canvas corners (0,0) — the canvas corners are always background and read clean regardless. And judge over a NON-BLACK background (black-on-black export edge hides everything — the same trap that made two earlier checks falsely pass).
+
+---
+
 ## 2026-07-30 (part 2) — The window-corner black had a SECOND root cause: SCK includes the window SHADOW, insetting the window inside the captured frame; exclude it
 
 The corner clip (part 1 below) was necessary but NOT sufficient. After it shipped, a black crescent remained at the window's corners over a background — asymmetric (worse on some corners than others), which a too-small radius can't explain (that fails symmetrically). Diagnosed by reproduction, NOT by eye.
