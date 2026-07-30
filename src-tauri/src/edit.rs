@@ -706,6 +706,7 @@ fn build_compositor_command(
     watermark: Option<&Watermark>,
     redact_json: Option<&Path>,
     frame_bg: Option<(FrameStyle, &Background)>,
+    window_source: bool,
 ) -> Command {
     let (w, h) = src_dims;
     let (out_w, out_h) = out_dims;
@@ -775,6 +776,12 @@ fn build_compositor_command(
         // stays a single FRAME_PADDING env (and a square/shadowless render omits them).
         if frame.corner_radius > 0.0 {
             cmd.env("FRAME_CORNER_RADIUS", format!("{}", frame.corner_radius));
+            // Window sources round their corners in SOURCE space (pre-zoom) so the black
+            // corner gaps stay masked under zoom (a fixed post-zoom clip is outgrown by a
+            // magnified corner). Only meaningful with a corner radius set.
+            if window_source {
+                cmd.env("WINDOW_CORNER", "1");
+            }
         }
         if frame.shadow > 0.0 {
             cmd.env("FRAME_SHADOW", format!("{}", frame.shadow));
@@ -971,6 +978,7 @@ fn v3_render(
         watermark,
         redact_json_path.as_deref(),
         frame_bg,
+        sidecar.source_kind.as_deref() == Some("window"),
     );
     let comp = cmd
         .output()
@@ -2501,7 +2509,7 @@ mod tests {
         let mk = |rj: Option<&Path>| {
             build_compositor_command(
                 bin, screen, video_only, (3024, 1964), (1920, 1246), None,
-                Some(zoom), Some(webcam), Some(&bubble), 30.0, Some(&wm), rj, None,
+                Some(zoom), Some(webcam), Some(&bubble), 30.0, Some(&wm), rj, None, false,
             )
         };
         let base = mk(None);
@@ -2583,7 +2591,7 @@ ZOOM_SEGMENTS=/S/zoom.json";
         let mk = |fb: Option<(FrameStyle, &Background)>| {
             build_compositor_command(
                 bin, Path::new("/S/in.mp4"), Path::new("/S/v3.mp4"), (1920, 1080), (1920, 1080),
-                None, None, None, None, 0.0, None, None, fb,
+                None, None, None, None, 0.0, None, None, fb, false,
             )
         };
         let bg = Background::Gradient { preset: "indigo".into() };
@@ -2629,7 +2637,7 @@ ZOOM_SEGMENTS=/S/zoom.json";
         let mk = |fb: Option<(FrameStyle, &Background)>| {
             build_compositor_command(
                 bin, Path::new("/S/in.mp4"), Path::new("/S/v3.mp4"), (1920, 1080), (1920, 1080),
-                None, None, None, None, 0.0, None, None, fb,
+                None, None, None, None, 0.0, None, None, fb, false,
             )
         };
         let bg = Background::Image { path: "/tmp/wall.heic".into() };
@@ -2645,6 +2653,31 @@ ZOOM_SEGMENTS=/S/zoom.json";
             ],
             "image emits kind + absolute path, no color or preset"
         );
+    }
+
+    // Window sources emit WINDOW_CORNER=1 (drives the source-space corner mask that
+    // survives zoom); non-window sources never do. Only meaningful with a corner radius.
+    #[test]
+    fn window_source_emits_window_corner() {
+        fn envs(cmd: &Command) -> Vec<String> {
+            cmd.get_envs()
+                .map(|(k, v)| format!("{}={}", k.to_string_lossy(),
+                    v.map(|v| v.to_string_lossy().into_owned()).unwrap_or_default()))
+                .collect()
+        }
+        let bin = Path::new("/S/cicompositor");
+        let bg = Background::Image { path: "/tmp/w.heic".into() };
+        let frame = FrameStyle { padding: 0.1, corner_radius: 0.05, ..Default::default() };
+        let mk = |win: bool| {
+            build_compositor_command(
+                bin, Path::new("/S/in.mp4"), Path::new("/S/v3.mp4"), (1920, 1080), (1920, 1080),
+                None, None, None, None, 0.0, None, None, Some((frame, &bg)), win,
+            )
+        };
+        assert!(envs(&mk(true)).iter().any(|e| e == "WINDOW_CORNER=1"),
+            "window source must emit WINDOW_CORNER=1");
+        assert!(!envs(&mk(false)).iter().any(|e| e.starts_with("WINDOW_CORNER")),
+            "non-window source must not emit WINDOW_CORNER");
     }
 
     // Slice 1/2 additive-env pin. A fully-styled solid background emits padding + the
@@ -2676,7 +2709,7 @@ ZOOM_SEGMENTS=/S/zoom.json";
         let mk = |fb: Option<(FrameStyle, &Background)>| {
             build_compositor_command(
                 bin, screen, video_only, (1920, 1080), (1920, 1080), None,
-                None, None, None, 0.0, None, None, fb,
+                None, None, None, 0.0, None, None, fb, false,
             )
         };
         let base = mk(None);

@@ -584,9 +584,23 @@ let insetOy = ((Hd - Double(insetH)) / 2).rounded()
 let insetShort = Double(min(insetW, insetH))
 let cornerPx = CGFloat(frameCornerFrac * insetShort)
 
-// Rounded-corner alpha mask at content-local extent. nil when square -> the Slice 1
-// path (no masking, no resample cost) is preserved exactly.
-let contentMask: CIImage? = (insetActive && cornerPx >= 0.5)
+// Window captures carry their OWN rounded corners with opaque-black gaps (SCK 4:2:0,
+// no alpha). Rounding them in the inset stage (post-zoom, fixed radius) fails under
+// zoom: a zoomed-in corner is magnified past the fixed clip and the black leaks. So for
+// window sources round in SOURCE space instead (before zoom, below), so the rounding —
+// and the black masking — magnifies WITH the content at any zoom. The source radius is
+// the same fraction of the SOURCE short side (= cornerPx / insetK), so after the inset's
+// insetK downscale it lands exactly at cornerPx un-zoomed, matching the shadow + rim
+// silhouettes. Display/area sources have no black corners and keep the fixed inset-stage
+// mask (their styling round is a fixed card corner, not something that should zoom).
+let windowSource = env["WINDOW_CORNER"] == "1"
+let sourceCornerMask: CIImage? = (insetActive && windowSource && cornerPx >= 0.5)
+    ? roundedFill(w: W, h: H, radius: CGFloat(frameCornerFrac * min(Wd, Hd)), gray: 1.0, alpha: 1.0)
+    : nil
+
+// Rounded-corner alpha mask at content-local extent. nil when square (or a window
+// source, handled in source space) -> the Slice 1 path (no masking) is preserved.
+let contentMask: CIImage? = (insetActive && cornerPx >= 0.5 && !windowSource)
     ? roundedFill(w: insetW, h: insetH, radius: cornerPx, gray: 1.0, alpha: 1.0)
     : nil
 
@@ -794,7 +808,14 @@ writerInput.requestMediaDataWhenReady(on: queue) {
         let t = tSrc  // original-timeline time -> zoom straddling the cut renders correctly
         // No colorSpace override: CI reads the 709 video-range attachments the
         // decoder put on the YCbCr buffer, so input color is interpreted, not guessed.
-        let src = CIImage(cvPixelBuffer: pixels)
+        var src = CIImage(cvPixelBuffer: pixels)
+        // Window sources: round the source corners to transparent BEFORE zoom so the
+        // window's black corner gaps are masked away and the rounding magnifies with the
+        // content (the inset stage then composites the transparent corners over the bg).
+        if let m = sourceCornerMask {
+            src = src.applyingFilter("CIBlendWithMask",
+                parameters: ["inputBackgroundImage": CIImage.empty(), "inputMaskImage": m])
+        }
 
         // Zoom geometry (mirror gpuzoom/Review.tsx): clamped off-center window of
         // size W/s x H/s, focus mapped to output center. q is CI bottom-left px.
