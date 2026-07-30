@@ -180,6 +180,11 @@ let framePadding = Double(env["FRAME_PADDING"] ?? "") ?? 0
 let frameCornerFrac = Double(env["FRAME_CORNER_RADIUS"] ?? "") ?? 0
 let frameShadow = Double(env["FRAME_SHADOW"] ?? "") ?? 0
 let frameInsetFrac = Double(env["FRAME_INSET"] ?? "") ?? 0
+// Inset rim color/opacity (internal knobs for calibration). Black by default: it reads
+// as a subtle edge on the mid/dark/saturated palette, and it absorbs the rounded-corner
+// aliasing that a light rim would catch and highlight as stair-stepping.
+let rimGray = Double(env["RIM_GRAY"] ?? "") ?? 0.0
+let rimAlpha = Double(env["RIM_ALPHA"] ?? "") ?? 0.55
 // Shadow geometry scales with the PADDING MARGIN (the space the shadow lives in), so it
 // fits at Tight and grows at Wide without ramming the frame edge — and it's an ELEVATION
 // shadow (broad/soft/offset into the clear margin), not an edge-hugging separator, so it
@@ -572,7 +577,7 @@ let borderLayer: CIImage? = {
     guard insetActive, frameInsetFrac > 0 else { return nil }
     let lw = max(1.0, CGFloat(frameInsetFrac * insetShort))
     return roundedStroke(w: insetW, h: insetH, radius: cornerPx, lineWidth: lw,
-                         gray: 1.0, alpha: 0.5)?
+                         gray: CGFloat(rimGray), alpha: CGFloat(rimAlpha))?
         .transformed(by: CGAffineTransform(translationX: insetOx, y: insetOy))
         .cropped(to: CGRect(x: 0, y: 0, width: Wd, height: Hd))
 }()

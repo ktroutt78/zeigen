@@ -2745,7 +2745,7 @@ function VideoStage(props: VideoStageProps) {
           shadowOn
             ? `0 ${(0.45 * marginShort).toFixed(1)}px ${(0.85 * marginShort).toFixed(1)}px rgba(0,0,0,0.5)`
             : "",
-          rimFrac > 0 ? `inset 0 0 0 ${rimPx.toFixed(1)}px rgba(255,255,255,0.5)` : "",
+          rimFrac > 0 ? `inset 0 0 0 ${rimPx.toFixed(1)}px rgba(0,0,0,0.55)` : "",
         ]
           .filter(Boolean)
           .join(", "),
