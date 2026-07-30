@@ -855,8 +855,14 @@ type ReviewOpenArgs = {
   screenPath: string;
   webcamPath: string | null;
   webcamLeadMs: number;
-  // Capture source, so Review can gate Rounded corners off for window captures.
+  // Capture source, so Review can gate the Corners control for window captures.
   sourceKind: SourceKind;
+  // Window's SHORT side in POINTS (SCWindow.frame is point-space). Review turns
+  // the ~11pt macOS window-corner radius into a frame fraction (11/pointShort,
+  // scale-independent) to clip the window's own rounded corners just inside their
+  // arc — otherwise SCK's opaque-black corner fill shows as wedges over a
+  // background. null for display/area (no inherent corners) or if unknown.
+  windowPointShort: number | null;
 };
 
 async function openReview(
@@ -875,6 +881,9 @@ async function openReview(
   });
   if (args.webcamPath) {
     params.set("webcamPath", args.webcamPath);
+  }
+  if (args.windowPointShort != null) {
+    params.set("windowPointShort", String(args.windowPointShort));
   }
   const url = `/#review?${params.toString()}`;
   const win = new WebviewWindow(label, {
@@ -1215,6 +1224,7 @@ function App() {
                     // Corners gating. ctrlRef.current stays live (see the area
                     // check above).
                     sourceKind: ctrlRef.current.sourceKind,
+                    windowPointShort: ctrlRef.current.windowPointShort,
                   },
                   decReview,
                 );
@@ -1299,6 +1309,7 @@ function App() {
                     // Corners gating. ctrlRef.current stays live (see the area
                     // check above).
                     sourceKind: ctrlRef.current.sourceKind,
+                    windowPointShort: ctrlRef.current.windowPointShort,
                   },
                   decReview,
                 );
@@ -1603,6 +1614,15 @@ function App() {
       : sourceKind === "window"
       ? selectedWindow != null
       : selectedArea != null;
+  // Short side (points) of the window being recorded — Review uses it to size the
+  // corner-clip radius. null unless a window is the source and its dims are known.
+  const windowPointShort =
+    sourceKind === "window" && selectedWindow != null
+      ? (() => {
+          const w = windows.find((x) => x.id === selectedWindow);
+          return w ? Math.min(w.width, w.height) : null;
+        })()
+      : null;
   const ctrlRef = useRef({
     state,
     canStartNow,
@@ -1612,6 +1632,7 @@ function App() {
     setSelectedMic,
     setSelectedDisplay,
     sourceKind,
+    windowPointShort,
     selectedArea,
     setSelectedArea,
   });
@@ -1624,6 +1645,7 @@ function App() {
     setSelectedMic,
     setSelectedDisplay,
     sourceKind,
+    windowPointShort,
     selectedArea,
     setSelectedArea,
   };

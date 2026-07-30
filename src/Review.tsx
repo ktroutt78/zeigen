@@ -384,6 +384,27 @@ const FRAME_WIDE = 0.12;
 const FRAME_ROUND = 0.018;
 const FRAME_SHADOW = 1.0;
 const FRAME_RIM = 0.003;
+// Window captures come out of SCK with their own rounded corners and OPAQUE BLACK
+// (not alpha — capture is 4:2:0, no alpha anywhere in the pipeline) filling the gap
+// outside that arc. Over a background those gaps read as black wedges. Fix: clip the
+// content to a radius sized to sit just INSIDE the window's own ~11pt arc, so the
+// window edge + the black are both masked away, leaving one clean arc over the bg.
+// The clip is MANDATORY for window sources (it's the fix, not a style) — the Corners
+// control is hidden for them. Radius is point-based: macOS window corners are a near-
+// constant ~11pt regardless of window size, and 11/pointShort is scale-independent
+// (the capture-scale factor cancels through the compositor's fraction*insetShort).
+// Err slightly LARGE (a hair of clipped content is invisible; too small leaves the
+// black wedge, the visible failure), hence the +margin.
+const WINDOW_CORNER_PT = 11;
+const WINDOW_CORNER_MARGIN_PT = 2;
+// Fallback fraction when the window's point size is unknown (old/edge-case opens):
+// errs large so the black never survives, at the cost of over-clipping big windows.
+const WINDOW_CLIP_FALLBACK_FRAC = 0.02;
+function windowClipCornerFrac(pointShort: number | null): number {
+  return pointShort && pointShort > 0
+    ? (WINDOW_CORNER_PT + WINDOW_CORNER_MARGIN_PT) / pointShort
+    : WINDOW_CLIP_FALLBACK_FRAC;
+}
 const DEFAULT_FRAME: FrameStyle = {
   padding: FRAME_WIDE,
   corner_radius: 0, // Square by default
@@ -528,22 +549,34 @@ type ReviewParams = {
   webcamLeadMs: number;
   // Capture source ("window"|"display"|"area") — drives the Corners gating.
   sourceKind: string | null;
+  // Window's short side in points (window sources only) — sizes the corner clip.
+  windowPointShort: number | null;
 };
 
 function readParams(): ReviewParams {
   const hash = window.location.hash || "";
   const q = hash.indexOf("?");
   if (q < 0)
-    return { path: null, screenPath: null, webcamPath: null, webcamLeadMs: 280, sourceKind: null };
+    return {
+      path: null,
+      screenPath: null,
+      webcamPath: null,
+      webcamLeadMs: 280,
+      sourceKind: null,
+      windowPointShort: null,
+    };
   const params = new URLSearchParams(hash.slice(q + 1));
   const leadStr = params.get("webcamLeadMs");
   const lead = leadStr ? Number(leadStr) : 280;
+  const shortStr = params.get("windowPointShort");
+  const short = shortStr ? Number(shortStr) : NaN;
   return {
     path: params.get("path"),
     screenPath: params.get("screenPath"),
     webcamPath: params.get("webcamPath"),
     webcamLeadMs: Number.isFinite(lead) ? lead : 280,
     sourceKind: params.get("sourceKind"),
+    windowPointShort: Number.isFinite(short) && short > 0 ? short : null,
   };
 }
 
@@ -865,6 +898,11 @@ export default function Review() {
   // 2026-07-29). Metadata: persisted but excluded from the dirty check.
   const [sourceKind, setSourceKind] = useState<string | null>(params.sourceKind);
   const isWindowSource = sourceKind === "window";
+  // Mandatory corner-clip radius for window captures (see WINDOW_CORNER_PT): kills
+  // the SCK black-corner wedges. Sized from the window's point short side (from the
+  // open params). Applied as the frame's corner_radius for window sources; the
+  // Corners control is hidden for them since there's no choice to make.
+  const windowClipCorner = windowClipCornerFrac(params.windowPointShort);
   // Selection = a PRIMARY (the focus: drives the timeline edit row, the strong
   // highlight, single-region edits) plus a SET for batch timing (shift-click). The
   // primary is always in the set; a plain click collapses the set to just it.
@@ -1412,10 +1450,19 @@ export default function Review() {
   // (keeping any existing margin/corner choice); picking None clears both, back to
   // the no-op. Margin/corner toggles only mutate their field. A solid hex change is
   // remembered and pushed into the background only while solid is the active kind.
-  const pickBackground = useCallback((bg: Background | null) => {
-    setBackground(bg);
-    setFrame((prev) => (bg ? prev ?? DEFAULT_FRAME : null));
-  }, []);
+  const pickBackground = useCallback(
+    (bg: Background | null) => {
+      setBackground(bg);
+      setFrame((prev) => {
+        if (!bg) return null;
+        const base = prev ?? DEFAULT_FRAME;
+        // Window sources get the mandatory clip corner (not the user's Square/Rounded,
+        // which isn't offered for them); display/area keep their own corner choice.
+        return isWindowSource ? { ...base, corner_radius: windowClipCorner } : base;
+      });
+    },
+    [isWindowSource, windowClipCorner],
+  );
   const setMarginPreset = useCallback((p: "tight" | "wide") => {
     setFrame((f) => ({ ...(f ?? DEFAULT_FRAME), padding: p === "wide" ? FRAME_WIDE : FRAME_TIGHT }));
   }, []);
@@ -5654,29 +5701,28 @@ function ExportPanel({
                       </button>
                     </div>
                   </Field>
-                  <Field label="Corners">
-                    <div className="segmented full">
-                      <button
-                        className={!bg.windowSource && (bg.frame?.corner_radius ?? 0) > 0 ? "on" : ""}
-                        disabled={bg.windowSource}
-                        style={bg.windowSource ? { opacity: 0.45, cursor: "not-allowed" } : undefined}
-                        onClick={bg.windowSource ? undefined : () => bg.onCorner("rounded")}
-                      >
-                        Rounded
-                      </button>
-                      <button
-                        className={bg.windowSource || (bg.frame?.corner_radius ?? 0) === 0 ? "on" : ""}
-                        onClick={() => bg.onCorner("square")}
-                      >
-                        Square
-                      </button>
-                    </div>
-                    {bg.windowSource && (
-                      <div style={{ fontSize: 10.5, color: "var(--fg-tertiary)", marginTop: 4 }}>
-                        Window already has rounded corners.
+                  {/* Corners is a genuine choice only for display/area (no inherent
+                      corners). Window captures get a mandatory clip radius instead
+                      (it removes SCK's black-corner wedges), so the control is hidden
+                      for them rather than shown as a one-option toggle. */}
+                  {!bg.windowSource && (
+                    <Field label="Corners">
+                      <div className="segmented full">
+                        <button
+                          className={(bg.frame?.corner_radius ?? 0) > 0 ? "on" : ""}
+                          onClick={() => bg.onCorner("rounded")}
+                        >
+                          Rounded
+                        </button>
+                        <button
+                          className={(bg.frame?.corner_radius ?? 0) === 0 ? "on" : ""}
+                          onClick={() => bg.onCorner("square")}
+                        >
+                          Square
+                        </button>
                       </div>
-                    )}
-                  </Field>
+                    </Field>
+                  )}
                   {bg.background?.kind === "solid" && (
                     <Field label="Color">
                       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
