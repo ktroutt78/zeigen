@@ -295,6 +295,16 @@ final class RecordingSession: NSObject,
         // so capture output is identical with the flag on or off.
         config.showsCursor = true
         config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        // Exclude the window's own drop shadow from single-window captures.
+        // Default (false) INCLUDES the shadow, which frames the window inside the
+        // window-sized buffer: the window (and its rounded corners) ends up INSET,
+        // surrounded by the shadow region that 4:2:0 flattens to opaque black. Over
+        // a background canvas that black shows as crescents at the window's corners
+        // that no frame-corner clip can reach, and the inset also scaled the window
+        // DOWN (lost resolution). Excluding it makes the window fill the frame at
+        // native size, so its corners sit at the frame corners where the export's
+        // corner-clip aligns. No effect on display/area filters. (macOS 14+.)
+        config.ignoreShadowsSingleWindow = true
         // captureMicrophone deliberately left unset: V2.2 routes mic
         // through AVCaptureSession (Track B).
 

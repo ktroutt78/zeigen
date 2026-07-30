@@ -4,6 +4,20 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-30 (part 2) — The window-corner black had a SECOND root cause: SCK includes the window SHADOW, insetting the window inside the captured frame; exclude it
+
+The corner clip (part 1 below) was necessary but NOT sufficient. After it shipped, a black crescent remained at the window's corners over a background — asymmetric (worse on some corners than others), which a too-small radius can't explain (that fails symmetrically). Diagnosed by reproduction, NOT by eye.
+
+Root cause: `SCContentFilter(desktopIndependentWindow:)` was used with `SCStreamConfiguration.ignoreShadowsSingleWindow` UNSET, and its default is `false` = **shadow INCLUDED**. SCK frames the window together with its drop shadow inside the window-sized buffer, so the window (and its own rounded corners) ends up INSET, ringed by the shadow region that 4:2:0 flattens to opaque black. Our corner clip rounds the FRAME corners; the window's real corners are inset and off-center (macOS shadows are bottom-heavier and not left/right even), so the black is unreachable → asymmetric crescents. The inset also scaled the window DOWN, quietly costing resolution, and skewed the window cursor-mapping telemetry (mapped as if the window filled the buffer).
+
+Fix: `config.ignoreShadowsSingleWindow = true` (RecordingSession.swift, macOS 14+; no effect on display/area filters). The window then fills the frame at native size, its corners sit at the frame corners, and the part-1 clip aligns. BOTH are required and complementary: shadow-exclusion fixes the ALIGNMENT, the clip removes the window's OWN corner black. Proven together on a synthetic window-fills-frame frame (circle AND squircle): zero black at all four content corners; the inset (shadow) model reproduces the crescents.
+
+HARNESS LESSON (cost me a false "all clean" pass): when pixel-sampling a padded export, sample the CONTENT corners (at the inset origin `ox=round((W-insetW)/2)`, `oy=...`), NOT the canvas corners (0,0) — the canvas corners are always background, so a corner scan there reports clean no matter what. Any four-corner verify of the frame/clip must compute the inset offset first.
+
+Reconfirmed from part 1: the black is opaque (4:2:0, no alpha), and the earlier "corners are clean" checks falsely passed because they had no background (black-on-black export edge). Same trap, twice — judge window-corner work OVER A NON-BLACK BACKGROUND, and sample the right pixels.
+
+---
+
 ## 2026-07-30 — Window captures need a MANDATORY corner clip over a background (SUPERSEDES "Square is safe / corners are clean"); the black is opaque, alpha is unrecoverable
 
 SUPERSEDES the 2026-07-29 "black-notch resolved, corners come out CLEAN, Square is final" claim below — that check FALSELY PASSED. It was run on a window capture WITHOUT a background, where the black corner gaps sit against the black export edge: black-on-black is invisible. Put a background behind the same recording and the gaps show as **black wedges** at the window's own rounded corners. The black was always there; the background just made it visible. Lesson: any corner/edge check for window captures MUST be done over a non-black background, where the failure actually shows.
