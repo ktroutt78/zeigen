@@ -102,6 +102,12 @@ pub struct SidecarState {
     // skip-when-unset convention as frame.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background: Option<Background>,
+    // Capture source ("window" | "display" | "area"). Recorded so a reopened window
+    // capture still knows to gate off Rounded corners (the window supplies its own,
+    // and ours would double the edge — BACKGROUND-PADDING-PLAN / DECISIONS 2026-07-29).
+    // Metadata only: the export never reads it. Declared last; absent on legacy sidecars.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_kind: Option<String>,
 }
 
 // Frame styling for the padded recording (BACKGROUND-PADDING-PLAN §Q5). Every
@@ -2075,6 +2081,7 @@ mod tests {
             redactions: vec![],
             frame: None,
             background: None,
+            source_kind: None,
         }
     }
 
@@ -2324,6 +2331,22 @@ mod tests {
                 serde_json::from_str(&serde_json::to_string_pretty(&s).unwrap()).unwrap();
             assert_eq!(reparsed.background, Some(bg));
         }
+    }
+
+    // source_kind must survive read_sidecar (deserialize -> back to Review) so a
+    // reopened window capture still gates off Rounded; absent when unset (legacy
+    // sidecars + the no-op path stay byte-identical — the pins above prove that).
+    #[test]
+    fn source_kind_round_trips_and_skips_when_absent() {
+        let mut s = pre_zoom_populated_state();
+        s.source_kind = Some("window".into());
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"source_kind\":\"window\""));
+        let back: SidecarState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.source_kind.as_deref(), Some("window"));
+
+        let plain = pre_zoom_populated_state(); // source_kind: None
+        assert!(!serde_json::to_string(&plain).unwrap().contains("source_kind"));
     }
 
     // GATE 1 (teardown) — the plain-MP4 tail (run_plain_mp4) survives the removal

@@ -4,6 +4,18 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-29 — Window captures force Square corners; do NOT try to match the OS window radius
+
+On a window capture, ScreenCaptureKit bakes the window's OWN rounded corners into the frame. Turning on our Rounded frame adds a SECOND arc at a different radius, so you get two nested arcs with a wedge of background between = a doubled edge (seen on a Music.app capture). Fix: window captures are locked to Square (Rounded greyed, note "Window already has rounded corners"); the window supplies its own corners cleanly, so ours is redundant there. Display + area captures keep Rounded (no inherent corners).
+
+DO NOT re-propose "just derive our radius from the window's corner radius." It was considered and rejected for four compounding reasons, the last fatal:
+1. No public macOS API exposes a window's corner radius — it's a private window-server constant; we'd hardcode a guess.
+2. It changes between OS versions (Big Sur bumped it; Tahoe/26 Liquid Glass changed it again) — any constant drifts.
+3. It's in points; matching pixels needs the capture's backing scale too.
+4. **Squircle, fatally:** modern macOS window corners are CONTINUOUS (squircle) curves. Our `CGPath(roundedRect:)` is a CIRCULAR arc. A circular arc cannot lie on a continuous curve at ANY radius — so even a perfect radius match still doubles the edge. Matching is impossible by construction, not just fiddly.
+
+Plumbing: `sourceKind` ("window"|"display"|"area", already tracked in App.tsx) is passed to Review via the openReview URL param AND persisted in the sidecar (`source_kind`, metadata-only, excluded from the dirty check, never read by the export) so a reopened window recording still knows.
+
 ## 2026-07-29 — Background/frame: watermark stays ON CONTENT; corners default SQUARE (final)
 
 Two settled calls after the Slice-4 signed-build eye-check:

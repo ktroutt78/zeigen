@@ -855,6 +855,8 @@ type ReviewOpenArgs = {
   screenPath: string;
   webcamPath: string | null;
   webcamLeadMs: number;
+  // Capture source, so Review can gate Rounded corners off for window captures.
+  sourceKind: SourceKind;
 };
 
 async function openReview(
@@ -869,6 +871,7 @@ async function openReview(
     path: args.scratchPath,
     screenPath: args.screenPath,
     webcamLeadMs: String(args.webcamLeadMs),
+    sourceKind: args.sourceKind,
   });
   if (args.webcamPath) {
     params.set("webcamPath", args.webcamPath);
@@ -1205,6 +1208,7 @@ function App() {
                     screenPath: info.screen_path,
                     webcamPath: info.webcam_path,
                     webcamLeadMs: info.webcam_lead_ms,
+                    sourceKind,
                   },
                   decReview,
                 );
@@ -1282,6 +1286,7 @@ function App() {
                     screenPath: info.screen_path,
                     webcamPath: info.webcam_path,
                     webcamLeadMs: info.webcam_lead_ms,
+                    sourceKind,
                   },
                   decReview,
                 );

@@ -335,6 +335,10 @@ type SidecarState = {
   // Declared last so an unset pair never perturbs existing field order.
   frame?: FrameStyle | null;
   background?: Background | null;
+  // Capture source ("window"|"display"|"area"), persisted so a reopened window
+  // capture still gates off Rounded corners. Metadata — not an edit (excluded from
+  // the dirty check); the export never reads it.
+  source_kind?: string | null;
 };
 
 // Mirror of Rust FrameStyle. Every knob is the no-op at 0. padding is the
@@ -519,12 +523,15 @@ type ReviewParams = {
   screenPath: string | null;
   webcamPath: string | null;
   webcamLeadMs: number;
+  // Capture source ("window"|"display"|"area") — drives the Corners gating.
+  sourceKind: string | null;
 };
 
 function readParams(): ReviewParams {
   const hash = window.location.hash || "";
   const q = hash.indexOf("?");
-  if (q < 0) return { path: null, screenPath: null, webcamPath: null, webcamLeadMs: 280 };
+  if (q < 0)
+    return { path: null, screenPath: null, webcamPath: null, webcamLeadMs: 280, sourceKind: null };
   const params = new URLSearchParams(hash.slice(q + 1));
   const leadStr = params.get("webcamLeadMs");
   const lead = leadStr ? Number(leadStr) : 280;
@@ -533,6 +540,7 @@ function readParams(): ReviewParams {
     screenPath: params.get("screenPath"),
     webcamPath: params.get("webcamPath"),
     webcamLeadMs: Number.isFinite(lead) ? lead : 280,
+    sourceKind: params.get("sourceKind"),
   };
 }
 
@@ -704,6 +712,7 @@ function sidecarWritePayload(s: SidecarState, duration: number): SidecarState {
     redactions: redactionsPayload(s.redactions ?? []),
     frame: frameIsNoop(s.frame) ? undefined : s.frame,
     background: s.background ?? undefined,
+    source_kind: s.source_kind ?? undefined,
   };
 }
 
@@ -847,6 +856,12 @@ export default function Review() {
   const [background, setBackground] = useState<Background | null>(null);
   const [frame, setFrame] = useState<FrameStyle | null>(null);
   const [solidHex, setSolidHex] = useState(DEFAULT_SOLID_HEX);
+  // Capture source — from the open params, overridden by a loaded sidecar's
+  // source_kind on reopen. A window capture supplies its own (squircle) corners, so
+  // Rounded is gated off for it; our arc can't coincide with the OS curve (DECISIONS
+  // 2026-07-29). Metadata: persisted but excluded from the dirty check.
+  const [sourceKind, setSourceKind] = useState<string | null>(params.sourceKind);
+  const isWindowSource = sourceKind === "window";
   // Selection = a PRIMARY (the focus: drives the timeline edit row, the strong
   // highlight, single-region edits) plus a SET for batch timing (shift-click). The
   // primary is always in the set; a plain click collapses the set to just it.
@@ -1252,6 +1267,7 @@ export default function Review() {
             redactions: state.redactions ?? [],
             frame: state.frame ?? null,
             background: state.background ?? null,
+            source_kind: state.source_kind ?? null,
           });
           if (state.trim) setTrim(state.trim);
           if (state.bubble_position_log) setBubblePositionLog(state.bubble_position_log);
@@ -1270,6 +1286,8 @@ export default function Review() {
             setFrame(state.frame ?? DEFAULT_FRAME);
             if (state.background.kind === "solid") setSolidHex(state.background.hex);
           }
+          // Reopened recording: the persisted source wins over the (absent) param.
+          if (state.source_kind) setSourceKind(state.source_kind);
         } else {
           setSnapshot(EMPTY_STATE);
         }
@@ -1377,8 +1395,9 @@ export default function Review() {
       redactions,
       frame,
       background,
+      source_kind: sourceKind,
     }),
-    [trim, bubblePositionLog, thumbnailTime, bubbleRoundness, bubbleZone, bubbleScale, zoomSegments, redactions, frame, background],
+    [trim, bubblePositionLog, thumbnailTime, bubbleRoundness, bubbleZone, bubbleScale, zoomSegments, redactions, frame, background, sourceKind],
   );
 
   const dirty = useMemo(
@@ -2232,6 +2251,7 @@ export default function Review() {
             background,
             frame,
             solidHex,
+            windowSource: isWindowSource,
             onPick: pickBackground,
             onMargin: setMarginPreset,
             onCorner: setCornerPreset,
@@ -4843,6 +4863,9 @@ function ExportPanel({
     background: Background | null;
     frame: FrameStyle | null;
     solidHex: string;
+    // Window captures already carry their own rounded corners; ours would double the
+    // edge, so Rounded is greyed for them (Square only).
+    windowSource: boolean;
     onPick: (b: Background | null) => void;
     onMargin: (p: "tight" | "wide") => void;
     onCorner: (p: "rounded" | "square") => void;
@@ -5598,18 +5621,25 @@ function ExportPanel({
                   <Field label="Corners">
                     <div className="segmented full">
                       <button
-                        className={(bg.frame?.corner_radius ?? 0) > 0 ? "on" : ""}
-                        onClick={() => bg.onCorner("rounded")}
+                        className={!bg.windowSource && (bg.frame?.corner_radius ?? 0) > 0 ? "on" : ""}
+                        disabled={bg.windowSource}
+                        style={bg.windowSource ? { opacity: 0.45, cursor: "not-allowed" } : undefined}
+                        onClick={bg.windowSource ? undefined : () => bg.onCorner("rounded")}
                       >
                         Rounded
                       </button>
                       <button
-                        className={(bg.frame?.corner_radius ?? 0) === 0 ? "on" : ""}
+                        className={bg.windowSource || (bg.frame?.corner_radius ?? 0) === 0 ? "on" : ""}
                         onClick={() => bg.onCorner("square")}
                       >
                         Square
                       </button>
                     </div>
+                    {bg.windowSource && (
+                      <div style={{ fontSize: 10.5, color: "var(--fg-tertiary)", marginTop: 4 }}>
+                        Window already has rounded corners.
+                      </div>
+                    )}
                   </Field>
                   {bg.background?.kind === "solid" && (
                     <Field label="Color">
