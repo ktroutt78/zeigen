@@ -4,7 +4,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { emit, listen } from "@tauri-apps/api/event";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { ask, open } from "@tauri-apps/plugin-dialog";
-import { Icon, I, P } from "./components/icons";
+import { Icon, I, P, RailIcon } from "./components/icons";
 import SegmentTrack from "./components/SegmentTrack";
 import Waveform from "./Waveform";
 import ScrubPreview from "./ScrubPreview";
@@ -2120,11 +2120,11 @@ export default function Review() {
       <div
         style={{
           display: "grid",
-          // Right region = vertical tool rail (~48px) + the 320px panel; the rail
+          // Right region = icon-only tool rail (40px) + the 320px panel; the rail
           // moved here from a horizontal row atop the panel (which had run out of
           // width at 7 tools), buying back the panel's vertical space. Preview (1fr)
-          // takes the ~48px hit.
-          gridTemplateColumns: "1fr 368px",
+          // takes the 40px hit.
+          gridTemplateColumns: "1fr 360px",
           // Clamp the single row to the container height so a tall column
           // (the left video stage's aspect-ratio height at wide window sizes)
           // can never inflate the row past the viewport and push the right
@@ -4642,15 +4642,19 @@ function ToolTile({
   onClick: () => void;
   title?: string;
 }) {
+  // Icon-only rail (Screen Studio style): the label is the hover tooltip + a11y name,
+  // not visible text, so the rail stays narrow. The active highlight is the only cue,
+  // so it's kept strong (.rail-tool.on).
   return (
     <button
       className={active ? "rail-tool on" : "rail-tool"}
       onClick={disabled ? undefined : onClick}
       disabled={disabled}
-      title={title}
+      title={title ?? label}
+      aria-label={label}
+      aria-pressed={active}
     >
       {icon}
-      <span>{label}</span>
     </button>
   );
 }
@@ -5031,17 +5035,17 @@ function ExportPanel({
       }}
     >
       {/* Vertical tool rail (moved from a horizontal row that ran out of width at
-          7 tools; frees the panel's vertical space). Icon + label per tile — the
-          four rectangle-ish icons (Redact/Watermark/Frame/Mark) aren't distinct
-          enough to stand alone, and the rail has room for both. */}
+          7 tools; frees the panel's vertical space). Icon-only (Screen Studio style)
+          with Lucide icons + hover tooltips — narrower, and the four rectangle-ish
+          labels no longer cramp. Active tile carries the only cue (.rail-tool.on). */}
       <div
         style={{
-          width: 48,
+          width: 40,
           flexShrink: 0,
           display: "flex",
           flexDirection: "column",
           gap: 2,
-          padding: "8px 2px",
+          padding: "8px 4px",
           borderRight: "1px solid var(--border-faint)",
         }}
       >
@@ -5049,39 +5053,39 @@ function ExportPanel({
           label="Zoom"
           active={activeTool === "zoom"}
           onClick={() => setActiveTool("zoom")}
-          icon={<Icon d={<><circle cx="7" cy="7" r="4" /><path d="M10 10l3.5 3.5M5.2 7h3.6M7 5.2v3.6" /></>} size={17} stroke={1.4} />}
+          icon={RailIcon.zoom}
         />
         <ToolTile
           label="Bubble"
           active={activeTool === "bubble"}
           disabled={!hasBubble}
-          title={hasBubble ? undefined : "No webcam bubble in this recording"}
+          title={hasBubble ? "Bubble" : "No webcam bubble in this recording"}
           onClick={() => setActiveTool("bubble")}
-          icon={<Icon d={<circle cx="8" cy="8" r="5" />} size={17} stroke={1.4} />}
+          icon={RailIcon.bubble}
         />
         <ToolTile
           label="Redact"
           active={activeTool === "redact"}
           onClick={() => setActiveTool("redact")}
-          icon={<Icon d={<><rect x="2.5" y="4.5" width="11" height="7" rx="1.5" /><path d="M4.5 6.5h7M4.5 9.5h5" /></>} size={17} stroke={1.4} />}
+          icon={RailIcon.redact}
         />
         <ToolTile
           label="Watermark"
           active={activeTool === "watermark"}
           onClick={() => setActiveTool("watermark")}
-          icon={<Icon d={<><rect x="2.5" y="3.5" width="11" height="9" rx="1.5" /><path d="M5 11l2.2-2.6 1.5 1.7 1.3-1.5 1.5 2.4z" /></>} size={17} stroke={1.4} />}
+          icon={RailIcon.watermark}
         />
         <ToolTile
           label="Frame"
           active={activeTool === "background"}
           onClick={() => setActiveTool("background")}
-          icon={<Icon d={<><rect x="2" y="3" width="12" height="10" rx="1.5" /><rect x="4.5" y="5.5" width="7" height="5" rx="1" /></>} size={17} stroke={1.4} />}
+          icon={RailIcon.frame}
         />
         <ToolTile
           label="Mark"
           active={activeTool === "mark"}
           onClick={() => setActiveTool("mark")}
-          icon={<Icon d={<path d="M4 2.5h8v11l-4-2.5-4 2.5z" />} size={17} stroke={1.4} />}
+          icon={RailIcon.mark}
         />
       </div>
       {/* Panel content column. */}
