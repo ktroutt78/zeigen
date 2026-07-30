@@ -625,7 +625,7 @@ func measureBlackCornerReach(_ url: URL) -> Double? {
 // Clip radius (source px): measured reach + margin (covers residual AA + the sliver a
 // CIRCULAR arc leaves against the window's SQUIRCLE). Fallback to the passed fraction of
 // the source short side if measurement fails.
-let windowClipMargin = Double(env["WINDOW_CLIP_MARGIN"] ?? "") ?? 10.0
+let windowClipMargin = Double(env["WINDOW_CLIP_MARGIN"] ?? "") ?? 18.0
 let windowCornerR: Double = windowSource
     ? ((measureBlackCornerReach(inURL).map { $0 + windowClipMargin }) ?? (frameCornerFrac * min(Wd, Hd)))
     : 0
@@ -633,22 +633,27 @@ if windowSource {
     FileHandle.standardError.write("measured window corner reach -> clip R=\(windowCornerR)px (source)\n".data(using: .utf8)!)
 }
 
-// Corner radius in inset space. Window sources use the MEASURED reach (× insetK so it
-// lands right after the inset downscale); display/area use their fixed styling fraction.
+// Base corner radius (un-zoomed) in inset space. Window sources use the MEASURED reach
+// (× insetK so it lands right after the inset downscale); display/area use their fixed
+// styling fraction.
 let cornerPx = windowSource ? CGFloat(windowCornerR * insetK) : CGFloat(frameCornerFrac * insetShort)
 
-// Window sources round the corners in SOURCE space (before zoom) so the rounding — and
-// the black masking — magnifies WITH the content at any zoom (a fixed post-zoom clip is
-// outgrown by a magnified corner). Radius = the measured source-space reach+margin.
-let sourceCornerMask: CIImage? = (insetActive && windowSource && windowCornerR >= 0.5)
-    ? roundedFill(w: W, h: H, radius: CGFloat(windowCornerR), gray: 1.0, alpha: 1.0)
-    : nil
-
-// Rounded-corner alpha mask at content-local extent. nil when square (or a window
-// source, handled in source space) -> the Slice 1 path (no masking) is preserved.
-let contentMask: CIImage? = (insetActive && cornerPx >= 0.5 && !windowSource)
-    ? roundedFill(w: insetW, h: insetH, radius: cornerPx, gray: 1.0, alpha: 1.0)
-    : nil
+// The corner is rounded at the inset stage (POST-zoom), and for WINDOW sources the radius
+// SCALES with the per-frame zoom s (see the loop): the window's own rounded corner is part
+// of the CONTENT, so under zoom it magnifies by s; a clip of cornerPx*s tracks it exactly,
+// keeping the corner proportional to the content (constant apparent size) AND covering the
+// magnified black gap at any zoom — no source-space mask (which broke the zoom/inset path).
+// Display/area corners are pure card styling (no content corner) and stay fixed at cornerPx.
+// Masks are cached by integer radius so a held zoom builds one mask and a ramp a handful.
+var cardMaskCache: [Int: CIImage] = [:]
+func cardMask(_ radius: CGFloat) -> CIImage? {
+    guard insetActive, radius >= 0.5 else { return nil }
+    let key = Int(radius.rounded())
+    if let m = cardMaskCache[key] { return m }
+    let m = roundedFill(w: insetW, h: insetH, radius: CGFloat(key), gray: 1.0, alpha: 1.0)
+    cardMaskCache[key] = m
+    return m
+}
 
 // Background + drop shadow, composited once. Shadow = a black rounded silhouette
 // (matching the content corners), blurred and offset DOWN, placed under the content.
@@ -849,14 +854,7 @@ writerInput.requestMediaDataWhenReady(on: queue) {
         let t = tSrc  // original-timeline time -> zoom straddling the cut renders correctly
         // No colorSpace override: CI reads the 709 video-range attachments the
         // decoder put on the YCbCr buffer, so input color is interpreted, not guessed.
-        var src = CIImage(cvPixelBuffer: pixels)
-        // Window sources: round the source corners to transparent BEFORE zoom so the
-        // window's black corner gaps are masked away and the rounding magnifies with the
-        // content (the inset stage then composites the transparent corners over the bg).
-        if let m = sourceCornerMask {
-            src = src.applyingFilter("CIBlendWithMask",
-                parameters: ["inputBackgroundImage": CIImage.empty(), "inputMaskImage": m])
-        }
+        let src = CIImage(cvPixelBuffer: pixels)
 
         // Zoom geometry (mirror gpuzoom/Review.tsx): clamped off-center window of
         // size W/s x H/s, focus mapped to output center. q is CI bottom-left px.
@@ -1024,7 +1022,9 @@ writerInput.requestMediaDataWhenReady(on: queue) {
                 .applyingFilter("CILanczosScaleTransform",
                     parameters: [kCIInputScaleKey: insetK, kCIInputAspectRatioKey: 1.0])
                 .cropped(to: CGRect(x: 0, y: 0, width: Double(insetW), height: Double(insetH)))
-            if let mask = contentMask {
+            // Window sources scale the corner radius with the zoom so the window's own
+            // (magnified) corner is matched at any zoom; display/area stay at cornerPx.
+            if let mask = cardMask(windowSource ? cornerPx * CGFloat(s) : cornerPx) {
                 content = content.applyingFilter("CIBlendWithMask",
                     parameters: ["inputBackgroundImage": CIImage.empty(), "inputMaskImage": mask])
             }
