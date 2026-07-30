@@ -580,56 +580,31 @@ let borderLayer: CIImage? = {
 // Pre-scale the watermark once (constant for the whole recording) and precompute
 // its integer top-left. scale: width-based round(sw*frac) (aspect kept) or legacy
 // round(0.10*min(sw,sh)) height (composite.rs metrics); opacity multiplies alpha.
-// Watermark. Normally screen-anchored on the content (composited in the frame loop).
-// When a Wide background is active (Rust sets WATERMARK_IN_MARGIN), it instead sits in
-// the CANVAS MARGIN as a signature on the frame — sized to the margin band, at the
-// chosen corner, aligned to the content edge, composited AFTER the inset stage.
-let wmInMargin = insetActive && env["WATERMARK_IN_MARGIN"] != nil
-var wmComposite: CIImage? = nil        // on-content
-var wmMarginComposite: CIImage? = nil  // in the margin (canvas)
+var wmComposite: CIImage? = nil
 if let wp = env["WATERMARK_PNG"], let logo = CIImage(contentsOf: URL(fileURLWithPath: wp)) {
-    func fade(_ img: CIImage) -> CIImage {
-        wmOpacity < 0.999
-            ? img.applyingFilter("CIColorMatrix",
-                parameters: ["inputAVector": CIVector(x: 0, y: 0, z: 0, w: wmOpacity)])
-            : img
+    let shortSide = min(Wd, Hd)
+    let factor = wmScaleFrac.map { ($0 * Wd).rounded() / logo.extent.width }
+        ?? ((shortSide * 0.10).rounded() / logo.extent.height)
+    var layer = logo.applyingFilter("CILanczosScaleTransform",
+        parameters: [kCIInputScaleKey: factor, kCIInputAspectRatioKey: 1.0])
+    if wmOpacity < 0.999 {
+        layer = layer.applyingFilter("CIColorMatrix",
+            parameters: ["inputAVector": CIVector(x: 0, y: 0, z: 0, w: wmOpacity)])
     }
-    if wmInMargin {
-        // Fit the logo to ~55% of the vertical margin band (insetOy = the bottom margin
-        // height); place in the top/bottom band per the corner prefix, aligned to the
-        // content's left/right edge per the suffix.
-        let wmH = (0.55 * Double(insetOy)).rounded()
-        let factor = wmH / logo.extent.height
-        let layer = fade(logo.applyingFilter("CILanczosScaleTransform",
-            parameters: [kCIInputScaleKey: factor, kCIInputAspectRatioKey: 1.0]))
-        let ow = layer.extent.width, oh = layer.extent.height
-        let vTop = wmCorner.hasPrefix("t"), hRight = wmCorner.hasSuffix("r")
-        let contentL = Double(insetOx), contentR = Double(insetOx) + Double(insetW)
-        let bandCY = vTop ? (Double(insetOy) + Double(insetH) + Hd) / 2 : Double(insetOy) / 2
-        let tx = (hRight ? contentR - ow : contentL).rounded()
-        let ty = (bandCY - oh / 2).rounded()
-        wmMarginComposite = layer.transformed(by: CGAffineTransform(translationX: tx, y: ty))
-    } else {
-        let shortSide = min(Wd, Hd)
-        let factor = wmScaleFrac.map { ($0 * Wd).rounded() / logo.extent.width }
-            ?? ((shortSide * 0.10).rounded() / logo.extent.height)
-        let layer = fade(logo.applyingFilter("CILanczosScaleTransform",
-            parameters: [kCIInputScaleKey: factor, kCIInputAspectRatioKey: 1.0]))
-        let ow = layer.extent.width, oh = layer.extent.height
-        let p = (shortSide * 0.02).rounded()  // composite.rs padding = 2% of short side
-        // ffmpeg corner (top-left origin) -> CI bottom-left; integer placement.
-        let leftX = p, rightX = Wd - ow - p
-        let topY = Hd - p - oh, botY = p
-        let (tx, ty): (Double, Double)
-        switch wmCorner {
-        case "tl": (tx, ty) = (leftX, topY)
-        case "bl": (tx, ty) = (leftX, botY)
-        case "br": (tx, ty) = (rightX, botY)
-        default:   (tx, ty) = (rightX, topY)  // tr (composite.rs default)
-        }
-        wmComposite = layer.transformed(
-            by: CGAffineTransform(translationX: tx.rounded(), y: ty.rounded()))
+    let ow = layer.extent.width, oh = layer.extent.height
+    let p = (shortSide * 0.02).rounded()  // composite.rs padding = 2% of short side
+    // ffmpeg corner (top-left origin) -> CI bottom-left; integer placement.
+    let leftX = p, rightX = Wd - ow - p
+    let topY = Hd - p - oh, botY = p
+    let (tx, ty): (Double, Double)
+    switch wmCorner {
+    case "tl": (tx, ty) = (leftX, topY)
+    case "bl": (tx, ty) = (leftX, botY)
+    case "br": (tx, ty) = (rightX, botY)
+    default:   (tx, ty) = (rightX, topY)  // tr (composite.rs default)
     }
+    wmComposite = layer.transformed(
+        by: CGAffineTransform(translationX: tx.rounded(), y: ty.rounded()))
 }
 
 // --- Webcam bubble static setup: the mask (applied per frame to the live webcam)
@@ -951,13 +926,6 @@ writerInput.requestMediaDataWhenReady(on: queue) {
             out = content.transformed(by: CGAffineTransform(translationX: insetOx, y: insetOy))
                 .composited(over: base)
             if let border = borderLayer { out = border.composited(over: out) }
-        }
-
-        // Margin watermark (#3): a signature on the frame, composited onto the canvas
-        // margin AFTER the inset so it sits beside the content, not over it. Present only
-        // when a Wide background is active (Rust gates it); nil otherwise.
-        if let wm = wmMarginComposite {
-            out = wm.composited(over: out)
         }
 
         // Terminal downscale to the requested output dims — AFTER every overlay, so

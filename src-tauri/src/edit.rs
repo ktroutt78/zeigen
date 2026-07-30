@@ -752,13 +752,6 @@ fn build_compositor_command(
         if let Some(sf) = wm.scale_frac {
             cmd.env("WATERMARK_SCALE_FRAC", format!("{sf}"));
         }
-        // #3: with a Wide background active the watermark moves to the canvas margin.
-        // (Tight is already dropped upstream, so watermark here means Wide-or-no-bg.)
-        if let Some((frame, _)) = frame_bg {
-            if frame.padding >= MARGIN_WATERMARK_MIN_PADDING {
-                cmd.env("WATERMARK_IN_MARGIN", "1");
-            }
-        }
     }
     // Frosted-glass redaction panels (REDACTION-PLAN). Added last and only when
     // present; absent -> the pre-redaction command exactly.
@@ -1457,20 +1450,6 @@ fn has_background(sidecar: &SidecarState) -> bool {
     ) && sidecar.frame.map_or(false, |f| f.padding > 0.0)
 }
 
-// A margin watermark needs a Wide margin to fit; this threshold sits between the Tight
-// (0.06) and Wide (0.12) presets. Mirrored by the Review UI's grey-out rule.
-const MARGIN_WATERMARK_MIN_PADDING: f64 = 0.09;
-
-// When a background is active but the margin is too tight to seat a margin watermark,
-// the watermark is dropped entirely (there's no room, and it must NOT fall back onto the
-// content — the UI greys it). With no background it renders on content as before.
-fn watermark_dropped_tight(sidecar: &SidecarState) -> bool {
-    has_background(sidecar)
-        && sidecar
-            .frame
-            .map_or(false, |f| f.padding < MARGIN_WATERMARK_MIN_PADDING)
-}
-
 pub(crate) fn run_edit_pipeline(
     screen_path: &Path,
     webcam_segments: &[std::path::PathBuf],
@@ -1490,10 +1469,7 @@ pub(crate) fn run_edit_pipeline(
     if let PipelineMode::Gif { resolution, fps } = mode {
         let has_zoom = !zoom_keyframes_to_segments(&sidecar.zoom).is_empty();
         let has_webcam = !webcam_segments.is_empty();
-        let effective_wm = watermark
-            .as_ref()
-            .filter(|w| w.logo_path.is_file())
-            .filter(|_| !watermark_dropped_tight(sidecar));
+        let effective_wm = watermark.as_ref().filter(|w| w.logo_path.is_file());
         if has_zoom || has_webcam || effective_wm.is_some() || has_background(sidecar) {
             let note = run_v3_gif(
                 screen_path,
@@ -1521,10 +1497,7 @@ pub(crate) fn run_edit_pipeline(
         PipelineMode::Mp4 { resolution } => resolution,
         PipelineMode::Gif { .. } => unreachable!("GIF handled above"),
     };
-    let effective_wm = watermark
-        .as_ref()
-        .filter(|w| w.logo_path.is_file())
-        .filter(|_| !watermark_dropped_tight(sidecar));
+    let effective_wm = watermark.as_ref().filter(|w| w.logo_path.is_file());
     let has_zoom = !zoom_keyframes_to_segments(&sidecar.zoom).is_empty();
     let has_webcam = !webcam_segments.is_empty();
     if has_zoom || has_webcam || effective_wm.is_some() || has_background(sidecar) {
@@ -2553,48 +2526,6 @@ ZOOM_SEGMENTS=/S/zoom.json";
         s.background = None;
         s.frame = Some(FrameStyle { padding: 0.1, ..Default::default() });
         assert!(!has_background(&s), "padding with no background -> copy path");
-    }
-
-    // #3: a Wide background moves the watermark to the margin (WATERMARK_IN_MARGIN);
-    // no background leaves it on content; and a Tight background drops it (no room).
-    #[test]
-    fn watermark_margin_gating() {
-        use std::collections::BTreeSet;
-        use std::ffi::OsStr;
-        fn envs_of(cmd: &Command) -> BTreeSet<String> {
-            cmd.get_envs()
-                .filter_map(|(k, _)| Some(k.to_string_lossy().into_owned()))
-                .collect()
-        }
-        let bin = Path::new("/S/cicompositor");
-        let wm = Watermark {
-            logo_path: PathBuf::from("/S/logo.png"),
-            corner: crate::composite::Corner::BottomLeft,
-            scale_frac: None,
-            opacity: 1.0,
-        };
-        let bg = Background::Gradient { preset: "graphite".into() };
-        let wide = FrameStyle { padding: 0.12, ..Default::default() };
-        let mk = |fb: Option<(FrameStyle, &Background)>| {
-            build_compositor_command(
-                bin, Path::new("/S/in.mp4"), Path::new("/S/v3.mp4"), (1468, 770), (1468, 770),
-                None, None, None, None, 30.0, Some(&wm), None, fb,
-            )
-        };
-        // Wide background -> WATERMARK_IN_MARGIN emitted.
-        assert!(envs_of(&mk(Some((wide, &bg)))).contains("WATERMARK_IN_MARGIN"),
-            "Wide background must move the watermark to the margin");
-        // No background -> on content, env absent.
-        assert!(!envs_of(&mk(None)).contains("WATERMARK_IN_MARGIN"),
-            "no background must leave the watermark on content");
-
-        // Upstream drop at Tight (the compositor never sees the watermark).
-        let mut s = pre_zoom_populated_state();
-        s.background = Some(bg.clone());
-        s.frame = Some(FrameStyle { padding: 0.06, ..Default::default() });
-        assert!(watermark_dropped_tight(&s), "Tight background drops the watermark (no room)");
-        s.frame = Some(FrameStyle { padding: 0.12, ..Default::default() });
-        assert!(!watermark_dropped_tight(&s), "Wide background keeps the watermark");
     }
 
     // Slice 3: a gradient background gates the compositor and emits the preset name
