@@ -1208,7 +1208,13 @@ function App() {
                     screenPath: info.screen_path,
                     webcamPath: info.webcam_path,
                     webcamLeadMs: info.webcam_lead_ms,
-                    sourceKind,
+                    // ctrlRef, not the closure var: this listener is registered
+                    // once (empty-deps), so the bare `sourceKind` here is frozen at
+                    // its mount value ("display") and every capture — window
+                    // included — would open Review as a display, defeating the
+                    // Corners gating. ctrlRef.current stays live (see the area
+                    // check above).
+                    sourceKind: ctrlRef.current.sourceKind,
                   },
                   decReview,
                 );
@@ -1286,7 +1292,13 @@ function App() {
                     screenPath: info.screen_path,
                     webcamPath: info.webcam_path,
                     webcamLeadMs: info.webcam_lead_ms,
-                    sourceKind,
+                    // ctrlRef, not the closure var: this listener is registered
+                    // once (empty-deps), so the bare `sourceKind` here is frozen at
+                    // its mount value ("display") and every capture — window
+                    // included — would open Review as a display, defeating the
+                    // Corners gating. ctrlRef.current stays live (see the area
+                    // check above).
+                    sourceKind: ctrlRef.current.sourceKind,
                   },
                   decReview,
                 );
