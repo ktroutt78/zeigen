@@ -383,39 +383,27 @@ const FRAME_WIDE = 0.12;
 // content short side) that stays close to a native window corner when chosen.
 const FRAME_ROUND = 0.018;
 const FRAME_SHADOW = 1.0;
-const FRAME_RIM = 0.003;
+// FRAME_RIM removed 2026-07-30 (the inset rim read as unwanted dark edge lines).
 // Window captures come out of SCK with their own rounded corners and OPAQUE BLACK
 // (not alpha — capture is 4:2:0, no alpha anywhere in the pipeline) filling the gap
-// outside that arc. Over a background those gaps read as black crescents. Fix: clip the
-// content to a radius that fully COVERS the window's own corner, masking the window
-// edge + the black away and leaving one clean arc over the bg. MANDATORY for window
-// sources (the fix, not a style) — the Corners control is hidden for them. Point-based
-// (CLIP_PT/pointShort is scale-independent — the capture scale cancels through the
-// compositor's fraction*insetShort).
+// outside that arc. Over a background those gaps read as black crescents. The EXPORT
+// masks them precisely: the compositor MEASURES the black gap's reach from the capture
+// (docs/DECISIONS 2026-07-30 part 5) — self-calibrating, no fragile point constant.
 //
-// The value is EMPIRICAL, measured on a real macOS 26 window capture (Podcasts, 1x),
-// NOT the ~11pt textbook radius: (1) macOS 26 windows measure ~18pt at the corner, far
-// rounder than older macOS; (2) our clip is a CIRCLE but the window corner is a
-// SQUIRCLE (continuous curve), so a circular mask must be ~1.5x the nominal radius to
-// cover the squircle's shoulders — 18 * 1.5 ~= 27. A radius sweep on the real capture
-// (docs/DECISIONS 2026-07-30 part 3) showed the black crescent gone at 28pt and still
-// present at 13pt. Err LARGE: over-clip is an invisible corner sliver; too small leaves
-// the visible black. If a future macOS changes the window radius, re-measure and revisit
-// (or switch to a squircle mask to match the shape with less over-clip).
-const WINDOW_CLIP_PT = 28;
-// Fallback fraction when the window's point size is unknown (edge-case opens): errs
-// large (~WINDOW_CLIP_PT over a typical ~800pt window) so the black never survives.
-const WINDOW_CLIP_FALLBACK_FRAC = 0.035;
-function windowClipCornerFrac(pointShort: number | null): number {
-  return pointShort && pointShort > 0
-    ? WINDOW_CLIP_PT / pointShort
-    : WINDOW_CLIP_FALLBACK_FRAC;
-}
+// This fraction is PREVIEW-ONLY (and a compositor fallback if the measure fails). The
+// preview can't cheaply decode pixels, so it rounds the video by a generous fixed
+// fraction that comfortably covers a macOS-26 window corner (~4-5% of the short side)
+// plus margin, so the preview shows a clean rounded corner like the export. Over-
+// rounding the preview a touch is fine (approximate WYSIWYG); the export is exact.
+const WINDOW_CLIP_PREVIEW_FRAC = 0.055;
 const DEFAULT_FRAME: FrameStyle = {
   padding: FRAME_WIDE,
   corner_radius: 0, // Square by default
   shadow: FRAME_SHADOW,
-  inset: FRAME_RIM,
+  inset: 0, // Rim REMOVED (2026-07-30): it read as unwanted dark edge lines over the
+  // window on a light background; the elevation shadow alone separates the card. The
+  // inset field stays in the schema but is never set, and the compositor + preview no
+  // longer render a rim.
 };
 const DEFAULT_SOLID_HEX = "#1E293B";
 
@@ -904,11 +892,11 @@ export default function Review() {
   // 2026-07-29). Metadata: persisted but excluded from the dirty check.
   const [sourceKind, setSourceKind] = useState<string | null>(params.sourceKind);
   const isWindowSource = sourceKind === "window";
-  // Mandatory corner-clip radius for window captures (see WINDOW_CLIP_PT): kills
-  // the SCK black-corner wedges. Sized from the window's point short side (from the
-  // open params). Applied as the frame's corner_radius for window sources; the
-  // Corners control is hidden for them since there's no choice to make.
-  const windowClipCorner = windowClipCornerFrac(params.windowPointShort);
+  // Mandatory corner-clip for window captures: kills the SCK black-corner wedges. The
+  // EXPORT measures the exact reach in the compositor; this generous fixed fraction is
+  // the PREVIEW's rounding (and the compositor fallback). Applied as the frame's
+  // corner_radius for window sources; the Corners control is hidden for them.
+  const windowClipCorner = WINDOW_CLIP_PREVIEW_FRAC;
   // Selection = a PRIMARY (the focus: drives the timeline edit row, the strong
   // highlight, single-region edits) plus a SET for batch timing (shift-click). The
   // primary is always in the set; a plain click collapses the set to just it.
@@ -2820,10 +2808,9 @@ function VideoStage(props: VideoStageProps) {
         stageSize.height - (insetBox.y + insetBox.h)
       }px ${insetBox.x}px round ${cornerPx}px)`
     : undefined;
-  const rimFrac = props.frame?.inset ?? 0;
-  const rimPx = Math.max(1, rimFrac * shortSide);
   const marginShort = (insetFrac * Math.min(fullBox.w, fullBox.h)) / 2;
   const shadowOn = (props.frame?.shadow ?? 0) > 0;
+  // Rim REMOVED (2026-07-30): only the elevation drop shadow separates the card now.
   const frameWrapStyle: React.CSSProperties = bgActive
     ? {
         position: "absolute",
@@ -2833,14 +2820,9 @@ function VideoStage(props: VideoStageProps) {
         height: insetBox.h,
         borderRadius: cornerPx,
         overflow: "hidden",
-        boxShadow: [
-          shadowOn
-            ? `0 ${(0.45 * marginShort).toFixed(1)}px ${(0.85 * marginShort).toFixed(1)}px rgba(0,0,0,0.5)`
-            : "",
-          rimFrac > 0 ? `inset 0 0 0 ${rimPx.toFixed(1)}px rgba(0,0,0,0.55)` : "",
-        ]
-          .filter(Boolean)
-          .join(", "),
+        boxShadow: shadowOn
+          ? `0 ${(0.45 * marginShort).toFixed(1)}px ${(0.85 * marginShort).toFixed(1)}px rgba(0,0,0,0.5)`
+          : "none",
       }
     : { position: "absolute", inset: 0 };
   // While the Redact tool is active AND paused, hold the frame flat so a box is

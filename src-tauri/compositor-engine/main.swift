@@ -582,20 +582,66 @@ let insetH = Int((Hd * insetK).rounded())
 let insetOx = ((Wd - Double(insetW)) / 2).rounded()   // content origin in canvas (CI bottom-left)
 let insetOy = ((Hd - Double(insetH)) / 2).rounded()
 let insetShort = Double(min(insetW, insetH))
-let cornerPx = CGFloat(frameCornerFrac * insetShort)
 
-// Window captures carry their OWN rounded corners with opaque-black gaps (SCK 4:2:0,
-// no alpha). Rounding them in the inset stage (post-zoom, fixed radius) fails under
-// zoom: a zoomed-in corner is magnified past the fixed clip and the black leaks. So for
-// window sources round in SOURCE space instead (before zoom, below), so the rounding —
-// and the black masking — magnifies WITH the content at any zoom. The source radius is
-// the same fraction of the SOURCE short side (= cornerPx / insetK), so after the inset's
-// insetK downscale it lands exactly at cornerPx un-zoomed, matching the shadow + rim
-// silhouettes. Display/area sources have no black corners and keep the fixed inset-stage
-// mask (their styling round is a fixed card corner, not something that should zoom).
+// Window captures carry their OWN rounded corners with opaque-black gaps (SCK 4:2:0, no
+// alpha to recover). We MEASURE that black gap's reach directly from frame 0 rather than
+// guess a radius from a point constant — the reach varies by window / display / scale, so
+// a constant is fragile (it was too small on real captures). The black is pure, so the
+// reach is unambiguous. windowSource is gated by edit.rs (WINDOW_CORNER=1).
 let windowSource = env["WINDOW_CORNER"] == "1"
-let sourceCornerMask: CIImage? = (insetActive && windowSource && cornerPx >= 0.5)
-    ? roundedFill(w: W, h: H, radius: CGFloat(frameCornerFrac * min(Wd, Hd)), gray: 1.0, alpha: 1.0)
+// Max reach (source px) of the near-black corner gap across all four corners, from frame 0.
+func measureBlackCornerReach(_ url: URL) -> Double? {
+    let gen = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+    gen.requestedTimeToleranceBefore = .zero
+    gen.requestedTimeToleranceAfter = CMTime(seconds: 1, preferredTimescale: 600)
+    guard let cg = try? gen.copyCGImage(at: .zero, actualTime: nil), cg.width > 0, cg.height > 0
+    else { return nil }
+    let w = cg.width, h = cg.height
+    var buf = [UInt8](repeating: 0, count: w * h * 4)
+    guard let c = CGContext(data: &buf, width: w, height: h, bitsPerComponent: 8,
+                            bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(),
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+    c.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+    func lum(_ x: Int, _ y: Int) -> Int {
+        let i = (y * w + x) * 4
+        return (Int(buf[i]) * 30 + Int(buf[i + 1]) * 59 + Int(buf[i + 2]) * 11) / 100
+    }
+    // Contiguous near-black run inward from an edge (threshold catches the AA ramp too).
+    let cap = min(w, h) / 4, thr = 60
+    func run(_ xs: (Int) -> Int, _ ys: (Int) -> Int, along: Int) -> Int {
+        var r = 0
+        for d in 0..<min(cap, along) { if lum(xs(d), ys(d)) < thr { r = d + 1 } else { break } }
+        return r
+    }
+    var reach = 0
+    for d in [1, 2, 3, 4] {
+        reach = max(reach, run({ $0 }, { _ in d }, along: w), run({ w - 1 - $0 }, { _ in d }, along: w))
+        reach = max(reach, run({ $0 }, { _ in h - 1 - d }, along: w), run({ w - 1 - $0 }, { _ in h - 1 - d }, along: w))
+        reach = max(reach, run({ _ in d }, { $0 }, along: h), run({ _ in w - 1 - d }, { $0 }, along: h))
+        reach = max(reach, run({ _ in d }, { h - 1 - $0 }, along: h), run({ _ in w - 1 - d }, { h - 1 - $0 }, along: h))
+    }
+    return reach > 1 ? Double(reach) : nil
+}
+// Clip radius (source px): measured reach + margin (covers residual AA + the sliver a
+// CIRCULAR arc leaves against the window's SQUIRCLE). Fallback to the passed fraction of
+// the source short side if measurement fails.
+let windowClipMargin = Double(env["WINDOW_CLIP_MARGIN"] ?? "") ?? 10.0
+let windowCornerR: Double = windowSource
+    ? ((measureBlackCornerReach(inURL).map { $0 + windowClipMargin }) ?? (frameCornerFrac * min(Wd, Hd)))
+    : 0
+if windowSource {
+    FileHandle.standardError.write("measured window corner reach -> clip R=\(windowCornerR)px (source)\n".data(using: .utf8)!)
+}
+
+// Corner radius in inset space. Window sources use the MEASURED reach (× insetK so it
+// lands right after the inset downscale); display/area use their fixed styling fraction.
+let cornerPx = windowSource ? CGFloat(windowCornerR * insetK) : CGFloat(frameCornerFrac * insetShort)
+
+// Window sources round the corners in SOURCE space (before zoom) so the rounding — and
+// the black masking — magnifies WITH the content at any zoom (a fixed post-zoom clip is
+// outgrown by a magnified corner). Radius = the measured source-space reach+margin.
+let sourceCornerMask: CIImage? = (insetActive && windowSource && windowCornerR >= 0.5)
+    ? roundedFill(w: W, h: H, radius: CGFloat(windowCornerR), gray: 1.0, alpha: 1.0)
     : nil
 
 // Rounded-corner alpha mask at content-local extent. nil when square (or a window
@@ -624,15 +670,10 @@ let bgWithShadow: CIImage? = {
     return shadow.composited(over: bg)
 }()
 
-// Inset border: a thin light rim on the content edge (canvas-placed). nil when 0.
-let borderLayer: CIImage? = {
-    guard insetActive, frameInsetFrac > 0 else { return nil }
-    let lw = max(1.0, CGFloat(frameInsetFrac * insetShort))
-    return roundedStroke(w: insetW, h: insetH, radius: cornerPx, lineWidth: lw,
-                         gray: CGFloat(rimGray), alpha: CGFloat(rimAlpha))?
-        .transformed(by: CGAffineTransform(translationX: insetOx, y: insetOy))
-        .cropped(to: CGRect(x: 0, y: 0, width: Wd, height: Hd))
-}()
+// Inset border (rim) REMOVED 2026-07-30: over a window on a light background it read as
+// unwanted dark edge lines; the elevation shadow alone separates the card. FRAME_INSET /
+// RIM_* env are ignored now (roundedStroke kept only in case a future stroke needs it).
+let borderLayer: CIImage? = nil
 
 // Pre-scale the watermark once (constant for the whole recording) and precompute
 // its integer top-left. scale: width-based round(sw*frac) (aspect kept) or legacy
