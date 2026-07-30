@@ -4,6 +4,20 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-30 (part 5) — MEASURE the window corner from the capture (the point constant was fragile); and REMOVE the inset rim.
+
+Settled the "is the raw dirty or are we adding it" question by sampling THIS recording's raw `screen.mp4` (owner's Notes window, 1832x1042), row by row from all four edges:
+- STRAIGHT EDGES ARE CLEAN in the capture (all ~253 white, first 12 rows/cols). So the dark EDGE LINES the owner saw are NOT captured — they were the `FRAME_INSET` rim we composite (rgba 0,0,0,0.55, ~2px), confirmed by sampling the export's content edge (`103,104` there, `253` in the raw). Reconciles the earlier "edges bright" reports: straight edges have always been clean; the corners have always been black. `ignoreShadowsSingleWindow` is working — a shadow ring would darken the straight edges; it doesn't.
+- CORNERS ARE BLACK in the capture (~607 px/corner, reach 38px) — the window's OWN rounded-corner gap (inherent to window capture; unremovable at the engine without alpha, which doesn't exist). So the corner fix is compositor-side, not engine-side.
+
+Two decisions:
+1. CORNER — measure, don't guess. The point-based `WINDOW_CLIP_PT=28` gave a ~30px clip here, SMALLER than the window's 38px black -> leaked even un-zoomed. The constant is fragile (varies by window/display/scale; the Podcasts capture measured ~18px, this one ~38px). Replaced it: the compositor now MEASURES the pure-black corner reach from frame 0 (`AVAssetImageGenerator` + a corner scan for the contiguous near-black run inward) and clips to reach + `WINDOW_CLIP_MARGIN` (default 10px). Self-calibrating, no constant, no scale/pointShort dependency. Kept the part-4 source-space masking so it also survives zoom. Verified on the real Notes capture: corners 239 black px -> 0 un-zoomed, and clean across the top edge under a top-left 2x zoom. The frontend's `windowPointShort` URL plumbing is now DORMANT (preview uses a generous fixed 0.055 fraction; the export measures).
+2. RIM — removed entirely (owner call). The inset border read as unwanted dark edge lines over a window on a light background; the elevation shadow alone separates the card. `DEFAULT_FRAME.inset=0`, preview drops the inset box-shadow, compositor `borderLayer=nil`. The `inset` field stays in the schema (unset) to avoid a serialization churn. Supersedes the 2026-07-29 "rim now black / rim earns its place" notes.
+
+Lesson reinforced: the macOS window corner radius is NOT a portable constant — measure it from the actual pixels. And sample the raw capture from the EXACT recording in question, not an older one.
+
+---
+
 ## 2026-07-30 (part 4) — Window-corner black returns UNDER ZOOM: a fixed post-zoom clip can't cover a magnified corner. Mask in SOURCE space instead.
 
 After part 3 (radius bumped to 28pt) the corners were clean un-zoomed but a dark "band" appeared along an edge under zoom — reported as a soft full-width top band. Diagnosed from the owner's real capture + sidecar (raw `screen.mp4` in the scratch dir, its `.annotations.json` sidecar, AND the saved export mp4 — all readable in-session).
