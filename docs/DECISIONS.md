@@ -4,6 +4,16 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-29 — Background/frame: watermark stays ON CONTENT; corners default SQUARE (final)
+
+Two settled calls after the Slice-4 signed-build eye-check:
+
+**Watermark stays on the content — no margin mode.** A brief experiment (d4cb5d7) moved the watermark into the canvas margin when a background was active. Reverted (3d092c6). The margin is negative space that makes the frame look designed; seating a small mark in it reads as a stray element crammed in a corner and clipped by the frame edge, and it fights the whole point of the margin. Watermark = always on the content, positioned by the corner picker, sized by the slider. Don't re-propose margin/Tight-Wide-gated watermark placement.
+
+**Corners default to Square (Rounded opt-in at 0.018).** Rounding the outer frame clips real corner content — a full-display capture reaches the menu bar/edges, and our radius exceeds a window's own ~10px curve. Black-notch question resolved: ScreenCaptureKit WINDOW captures come out with CLEAN corners (not black) in this app's pipeline, so Square exposes no black notch and needs no small-always-on-round fallback. Square is the final default; Rounded stays available.
+
+**Bubble stays inside the content, always** (never the margin) and is clipped to the content rect (rounded) in the preview so its element + shadow can't spill past the frame edge (7af288b). The export was already bounded by the inset crop/mask.
+
 ## 2026-07-29 — Gradient/backdrop palette must be judged at full size in the real thin-margin view, NOT on whole-frame thumbnails
 
 The Slice 3 gradient palette was eye-checked on small whole-frame contact sheets (each gradient ~560px wide, the entire framed recording visible in one glance). It "passed." Installed at 1:1, the same gradients read as flat solid colors. Root cause of the bad methodology: the recording covers the center of the canvas, so the ONLY part of the background a viewer ever sees is a thin margin frame around the edges. A corner-to-corner linear gradient changes its full A→B range across the whole diagonal, so within any thin margin slice the LOCAL change is ~1–2 levels — imperceptible. On a shrunk whole-frame thumbnail the four corners sit adjacent and the eye catches the corner-to-corner delta; at full size through the margin it never sees a contiguous stretch of the transition. Proven by pixel-sampling the four canvas corners (gradient renders correctly — TL=stop A, BR=stop B) and by an A/B render: 2× contrast reads clearly at the same margin, while widening the margin at current contrast barely helps.
