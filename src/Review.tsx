@@ -2720,6 +2720,14 @@ function VideoStage(props: VideoStageProps) {
   // corners, not the element's own box-shadow), so the window reads as floating.
   const shortSide = Math.min(insetBox.w, insetBox.h);
   const cornerPx = (props.frame?.corner_radius ?? 0) * shortSide;
+  // The webcam bubble is a sibling layer (not inside the frame wrapper), so nothing
+  // clips it — its element + drop shadow would spill past the content into the margin.
+  // Clip it to the content rect (rounded to match corners); no clip with no background.
+  const bubbleClipPath = bgActive
+    ? `inset(${insetBox.y}px ${stageSize.width - (insetBox.x + insetBox.w)}px ${
+        stageSize.height - (insetBox.y + insetBox.h)
+      }px ${insetBox.x}px round ${cornerPx}px)`
+    : undefined;
   const rimFrac = props.frame?.inset ?? 0;
   const rimPx = Math.max(1, rimFrac * shortSide);
   const marginShort = (insetFrac * Math.min(fullBox.w, fullBox.h)) / 2;
@@ -2893,20 +2901,22 @@ function VideoStage(props: VideoStageProps) {
           )}
         </div>
         </div>
-        <BubbleLayer
-          stageRef={stageRef}
-          screenVideoRef={props.videoRef}
-          webcamVideoRef={props.webcamVideoRef}
-          webcamUrl={props.webcamUrl}
-          webcamLeadSec={props.webcamLeadSec}
-          bubblePositionLog={props.bubblePositionLog}
-          bubbleRoundness={props.bubbleRoundness}
-          bubbleZone={props.bubbleZone}
-          bubbleScale={props.bubbleScale}
-          scrubbingRef={props.scrubbingRef}
-          videoDims={props.watermarkPreview.videoDims}
-          insetFrac={insetFrac}
-        />
+        <div style={{ position: "absolute", inset: 0, pointerEvents: "none", clipPath: bubbleClipPath }}>
+          <BubbleLayer
+            stageRef={stageRef}
+            screenVideoRef={props.videoRef}
+            webcamVideoRef={props.webcamVideoRef}
+            webcamUrl={props.webcamUrl}
+            webcamLeadSec={props.webcamLeadSec}
+            bubblePositionLog={props.bubblePositionLog}
+            bubbleRoundness={props.bubbleRoundness}
+            bubbleZone={props.bubbleZone}
+            bubbleScale={props.bubbleScale}
+            scrubbingRef={props.scrubbingRef}
+            videoDims={props.watermarkPreview.videoDims}
+            insetFrac={insetFrac}
+          />
+        </div>
         {props.zoom.selectedIndex != null &&
           !props.zoom.looping &&
           props.zoom.segments[props.zoom.selectedIndex] && (
