@@ -4,6 +4,20 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-30 (part 4) — Window-corner black returns UNDER ZOOM: a fixed post-zoom clip can't cover a magnified corner. Mask in SOURCE space instead.
+
+After part 3 (radius bumped to 28pt) the corners were clean un-zoomed but a dark "band" appeared along an edge under zoom — reported as a soft full-width top band. Diagnosed from the owner's real capture + sidecar (raw `screen.mp4` in the scratch dir, its `.annotations.json` sidecar, AND the saved export mp4 — all readable in-session).
+
+What it actually was: the corner clip ran in the inset stage (POST-zoom) at a FIXED radius, but the window's own black corner is part of the content and is MAGNIFIED by zoom (2x zoom -> ~2x bigger black corner). The fixed clip is outgrown -> the enlarged black corner leaks. It shows at whichever corner the zoom CLAMPS to: this capture's zoom clamped top-left, so the leak was at the top-left corner — which is why the earlier bottom-right-zoom repro couldn't see it (a real lesson: reproduce at the zoom position the user is actually using).
+
+The "full-width soft band" was a misread, settled by sampling pixels (min-luma + count-of-near-black per column across the top edge, on BOTH the owner's screenshot and the export): PURE BLACK only at the top-left corner (the leak); across the rest of the top, zero black — just the ~2-3px FRAME_INSET rim (rgba 0,0,0,0.55) reading as a soft thin line over the light wallpaper. The screenshot's pixels MATCHED the export (so it was the exported mp4 in Quick Look, not a preview-only artifact — the titlebar even showed the .mp4 name). So: one bug (corner leak) + one designed element (the rim), not a hidden band.
+
+Fix: for window sources, round the corners to transparent in SOURCE space (before zoom) so the rounding — and thus the black masking — magnifies WITH the content at any zoom, instead of a fixed post-zoom clip. Source radius = same fraction of the SOURCE short side (= cornerPx/insetK), so after the inset insetK downscale it lands at cornerPx un-zoomed (matches shadow+rim silhouettes; no un-zoomed change). Inset-stage mask skipped for window sources; display/area keep the fixed inset mask (no black corners, and their card round shouldn't zoom). Plumbed `WINDOW_CORNER=1` from edit.rs when `source_kind=="window"` + corner set. Verified on the real top-left-zoom capture: 2x-zoom top-left corner went from pure black to a clean rounded corner (min luma 0 -> 39 = just rim/shadow).
+
+Note: the FRAME_INSET rim is a designed element, not a leak; if it ever reads too heavy over a light background, tune RIM_ALPHA / FRAME_INSET separately.
+
+---
+
 ## 2026-07-30 (part 3) — The ACTUAL root cause of the window-corner black: the clip radius was too small — macOS 26 windows are ~18pt and a CIRCULAR clip of a SQUIRCLE needs ~1.5x. Verified on the real capture.
 
 Parts 1-2 were necessary groundwork but neither was the root cause. Found it by sampling the user's REAL raw capture (`~/Movies/Zeigen/.scratch/recording-<stamp>/sources/screen.mp4`, present while the Review window is open) plus its sidecar — NOT by eye or synthetic guess.
