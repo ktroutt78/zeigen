@@ -2555,6 +2555,48 @@ ZOOM_SEGMENTS=/S/zoom.json";
         assert!(!has_background(&s), "padding with no background -> copy path");
     }
 
+    // #3: a Wide background moves the watermark to the margin (WATERMARK_IN_MARGIN);
+    // no background leaves it on content; and a Tight background drops it (no room).
+    #[test]
+    fn watermark_margin_gating() {
+        use std::collections::BTreeSet;
+        use std::ffi::OsStr;
+        fn envs_of(cmd: &Command) -> BTreeSet<String> {
+            cmd.get_envs()
+                .filter_map(|(k, _)| Some(k.to_string_lossy().into_owned()))
+                .collect()
+        }
+        let bin = Path::new("/S/cicompositor");
+        let wm = Watermark {
+            logo_path: PathBuf::from("/S/logo.png"),
+            corner: crate::composite::Corner::BottomLeft,
+            scale_frac: None,
+            opacity: 1.0,
+        };
+        let bg = Background::Gradient { preset: "graphite".into() };
+        let wide = FrameStyle { padding: 0.12, ..Default::default() };
+        let mk = |fb: Option<(FrameStyle, &Background)>| {
+            build_compositor_command(
+                bin, Path::new("/S/in.mp4"), Path::new("/S/v3.mp4"), (1468, 770), (1468, 770),
+                None, None, None, None, 30.0, Some(&wm), None, fb,
+            )
+        };
+        // Wide background -> WATERMARK_IN_MARGIN emitted.
+        assert!(envs_of(&mk(Some((wide, &bg)))).contains("WATERMARK_IN_MARGIN"),
+            "Wide background must move the watermark to the margin");
+        // No background -> on content, env absent.
+        assert!(!envs_of(&mk(None)).contains("WATERMARK_IN_MARGIN"),
+            "no background must leave the watermark on content");
+
+        // Upstream drop at Tight (the compositor never sees the watermark).
+        let mut s = pre_zoom_populated_state();
+        s.background = Some(bg.clone());
+        s.frame = Some(FrameStyle { padding: 0.06, ..Default::default() });
+        assert!(watermark_dropped_tight(&s), "Tight background drops the watermark (no room)");
+        s.frame = Some(FrameStyle { padding: 0.12, ..Default::default() });
+        assert!(!watermark_dropped_tight(&s), "Wide background keeps the watermark");
+    }
+
     // Slice 3: a gradient background gates the compositor and emits the preset name
     // (BACKGROUND_KIND=gradient + BACKGROUND_GRADIENT), never the solid hex.
     #[test]
