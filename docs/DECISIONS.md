@@ -4,6 +4,14 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-30 — A lane that owns the add-surface must render even when empty.
+
+Bug: a recording with zero suggested zooms had no way to add the first zoom manually. The zoom `SegmentTrack` lane was gated on `segments.length > 0` in `Review.tsx`, so an empty list rendered no lane — and the lane's blank-track click IS the add gesture. Re-suggest was the only path in from zero, and it returns nothing on a clip with no cursor activity; the panel's empty-state copy even pointed at a lane that wasn't there.
+
+Rule (the one that would have caught this, and recurs): **any lane that owns its own add-surface must stay rendered when empty** — an empty state that offers no way to leave it is a dead end. Adding the first item and adding the Nth must go through the same code path (here, `addZoomAt`), so the empty lane just has to exist and be clickable. The redaction lane is NOT subject to this: it has no `onAddAt` (regions are drawn on the video), so its `regions.length > 0` gate has a discoverable alternate path and is fine. The pattern applies specifically to lanes bearing the add-surface, not to every `SegmentTrack`.
+
+Fix: gate the zoom lane on `duration != null` only, and render a visible "Click to add a zoom" affordance while empty (`pointerEvents:none`, so the click falls through to the SegmentTrack add-surface underneath). The strip disappears once a zoom exists — the bands then carry the lane's visibility.
+
 ## 2026-07-30 (part 5) — MEASURE the window corner from the capture (the point constant was fragile); and REMOVE the inset rim.
 
 Settled the "is the raw dirty or are we adding it" question by sampling THIS recording's raw `screen.mp4` (owner's Notes window, 1832x1042), row by row from all four edges:

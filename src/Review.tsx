@@ -4266,13 +4266,15 @@ function Timeline(props: TimelineProps) {
         </div>
       </div>
 
-      {/* Zoom lane — second SegmentTrack row under the main track. Only
-          rendered once zooms exist (added via the right panel's Zoom
-          section) so no-zoom recordings keep today's layout. marginTop
-          clears the thumbnail tick that hangs below the track. Bands stay
-          visible unselected (alwaysBand): a zoom is a range the user
-          reasons about, not a point. */}
-      {props.zoom.segments.length > 0 && props.duration != null && (
+      {/* Zoom lane — second SegmentTrack row under the main track. Always
+          rendered once the duration is known (even with zero zooms) so the
+          lane is a standing click-to-add surface: clicking empty track adds
+          the first zoom exactly as it adds a later one. Gating it on
+          segments.length created a dead end — a no-zoom recording had no lane
+          to click and no other way in. marginTop clears the thumbnail tick
+          that hangs below the track. Bands stay visible unselected
+          (alwaysBand): a zoom is a range the user reasons about, not a point. */}
+      {props.duration != null && (
         <div
           style={{ position: "relative", height: 44, marginTop: 16 }}
           onPointerMove={(e) => {
@@ -4283,6 +4285,36 @@ function Timeline(props: TimelineProps) {
           }}
           onPointerLeave={onTrackPointerLeave}
         >
+          {/* Empty-lane affordance: a visible violet strip that makes the
+              otherwise-blank lane discoverable and reads as "click to add".
+              pointerEvents:none so the click falls through to the
+              SegmentTrack add-surface underneath. Disappears once a zoom
+              exists (the bands then carry the lane's visibility). */}
+          {props.zoom.segments.length === 0 && (
+            <div
+              style={{
+                position: "absolute",
+                left: 0,
+                right: 0,
+                top: 4,
+                height: 36,
+                border: "1px dashed var(--zoom)",
+                background: "var(--zoom-soft)",
+                borderRadius: 4,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontSize: 11,
+                fontWeight: 600,
+                letterSpacing: "0.03em",
+                color: "var(--zoom)",
+                opacity: 0.85,
+                pointerEvents: "none",
+              }}
+            >
+              Click to add a zoom
+            </div>
+          )}
           <SegmentTrack
             segments={props.zoom.segments}
             duration={props.duration}
