@@ -87,6 +87,74 @@ pub struct SidecarState {
     // empty track never perturbs the serialized field order of existing sidecars.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub redactions: Vec<RedactionRegion>,
+    // Frame styling for the padded recording (BACKGROUND-PADDING-PLAN). All knobs
+    // 0 = the padding-0 no-op: the recording fills the canvas and no background
+    // shows. frame_is_noop drops both None and an all-zero struct, so a hand-
+    // written "frame": {} re-serializes to ABSENT — the Option<struct> analog of
+    // the empty-Vec collapse used by zoom/redactions. Declared AFTER redactions
+    // (with background) so an unset pair never perturbs the field order of
+    // existing sidecars; nothing renders it yet (Slice 1), so a set frame with no
+    // other edit must not yet leave the copy path — enforced by the export gate
+    // staying blind to it until Slice 1 wires has_background.
+    #[serde(default, skip_serializing_if = "frame_is_noop")]
+    pub frame: Option<FrameStyle>,
+    // Background canvas fill. Absent = no background = the padding-0 no-op, same
+    // skip-when-unset convention as frame.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<Background>,
+    // Capture source ("window" | "display" | "area"). Recorded so a reopened window
+    // capture still knows to gate off Rounded corners (the window supplies its own,
+    // and ours would double the edge — BACKGROUND-PADDING-PLAN / DECISIONS 2026-07-29).
+    // Metadata only: the export never reads it. Declared last; absent on legacy sidecars.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_kind: Option<String>,
+}
+
+// Frame styling for the padded recording (BACKGROUND-PADDING-PLAN §Q5). Every
+// value is the no-op at 0.0. padding is the fraction of the canvas consumed by
+// margin (content scale k = 1 - padding); corner_radius/shadow/inset are resolved
+// by the compositor's inset stage. Copy so it round-trips by value.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+pub struct FrameStyle {
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub padding: f64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub corner_radius: f64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub shadow: f64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub inset: f64,
+}
+
+impl FrameStyle {
+    fn is_noop(&self) -> bool {
+        self.padding == 0.0
+            && self.corner_radius == 0.0
+            && self.shadow == 0.0
+            && self.inset == 0.0
+    }
+}
+
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
+}
+
+// Drops both None and an all-zero FrameStyle so a wiped-to-zero panel serializes
+// to ABSENT (the empty-Vec collapse, for an Option<struct>).
+fn frame_is_noop(f: &Option<FrameStyle>) -> bool {
+    f.as_ref().map_or(true, FrameStyle::is_noop)
+}
+
+// Background canvas fill behind the padded recording. Gradient presets are
+// procedural (resolved by name in the compositor, no bundled assets); solid is a
+// "#RRGGBB" hex; image is an absolute path read at render time (watermark-logo
+// pattern). Absent = no background = the padding-0 no-op.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Background {
+    Gradient { preset: String },
+    Solid { hex: String },
+    Image { path: String },
 }
 
 // One point on the zoom curve (V3-PLAN C.2). Zoom state between keyframes
@@ -637,6 +705,8 @@ fn build_compositor_command(
     fps: f64,
     watermark: Option<&Watermark>,
     redact_json: Option<&Path>,
+    frame_bg: Option<(FrameStyle, &Background)>,
+    window_source: bool,
 ) -> Command {
     let (w, h) = src_dims;
     let (out_w, out_h) = out_dims;
@@ -694,6 +764,48 @@ fn build_compositor_command(
     // present; absent -> the pre-redaction command exactly.
     if let Some(rj) = redact_json {
         cmd.env("REDACT_REGIONS", rj);
+    }
+    // Background canvas + padding (BACKGROUND-PADDING-PLAN Slice 1). Emitted only when
+    // the inset stage is active (Some) — a padding-0 / no-background export gets no env
+    // and the command stays byte-identical. Only Solid is render-backed here; gradient
+    // and image land in later slices. corner/shadow/inset ride the sidecar but are not
+    // emitted until Slice 2 renders them.
+    if let Some((frame, bg)) = frame_bg {
+        cmd.env("FRAME_PADDING", format!("{}", frame.padding));
+        // Slice 2 frame styling — each emitted only when set, so a padding-only frame
+        // stays a single FRAME_PADDING env (and a square/shadowless render omits them).
+        if frame.corner_radius > 0.0 {
+            cmd.env("FRAME_CORNER_RADIUS", format!("{}", frame.corner_radius));
+            // Window sources round their corners in SOURCE space (pre-zoom) so the black
+            // corner gaps stay masked under zoom (a fixed post-zoom clip is outgrown by a
+            // magnified corner). Only meaningful with a corner radius set.
+            if window_source {
+                cmd.env("WINDOW_CORNER", "1");
+            }
+        }
+        if frame.shadow > 0.0 {
+            cmd.env("FRAME_SHADOW", format!("{}", frame.shadow));
+        }
+        if frame.inset > 0.0 {
+            cmd.env("FRAME_INSET", format!("{}", frame.inset));
+        }
+        match bg {
+            Background::Solid { hex } => {
+                cmd.env("BACKGROUND_KIND", "solid")
+                    .env("BACKGROUND_SOLID_HEX", hex);
+            }
+            Background::Gradient { preset } => {
+                cmd.env("BACKGROUND_KIND", "gradient")
+                    .env("BACKGROUND_GRADIENT", preset);
+            }
+            // User image (Slice 5): the absolute path, read + fill-cropped by the
+            // compositor at render time (watermark-logo pattern). A missing file
+            // degrades to a neutral solid in the compositor, so the path is passed
+            // through as-is without an existence check here.
+            Background::Image { path } => {
+                cmd.env("BACKGROUND_KIND", "image").env("BACKGROUND_IMAGE", path);
+            }
+        }
     }
     cmd
 }
@@ -841,6 +953,13 @@ fn v3_render(
         None => None,
     };
 
+    // Background/padding inset (BACKGROUND-PADDING-PLAN Slice 1). Active only when a
+    // render-backed background is chosen AND padding insets the content — the SAME
+    // predicate the export gate uses (has_background), so a set background never rides
+    // the copy path and an unset one never leaves it. Passed as one Option.
+    let frame_bg = has_background(sidecar)
+        .then(|| (sidecar.frame.unwrap(), sidecar.background.as_ref().unwrap()));
+
     let video_only = temp_dir.join("v3-video.mp4");
     // fps is only needed for the bubble lead/skip math; probe it only when a webcam
     // is present so the no-bubble path adds no extra probe (unchanged behavior).
@@ -858,6 +977,8 @@ fn v3_render(
         fps,
         watermark,
         redact_json_path.as_deref(),
+        frame_bg,
+        sidecar.source_kind.as_deref() == Some("window"),
     );
     let comp = cmd
         .output()
@@ -1335,6 +1456,20 @@ fn run_plain_mp4(
     Ok(())
 }
 
+// The background/padding inset stage is active only when a render-backed background
+// is chosen AND padding actually insets the content (padding 0 = no background shows =
+// the no-op). Gate and render share this ONE predicate so a set background never
+// silently takes the copy path — the worst failure mode for this feature. Only Solid
+// is render-backed in Slice 1; gradient/image extend this match as they land.
+fn has_background(sidecar: &SidecarState) -> bool {
+    matches!(
+        sidecar.background,
+        Some(Background::Solid { .. })
+            | Some(Background::Gradient { .. })
+            | Some(Background::Image { .. })
+    ) && sidecar.frame.map_or(false, |f| f.padding > 0.0)
+}
+
 pub(crate) fn run_edit_pipeline(
     screen_path: &Path,
     webcam_segments: &[std::path::PathBuf],
@@ -1355,7 +1490,7 @@ pub(crate) fn run_edit_pipeline(
         let has_zoom = !zoom_keyframes_to_segments(&sidecar.zoom).is_empty();
         let has_webcam = !webcam_segments.is_empty();
         let effective_wm = watermark.as_ref().filter(|w| w.logo_path.is_file());
-        if has_zoom || has_webcam || effective_wm.is_some() {
+        if has_zoom || has_webcam || effective_wm.is_some() || has_background(sidecar) {
             let note = run_v3_gif(
                 screen_path,
                 webcam_segments,
@@ -1385,7 +1520,7 @@ pub(crate) fn run_edit_pipeline(
     let effective_wm = watermark.as_ref().filter(|w| w.logo_path.is_file());
     let has_zoom = !zoom_keyframes_to_segments(&sidecar.zoom).is_empty();
     let has_webcam = !webcam_segments.is_empty();
-    if has_zoom || has_webcam || effective_wm.is_some() {
+    if has_zoom || has_webcam || effective_wm.is_some() || has_background(sidecar) {
         match run_v3_export(
             screen_path,
             webcam_segments,
@@ -1958,6 +2093,9 @@ mod tests {
             annotation_color: Some("#FF3B30".into()),
             zoom: vec![],
             redactions: vec![],
+            frame: None,
+            background: None,
+            source_kind: None,
         }
     }
 
@@ -2123,6 +2261,108 @@ mod tests {
         assert_eq!(sparse.tint, RedactionTint::Auto);
     }
 
+    // BACKGROUND-PADDING-PLAN Slice 0 no-op proof: absent frame + background
+    // serialize to nothing, so a recording with no background/padding produces the
+    // pinned pre-feature bytes exactly and rides the unchanged (copy) export path.
+    // Equality to PRE_ZOOM_SIDECAR_PIN (which predates these fields) IS the proof
+    // they add nothing — proven, not asserted.
+    #[test]
+    fn frame_and_background_absent_serialize_byte_identical() {
+        let state = pre_zoom_populated_state();
+        assert!(state.frame.is_none() && state.background.is_none());
+        assert_eq!(
+            serde_json::to_string_pretty(&state).unwrap(),
+            PRE_ZOOM_SIDECAR_PIN
+        );
+        // Untouched-recording shape is unchanged by the two new fields.
+        assert_eq!(
+            serde_json::to_string_pretty(&SidecarState::default()).unwrap(),
+            "{\n  \"annotations\": []\n}"
+        );
+    }
+
+    // A wiped-to-zero panel written as "frame": {} (or all knobs 0) re-serializes
+    // with the key gone — not as {} and not as null. The Option<struct> analog of
+    // the empty-Vec collapse zoom/redactions get.
+    #[test]
+    fn frame_zeroed_normalizes_to_absent() {
+        let mut with_empty: serde_json::Value =
+            serde_json::from_str(PRE_ZOOM_SIDECAR_PIN).unwrap();
+        with_empty["frame"] = serde_json::json!({});
+        let state: SidecarState = serde_json::from_value(with_empty).unwrap();
+        assert_eq!(
+            serde_json::to_string_pretty(&state).unwrap(),
+            PRE_ZOOM_SIDECAR_PIN
+        );
+
+        let mut all_zero: serde_json::Value =
+            serde_json::from_str(PRE_ZOOM_SIDECAR_PIN).unwrap();
+        all_zero["frame"] =
+            serde_json::json!({"padding": 0.0, "corner_radius": 0.0, "shadow": 0.0, "inset": 0.0});
+        let state: SidecarState = serde_json::from_value(all_zero).unwrap();
+        assert_eq!(
+            serde_json::to_string_pretty(&state).unwrap(),
+            PRE_ZOOM_SIDECAR_PIN
+        );
+    }
+
+    // A non-noop frame + a background survive serialize -> parse -> serialize with
+    // no loss, in memory and through the disk path. Zero-valued frame knobs drop
+    // from the emitted JSON (skip_serializing_if), so only the set knob persists.
+    #[test]
+    fn frame_and_background_round_trip_losslessly() {
+        let mut state = pre_zoom_populated_state();
+        state.frame = Some(FrameStyle {
+            padding: 0.12,
+            corner_radius: 24.0,
+            shadow: 0.5,
+            inset: 0.0,
+        });
+        state.background = Some(Background::Gradient {
+            preset: "violet_dusk".into(),
+        });
+        let json = serde_json::to_string_pretty(&state).unwrap();
+        // inset == 0 is dropped; the three set knobs survive.
+        assert!(json.contains("\"padding\": 0.12"));
+        assert!(!json.contains("inset"));
+        let reparsed: SidecarState = serde_json::from_str(&json).unwrap();
+        assert_eq!(reparsed, state);
+
+        let dir = std::env::temp_dir().join(format!("zeigen-frame-rt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("recording-rt.mp4");
+        write_sidecar_path(&source, &state).unwrap();
+        assert_eq!(read_sidecar_path(&source).unwrap().unwrap(), state);
+
+        // Each background variant round-trips through its tagged form.
+        for bg in [
+            Background::Solid { hex: "#1E293B".into() },
+            Background::Image { path: "/tmp/bg.png".into() },
+        ] {
+            let mut s = pre_zoom_populated_state();
+            s.background = Some(bg.clone());
+            let reparsed: SidecarState =
+                serde_json::from_str(&serde_json::to_string_pretty(&s).unwrap()).unwrap();
+            assert_eq!(reparsed.background, Some(bg));
+        }
+    }
+
+    // source_kind must survive read_sidecar (deserialize -> back to Review) so a
+    // reopened window capture still gates off Rounded; absent when unset (legacy
+    // sidecars + the no-op path stay byte-identical — the pins above prove that).
+    #[test]
+    fn source_kind_round_trips_and_skips_when_absent() {
+        let mut s = pre_zoom_populated_state();
+        s.source_kind = Some("window".into());
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"source_kind\":\"window\""));
+        let back: SidecarState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.source_kind.as_deref(), Some("window"));
+
+        let plain = pre_zoom_populated_state(); // source_kind: None
+        assert!(!serde_json::to_string(&plain).unwrap().contains("source_kind"));
+    }
+
     // GATE 1 (teardown) — the plain-MP4 tail (run_plain_mp4) survives the removal
     // of the V2 body byte-for-byte. Two guards:
     //   (a) runtime: a plain no-edit save keeps the video stream bit-exact (-c:v
@@ -2269,7 +2509,7 @@ mod tests {
         let mk = |rj: Option<&Path>| {
             build_compositor_command(
                 bin, screen, video_only, (3024, 1964), (1920, 1246), None,
-                Some(zoom), Some(webcam), Some(&bubble), 30.0, Some(&wm), rj,
+                Some(zoom), Some(webcam), Some(&bubble), 30.0, Some(&wm), rj, None, false,
             )
         };
         let base = mk(None);
@@ -2300,6 +2540,216 @@ ZOOM_SEGMENTS=/S/zoom.json";
         assert_eq!(added, vec!["REDACT_REGIONS=/S/redactions.json".to_string()],
             "redaction adds exactly the REDACT_REGIONS env");
         assert!(removed.is_empty(), "redaction removes/changes no existing env: {removed:?}");
+    }
+
+    // BACKGROUND-PADDING-PLAN Slice 1 gate — BOTH directions the owner asked to verify.
+    // has_background is the single predicate gating compositor-vs-copy, so proving it
+    // here proves the routing: a set background leaves the copy path, an absent one
+    // stays on it, and the two no-op edges (padding 0, background-less padding) stay on
+    // it too. A background that silently takes the copy path is a wrong export with no
+    // error — this test is the guard against exactly that.
+    #[test]
+    fn background_gate_both_directions() {
+        let mut s = pre_zoom_populated_state();
+        assert!(!has_background(&s), "no background must stay on the copy path");
+
+        s.background = Some(Background::Solid { hex: "#101828".into() });
+        s.frame = Some(FrameStyle { padding: 0.1, ..Default::default() });
+        assert!(has_background(&s), "solid background + padding must LEAVE the copy path");
+
+        s.frame = Some(FrameStyle { padding: 0.0, ..Default::default() });
+        assert!(!has_background(&s), "padding 0 shows no background -> copy path (no-op)");
+
+        s.background = None;
+        s.frame = Some(FrameStyle { padding: 0.1, ..Default::default() });
+        assert!(!has_background(&s), "padding with no background -> copy path");
+    }
+
+    // Slice 3: a gradient background gates the compositor and emits the preset name
+    // (BACKGROUND_KIND=gradient + BACKGROUND_GRADIENT), never the solid hex.
+    #[test]
+    fn gradient_background_gates_and_emits() {
+        use std::collections::BTreeSet;
+        use std::ffi::OsStr;
+        let mut s = pre_zoom_populated_state();
+        s.background = Some(Background::Gradient { preset: "indigo".into() });
+        s.frame = Some(FrameStyle { padding: 0.1, ..Default::default() });
+        assert!(has_background(&s), "gradient + padding must leave the copy path");
+
+        fn envs_of(cmd: &Command) -> BTreeSet<String> {
+            cmd.get_envs()
+                .map(|(k, v): (&OsStr, Option<&OsStr>)| {
+                    format!(
+                        "{}={}",
+                        k.to_string_lossy(),
+                        v.map(|v| v.to_string_lossy().into_owned()).unwrap_or_default()
+                    )
+                })
+                .collect()
+        }
+        let bin = Path::new("/S/cicompositor");
+        let mk = |fb: Option<(FrameStyle, &Background)>| {
+            build_compositor_command(
+                bin, Path::new("/S/in.mp4"), Path::new("/S/v3.mp4"), (1920, 1080), (1920, 1080),
+                None, None, None, None, 0.0, None, None, fb, false,
+            )
+        };
+        let bg = Background::Gradient { preset: "indigo".into() };
+        let frame = FrameStyle { padding: 0.1, ..Default::default() };
+        let added: Vec<String> =
+            envs_of(&mk(Some((frame, &bg)))).difference(&envs_of(&mk(None))).cloned().collect();
+        assert_eq!(
+            added,
+            vec![
+                "BACKGROUND_GRADIENT=indigo".to_string(),
+                "BACKGROUND_KIND=gradient".to_string(),
+                "FRAME_PADDING=0.1".to_string(),
+            ],
+            "gradient emits kind + preset name, no solid hex"
+        );
+    }
+
+    // Slice 5: a user-image background gates the compositor and emits the absolute path
+    // (BACKGROUND_KIND=image + BACKGROUND_IMAGE), never a color/preset. A set path gates
+    // regardless of whether the file exists — the compositor degrades a missing file to a
+    // neutral solid rather than dropping to the copy path (which would export unpadded).
+    #[test]
+    fn image_background_gates_and_emits() {
+        use std::collections::BTreeSet;
+        use std::ffi::OsStr;
+        let mut s = pre_zoom_populated_state();
+        s.background = Some(Background::Image { path: "/tmp/wall.heic".into() });
+        s.frame = Some(FrameStyle { padding: 0.1, ..Default::default() });
+        assert!(has_background(&s), "image + padding must leave the copy path");
+
+        fn envs_of(cmd: &Command) -> BTreeSet<String> {
+            cmd.get_envs()
+                .map(|(k, v): (&OsStr, Option<&OsStr>)| {
+                    format!(
+                        "{}={}",
+                        k.to_string_lossy(),
+                        v.map(|v| v.to_string_lossy().into_owned()).unwrap_or_default()
+                    )
+                })
+                .collect()
+        }
+        let bin = Path::new("/S/cicompositor");
+        let mk = |fb: Option<(FrameStyle, &Background)>| {
+            build_compositor_command(
+                bin, Path::new("/S/in.mp4"), Path::new("/S/v3.mp4"), (1920, 1080), (1920, 1080),
+                None, None, None, None, 0.0, None, None, fb, false,
+            )
+        };
+        let bg = Background::Image { path: "/tmp/wall.heic".into() };
+        let frame = FrameStyle { padding: 0.1, ..Default::default() };
+        let added: Vec<String> =
+            envs_of(&mk(Some((frame, &bg)))).difference(&envs_of(&mk(None))).cloned().collect();
+        assert_eq!(
+            added,
+            vec![
+                "BACKGROUND_IMAGE=/tmp/wall.heic".to_string(),
+                "BACKGROUND_KIND=image".to_string(),
+                "FRAME_PADDING=0.1".to_string(),
+            ],
+            "image emits kind + absolute path, no color or preset"
+        );
+    }
+
+    // Window sources emit WINDOW_CORNER=1 (drives the source-space corner mask that
+    // survives zoom); non-window sources never do. Only meaningful with a corner radius.
+    #[test]
+    fn window_source_emits_window_corner() {
+        fn envs(cmd: &Command) -> Vec<String> {
+            cmd.get_envs()
+                .map(|(k, v)| format!("{}={}", k.to_string_lossy(),
+                    v.map(|v| v.to_string_lossy().into_owned()).unwrap_or_default()))
+                .collect()
+        }
+        let bin = Path::new("/S/cicompositor");
+        let bg = Background::Image { path: "/tmp/w.heic".into() };
+        let frame = FrameStyle { padding: 0.1, corner_radius: 0.05, ..Default::default() };
+        let mk = |win: bool| {
+            build_compositor_command(
+                bin, Path::new("/S/in.mp4"), Path::new("/S/v3.mp4"), (1920, 1080), (1920, 1080),
+                None, None, None, None, 0.0, None, None, Some((frame, &bg)), win,
+            )
+        };
+        assert!(envs(&mk(true)).iter().any(|e| e == "WINDOW_CORNER=1"),
+            "window source must emit WINDOW_CORNER=1");
+        assert!(!envs(&mk(false)).iter().any(|e| e.starts_with("WINDOW_CORNER")),
+            "non-window source must not emit WINDOW_CORNER");
+    }
+
+    // Slice 1/2 additive-env pin. A fully-styled solid background emits padding + the
+    // three Slice 2 knobs + the solid pair and touches nothing else; a padding-only
+    // frame emits just FRAME_PADDING + solid (zeros skipped, so a Tight/Square/no-shadow
+    // render never carries dead env). Env is a sorted BTreeSet so order is irrelevant.
+    #[test]
+    fn background_command_emits_active_frame_env() {
+        use std::collections::BTreeSet;
+        use std::ffi::OsStr;
+        fn args_of(cmd: &Command) -> Vec<String> {
+            cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect()
+        }
+        fn envs_of(cmd: &Command) -> BTreeSet<String> {
+            cmd.get_envs()
+                .map(|(k, v): (&OsStr, Option<&OsStr>)| {
+                    format!(
+                        "{}={}",
+                        k.to_string_lossy(),
+                        v.map(|v| v.to_string_lossy().into_owned()).unwrap_or_default()
+                    )
+                })
+                .collect()
+        }
+        let bin = Path::new("/S/cicompositor");
+        let screen = Path::new("/S/in.mp4");
+        let video_only = Path::new("/S/v3-video.mp4");
+        let bg = Background::Solid { hex: "#1E293B".into() };
+        let mk = |fb: Option<(FrameStyle, &Background)>| {
+            build_compositor_command(
+                bin, screen, video_only, (1920, 1080), (1920, 1080), None,
+                None, None, None, 0.0, None, None, fb, false,
+            )
+        };
+        let base = mk(None);
+
+        // Fully styled: all four knobs set -> all six env vars.
+        let full = FrameStyle { padding: 0.12, corner_radius: 0.03, shadow: 0.6, inset: 0.004 };
+        let with_full = mk(Some((full, &bg)));
+        assert_eq!(args_of(&with_full), args_of(&base), "background must not touch args");
+        let added: Vec<String> =
+            envs_of(&with_full).difference(&envs_of(&base)).cloned().collect(); // sorted
+        assert_eq!(
+            added,
+            vec![
+                "BACKGROUND_KIND=solid".to_string(),
+                "BACKGROUND_SOLID_HEX=#1E293B".to_string(),
+                "FRAME_CORNER_RADIUS=0.03".to_string(),
+                "FRAME_INSET=0.004".to_string(),
+                "FRAME_PADDING=0.12".to_string(),
+                "FRAME_SHADOW=0.6".to_string(),
+            ],
+            "fully-styled frame emits padding + corner + inset + shadow + solid pair"
+        );
+
+        // Padding only (square, no shadow, no border) -> zeros skipped.
+        let pad_only = FrameStyle { padding: 0.1, ..Default::default() };
+        let with_pad = mk(Some((pad_only, &bg)));
+        let added_pad: Vec<String> =
+            envs_of(&with_pad).difference(&envs_of(&base)).cloned().collect();
+        assert_eq!(
+            added_pad,
+            vec![
+                "BACKGROUND_KIND=solid".to_string(),
+                "BACKGROUND_SOLID_HEX=#1E293B".to_string(),
+                "FRAME_PADDING=0.1".to_string(),
+            ],
+            "padding-only frame emits just padding + solid; corner/shadow/inset skipped"
+        );
+        let removed: Vec<String> =
+            envs_of(&base).difference(&envs_of(&with_pad)).cloned().collect();
+        assert!(removed.is_empty(), "background removes/changes no existing env: {removed:?}");
     }
 
     // The JSON v3_render writes to REDACT_REGIONS must carry EXACTLY the fields the

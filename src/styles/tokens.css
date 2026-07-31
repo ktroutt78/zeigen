@@ -275,15 +275,13 @@
 
 /* Review rail — tool toolbar tile (icon over label) */
 .rail-tool {
-  display: flex; flex-direction: column; align-items: center; gap: 5px;
-  padding: 10px 2px; border-radius: var(--r-sm);
+  display: flex; align-items: center; justify-content: center;
+  padding: 9px 0; border-radius: var(--r-sm);
   background: transparent; border: none; cursor: pointer;
   color: var(--fg-secondary);
-  font: 500 10.5px var(--font-system); letter-spacing: -0.01em;
   min-width: 0;
   transition: background var(--dur-quick) var(--ease-ds), color var(--dur-quick) var(--ease-ds);
 }
-.rail-tool > span { line-height: 1; }
 .rail-tool:hover:not(:disabled) { background: var(--bg-elevated); color: var(--fg-primary); }
 .rail-tool.on { background: var(--accent-soft); color: var(--accent-bright); }
 .rail-tool:disabled { opacity: 0.4; cursor: not-allowed; }

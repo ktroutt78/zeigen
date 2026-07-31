@@ -4,6 +4,116 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-07-30 (part 5) — MEASURE the window corner from the capture (the point constant was fragile); and REMOVE the inset rim.
+
+Settled the "is the raw dirty or are we adding it" question by sampling THIS recording's raw `screen.mp4` (owner's Notes window, 1832x1042), row by row from all four edges:
+- STRAIGHT EDGES ARE CLEAN in the capture (all ~253 white, first 12 rows/cols). So the dark EDGE LINES the owner saw are NOT captured — they were the `FRAME_INSET` rim we composite (rgba 0,0,0,0.55, ~2px), confirmed by sampling the export's content edge (`103,104` there, `253` in the raw). Reconciles the earlier "edges bright" reports: straight edges have always been clean; the corners have always been black. `ignoreShadowsSingleWindow` is working — a shadow ring would darken the straight edges; it doesn't.
+- CORNERS ARE BLACK in the capture (~607 px/corner, reach 38px) — the window's OWN rounded-corner gap (inherent to window capture; unremovable at the engine without alpha, which doesn't exist). So the corner fix is compositor-side, not engine-side.
+
+Two decisions:
+1. CORNER — measure, don't guess. The point-based `WINDOW_CLIP_PT=28` gave a ~30px clip here, SMALLER than the window's 38px black -> leaked even un-zoomed. The constant is fragile (varies by window/display/scale; the Podcasts capture measured ~18px, this one ~38px). Replaced it: the compositor now MEASURES the pure-black corner reach from frame 0 (`AVAssetImageGenerator` + a corner scan for the contiguous near-black run inward) and clips to reach + `WINDOW_CLIP_MARGIN` (default 10px). Self-calibrating, no constant, no scale/pointShort dependency. Kept the part-4 source-space masking so it also survives zoom. Verified on the real Notes capture: corners 239 black px -> 0 un-zoomed, and clean across the top edge under a top-left 2x zoom. The frontend's `windowPointShort` URL plumbing is now DORMANT (preview uses a generous fixed 0.055 fraction; the export measures).
+2. RIM — removed entirely (owner call). The inset border read as unwanted dark edge lines over a window on a light background; the elevation shadow alone separates the card. `DEFAULT_FRAME.inset=0`, preview drops the inset box-shadow, compositor `borderLayer=nil`. The `inset` field stays in the schema (unset) to avoid a serialization churn. Supersedes the 2026-07-29 "rim now black / rim earns its place" notes.
+
+Lesson reinforced: the macOS window corner radius is NOT a portable constant — measure it from the actual pixels. And sample the raw capture from the EXACT recording in question, not an older one.
+
+---
+
+## 2026-07-30 (part 4) — Window-corner black returns UNDER ZOOM: a fixed post-zoom clip can't cover a magnified corner. Mask in SOURCE space instead.
+
+After part 3 (radius bumped to 28pt) the corners were clean un-zoomed but a dark "band" appeared along an edge under zoom — reported as a soft full-width top band. Diagnosed from the owner's real capture + sidecar (raw `screen.mp4` in the scratch dir, its `.annotations.json` sidecar, AND the saved export mp4 — all readable in-session).
+
+What it actually was: the corner clip ran in the inset stage (POST-zoom) at a FIXED radius, but the window's own black corner is part of the content and is MAGNIFIED by zoom (2x zoom -> ~2x bigger black corner). The fixed clip is outgrown -> the enlarged black corner leaks. It shows at whichever corner the zoom CLAMPS to: this capture's zoom clamped top-left, so the leak was at the top-left corner — which is why the earlier bottom-right-zoom repro couldn't see it (a real lesson: reproduce at the zoom position the user is actually using).
+
+The "full-width soft band" was a misread, settled by sampling pixels (min-luma + count-of-near-black per column across the top edge, on BOTH the owner's screenshot and the export): PURE BLACK only at the top-left corner (the leak); across the rest of the top, zero black — just the ~2-3px FRAME_INSET rim (rgba 0,0,0,0.55) reading as a soft thin line over the light wallpaper. The screenshot's pixels MATCHED the export (so it was the exported mp4 in Quick Look, not a preview-only artifact — the titlebar even showed the .mp4 name). So: one bug (corner leak) + one designed element (the rim), not a hidden band.
+
+Fix: for window sources, round the corners to transparent in SOURCE space (before zoom) so the rounding — and thus the black masking — magnifies WITH the content at any zoom, instead of a fixed post-zoom clip. Source radius = same fraction of the SOURCE short side (= cornerPx/insetK), so after the inset insetK downscale it lands at cornerPx un-zoomed (matches shadow+rim silhouettes; no un-zoomed change). Inset-stage mask skipped for window sources; display/area keep the fixed inset mask (no black corners, and their card round shouldn't zoom). Plumbed `WINDOW_CORNER=1` from edit.rs when `source_kind=="window"` + corner set. Verified on the real top-left-zoom capture: 2x-zoom top-left corner went from pure black to a clean rounded corner (min luma 0 -> 39 = just rim/shadow).
+
+Note: the FRAME_INSET rim is a designed element, not a leak; if it ever reads too heavy over a light background, tune RIM_ALPHA / FRAME_INSET separately.
+
+---
+
+## 2026-07-30 (part 3) — The ACTUAL root cause of the window-corner black: the clip radius was too small — macOS 26 windows are ~18pt and a CIRCULAR clip of a SQUIRCLE needs ~1.5x. Verified on the real capture.
+
+Parts 1-2 were necessary groundwork but neither was the root cause. Found it by sampling the user's REAL raw capture (`~/Movies/Zeigen/.scratch/recording-<stamp>/sources/screen.mp4`, present while the Review window is open) plus its sidecar — NOT by eye or synthetic guess.
+
+Ground truth from the real capture (a Podcasts window, 1x, 1472x790):
+- The raw corners ARE pure black `rgb(0,0,0)` (confirms part-1 opaque-black; the shadow fix in part 2 left the window filling the frame, corners at frame corners — so part 2 works but was not the crescent's cause).
+- The window's OWN corner radius measures ~18px on the left edges, ~15px on the right (asymmetric — THAT is why the crescent was worse top-left: the left corner is genuinely rounder, so an undersized clip misses it more).
+- The sidecar's `corner_radius` was `0.016455… = 13/790` exactly → computed from the real `windowPointShort=790`, NOT the fallback. So the plumbing was fine; the CONSTANT was wrong.
+
+Two compounding reasons the ~11pt assumption failed: (1) macOS 26 ("Liquid Glass") windows are ~18pt at the corner, far rounder than the ~10-11pt older-macOS figure; (2) our clip mask is a CIRCLE (`CGPath(roundedRect:cornerWidth:)`) but the window corner is a SQUIRCLE, and a circular mask must be ~1.5x the nominal radius to cover the squircle's shoulders. So the effective clip needs ~18*1.5 ~= 27pt, not 13.
+
+A radius sweep on the real capture (13/18/21/24/27/28pt total): the black crescent shrank monotonically and was VISUALLY GONE at 28pt at all four corners (residual "black pixels" the checker flagged there were the app's own "..." UI dots, not a leak). Fix: `WINDOW_CLIP_PT = 28` (point-based, scale-independent) in Review.tsx, replacing the 11+2 split. Fallback fraction raised 0.02 -> 0.035 to match. Err large stands: over-clip is an invisible corner sliver; too small is the visible black.
+
+Two lessons logged so the next person doesn't repeat the four-round chase:
+- The macOS window corner radius is an EMPIRICAL, OS-version-dependent number — measure it on a real capture, do not trust the textbook ~10pt. If a future macOS changes it, re-measure. A squircle mask (superellipse) would match the shape with less over-clip and is the documented next-step if over-clipping ever bites or the circular look reads wrong.
+- HARNESS TRAP (cost a whole round): a corner checker MUST sample the CONTENT corners (compositor inset origin), not the canvas corners (0,0) — the canvas corners are always background and read clean regardless. And judge over a NON-BLACK background (black-on-black export edge hides everything — the same trap that made two earlier checks falsely pass).
+
+---
+
+## 2026-07-30 (part 2) — The window-corner black had a SECOND root cause: SCK includes the window SHADOW, insetting the window inside the captured frame; exclude it
+
+The corner clip (part 1 below) was necessary but NOT sufficient. After it shipped, a black crescent remained at the window's corners over a background — asymmetric (worse on some corners than others), which a too-small radius can't explain (that fails symmetrically). Diagnosed by reproduction, NOT by eye.
+
+Root cause: `SCContentFilter(desktopIndependentWindow:)` was used with `SCStreamConfiguration.ignoreShadowsSingleWindow` UNSET, and its default is `false` = **shadow INCLUDED**. SCK frames the window together with its drop shadow inside the window-sized buffer, so the window (and its own rounded corners) ends up INSET, ringed by the shadow region that 4:2:0 flattens to opaque black. Our corner clip rounds the FRAME corners; the window's real corners are inset and off-center (macOS shadows are bottom-heavier and not left/right even), so the black is unreachable → asymmetric crescents. The inset also scaled the window DOWN, quietly costing resolution, and skewed the window cursor-mapping telemetry (mapped as if the window filled the buffer).
+
+Fix: `config.ignoreShadowsSingleWindow = true` (RecordingSession.swift, macOS 14+; no effect on display/area filters). The window then fills the frame at native size, its corners sit at the frame corners, and the part-1 clip aligns. BOTH are required and complementary: shadow-exclusion fixes the ALIGNMENT, the clip removes the window's OWN corner black. Proven together on a synthetic window-fills-frame frame (circle AND squircle): zero black at all four content corners; the inset (shadow) model reproduces the crescents.
+
+HARNESS LESSON (cost me a false "all clean" pass): when pixel-sampling a padded export, sample the CONTENT corners (at the inset origin `ox=round((W-insetW)/2)`, `oy=...`), NOT the canvas corners (0,0) — the canvas corners are always background, so a corner scan there reports clean no matter what. Any four-corner verify of the frame/clip must compute the inset offset first.
+
+Reconfirmed from part 1: the black is opaque (4:2:0, no alpha), and the earlier "corners are clean" checks falsely passed because they had no background (black-on-black export edge). Same trap, twice — judge window-corner work OVER A NON-BLACK BACKGROUND, and sample the right pixels.
+
+---
+
+## 2026-07-30 — Window captures need a MANDATORY corner clip over a background (SUPERSEDES "Square is safe / corners are clean"); the black is opaque, alpha is unrecoverable
+
+SUPERSEDES the 2026-07-29 "black-notch resolved, corners come out CLEAN, Square is final" claim below — that check FALSELY PASSED. It was run on a window capture WITHOUT a background, where the black corner gaps sit against the black export edge: black-on-black is invisible. Put a background behind the same recording and the gaps show as **black wedges** at the window's own rounded corners. The black was always there; the background just made it visible. Lesson: any corner/edge check for window captures MUST be done over a non-black background, where the failure actually shows.
+
+**Why the corners are black — and why "just respect the alpha" is a dead end (do not re-propose).** The window's transparent corner pixels are NOT delivered to us as alpha. The capture is configured `SCStreamConfiguration.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange` (4:2:0, no alpha plane; `RecordingSession.swift:297`), and no `backgroundColor` is set, so ScreenCaptureKit flattens the clear area outside the window's arc to **opaque black at capture time**, before the first frame is written. The intermediate is `AVVideoCodecType.h264` (`RecordingSession.swift:211`, no alpha), and the final export is `h264_videotoolbox` (opaque). **There is no alpha anywhere in the pipeline to recover.** Recovering it (the "perfect squircle showing the background through it" ideal) would require re-architecting capture end-to-end — BGRA capture → an alpha-carrying intermediate codec (HEVC-with-alpha or ProRes 4444; H.264 cannot) → Core Image compositing over the background — a large, risky change to the sensitive capture engine plus much heavier intermediate files, for a subtle shape difference. Rejected: not worth it. Owner call 2026-07-30.
+
+**Fix: a mandatory point-based corner clip on window captures** (the provisional plan from 2026-07-29, now activated). Clip the content to a radius sized to sit just INSIDE the window's own ~11pt arc, so the window edge AND the black gap are both masked away, leaving ONE clean arc over the background. Proven in the compositor both ways: a radius `>=` the window's arc gives a single clean arc with the background showing through the corner (no black, NO doubling); a radius that's too SMALL is the visible failure — it leaves the black wedge as a dark crescent between our arc and the window's. So **err slightly LARGE**: a hair of clipped window content is invisible; too small leaves the black.
+
+Sizing is point-based and **scale-independent**: macOS window corners are a near-constant ~11pt regardless of window size, and the clip expressed as a frame fraction is `~(11+margin)pt / windowShortSidePt` — the capture backing scale cancels through the compositor's `cornerFrac * insetShort`. So we do NOT need the backing scale, only the window's point short side, which the engine already has (`SCWindow.frame` is point-space, `WindowInfo.width/height`). Plumbed App.tsx (`windowPointShort`, resolved from the selected window) → openReview URL param → Review, which turns it into the frame's `corner_radius`. No compositor or edit.rs change — it rides the existing `FRAME_CORNER_RADIUS` path. Fallback fraction (0.02, errs large) when the point size is unknown. Constants live in Review (`WINDOW_CORNER_PT=11`, `WINDOW_CORNER_MARGIN_PT=2`); owner tunes by eye on a real window capture over a light background.
+
+This does NOT reopen the rejected "match the OS radius" idea below — the squircle-vs-circle mismatch there was fatal because it tried to COINCIDE our arc with the window's. Here we deliberately clip INSIDE the window's arc and discard the window's corner entirely, so a circular arc is fine and the squircle is irrelevant. The real per-window radius is still unavailable (SCWindow exposes none), so 11pt is the constant, not a lookup.
+
+UI consequence: the Corners control is now HIDDEN for window sources (the clip is mandatory — a control with one valid option isn't a control), replacing the earlier greyed-Rounded-with-note. Display + area keep BOTH Square/Rounded (no inherent corners — a genuine aesthetic choice, and rounding a rectangular area capture is a nice touch).
+
+---
+
+## 2026-07-29 — Window captures force Square corners; do NOT try to match the OS window radius
+
+On a window capture, ScreenCaptureKit bakes the window's OWN rounded corners into the frame. Turning on our Rounded frame adds a SECOND arc at a different radius, so you get two nested arcs with a wedge of background between = a doubled edge (seen on a Music.app capture). Fix: window captures are locked to Square (Rounded greyed, note "Window already has rounded corners"); the window supplies its own corners cleanly, so ours is redundant there. Display + area captures keep Rounded (no inherent corners).
+
+DO NOT re-propose "just derive our radius from the window's corner radius." It was considered and rejected for four compounding reasons, the last fatal:
+1. No public macOS API exposes a window's corner radius — it's a private window-server constant; we'd hardcode a guess.
+2. It changes between OS versions (Big Sur bumped it; Tahoe/26 Liquid Glass changed it again) — any constant drifts.
+3. It's in points; matching pixels needs the capture's backing scale too.
+4. **Squircle, fatally:** modern macOS window corners are CONTINUOUS (squircle) curves. Our `CGPath(roundedRect:)` is a CIRCULAR arc. A circular arc cannot lie on a continuous curve at ANY radius — so even a perfect radius match still doubles the edge. Matching is impossible by construction, not just fiddly.
+
+Plumbing: `sourceKind` ("window"|"display"|"area", already tracked in App.tsx) is passed to Review via the openReview URL param AND persisted in the sidecar (`source_kind`, metadata-only, excluded from the dirty check, never read by the export) so a reopened window recording still knows.
+
+## 2026-07-29 — Background/frame: watermark stays ON CONTENT; corners default SQUARE (final)
+
+Two settled calls after the Slice-4 signed-build eye-check:
+
+**Watermark stays on the content — no margin mode.** A brief experiment (d4cb5d7) moved the watermark into the canvas margin when a background was active. Reverted (3d092c6). The margin is negative space that makes the frame look designed; seating a small mark in it reads as a stray element crammed in a corner and clipped by the frame edge, and it fights the whole point of the margin. Watermark = always on the content, positioned by the corner picker, sized by the slider. Don't re-propose margin/Tight-Wide-gated watermark placement.
+
+**Corners default to Square (Rounded opt-in at 0.018).** Rounding the outer frame clips real corner content — a full-display capture reaches the menu bar/edges, and our radius exceeds a window's own ~10px curve. Black-notch question resolved: ScreenCaptureKit WINDOW captures come out with CLEAN corners (not black) in this app's pipeline, so Square exposes no black notch and needs no small-always-on-round fallback. Square is the final default; Rounded stays available.
+
+**Bubble stays inside the content, always** (never the margin) and is clipped to the content rect (rounded) in the preview so its element + shadow can't spill past the frame edge (7af288b). The export was already bounded by the inset crop/mask.
+
+## 2026-07-29 — Gradient/backdrop palette must be judged at full size in the real thin-margin view, NOT on whole-frame thumbnails
+
+The Slice 3 gradient palette was eye-checked on small whole-frame contact sheets (each gradient ~560px wide, the entire framed recording visible in one glance). It "passed." Installed at 1:1, the same gradients read as flat solid colors. Root cause of the bad methodology: the recording covers the center of the canvas, so the ONLY part of the background a viewer ever sees is a thin margin frame around the edges. A corner-to-corner linear gradient changes its full A→B range across the whole diagonal, so within any thin margin slice the LOCAL change is ~1–2 levels — imperceptible. On a shrunk whole-frame thumbnail the four corners sit adjacent and the eye catches the corner-to-corner delta; at full size through the margin it never sees a contiguous stretch of the transition. Proven by pixel-sampling the four canvas corners (gradient renders correctly — TL=stop A, BR=stop B) and by an A/B render: 2× contrast reads clearly at the same margin, while widening the margin at current contrast barely helps.
+
+RULES, so no future eye-check is set up the same way:
+- Judge any background/backdrop that is only seen through a margin at FULL SIZE, in the actual thin-frame view — never on a whole-frame thumbnail where corners sit adjacent.
+- For a gradient seen through a margin, CONTRAST (stop spread) is the readability lever, not margin size — the content covers the middle, so you only ever see slivers.
+- The muted-palette constraint ("backdrop must not compete with content") and "reads flat" are the same property from opposite sides. A retune has to prove BOTH per preset: reads as a gradient AND the lighter corner doesn't pull attention off dark content. If a hue can't do both, drop it rather than split the difference.
+
+This supersedes the Slice 3 "palette locked" note for the STOP VALUES only (the six hue families stand); the stops are being re-tuned for contrast.
+
 ## 2026-07-28 — Window-picker priming-click ROOT CAUSE = key-window exclusivity (NOT app activation); global monitor refuted on macOS 26
 
 Instrumented the picker (branch `activation-priming-click`, `focus_probe` + `try_activate_probe` in `macos.rs`, read-only, logs to `/tmp/zeigen-focus-probe.log`; removed before merge). Three findings, each of which someone will otherwise re-propose:

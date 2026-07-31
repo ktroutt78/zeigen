@@ -4,7 +4,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { emit, listen } from "@tauri-apps/api/event";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { ask, open } from "@tauri-apps/plugin-dialog";
-import { Icon, I, P } from "./components/icons";
+import { Icon, I, P, RailIcon } from "./components/icons";
 import SegmentTrack from "./components/SegmentTrack";
 import Waveform from "./Waveform";
 import ScrubPreview from "./ScrubPreview";
@@ -328,7 +328,120 @@ type SidecarState = {
   // byte-identical to a pre-redaction one (Rust's skip_serializing_if mirrors
   // this). The draw UI (commit 4) writes the field only when a panel exists.
   redactions?: RedactionRegion[];
+  // Frame styling + background canvas (BACKGROUND-PADDING-PLAN). Both
+  // undefined = the padding-0/no-background no-op; the write path drops an
+  // all-zero frame and an unset background so a plain recording stays
+  // byte-identical (Rust's frame_is_noop / skip_serializing_if mirror this).
+  // Declared last so an unset pair never perturbs existing field order.
+  frame?: FrameStyle | null;
+  background?: Background | null;
+  // Capture source ("window"|"display"|"area"), persisted so a reopened window
+  // capture still gates off Rounded corners. Metadata — not an edit (excluded from
+  // the dirty check); the export never reads it.
+  source_kind?: string | null;
 };
+
+// Mirror of Rust FrameStyle. Every knob is the no-op at 0. padding is the
+// fraction of the canvas taken by margin (content scale k = 1 - padding).
+type FrameStyle = {
+  padding?: number;
+  corner_radius?: number;
+  shadow?: number;
+  inset?: number;
+};
+
+// Mirror of Rust Background (tagged by `kind`). Gradient presets resolve by
+// name in the compositor (procedural, no bundled assets); solid is "#RRGGBB";
+// image is an absolute path read at render time.
+type Background =
+  | { kind: "gradient"; preset: string }
+  | { kind: "solid"; hex: string }
+  | { kind: "image"; path: string };
+
+// True when a frame carries no visible styling — drives skip-when-noop in the
+// write payload, the TS twin of Rust frame_is_noop.
+function frameIsNoop(f: FrameStyle | null | undefined): boolean {
+  return (
+    !f ||
+    ((f.padding ?? 0) === 0 &&
+      (f.corner_radius ?? 0) === 0 &&
+      (f.shadow ?? 0) === 0 &&
+      (f.inset ?? 0) === 0)
+  );
+}
+
+// Slice 4 preset values (the UI exposes only presets, no sliders). Margin
+// Tight/Wide + Corners Rounded/Square map to these; shadow + inset rim are
+// always-on at the compositor-tuned values and never exposed. corner_radius +
+// inset are fractions of the content short side, shadow is a 0..1 intensity —
+// same wire contract the compositor reads.
+const FRAME_TIGHT = 0.06;
+const FRAME_WIDE = 0.12;
+// Rounding the outer frame clips real corner content — a screen capture reaches the
+// menu bar/edges, and our radius is far larger than a window's own ~10px curve — so
+// Square is the default and Rounded is opt-in at a restrained radius (fraction of the
+// content short side) that stays close to a native window corner when chosen.
+const FRAME_ROUND = 0.018;
+const FRAME_SHADOW = 1.0;
+// FRAME_RIM removed 2026-07-30 (the inset rim read as unwanted dark edge lines).
+// Window captures come out of SCK with their own rounded corners and OPAQUE BLACK
+// (not alpha — capture is 4:2:0, no alpha anywhere in the pipeline) filling the gap
+// outside that arc. Over a background those gaps read as black crescents. The EXPORT
+// masks them precisely: the compositor MEASURES the black gap's reach from the capture
+// (docs/DECISIONS 2026-07-30 part 5) — self-calibrating, no fragile point constant.
+//
+// This fraction is PREVIEW-ONLY (and a compositor fallback if the measure fails). The
+// preview can't cheaply decode pixels, so it rounds the video by a generous fixed
+// fraction that comfortably covers a macOS-26 window corner (~4-5% of the short side)
+// plus margin, so the preview shows a clean rounded corner like the export. Over-
+// rounding the preview a touch is fine (approximate WYSIWYG); the export is exact.
+const WINDOW_CLIP_PREVIEW_FRAC = 0.055;
+const DEFAULT_FRAME: FrameStyle = {
+  padding: FRAME_WIDE,
+  corner_radius: 0, // Square by default
+  shadow: FRAME_SHADOW,
+  inset: 0, // Rim REMOVED (2026-07-30): it read as unwanted dark edge lines over the
+  // window on a light background; the elevation shadow alone separates the card. The
+  // inset field stays in the schema but is never set, and the compositor + preview no
+  // longer render a rim.
+};
+const DEFAULT_SOLID_HEX = "#1E293B";
+
+// The six gradient presets, mirrored from the compositor's `gradientPresets`
+// table (main.swift). id = the name serialized to the sidecar; a is the LIGHT
+// stop, b the DARK stop. Rendered VERTICAL, dark-top -> light-bottom (b at top,
+// a at bottom): the full range lands across the top and bottom margins (the
+// bands actually seen), not the thin side slivers a diagonal cut across. Stops
+// are the steeper set so the transition reads through a thin (Tight) margin.
+const GRADIENT_PRESETS: { id: string; a: string; b: string }[] = [
+  { id: "graphite", a: "#69748A", b: "#111318" },
+  { id: "indigo", a: "#5450A6", b: "#0F0D20" },
+  { id: "teal", a: "#2B7A76", b: "#061A19" },
+  { id: "plum", a: "#7F53A6", b: "#150B22" },
+  { id: "ember", a: "#B85A32", b: "#2E0F09" },
+  { id: "mist", a: "#F8FBFE", b: "#B2BECE" },
+];
+
+// CSS for a gradient preset — vertical `to bottom` from the dark stop (top) to
+// the light stop (bottom), matching the compositor. Shared by the swatch and
+// the preview canvas so both agree with the export.
+function gradientCss(a: string, b: string): string {
+  return `linear-gradient(to bottom, ${b}, ${a})`;
+}
+
+// CSS for a background choice — used by the swatches and the preview canvas.
+function backgroundCss(bg: Background | null | undefined, solidHex: string): string {
+  if (!bg) return "transparent";
+  if (bg.kind === "solid") return bg.hex;
+  if (bg.kind === "gradient") {
+    const p = GRADIENT_PRESETS.find((g) => g.id === bg.preset);
+    return p ? gradientCss(p.a, p.b) : solidHex;
+  }
+  // Image (Slice 5): fill-and-crop via CSS `cover`, matching the compositor's
+  // max-scale-then-center-crop. A missing file just fails to load (transparent);
+  // the export falls back to a neutral solid.
+  return `url("${convertFileSrc(bg.path)}") center center / cover no-repeat`;
+}
 
 const EMPTY_STATE: SidecarState = {
   trim: null,
@@ -428,20 +541,36 @@ type ReviewParams = {
   screenPath: string | null;
   webcamPath: string | null;
   webcamLeadMs: number;
+  // Capture source ("window"|"display"|"area") — drives the Corners gating.
+  sourceKind: string | null;
+  // Window's short side in points (window sources only) — sizes the corner clip.
+  windowPointShort: number | null;
 };
 
 function readParams(): ReviewParams {
   const hash = window.location.hash || "";
   const q = hash.indexOf("?");
-  if (q < 0) return { path: null, screenPath: null, webcamPath: null, webcamLeadMs: 280 };
+  if (q < 0)
+    return {
+      path: null,
+      screenPath: null,
+      webcamPath: null,
+      webcamLeadMs: 280,
+      sourceKind: null,
+      windowPointShort: null,
+    };
   const params = new URLSearchParams(hash.slice(q + 1));
   const leadStr = params.get("webcamLeadMs");
   const lead = leadStr ? Number(leadStr) : 280;
+  const shortStr = params.get("windowPointShort");
+  const short = shortStr ? Number(shortStr) : NaN;
   return {
     path: params.get("path"),
     screenPath: params.get("screenPath"),
     webcamPath: params.get("webcamPath"),
     webcamLeadMs: Number.isFinite(lead) ? lead : 280,
+    sourceKind: params.get("sourceKind"),
+    windowPointShort: Number.isFinite(short) && short > 0 ? short : null,
   };
 }
 
@@ -543,6 +672,28 @@ function statesEqual(a: SidecarState, b: SidecarState, duration: number | null):
   for (let i = 0; i < ra.length; i++) {
     if (JSON.stringify(ra[i]) !== JSON.stringify(rb[i])) return false;
   }
+  // Frame styling: compare field-by-field with 0 defaults (not JSON.stringify) so
+  // Rust's skip-zero re-serialization on read-back doesn't read as perpetually dirty.
+  const fa = a.frame;
+  const fb = b.frame;
+  const na = frameIsNoop(fa);
+  const nb = frameIsNoop(fb);
+  if (na !== nb) return false;
+  if (!na && !nb) {
+    for (const key of ["padding", "corner_radius", "shadow", "inset"] as const) {
+      if (Math.abs((fa![key] ?? 0) - (fb![key] ?? 0)) > 1e-6) return false;
+    }
+  }
+  const ga = a.background ?? null;
+  const gb = b.background ?? null;
+  if ((ga == null) !== (gb == null)) return false;
+  if (ga && gb) {
+    if (ga.kind !== gb.kind) return false;
+    if (ga.kind === "solid" && gb.kind === "solid" && ga.hex.toLowerCase() !== gb.hex.toLowerCase())
+      return false;
+    if (ga.kind === "gradient" && gb.kind === "gradient" && ga.preset !== gb.preset) return false;
+    if (ga.kind === "image" && gb.kind === "image" && ga.path !== gb.path) return false;
+  }
   return true;
 }
 
@@ -589,6 +740,9 @@ function sidecarWritePayload(s: SidecarState, duration: number): SidecarState {
     bubble_scale: s.bubble_scale ?? undefined,
     zoom: s.zoom && s.zoom.length > 0 ? s.zoom : undefined,
     redactions: redactionsPayload(s.redactions ?? []),
+    frame: frameIsNoop(s.frame) ? undefined : s.frame,
+    background: s.background ?? undefined,
+    source_kind: s.source_kind ?? undefined,
   };
 }
 
@@ -724,6 +878,25 @@ export default function Review() {
   // Redaction panels (REDACTION-PLAN). Stored source-space; drawn on the flat
   // frame, previewed through the active zoom via the shared ./redaction transform.
   const [redactions, setRedactions] = useState<RedactionRegion[]>([]);
+  // Background canvas + framing (BACKGROUND-PADDING-PLAN Slice 4). background =
+  // null is the no-op (no canvas); frame carries padding/corner/shadow/rim. The
+  // UI sets them together (pickBackground) and derives the Tight/Wide + Rounded/
+  // Square button states from frame. solidHex is remembered across solid<->gradient
+  // switches so the picked color survives toggling to a gradient and back.
+  const [background, setBackground] = useState<Background | null>(null);
+  const [frame, setFrame] = useState<FrameStyle | null>(null);
+  const [solidHex, setSolidHex] = useState(DEFAULT_SOLID_HEX);
+  // Capture source — from the open params, overridden by a loaded sidecar's
+  // source_kind on reopen. A window capture supplies its own (squircle) corners, so
+  // Rounded is gated off for it; our arc can't coincide with the OS curve (DECISIONS
+  // 2026-07-29). Metadata: persisted but excluded from the dirty check.
+  const [sourceKind, setSourceKind] = useState<string | null>(params.sourceKind);
+  const isWindowSource = sourceKind === "window";
+  // Mandatory corner-clip for window captures: kills the SCK black-corner wedges. The
+  // EXPORT measures the exact reach in the compositor; this generous fixed fraction is
+  // the PREVIEW's rounding (and the compositor fallback). Applied as the frame's
+  // corner_radius for window sources; the Corners control is hidden for them.
+  const windowClipCorner = WINDOW_CLIP_PREVIEW_FRAC;
   // Selection = a PRIMARY (the focus: drives the timeline edit row, the strong
   // highlight, single-region edits) plus a SET for batch timing (shift-click). The
   // primary is always in the set; a plain click collapses the set to just it.
@@ -1127,6 +1300,9 @@ export default function Review() {
             bubble_scale: state.bubble_scale ?? null,
             zoom: state.zoom ?? [],
             redactions: state.redactions ?? [],
+            frame: state.frame ?? null,
+            background: state.background ?? null,
+            source_kind: state.source_kind ?? null,
           });
           if (state.trim) setTrim(state.trim);
           if (state.bubble_position_log) setBubblePositionLog(state.bubble_position_log);
@@ -1140,6 +1316,13 @@ export default function Review() {
           if (state.redactions && state.redactions.length > 0) {
             setRedactions(state.redactions);
           }
+          if (state.background) {
+            setBackground(state.background);
+            setFrame(state.frame ?? DEFAULT_FRAME);
+            if (state.background.kind === "solid") setSolidHex(state.background.hex);
+          }
+          // Reopened recording: the persisted source wins over the (absent) param.
+          if (state.source_kind) setSourceKind(state.source_kind);
         } else {
           setSnapshot(EMPTY_STATE);
         }
@@ -1245,14 +1428,60 @@ export default function Review() {
       bubble_scale: bubbleScale === 1 ? null : bubbleScale,
       zoom: zoomSegmentsToKeyframes(zoomSegments),
       redactions,
+      frame,
+      background,
+      source_kind: sourceKind,
     }),
-    [trim, bubblePositionLog, thumbnailTime, bubbleRoundness, bubbleZone, bubbleScale, zoomSegments, redactions],
+    [trim, bubblePositionLog, thumbnailTime, bubbleRoundness, bubbleZone, bubbleScale, zoomSegments, redactions, frame, background, sourceKind],
   );
 
   const dirty = useMemo(
     () => !statesEqual(currentState, snapshot, duration),
     [currentState, snapshot, duration],
   );
+
+  // Background/framing handlers (Slice 4). Picking a background installs a frame
+  // (keeping any existing margin/corner choice); picking None clears both, back to
+  // the no-op. Margin/corner toggles only mutate their field. A solid hex change is
+  // remembered and pushed into the background only while solid is the active kind.
+  const pickBackground = useCallback(
+    (bg: Background | null) => {
+      setBackground(bg);
+      setFrame((prev) => {
+        if (!bg) return null;
+        const base = prev ?? DEFAULT_FRAME;
+        // Window sources get the mandatory clip corner (not the user's Square/Rounded,
+        // which isn't offered for them); display/area keep their own corner choice.
+        return isWindowSource ? { ...base, corner_radius: windowClipCorner } : base;
+      });
+    },
+    [isWindowSource, windowClipCorner],
+  );
+  const setMarginPreset = useCallback((p: "tight" | "wide") => {
+    setFrame((f) => ({ ...(f ?? DEFAULT_FRAME), padding: p === "wide" ? FRAME_WIDE : FRAME_TIGHT }));
+  }, []);
+  const setCornerPreset = useCallback((p: "rounded" | "square") => {
+    setFrame((f) => ({ ...(f ?? DEFAULT_FRAME), corner_radius: p === "rounded" ? FRAME_ROUND : 0 }));
+  }, []);
+  const changeSolidHex = useCallback((hex: string) => {
+    setSolidHex(hex);
+    setBackground((bg) => (bg?.kind === "solid" ? { kind: "solid", hex } : bg));
+  }, []);
+  // Image background (Slice 5): pick any image; its absolute path rides the sidecar
+  // (watermark-logo pattern) and the compositor fill-crops it to the canvas. Picking
+  // installs a frame like any other background; cancelling leaves the choice unchanged.
+  const pickBackgroundImage = useCallback(async () => {
+    try {
+      const picked = await open({
+        multiple: false,
+        filters: [{ name: "Image", extensions: ["png", "jpg", "jpeg", "heic", "heif", "webp", "tiff", "bmp", "gif"] }],
+      });
+      if (typeof picked !== "string") return; // cancelled
+      pickBackground({ kind: "image", path: picked });
+    } catch (err) {
+      setError(`background image: ${err}`);
+    }
+  }, [pickBackground]);
 
   // V2 Step 2: the zone actually used for the parked preview + picker
   // highlight. An explicit pick wins; otherwise the migration default
@@ -1969,7 +2198,11 @@ export default function Review() {
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "1fr 320px",
+          // Right region = icon-only tool rail (40px) + the 320px panel; the rail
+          // moved here from a horizontal row atop the panel (which had run out of
+          // width at 7 tools), buying back the panel's vertical space. Preview (1fr)
+          // takes the 40px hit.
+          gridTemplateColumns: "1fr 360px",
           // Clamp the single row to the container height so a tall column
           // (the left video stage's aspect-ratio height at wide window sizes)
           // can never inflate the row past the viewport and push the right
@@ -2024,6 +2257,9 @@ export default function Review() {
           bubbleRoundness={bubbleRoundness}
           bubbleZone={effectiveZone}
           bubbleScale={bubbleScale}
+          frame={frame}
+          background={background}
+          solidHex={solidHex}
         />
         <ExportPanel
           sourcePath={sourcePath}
@@ -2069,6 +2305,17 @@ export default function Review() {
             onToggleApply,
             onScale: setWmScale,
             onOpacity: setWmOpacity,
+          }}
+          bg={{
+            background,
+            frame,
+            solidHex,
+            windowSource: isWindowSource,
+            onPick: pickBackground,
+            onPickImage: pickBackgroundImage,
+            onMargin: setMarginPreset,
+            onCorner: setCornerPreset,
+            onSolidHex: changeSolidHex,
           }}
         />
       </div>
@@ -2216,6 +2463,10 @@ type LeftColumnProps = {
   bubbleZone: BubbleZone;
   // Bubble "Size" preset multiplier (1.0 Normal, ~0.5 Small) for the preview.
   bubbleScale: number;
+  // Background canvas + framing (Slice 4) for the WYSIWYG preview.
+  frame: FrameStyle | null;
+  background: Background | null;
+  solidHex: string;
 };
 
 function LeftColumn(props: LeftColumnProps) {
@@ -2252,6 +2503,9 @@ function LeftColumn(props: LeftColumnProps) {
         watermarkPreview={props.watermarkPreview}
         zoom={props.zoom}
         redact={props.redact}
+        frame={props.frame}
+        background={props.background}
+        solidHex={props.solidHex}
       />
       <Timeline
         assetUrl={props.assetUrl}
@@ -2496,6 +2750,11 @@ type VideoStageProps = {
   watermarkPreview: WatermarkPreview;
   zoom: ZoomEditor;
   redact: RedactionEditor;
+  // Background canvas + framing (Slice 4). null background = no-op (no preview
+  // change). solidHex backs the CSS when the background is a solid.
+  frame: FrameStyle | null;
+  background: Background | null;
+  solidHex: string;
 };
 
 function VideoStage(props: VideoStageProps) {
@@ -2523,6 +2782,49 @@ function VideoStage(props: VideoStageProps) {
   const zoomEditing = props.zoom.selectedIndex != null;
   const zoomLooping = props.zoom.looping;
   const videoRefForZoom = props.videoRef;
+
+  // Background/padding preview (Slice 4). insetFrac drives the shared contentBox
+  // so the video AND every overlay inset together, and pointer input maps through
+  // the same box. 0 = the shipped no-op path (frame wrapper is inset:0, no canvas).
+  const stageSize = useStageSize(stageRef);
+  const bgActive = props.background != null && (props.frame?.padding ?? 0) > 0;
+  const insetFrac = bgActive ? (props.frame?.padding ?? 0) : 0;
+  const insetBox = contentBox(stageSize, videoDims, insetFrac);
+  const fullBox = contentBox(stageSize, videoDims, 0);
+  const bgCss = backgroundCss(props.background, props.solidHex);
+  // Frame-wrapper: inset:0 (unchanged) with no bg; the inset content box + rounded
+  // corners + elevation shadow + light rim when active. Geometry mirrors the
+  // compositor — corner/rim = fraction of content short side; shadow scales with
+  // the padding margin (blur 0.85*margin, offset 0.45*margin down, alpha 0.5). The
+  // drop shadow renders outside the box (overflow:hidden clips only the video's
+  // corners, not the element's own box-shadow), so the window reads as floating.
+  const shortSide = Math.min(insetBox.w, insetBox.h);
+  const cornerPx = (props.frame?.corner_radius ?? 0) * shortSide;
+  // The webcam bubble is a sibling layer (not inside the frame wrapper), so nothing
+  // clips it — its element + drop shadow would spill past the content into the margin.
+  // Clip it to the content rect (rounded to match corners); no clip with no background.
+  const bubbleClipPath = bgActive
+    ? `inset(${insetBox.y}px ${stageSize.width - (insetBox.x + insetBox.w)}px ${
+        stageSize.height - (insetBox.y + insetBox.h)
+      }px ${insetBox.x}px round ${cornerPx}px)`
+    : undefined;
+  const marginShort = (insetFrac * Math.min(fullBox.w, fullBox.h)) / 2;
+  const shadowOn = (props.frame?.shadow ?? 0) > 0;
+  // Rim REMOVED (2026-07-30): only the elevation drop shadow separates the card now.
+  const frameWrapStyle: React.CSSProperties = bgActive
+    ? {
+        position: "absolute",
+        left: insetBox.x,
+        top: insetBox.y,
+        width: insetBox.w,
+        height: insetBox.h,
+        borderRadius: cornerPx,
+        overflow: "hidden",
+        boxShadow: shadowOn
+          ? `0 ${(0.45 * marginShort).toFixed(1)}px ${(0.85 * marginShort).toFixed(1)}px rgba(0,0,0,0.5)`
+          : "none",
+      }
+    : { position: "absolute", inset: 0 };
   // While the Redact tool is active AND paused, hold the frame flat so a box is
   // drawn in true source space (no zoom to invert). Playing in the tool un-holds
   // it, so the frost tracks the magnified content — the live coverage check.
@@ -2556,7 +2858,14 @@ function VideoStage(props: VideoStageProps) {
       // box. The export renderer (edit.rs zoom_filter_fragment) mirrors this
       // math for preview/export parity — change one, change the other.
       const rect = stage.getBoundingClientRect();
-      const b = contentBox({ width: rect.width, height: rect.height }, videoDims);
+      // When a background is active the video lives inside the inset frame wrapper,
+      // so the zoom crop is relative to THAT box (origin 0,0, shrunk by padding),
+      // not the stage. insetFrac 0 => the full stage-relative content box as before.
+      const full = contentBox({ width: rect.width, height: rect.height }, videoDims);
+      const b =
+        insetFrac > 0
+          ? { x: 0, y: 0, w: full.w * (1 - insetFrac), h: full.h * (1 - insetFrac) }
+          : full;
       const s = z.scale;
       const px = b.x + (z.center_x / videoDims.w) * b.w;
       const py = b.y + (z.center_y / videoDims.h) * b.h;
@@ -2572,7 +2881,7 @@ function VideoStage(props: VideoStageProps) {
       cancelAnimationFrame(raf);
       reset();
     };
-  }, [zoomSegs, zoomEditing, zoomLooping, redactFlat, videoDims, videoRefForZoom]);
+  }, [zoomSegs, zoomEditing, zoomLooping, redactFlat, videoDims, videoRefForZoom, insetFrac]);
 
   const onStageClick = (e: React.MouseEvent) => {
     // Click on the empty stage background = deselect any zoom, which leaves
@@ -2619,6 +2928,17 @@ function VideoStage(props: VideoStageProps) {
             to this transform wrapper, not the stage div behind it, so without the
             marker onStageClick's deselect never matched. Broke when this wrapper
             was inserted between the video and the stage (V2 Step 3 zoom). */}
+        {/* Background/padding preview (Slice 4): the canvas fills the stage behind
+            the video; the frame wrapper insets + rounds + shadows the video (and
+            carries the zoom layer). Both collapse to no-ops when bgActive is false
+            (no canvas; wrapper is inset:0), so a plain recording is unchanged. */}
+        {bgActive && (
+          <div
+            data-stage-bg="1"
+            style={{ position: "absolute", inset: 0, background: bgCss }}
+          />
+        )}
+        <div style={frameWrapStyle}>
         <div ref={zoomLayerRef} data-stage-bg="1" style={{ position: "absolute", inset: 0 }}>
           {props.assetUrl ? (
             <video
@@ -2654,19 +2974,23 @@ function VideoStage(props: VideoStageProps) {
             </div>
           )}
         </div>
-        <BubbleLayer
-          stageRef={stageRef}
-          screenVideoRef={props.videoRef}
-          webcamVideoRef={props.webcamVideoRef}
-          webcamUrl={props.webcamUrl}
-          webcamLeadSec={props.webcamLeadSec}
-          bubblePositionLog={props.bubblePositionLog}
-          bubbleRoundness={props.bubbleRoundness}
-          bubbleZone={props.bubbleZone}
-          bubbleScale={props.bubbleScale}
-          scrubbingRef={props.scrubbingRef}
-          videoDims={props.watermarkPreview.videoDims}
-        />
+        </div>
+        <div style={{ position: "absolute", inset: 0, pointerEvents: "none", clipPath: bubbleClipPath }}>
+          <BubbleLayer
+            stageRef={stageRef}
+            screenVideoRef={props.videoRef}
+            webcamVideoRef={props.webcamVideoRef}
+            webcamUrl={props.webcamUrl}
+            webcamLeadSec={props.webcamLeadSec}
+            bubblePositionLog={props.bubblePositionLog}
+            bubbleRoundness={props.bubbleRoundness}
+            bubbleZone={props.bubbleZone}
+            bubbleScale={props.bubbleScale}
+            scrubbingRef={props.scrubbingRef}
+            videoDims={props.watermarkPreview.videoDims}
+            insetFrac={insetFrac}
+          />
+        </div>
         {props.zoom.selectedIndex != null &&
           !props.zoom.looping &&
           props.zoom.segments[props.zoom.selectedIndex] && (
@@ -2678,6 +3002,7 @@ function VideoStage(props: VideoStageProps) {
                 const i = props.zoom.selectedIndex;
                 if (i != null) props.zoom.update(i, { center_x: cx, center_y: cy });
               }}
+              insetFrac={insetFrac}
             />
           )}
         <RedactionLayer
@@ -2687,6 +3012,7 @@ function VideoStage(props: VideoStageProps) {
           zoomSegs={props.zoom.segments}
           videoRef={props.videoRef}
           flat={redactFlat}
+          insetFrac={insetFrac}
         />
         <PlayerOverlay
           playing={props.playing}
@@ -2698,6 +3024,7 @@ function VideoStage(props: VideoStageProps) {
         <WatermarkPreviewLayer
           stageRef={stageRef}
           preview={props.watermarkPreview}
+          insetFrac={insetFrac}
         />
       </div>
     </div>
@@ -2730,6 +3057,7 @@ function BubbleLayer({
   bubbleScale,
   scrubbingRef,
   videoDims,
+  insetFrac,
 }: {
   stageRef: React.MutableRefObject<HTMLDivElement | null>;
   screenVideoRef: React.MutableRefObject<HTMLVideoElement | null>;
@@ -2755,6 +3083,8 @@ function BubbleLayer({
   // it would force callers to keep threading the prop; declining lets
   // the prop die at the VideoStage callsite.
   videoDims: { w: number; h: number } | null;
+  // Background/padding preview inset (Slice 4): the bubble insets WITH the video.
+  insetFrac: number;
 }) {
   const stage = useStageSize(stageRef);
 
@@ -2875,7 +3205,7 @@ function BubbleLayer({
     // per effect run; deps include stage size + videoDims so resize
     // re-runs the effect with fresh values.
     const { w: vw } = videoDims;
-    const { x: cx, y: cy, w: cw, h: ch } = contentBox(stage, videoDims);
+    const { x: cx, y: cy, w: cw, h: ch } = contentBox(stage, videoDims, insetFrac);
 
     const frac = bubblePositionLog[0].diameter_frac ?? DEFAULT_BUBBLE_DIAMETER_FRAC;
     // bubbleScale is the Review "Size" preset (1.0 Normal, ~0.5 Small); it
@@ -2928,6 +3258,7 @@ function BubbleLayer({
     bubbleZone,
     bubbleScale,
     videoDims,
+    insetFrac,
     stage.width,
     stage.height,
   ]);
@@ -2987,17 +3318,20 @@ function BubbleLayer({
 function WatermarkPreviewLayer({
   stageRef,
   preview,
+  insetFrac,
 }: {
   stageRef: React.MutableRefObject<HTMLDivElement | null>;
   preview: WatermarkPreview;
+  insetFrac: number;
 }) {
   const stage = useStageSize(stageRef);
   if (!preview.src || !preview.videoDims || stage.width === 0 || stage.height === 0) {
     return null;
   }
 
-  // Contain-fit the video inside the 16:9 stage box.
-  const { x: cx, y: cy, w: cw, h: ch } = contentBox(stage, preview.videoDims);
+  // Contain-fit the video inside the 16:9 stage box (inset by padding when a
+  // background is active, so the watermark insets WITH the video).
+  const { x: cx, y: cy, w: cw, h: ch } = contentBox(stage, preview.videoDims, insetFrac);
 
   const shorter = Math.min(cw, ch);
   const logoH = shorter * 0.1;
@@ -3050,13 +3384,15 @@ function ZoomEditLayer({
   videoDims,
   seg,
   onCenter,
+  insetFrac,
 }: {
   stageRef: React.MutableRefObject<HTMLDivElement | null>;
   videoDims: { w: number; h: number } | null;
   seg: ZoomSegment;
   onCenter: (cx: number, cy: number) => void;
+  insetFrac: number;
 }) {
-  const box = useContentBox(stageRef, videoDims);
+  const box = useContentBox(stageRef, videoDims, insetFrac);
   if (!videoDims || box.w === 0 || box.h === 0) return null;
   const p = toStagePx(
     { x: seg.center_x / videoDims.w, y: seg.center_y / videoDims.h },
@@ -3073,7 +3409,7 @@ function ZoomEditLayer({
       const stage = stageRef.current;
       if (!stage) return;
       const rect = stage.getBoundingClientRect();
-      const b = contentBox({ width: rect.width, height: rect.height }, videoDims);
+      const b = contentBox({ width: rect.width, height: rect.height }, videoDims, insetFrac);
       const frac = toContentFrac({ x: ev.clientX - rect.left, y: ev.clientY - rect.top }, b);
       onCenter(frac.x * videoDims.w, frac.y * videoDims.h);
     };
@@ -3139,6 +3475,7 @@ function RedactionLayer({
   zoomSegs,
   videoRef,
   flat,
+  insetFrac,
 }: {
   stageRef: React.MutableRefObject<HTMLDivElement | null>;
   videoDims: { w: number; h: number } | null;
@@ -3146,6 +3483,9 @@ function RedactionLayer({
   zoomSegs: ZoomSegment[];
   videoRef: React.MutableRefObject<HTMLVideoElement | null>;
   flat: boolean;
+  // Background/padding preview inset (Slice 4): redaction rects render on — and
+  // are drawn onto — the inset video, so display and draw-capture stay aligned.
+  insetFrac: number;
 }) {
   const size = useStageSize(stageRef);
   const shiftRef = useShiftHeldRef();
@@ -3194,7 +3534,7 @@ function RedactionLayer({
       if (!ctx || !off || !offCtx) return;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, cw, ch);
-      const b = contentBox({ width: rect.width, height: rect.height }, videoDims);
+      const b = contentBox({ width: rect.width, height: rect.height }, videoDims, insetFrac);
       const dsx = videoDims.w > 0 ? b.w / videoDims.w : 0;
       const t = video.currentTime;
       const vW = video.videoWidth || videoDims.w, vH = video.videoHeight || videoDims.h;
@@ -3268,17 +3608,17 @@ function RedactionLayer({
     };
     tick();
     return () => cancelAnimationFrame(raf);
-  }, [editor.regions, zoomSegs, videoDims, videoRef, stageRef, flat, size]);
+  }, [editor.regions, zoomSegs, videoDims, videoRef, stageRef, flat, size, insetFrac]);
 
   if (!videoDims) return null;
-  const b = contentBox({ width: size.width, height: size.height }, videoDims);
+  const b = contentBox({ width: size.width, height: size.height }, videoDims, insetFrac);
 
   const startDraw = (e: React.PointerEvent) => {
     const stage = stageRef.current;
     if (!stage || !videoDims) return;
     e.preventDefault();
     const rect = stage.getBoundingClientRect();
-    const box = contentBox({ width: rect.width, height: rect.height }, videoDims);
+    const box = contentBox({ width: rect.width, height: rect.height }, videoDims, insetFrac);
     const anchor = toContentFrac({ x: e.clientX - rect.left, y: e.clientY - rect.top }, box);
     const rectFrom = (ev: { clientX: number; clientY: number }): Rect => {
       const cur = toContentFrac({ x: ev.clientX - rect.left, y: ev.clientY - rect.top }, box);
@@ -3402,6 +3742,7 @@ function useStageSize(stageRef: React.MutableRefObject<HTMLDivElement | null>) {
 function contentBox(
   stage: { width: number; height: number },
   videoDims: { w: number; h: number } | null,
+  insetFrac = 0,
 ): { x: number; y: number; w: number; h: number } {
   if (!videoDims || stage.width === 0 || stage.height === 0) {
     return { x: 0, y: 0, w: stage.width, h: stage.height };
@@ -3417,14 +3758,30 @@ function contentBox(
     h = stage.height;
     w = stage.height * videoAspect;
   }
-  return { x: (stage.width - w) / 2, y: (stage.height - h) / 2, w, h };
+  let x = (stage.width - w) / 2;
+  let y = (stage.height - h) / 2;
+  // Background/padding preview (Slice 4): shrink the content box UNIFORMLY by
+  // k = 1 - padding and re-center, so the video and every overlay (which all
+  // position against this box) inset together — and pointer input maps through
+  // the same box, keeping redaction/zoom editing correct. insetFrac 0 = unchanged.
+  if (insetFrac > 0) {
+    const k = 1 - insetFrac;
+    const iw = w * k;
+    const ih = h * k;
+    x += (w - iw) / 2;
+    y += (h - ih) / 2;
+    w = iw;
+    h = ih;
+  }
+  return { x, y, w, h };
 }
 
 function useContentBox(
   stageRef: React.MutableRefObject<HTMLDivElement | null>,
   videoDims: { w: number; h: number } | null,
+  insetFrac = 0,
 ) {
-  return contentBox(useStageSize(stageRef), videoDims);
+  return contentBox(useStageSize(stageRef), videoDims, insetFrac);
 }
 
 // Content-box-relative fraction (the same convention the Rust export reads
@@ -4302,9 +4659,9 @@ type SaveSpec = {
 // mirrors the working flow: Trim, Bubble, Zoom, Watermark, Mark. A persisted
 // id from an older build (e.g. "export"/"annotate"/"share") falls back to the
 // default.
-type ToolId = "trim" | "bubble" | "zoom" | "redact" | "watermark" | "mark";
-const TOOL_IDS: ToolId[] = ["trim", "bubble", "zoom", "redact", "watermark", "mark"];
-const DEFAULT_TOOL: ToolId = "trim";
+type ToolId = "bubble" | "zoom" | "redact" | "watermark" | "background" | "mark";
+const TOOL_IDS: ToolId[] = ["zoom", "bubble", "redact", "watermark", "background", "mark"];
+const DEFAULT_TOOL: ToolId = "zoom";
 // Key versioned away from the old "review-panel-open-section" accordion format.
 const TOOL_LS_KEY = "review-panel-active-tool";
 
@@ -4359,15 +4716,19 @@ function ToolTile({
   onClick: () => void;
   title?: string;
 }) {
+  // Icon-only rail (Screen Studio style): the label is the hover tooltip + a11y name,
+  // not visible text, so the rail stays narrow. The active highlight is the only cue,
+  // so it's kept strong (.rail-tool.on).
   return (
     <button
       className={active ? "rail-tool on" : "rail-tool"}
       onClick={disabled ? undefined : onClick}
       disabled={disabled}
-      title={title}
+      title={title ?? label}
+      aria-label={label}
+      aria-pressed={active}
     >
       {icon}
-      <span>{label}</span>
     </button>
   );
 }
@@ -4428,6 +4789,62 @@ function ZonePicker({
   );
 }
 
+// A background-picker swatch (Slice 4): shows the actual color/gradient so the
+// user picks by look; None renders a labeled empty tile. aria-pressed + accent
+// border mirror ZonePicker.
+function BgSwatch({
+  label,
+  css,
+  selected,
+  onClick,
+  none,
+  image,
+}: {
+  label: string;
+  css: string;
+  selected: boolean;
+  onClick: () => void;
+  none?: boolean;
+  // Empty image-picker tile: shows a labeled placeholder (like `none`) until an
+  // image is chosen, at which point the caller passes the picked image as `css`.
+  image?: boolean;
+}) {
+  const placeholder = none ? "None" : image ? "Image" : null;
+  return (
+    <button
+      onClick={onClick}
+      aria-pressed={selected}
+      title={label}
+      style={{
+        height: 34,
+        borderRadius: 6,
+        border: selected ? "1.5px solid var(--accent)" : "1px solid var(--border-subtle)",
+        background: placeholder ? "var(--bg-input)" : css,
+        cursor: "pointer",
+        position: "relative",
+        overflow: "hidden",
+        padding: 0,
+      }}
+    >
+      {placeholder && (
+        <span
+          style={{
+            position: "absolute",
+            inset: 0,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontSize: 10,
+            color: "var(--fg-tertiary)",
+          }}
+        >
+          {placeholder}
+        </span>
+      )}
+    </button>
+  );
+}
+
 function ExportPanel({
   sourcePath,
   zoom,
@@ -4460,6 +4877,7 @@ function ExportPanel({
   onRecordAnother,
   setError,
   watermark,
+  bg,
 }: {
   sourcePath: string | null;
   zoom: ZoomEditor;
@@ -4497,6 +4915,22 @@ function ExportPanel({
   onRecordAnother: () => Promise<void> | void;
   setError: (msg: string | null) => void;
   watermark: WatermarkUI;
+  // Background canvas + framing (Slice 4). Pick-one-and-go: onPick sets the
+  // background (null = None), onMargin/onCorner flip the presets; shadow + rim
+  // are always-on and not exposed.
+  bg: {
+    background: Background | null;
+    frame: FrameStyle | null;
+    solidHex: string;
+    // Window captures already carry their own rounded corners; ours would double the
+    // edge, so Rounded is greyed for them (Square only).
+    windowSource: boolean;
+    onPick: (b: Background | null) => void;
+    onPickImage: () => void;
+    onMargin: (p: "tight" | "wide") => void;
+    onCorner: (p: "rounded" | "square") => void;
+    onSolidHex: (hex: string) => void;
+  };
 }) {
   // Transient post-save flash. Driven off lastSavedAt (parent state), reset
   // to 0 by a 1.5s timer.
@@ -4677,12 +5111,68 @@ function ExportPanel({
     <div
       style={{
         display: "flex",
-        flexDirection: "column",
+        flexDirection: "row",
         background: "var(--bg-sidebar)",
         minHeight: 0,
         overflow: "hidden",
       }}
     >
+      {/* Vertical tool rail (moved from a horizontal row that ran out of width at
+          7 tools; frees the panel's vertical space). Icon-only (Screen Studio style)
+          with Lucide icons + hover tooltips — narrower, and the four rectangle-ish
+          labels no longer cramp. Active tile carries the only cue (.rail-tool.on). */}
+      <div
+        style={{
+          width: 40,
+          flexShrink: 0,
+          display: "flex",
+          flexDirection: "column",
+          gap: 2,
+          padding: "8px 4px",
+          borderRight: "1px solid var(--border-faint)",
+        }}
+      >
+        <ToolTile
+          label="Zoom"
+          active={activeTool === "zoom"}
+          onClick={() => setActiveTool("zoom")}
+          icon={RailIcon.zoom}
+        />
+        <ToolTile
+          label="Bubble"
+          active={activeTool === "bubble"}
+          disabled={!hasBubble}
+          title={hasBubble ? "Bubble" : "No webcam bubble in this recording"}
+          onClick={() => setActiveTool("bubble")}
+          icon={RailIcon.bubble}
+        />
+        <ToolTile
+          label="Redact"
+          active={activeTool === "redact"}
+          onClick={() => setActiveTool("redact")}
+          icon={RailIcon.redact}
+        />
+        <ToolTile
+          label="Watermark"
+          active={activeTool === "watermark"}
+          onClick={() => setActiveTool("watermark")}
+          icon={RailIcon.watermark}
+        />
+        <ToolTile
+          label="Frame"
+          active={activeTool === "background"}
+          onClick={() => setActiveTool("background")}
+          icon={RailIcon.frame}
+        />
+        <ToolTile
+          label="Mark"
+          active={activeTool === "mark"}
+          onClick={() => setActiveTool("mark")}
+          icon={RailIcon.mark}
+        />
+      </div>
+      {/* Panel content column. */}
+      <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
       {/* Sections scroll vertically if the window is short; horizontal
           overflow is impossible by construction (full-width rows only). */}
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", padding: "10px 12px 12px", display: "flex", flexDirection: "column" }}>
@@ -4690,60 +5180,9 @@ function ExportPanel({
             layout is unchanged; the Export block below rides the same scroll
             region with marginTop:auto. */}
         <div style={{ flexShrink: 0 }}>
-        {/* Tool toolbar — one active tool; the contextual card below swaps to match. */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 4, marginBottom: 6 }}>
-          <ToolTile
-            label="Trim"
-            active={activeTool === "trim"}
-            onClick={() => setActiveTool("trim")}
-            icon={<Icon d={<path d="M5 2v12M11 2v12M2 5h12M2 11h12" />} size={17} stroke={1.4} />}
-          />
-          <ToolTile
-            label="Bubble"
-            active={activeTool === "bubble"}
-            disabled={!hasBubble}
-            title={hasBubble ? undefined : "No webcam bubble in this recording"}
-            onClick={() => setActiveTool("bubble")}
-            icon={<Icon d={<circle cx="8" cy="8" r="5" />} size={17} stroke={1.4} />}
-          />
-          <ToolTile
-            label="Zoom"
-            active={activeTool === "zoom"}
-            onClick={() => setActiveTool("zoom")}
-            icon={<Icon d={<><circle cx="7" cy="7" r="4" /><path d="M10 10l3.5 3.5M5.2 7h3.6M7 5.2v3.6" /></>} size={17} stroke={1.4} />}
-          />
-          <ToolTile
-            label="Redact"
-            active={activeTool === "redact"}
-            onClick={() => setActiveTool("redact")}
-            icon={<Icon d={<><rect x="2.5" y="4.5" width="11" height="7" rx="1.5" /><path d="M4.5 6.5h7M4.5 9.5h5" /></>} size={17} stroke={1.4} />}
-          />
-          <ToolTile
-            label="Watermark"
-            active={activeTool === "watermark"}
-            onClick={() => setActiveTool("watermark")}
-            icon={<Icon d={<><rect x="2.5" y="3.5" width="11" height="9" rx="1.5" /><path d="M5 11l2.2-2.6 1.5 1.7 1.3-1.5 1.5 2.4z" /></>} size={17} stroke={1.4} />}
-          />
-          <ToolTile
-            label="Mark"
-            active={activeTool === "mark"}
-            onClick={() => setActiveTool("mark")}
-            icon={<Icon d={<path d="M4 2.5h8v11l-4-2.5-4 2.5z" />} size={17} stroke={1.4} />}
-          />
-        </div>
-
-        {activeTool === "trim" && (
-          <>
-            <div style={RAIL_EYEBROW}>Trim</div>
-            <div style={CTX_CARD}>
-              <div style={{ fontSize: 11.5, color: "var(--fg-tertiary)", lineHeight: 1.4 }}>
-                Drag the handles on the timeline below to trim, or press{" "}
-                <span className="kbd">I</span> / <span className="kbd">O</span> to set the
-                in and out points at the playhead.
-              </div>
-            </div>
-          </>
-        )}
+        {/* Tool tiles live in the vertical rail (left). Trim was dropped — the
+            timeline below owns the handles + I/O keys, so its panel was only
+            instructions with no unique control. */}
 
         {activeTool === "bubble" && (
           <>
@@ -5191,6 +5630,116 @@ function ExportPanel({
           </>
         )}
 
+        {activeTool === "background" && (
+          <>
+            <div style={RAIL_EYEBROW}>Background</div>
+            <div style={CTX_CARD}>
+              <Field label="Style">
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6 }}>
+                  <BgSwatch
+                    label="None"
+                    css="transparent"
+                    none
+                    selected={bg.background == null}
+                    onClick={() => bg.onPick(null)}
+                  />
+                  <BgSwatch
+                    label="Solid color"
+                    css={bg.solidHex}
+                    selected={bg.background?.kind === "solid"}
+                    onClick={() => bg.onPick({ kind: "solid", hex: bg.solidHex })}
+                  />
+                  {GRADIENT_PRESETS.map((g) => (
+                    <BgSwatch
+                      key={g.id}
+                      label={g.id}
+                      css={gradientCss(g.a, g.b)}
+                      selected={bg.background?.kind === "gradient" && bg.background.preset === g.id}
+                      onClick={() => bg.onPick({ kind: "gradient", preset: g.id })}
+                    />
+                  ))}
+                  <BgSwatch
+                    label={bg.background?.kind === "image" ? "Change image" : "Choose image"}
+                    css={
+                      bg.background?.kind === "image"
+                        ? `url("${convertFileSrc(bg.background.path)}") center center / cover no-repeat`
+                        : "var(--bg-input)"
+                    }
+                    image={bg.background?.kind !== "image"}
+                    selected={bg.background?.kind === "image"}
+                    onClick={bg.onPickImage}
+                  />
+                </div>
+              </Field>
+              {bg.background != null && (
+                <>
+                  <Field label="Margin">
+                    <div className="segmented full">
+                      <button
+                        className={(bg.frame?.padding ?? 0) <= FRAME_TIGHT ? "on" : ""}
+                        onClick={() => bg.onMargin("tight")}
+                      >
+                        Tight
+                      </button>
+                      <button
+                        className={(bg.frame?.padding ?? 0) > FRAME_TIGHT ? "on" : ""}
+                        onClick={() => bg.onMargin("wide")}
+                      >
+                        Wide
+                      </button>
+                    </div>
+                  </Field>
+                  {/* Corners is a genuine choice only for display/area (no inherent
+                      corners). Window captures get a mandatory clip radius instead
+                      (it removes SCK's black-corner wedges), so the control is hidden
+                      for them rather than shown as a one-option toggle. */}
+                  {!bg.windowSource && (
+                    <Field label="Corners">
+                      <div className="segmented full">
+                        <button
+                          className={(bg.frame?.corner_radius ?? 0) > 0 ? "on" : ""}
+                          onClick={() => bg.onCorner("rounded")}
+                        >
+                          Rounded
+                        </button>
+                        <button
+                          className={(bg.frame?.corner_radius ?? 0) === 0 ? "on" : ""}
+                          onClick={() => bg.onCorner("square")}
+                        >
+                          Square
+                        </button>
+                      </div>
+                    </Field>
+                  )}
+                  {bg.background?.kind === "solid" && (
+                    <Field label="Color">
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <input
+                          type="color"
+                          value={bg.solidHex}
+                          onChange={(e) => bg.onSolidHex(e.target.value)}
+                          style={{ width: 28, height: 24, padding: 0, border: "none", background: "none", cursor: "pointer" }}
+                        />
+                        <input
+                          className="input"
+                          type="text"
+                          value={bg.solidHex}
+                          onChange={(e) => bg.onSolidHex(e.target.value)}
+                          spellCheck={false}
+                          style={{ flex: 1, height: 24, fontSize: 11 }}
+                        />
+                      </div>
+                    </Field>
+                  )}
+                  <div style={{ fontSize: 10.5, color: "var(--fg-tertiary)", lineHeight: 1.3 }}>
+                    Shadow and edge are always on. Baked on export.
+                  </div>
+                </>
+              )}
+            </div>
+          </>
+        )}
+
         {activeTool === "mark" && (
           <>
             <div style={RAIL_EYEBROW}>Thumbnail</div>
@@ -5450,6 +5999,7 @@ function ExportPanel({
           {I.trash}
           <span>Discard recording</span>
         </button>
+      </div>
       </div>
     </div>
   );

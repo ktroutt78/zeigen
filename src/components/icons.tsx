@@ -34,6 +34,78 @@ export const Icon = ({
   </svg>
 );
 
+// Tool-rail icons: Lucide (MIT), inlined at their native 24x24 viewBox (no lucide-react
+// dependency — we use six). Rendered stroke-only to sit with the app's line-icon look,
+// a touch thinner than Lucide's default 2. currentColor so the rail's active highlight
+// (.rail-tool.on color) drives them.
+const lucide = (children: ReactNode, size = 20) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={1.75}
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden
+  >
+    {children}
+  </svg>
+);
+export const RailIcon = {
+  // zoom-in
+  zoom: lucide(
+    <>
+      <circle cx="11" cy="11" r="8" />
+      <line x1="21" y1="21" x2="16.65" y2="16.65" />
+      <line x1="11" y1="8" x2="11" y2="14" />
+      <line x1="8" y1="11" x2="14" y2="11" />
+    </>,
+  ),
+  // webcam
+  bubble: lucide(
+    <>
+      <circle cx="12" cy="10" r="8" />
+      <circle cx="12" cy="10" r="3" />
+      <path d="M7 22h10" />
+      <path d="M12 22v-4" />
+    </>,
+  ),
+  // eye-off
+  redact: lucide(
+    <>
+      <path d="M9.88 9.88a3 3 0 1 0 4.24 4.24" />
+      <path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68" />
+      <path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61" />
+      <line x1="2" y1="2" x2="22" y2="22" />
+    </>,
+  ),
+  // stamp
+  watermark: lucide(
+    <>
+      <path d="M5 22h14" />
+      <path d="M19.27 13.73A2.5 2.5 0 0 0 17.5 13h-11A2.5 2.5 0 0 0 4 15.5V17a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-1.5a2.5 2.5 0 0 0-.73-1.77Z" />
+      <path d="M14 13V8.5C14 7 15 7 15 5a3 3 0 0 0-3-3 3 3 0 0 0-3 3c0 2 1 2 1 3.5V13" />
+    </>,
+  ),
+  // frame
+  frame: lucide(
+    <>
+      <line x1="22" y1="6" x2="2" y2="6" />
+      <line x1="22" y1="18" x2="2" y2="18" />
+      <line x1="6" y1="2" x2="6" y2="22" />
+      <line x1="18" y1="2" x2="18" y2="22" />
+    </>,
+  ),
+  // bookmark
+  mark: lucide(
+    <>
+      <path d="m19 21-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2Z" />
+    </>,
+  ),
+};
+
 // Path strings (canonical) — use I.<name> for raw paths or Glyph.<name> for prebuilt icons.
 export const P = {
   chevronRight: "M6 3l4 5-4 5",

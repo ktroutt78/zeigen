@@ -25,6 +25,7 @@
 import Foundation
 import AVFoundation
 import CoreImage
+import CoreGraphics
 import VideoToolbox
 
 func fail(_ msg: String) -> Never {
@@ -103,6 +104,133 @@ let blurEps = Double(env["BLUR_EPS"] ?? "0.4")!
 let wmCorner = env["WATERMARK_CORNER"] ?? "tr"
 let wmScaleFrac = Double(env["WATERMARK_SCALE_FRAC"] ?? "")
 let wmOpacity = Double(env["WATERMARK_OPACITY"] ?? "1.0")!
+
+// --- Background canvas + padding (BACKGROUND-PADDING-PLAN Slice 1): a terminal inset
+// stage (after every overlay, before downscale) that scales the whole composed WxH
+// frame UNIFORMLY by k = 1 - FRAME_PADDING (aspect preserved — NOT stretched) and
+// centers it over a solid background. Because it runs after the overlays, the bubble
+// and watermark inset WITH the recording instead of drifting into the margin. Canvas =
+// source dims in v1, so the terminal downscale still caps the canvas to the output res.
+// Absent/0 padding or no background -> inactive, the frame passes through byte-identical.
+// Only solid is wired here; gradient/image are later slices. Slice 2 adds rounded
+// corners, a drop shadow, and an inset border on the inset content (below).
+func ciColor(hex: String) -> CIColor? {
+    let s = (hex.hasPrefix("#") ? String(hex.dropFirst()) : hex)
+        .trimmingCharacters(in: .whitespaces)
+    guard s.count == 6, let v = UInt32(s, radix: 16) else { return nil }
+    let r = CGFloat((v >> 16) & 0xff) / 255.0
+    let g = CGFloat((v >> 8) & 0xff) / 255.0
+    let b = CGFloat(v & 0xff) / 255.0
+    // Tag sRGB so the fill matches the picked hex; CI converts to 709 at render.
+    if let srgb = CGColorSpace(name: CGColorSpace.sRGB),
+       let c = CIColor(red: r, green: g, blue: b, colorSpace: srgb) {
+        return c
+    }
+    return CIColor(red: r, green: g, blue: b)
+}
+// Rounded-rect layers for the inset stage, drawn once with Core Graphics (static for
+// the whole render). Filled = the corner mask (white, used as alpha) and the shadow
+// silhouette (black). Stroked = the inset border. Neutral colors (black/white) are
+// color-space-safe under the compositor's NSNull working space. Origin bottom-left to
+// match CI; premultiplied-last alpha.
+func roundedBitmap(w: Int, h: Int, radius: CGFloat,
+                   draw: (CGContext, CGPath) -> Void) -> CIImage? {
+    guard w > 0, h > 0, let cs = CGColorSpace(name: CGColorSpace.sRGB),
+          let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8,
+                              bytesPerRow: 0, space: cs,
+                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+    else { return nil }
+    ctx.clear(CGRect(x: 0, y: 0, width: w, height: h))
+    let r = max(0, min(radius, CGFloat(min(w, h)) / 2))
+    let path = CGPath(roundedRect: CGRect(x: 0, y: 0, width: w, height: h),
+                      cornerWidth: r, cornerHeight: r, transform: nil)
+    draw(ctx, path)
+    return ctx.makeImage().map { CIImage(cgImage: $0) }
+}
+func roundedFill(w: Int, h: Int, radius: CGFloat, gray: CGFloat, alpha: CGFloat) -> CIImage? {
+    roundedBitmap(w: w, h: h, radius: radius) { ctx, path in
+        ctx.addPath(path)
+        ctx.setFillColor(red: gray, green: gray, blue: gray, alpha: alpha)
+        ctx.fillPath()
+    }
+}
+func roundedStroke(w: Int, h: Int, radius: CGFloat, lineWidth: CGFloat,
+                   gray: CGFloat, alpha: CGFloat) -> CIImage? {
+    // Inset the stroke rect by half the line width so the whole stroke lands INSIDE the
+    // content edge (an inner rim, not a fattened outer outline).
+    let inset = lineWidth / 2
+    guard w > 0, h > 0, let cs = CGColorSpace(name: CGColorSpace.sRGB),
+          let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8,
+                              bytesPerRow: 0, space: cs,
+                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+    else { return nil }
+    ctx.clear(CGRect(x: 0, y: 0, width: w, height: h))
+    let r = max(0, min(radius, CGFloat(min(w, h)) / 2) - inset)
+    let rect = CGRect(x: inset, y: inset, width: CGFloat(w) - lineWidth, height: CGFloat(h) - lineWidth)
+    let path = CGPath(roundedRect: rect, cornerWidth: r, cornerHeight: r, transform: nil)
+    ctx.addPath(path)
+    ctx.setStrokeColor(red: gray, green: gray, blue: gray, alpha: alpha)
+    ctx.setLineWidth(lineWidth)
+    ctx.strokePath()
+    return ctx.makeImage().map { CIImage(cgImage: $0) }
+}
+let framePadding = Double(env["FRAME_PADDING"] ?? "") ?? 0
+// corner radius + inset border width are fractions of the inset content's SHORT side
+// (resolution-independent, scale with the supersample); shadow is a 0..1 intensity.
+let frameCornerFrac = Double(env["FRAME_CORNER_RADIUS"] ?? "") ?? 0
+let frameShadow = Double(env["FRAME_SHADOW"] ?? "") ?? 0
+let frameInsetFrac = Double(env["FRAME_INSET"] ?? "") ?? 0
+// Inset rim color/opacity (internal knobs for calibration). Black by default: it reads
+// as a subtle edge on the mid/dark/saturated palette, and it absorbs the rounded-corner
+// aliasing that a light rim would catch and highlight as stair-stepping.
+let rimGray = Double(env["RIM_GRAY"] ?? "") ?? 0.0
+let rimAlpha = Double(env["RIM_ALPHA"] ?? "") ?? 0.55
+// Shadow geometry scales with the PADDING MARGIN (the space the shadow lives in), so it
+// fits at Tight and grows at Wide without ramming the frame edge — and it's an ELEVATION
+// shadow (broad/soft/offset into the clear margin), not an edge-hugging separator, so it
+// reads on light backgrounds even under high-contrast dark content. Internal knobs with
+// tuned defaults (unexposed; used for calibration).
+let shadowBlurK = Double(env["SHADOW_BLUR_K"] ?? "") ?? 0.85
+let shadowDyK = Double(env["SHADOW_DY_K"] ?? "") ?? 0.45
+let shadowAlphaK = Double(env["SHADOW_ALPHA_K"] ?? "") ?? 0.5
+// Procedural gradient presets (BACKGROUND-PADDING-PLAN Slice 3): name -> (light stop,
+// dark stop). Rendered VERTICAL, dark-top -> light-bottom (see backgroundImage), so the
+// full range lands across the top+bottom margins (the bands seen) rather than the thin
+// side slivers a diagonal crosses at an angle; stops are the steeper set so the gradient
+// reads through a Tight margin. One member per hue family (graphite/indigo/teal/plum/
+// ember) plus one light option (mist). The rim + elevation shadow are the contrast
+// backstops. Mirrored in the TS UI (Slice 4) for preview parity.
+let gradientPresets: [String: (String, String)] = [
+    "graphite": ("#69748A", "#111318"),
+    "indigo":   ("#5450A6", "#0F0D20"),
+    "teal":     ("#2B7A76", "#061A19"),
+    "plum":     ("#7F53A6", "#150B22"),
+    "ember":    ("#B85A32", "#2E0F09"),
+    "mist":     ("#F8FBFE", "#B2BECE"),
+]
+// Background colors as (top-left, bottom-right): a solid repeats one color; a gradient
+// resolves its preset. nil = no background. bgIsGradient drives whether the canvas is a
+// CILinearGradient or a flat fill (the flat fill keeps the proven Slice 1 solid path).
+let bgIsGradient = env["BACKGROUND_KIND"] == "gradient"
+// User image background (Slice 5): an absolute path (watermark-logo pattern), loaded
+// and fill-cropped at render time. A set path keeps the inset active even if the file
+// later moves/deletes — the load falls back to a neutral solid (see backgroundImage).
+let bgIsImage = env["BACKGROUND_KIND"] == "image"
+let bgImagePath: String? = bgIsImage ? env["BACKGROUND_IMAGE"] : nil
+let bgColors: (CIColor, CIColor)? = {
+    switch env["BACKGROUND_KIND"] {
+    case "solid":
+        guard let hex = env["BACKGROUND_SOLID_HEX"], let c = ciColor(hex: hex) else { return nil }
+        return (c, c)
+    case "gradient":
+        guard let name = env["BACKGROUND_GRADIENT"], let (a, b) = gradientPresets[name],
+              let ca = ciColor(hex: a), let cb = ciColor(hex: b) else { return nil }
+        return (ca, cb)
+    default:
+        return nil
+    }
+}()
+let insetActive = framePadding > 0 && (bgColors != nil || bgImagePath != nil)
 
 // --- Webcam bubble (Phase 4): a SECOND video stream, composited on the final zoomed
 // frame (screen-anchored, constant placement). Mask + shadow silhouette PNGs are
@@ -391,6 +519,166 @@ let t0 = Date()
 let Wd = Double(W), Hd = Double(H)
 // velocity-tracking state (a fixed source point's output-space motion frame to frame)
 var prevO0x = Wd / 2, prevO0y = Hd / 2, prevScale = 1.0, havePrev = false
+
+// Background canvas (WxH = source dims; canvas = source in v1). Static for the whole
+// render, so build once. A gradient is a CILinearGradient light-corner (top-left) ->
+// deep-corner (bottom-right), so the built-in top-left light pairs with the downward
+// elevation shadow; a solid is the flat fill (proven Slice 1 path).
+let backgroundImage: CIImage? = {
+    guard insetActive else { return nil }
+    let canvas = CGRect(x: 0, y: 0, width: Wd, height: Hd)
+    // User image (Slice 5): FILL-and-crop to the canvas — scale by max(W/w, H/h) so the
+    // image covers the canvas with aspect preserved, then center-crop the overflow (CSS
+    // `cover`; a mismatched aspect loses the long edge, never letterboxes). Rasterized
+    // ONCE here so the source Lanczos runs a single time no matter the resolution — a 6K
+    // wallpaper costs one scale for the whole render, not one per frame. A moved/deleted
+    // file (or an unreadable one) degrades to a neutral solid so the export stays valid
+    // instead of black; the background is cosmetic and not worth failing an export over.
+    if bgIsImage {
+        let fallback = CIImage(color: CIColor(red: 0.09, green: 0.10, blue: 0.12)).cropped(to: canvas)
+        // applyOrientationProperty bakes EXIF orientation into the pixels so a portrait
+        // phone photo (stored landscape + a rotation flag) is not rendered sideways.
+        guard let p = bgImagePath,
+              let img = CIImage(contentsOf: URL(fileURLWithPath: p),
+                                options: [.applyOrientationProperty: true]),
+              img.extent.width > 0, img.extent.height > 0 else { return fallback }
+        let ext = img.extent
+        let fill = max(Wd / ext.width, Hd / ext.height)
+        let scaled = img.applyingFilter("CILanczosScaleTransform",
+            parameters: [kCIInputScaleKey: fill, kCIInputAspectRatioKey: 1.0])
+        let se = scaled.extent
+        let placed = scaled
+            .transformed(by: CGAffineTransform(
+                translationX: ((Wd - se.width) / 2 - se.minX).rounded(),
+                y: ((Hd - se.height) / 2 - se.minY).rounded()))
+            .cropped(to: canvas)
+        // Flatten to a bitmap so per-frame compositing samples a canvas-sized image,
+        // never re-runs the fill Lanczos over the source.
+        if let cg = ciContext.createCGImage(placed, from: canvas) {
+            return CIImage(cgImage: cg)
+        }
+        return placed
+    }
+    guard let (a, b) = bgColors else { return nil }
+    guard bgIsGradient, let g = CIFilter(name: "CILinearGradient") else {
+        return CIImage(color: a).cropped(to: canvas)
+    }
+    // Vertical, dark-top -> light-bottom: the full A->B range lands across the TOP
+    // and BOTTOM margins (the bands you actually see), not the thin side margins a
+    // diagonal cuts across at an angle. b is the dark stop, a the light stop.
+    g.setValue(CIVector(x: 0, y: Hd), forKey: "inputPoint0")   // top (CI y-up)
+    g.setValue(b, forKey: "inputColor0")                        // dark at top
+    g.setValue(CIVector(x: 0, y: 0), forKey: "inputPoint1")     // bottom
+    g.setValue(a, forKey: "inputColor1")                        // light at bottom
+    return (g.outputImage ?? CIImage(color: a)).cropped(to: canvas)
+}()
+
+// --- Frame styling geometry + static layers (BACKGROUND-PADDING-PLAN Slice 2). The
+// inset content occupies an integer (W*k)x(H*k) rect centered on the canvas; the corner
+// mask, drop shadow, and inset border are constant for the whole render, so build once.
+let insetK = 1.0 - framePadding
+let insetW = Int((Wd * insetK).rounded())
+let insetH = Int((Hd * insetK).rounded())
+let insetOx = ((Wd - Double(insetW)) / 2).rounded()   // content origin in canvas (CI bottom-left)
+let insetOy = ((Hd - Double(insetH)) / 2).rounded()
+let insetShort = Double(min(insetW, insetH))
+
+// Window captures carry their OWN rounded corners with opaque-black gaps (SCK 4:2:0, no
+// alpha to recover). We MEASURE that black gap's reach directly from frame 0 rather than
+// guess a radius from a point constant — the reach varies by window / display / scale, so
+// a constant is fragile (it was too small on real captures). The black is pure, so the
+// reach is unambiguous. windowSource is gated by edit.rs (WINDOW_CORNER=1).
+let windowSource = env["WINDOW_CORNER"] == "1"
+// Max reach (source px) of the near-black corner gap across all four corners, from frame 0.
+func measureBlackCornerReach(_ url: URL) -> Double? {
+    let gen = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+    gen.requestedTimeToleranceBefore = .zero
+    gen.requestedTimeToleranceAfter = CMTime(seconds: 1, preferredTimescale: 600)
+    guard let cg = try? gen.copyCGImage(at: .zero, actualTime: nil), cg.width > 0, cg.height > 0
+    else { return nil }
+    let w = cg.width, h = cg.height
+    var buf = [UInt8](repeating: 0, count: w * h * 4)
+    guard let c = CGContext(data: &buf, width: w, height: h, bitsPerComponent: 8,
+                            bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(),
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+    c.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+    func lum(_ x: Int, _ y: Int) -> Int {
+        let i = (y * w + x) * 4
+        return (Int(buf[i]) * 30 + Int(buf[i + 1]) * 59 + Int(buf[i + 2]) * 11) / 100
+    }
+    // Contiguous near-black run inward from an edge (threshold catches the AA ramp too).
+    let cap = min(w, h) / 4, thr = 60
+    func run(_ xs: (Int) -> Int, _ ys: (Int) -> Int, along: Int) -> Int {
+        var r = 0
+        for d in 0..<min(cap, along) { if lum(xs(d), ys(d)) < thr { r = d + 1 } else { break } }
+        return r
+    }
+    var reach = 0
+    for d in [1, 2, 3, 4] {
+        reach = max(reach, run({ $0 }, { _ in d }, along: w), run({ w - 1 - $0 }, { _ in d }, along: w))
+        reach = max(reach, run({ $0 }, { _ in h - 1 - d }, along: w), run({ w - 1 - $0 }, { _ in h - 1 - d }, along: w))
+        reach = max(reach, run({ _ in d }, { $0 }, along: h), run({ _ in w - 1 - d }, { $0 }, along: h))
+        reach = max(reach, run({ _ in d }, { h - 1 - $0 }, along: h), run({ _ in w - 1 - d }, { h - 1 - $0 }, along: h))
+    }
+    return reach > 1 ? Double(reach) : nil
+}
+// Clip radius (source px): measured reach + margin (covers residual AA + the sliver a
+// CIRCULAR arc leaves against the window's SQUIRCLE). Fallback to the passed fraction of
+// the source short side if measurement fails.
+let windowClipMargin = Double(env["WINDOW_CLIP_MARGIN"] ?? "") ?? 18.0
+let windowCornerR: Double = windowSource
+    ? ((measureBlackCornerReach(inURL).map { $0 + windowClipMargin }) ?? (frameCornerFrac * min(Wd, Hd)))
+    : 0
+if windowSource {
+    FileHandle.standardError.write("measured window corner reach -> clip R=\(windowCornerR)px (source)\n".data(using: .utf8)!)
+}
+
+// Base corner radius (un-zoomed) in inset space. Window sources use the MEASURED reach
+// (× insetK so it lands right after the inset downscale); display/area use their fixed
+// styling fraction.
+let cornerPx = windowSource ? CGFloat(windowCornerR * insetK) : CGFloat(frameCornerFrac * insetShort)
+
+// The corner is rounded at the inset stage (POST-zoom), and for WINDOW sources the radius
+// SCALES with the per-frame zoom s (see the loop): the window's own rounded corner is part
+// of the CONTENT, so under zoom it magnifies by s; a clip of cornerPx*s tracks it exactly,
+// keeping the corner proportional to the content (constant apparent size) AND covering the
+// magnified black gap at any zoom — no source-space mask (which broke the zoom/inset path).
+// Display/area corners are pure card styling (no content corner) and stay fixed at cornerPx.
+// Masks are cached by integer radius so a held zoom builds one mask and a ramp a handful.
+var cardMaskCache: [Int: CIImage] = [:]
+func cardMask(_ radius: CGFloat) -> CIImage? {
+    guard insetActive, radius >= 0.5 else { return nil }
+    let key = Int(radius.rounded())
+    if let m = cardMaskCache[key] { return m }
+    let m = roundedFill(w: insetW, h: insetH, radius: CGFloat(key), gray: 1.0, alpha: 1.0)
+    cardMaskCache[key] = m
+    return m
+}
+
+// Background + drop shadow, composited once. Shadow = a black rounded silhouette
+// (matching the content corners), blurred and offset DOWN, placed under the content.
+// Blur/offset scale with content size; FRAME_SHADOW is the opacity intensity. A dark
+// shadow reads on LIGHT backgrounds; on DARK backgrounds the inset border carries the
+// edge separation — that is why both exist. Returns the bare bg when shadow is 0.
+let bgWithShadow: CIImage? = {
+    guard insetActive, let bg = backgroundImage else { return nil }
+    guard frameShadow > 0,
+          let sil = roundedFill(w: insetW, h: insetH, radius: cornerPx,
+                                gray: 0.0, alpha: CGFloat(min(1.0, shadowAlphaK * frameShadow)))
+    else { return bg }
+    let marginShort = framePadding * min(Wd, Hd) / 2   // the tighter (vertical) margin
+    let blur = shadowBlurK * marginShort
+    let dy = shadowDyK * marginShort
+    let shadow = sil.applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: blur])
+        .transformed(by: CGAffineTransform(translationX: insetOx, y: insetOy - dy))
+        .cropped(to: CGRect(x: 0, y: 0, width: Wd, height: Hd))
+    return shadow.composited(over: bg)
+}()
+
+// Inset border (rim) REMOVED 2026-07-30: over a window on a light background it read as
+// unwanted dark edge lines; the elevation shadow alone separates the card. FRAME_INSET /
+// RIM_* env are ignored now (roundedStroke kept only in case a future stroke needs it).
+let borderLayer: CIImage? = nil
 
 // Pre-scale the watermark once (constant for the whole recording) and precompute
 // its integer top-left. scale: width-based round(sw*frac) (aspect kept) or legacy
@@ -722,6 +1010,29 @@ writerInput.requestMediaDataWhenReady(on: queue) {
             out = wm.composited(over: out)
         }
 
+        // Background canvas + padding inset (BACKGROUND-PADDING-PLAN Slice 1/2). Scale the
+        // finished WxH content UNIFORMLY by k = 1 - padding (one Lanczos pass, aspect kept
+        // — not stretched), round its corners (Slice 2), and place it over the background
+        // (which already carries the drop shadow) — then lay the inset border on top. Runs
+        // after every overlay, so bubble/watermark inset WITH the recording; runs before
+        // downscale, so the canvas (= source dims) is what the terminal Lanczos caps to
+        // output res. Integer origin keeps the content on the pixel grid (sharp edges).
+        if insetActive, let base = bgWithShadow {
+            var content = out.cropped(to: CGRect(x: 0, y: 0, width: Wd, height: Hd))
+                .applyingFilter("CILanczosScaleTransform",
+                    parameters: [kCIInputScaleKey: insetK, kCIInputAspectRatioKey: 1.0])
+                .cropped(to: CGRect(x: 0, y: 0, width: Double(insetW), height: Double(insetH)))
+            // Window sources scale the corner radius with the zoom so the window's own
+            // (magnified) corner is matched at any zoom; display/area stay at cornerPx.
+            if let mask = cardMask(windowSource ? cornerPx * CGFloat(s) : cornerPx) {
+                content = content.applyingFilter("CIBlendWithMask",
+                    parameters: ["inputBackgroundImage": CIImage.empty(), "inputMaskImage": mask])
+            }
+            out = content.transformed(by: CGAffineTransform(translationX: insetOx, y: insetOy))
+                .composited(over: base)
+            if let border = borderLayer { out = border.composited(over: out) }
+        }
+
         // Terminal downscale to the requested output dims — AFTER every overlay, so
         // the bubble/watermark shrink with the frame exactly as V2's mp4_scale does.
         // One Lanczos pass over the exact WxH frame; crop to the even output rect.
@@ -766,8 +1077,15 @@ done.wait()
 if writer.status == .completed {
     if let vp = velLogPath { try? velLog.write(toFile: vp, atomically: true, encoding: .utf8) }
     let dt = Date().timeIntervalSince(t0)
-    print(String(format: "OK  %dx%d->%dx%d  %d frames  scenario=%@  wall=%.2fs",
-                 W, H, outW, outH, frames, scenario, dt))
+    // scenario is the ZOOM preset (always "identity" when env-driven); the inset note
+    // surfaces background/padding so a padded render is visible without sampling pixels.
+    let bgDesc = bgIsImage ? "image" : (bgIsGradient ? "gradient:\(env["BACKGROUND_GRADIENT"] ?? "?")" : "solid")
+    let insetNote = insetActive
+        ? String(format: "  bg=%@ pad=%.2f corner=%.3f shadow=%.2f inset=%.3f",
+                 bgDesc, framePadding, frameCornerFrac, frameShadow, frameInsetFrac)
+        : ""
+    print(String(format: "OK  %dx%d->%dx%d  %d frames  scenario=%@%@  wall=%.2fs",
+                 W, H, outW, outH, frames, scenario, insetNote, dt))
 } else {
     fail("writer status \(writer.status.rawValue): \(writer.error?.localizedDescription ?? "?")")
 }
