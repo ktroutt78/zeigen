@@ -10,6 +10,7 @@ mod prewarm;
 mod settings;
 mod thumbs;
 mod tray;
+mod wallpapers;
 mod webcam;
 mod zoom;
 
@@ -818,6 +819,8 @@ pub fn run() {
             edit::probe_audio_track,
             edit::render_preview_audio,
             thumbs::extract_thumb_sprite,
+            wallpapers::list_wallpapers,
+            wallpapers::wallpaper_thumb,
             discard_recording,
             clipboard::clipboard_copy_recording,
             exports::cleanup_recording_exports,

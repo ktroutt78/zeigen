@@ -358,6 +358,16 @@ type Background =
   | { kind: "solid"; hex: string }
   | { kind: "image"; path: string };
 
+// A curated wallpaper (Rust `Wallpaper`): the absolute source path a selection
+// serializes as, plus a cached in-scope PNG thumbnail the webview can load.
+type Wallpaper = { source_path: string; thumb_path: string; name: string };
+
+// Source-path -> cached-thumb-path. The source folder isn't in the asset scope
+// and 6K HEIC can't be decoded per swatch in the DOM anyway, so image swatches
+// AND the preview render the in-scope thumb instead. Populated by list_wallpapers
+// and, for one-off Browse picks / sidecar-restored images, by wallpaper_thumb.
+type ThumbMap = Record<string, string>;
+
 // True when a frame carries no visible styling — drives skip-when-noop in the
 // write payload, the TS twin of Rust frame_is_noop.
 function frameIsNoop(f: FrameStyle | null | undefined): boolean {
@@ -430,7 +440,14 @@ function gradientCss(a: string, b: string): string {
 }
 
 // CSS for a background choice — used by the swatches and the preview canvas.
-function backgroundCss(bg: Background | null | undefined, solidHex: string): string {
+// `thumbs` maps an image source path to its cached in-scope thumbnail; image
+// backgrounds render the thumb (loadable) rather than the raw source (which is
+// usually outside the asset scope, so it renders blank — the Slice 5 gap).
+function backgroundCss(
+  bg: Background | null | undefined,
+  solidHex: string,
+  thumbs?: ThumbMap,
+): string {
   if (!bg) return "transparent";
   if (bg.kind === "solid") return bg.hex;
   if (bg.kind === "gradient") {
@@ -438,9 +455,12 @@ function backgroundCss(bg: Background | null | undefined, solidHex: string): str
     return p ? gradientCss(p.a, p.b) : solidHex;
   }
   // Image (Slice 5): fill-and-crop via CSS `cover`, matching the compositor's
-  // max-scale-then-center-crop. A missing file just fails to load (transparent);
-  // the export falls back to a neutral solid.
-  return `url("${convertFileSrc(bg.path)}") center center / cover no-repeat`;
+  // max-scale-then-center-crop. Prefer the in-scope thumb; fall back to the raw
+  // path until the thumb is generated (a frame later). A file that never
+  // resolves just fails to load (transparent); the export is unaffected — the
+  // compositor reads the source directly, full-res.
+  const src = thumbs?.[bg.path] ?? bg.path;
+  return `url("${convertFileSrc(src)}") center center / cover no-repeat`;
 }
 
 const EMPTY_STATE: SidecarState = {
@@ -886,6 +906,52 @@ export default function Review() {
   const [background, setBackground] = useState<Background | null>(null);
   const [frame, setFrame] = useState<FrameStyle | null>(null);
   const [solidHex, setSolidHex] = useState(DEFAULT_SOLID_HEX);
+  // Curated wallpaper picker. The list is fetched lazily the first time the
+  // Wallpapers tab is shown (and re-fetched on later opens, which is cheap and
+  // picks up newly-dropped files). thumbBySource feeds both the swatches and
+  // the preview; wallpapersLoading drives the first-open spinner.
+  const [wallpapers, setWallpapers] = useState<Wallpaper[]>([]);
+  const [wallpapersLoading, setWallpapersLoading] = useState(false);
+  const [thumbBySource, setThumbBySource] = useState<ThumbMap>({});
+  const wallpapersLoadingRef = useRef(false);
+  const loadWallpapers = useCallback(async () => {
+    if (wallpapersLoadingRef.current) return; // ignore overlapping opens
+    wallpapersLoadingRef.current = true;
+    setWallpapersLoading(true);
+    try {
+      const list = await invoke<Wallpaper[]>("list_wallpapers");
+      setWallpapers(list);
+      setThumbBySource((m) => {
+        const next = { ...m };
+        for (const w of list) next[w.source_path] = w.thumb_path;
+        return next;
+      });
+    } catch (err) {
+      // A missing folder returns []; a hard error just leaves None + Browse.
+      setError(`wallpapers: ${err}`);
+    } finally {
+      wallpapersLoadingRef.current = false;
+      setWallpapersLoading(false);
+    }
+  }, []);
+  // Ensure any selected image background has an in-scope thumb, so the preview
+  // (and its swatch) render. Covers all three entry points uniformly: a folder
+  // wallpaper (already mapped, no-op), a one-off Browse pick, and an image
+  // restored from a sidecar on mount. A failure is silent — the export is fine
+  // regardless; the preview just stays on its fallback.
+  useEffect(() => {
+    if (background?.kind !== "image") return;
+    if (thumbBySource[background.path]) return;
+    let live = true;
+    invoke<string>("wallpaper_thumb", { sourcePath: background.path })
+      .then((thumb) => {
+        if (live) setThumbBySource((m) => ({ ...m, [background.path]: thumb }));
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [background, thumbBySource]);
   // Capture source — from the open params, overridden by a loaded sidecar's
   // source_kind on reopen. A window capture supplies its own (squircle) corners, so
   // Rounded is gated off for it; our arc can't coincide with the OS curve (DECISIONS
@@ -2260,6 +2326,7 @@ export default function Review() {
           frame={frame}
           background={background}
           solidHex={solidHex}
+          thumbBySource={thumbBySource}
         />
         <ExportPanel
           sourcePath={sourcePath}
@@ -2316,6 +2383,10 @@ export default function Review() {
             onMargin: setMarginPreset,
             onCorner: setCornerPreset,
             onSolidHex: changeSolidHex,
+            wallpapers,
+            wallpapersLoading,
+            loadWallpapers,
+            thumbBySource,
           }}
         />
       </div>
@@ -2467,6 +2538,7 @@ type LeftColumnProps = {
   frame: FrameStyle | null;
   background: Background | null;
   solidHex: string;
+  thumbBySource: ThumbMap;
 };
 
 function LeftColumn(props: LeftColumnProps) {
@@ -2506,6 +2578,7 @@ function LeftColumn(props: LeftColumnProps) {
         frame={props.frame}
         background={props.background}
         solidHex={props.solidHex}
+        thumbBySource={props.thumbBySource}
       />
       <Timeline
         assetUrl={props.assetUrl}
@@ -2755,6 +2828,7 @@ type VideoStageProps = {
   frame: FrameStyle | null;
   background: Background | null;
   solidHex: string;
+  thumbBySource: ThumbMap;
 };
 
 function VideoStage(props: VideoStageProps) {
@@ -2791,7 +2865,7 @@ function VideoStage(props: VideoStageProps) {
   const insetFrac = bgActive ? (props.frame?.padding ?? 0) : 0;
   const insetBox = contentBox(stageSize, videoDims, insetFrac);
   const fullBox = contentBox(stageSize, videoDims, 0);
-  const bgCss = backgroundCss(props.background, props.solidHex);
+  const bgCss = backgroundCss(props.background, props.solidHex, props.thumbBySource);
   // Frame-wrapper: inset:0 (unchanged) with no bg; the inset content box + rounded
   // corners + elevation shadow + light rim when active. Geometry mirrors the
   // compositor — corner/rim = fraction of content short side; shadow scales with
@@ -4830,18 +4904,21 @@ function BgSwatch({
   selected,
   onClick,
   none,
-  image,
+  browse,
 }: {
   label: string;
   css: string;
   selected: boolean;
   onClick: () => void;
   none?: boolean;
-  // Empty image-picker tile: shows a labeled placeholder (like `none`) until an
-  // image is chosen, at which point the caller passes the picked image as `css`.
-  image?: boolean;
+  // Browse tile: shows a "Browse" placeholder (like `none`) until a one-off
+  // image is chosen, at which point the caller passes its thumb as `css`.
+  browse?: boolean;
 }) {
-  const placeholder = none ? "None" : image ? "Image" : null;
+  // A browse tile with a real image css (a picked one-off) drops the placeholder
+  // and shows the image, same as any selected swatch.
+  const hasImage = css.startsWith("url(");
+  const placeholder = none ? "None" : browse && !hasImage ? "Browse" : null;
   return (
     <button
       onClick={onClick}
@@ -4962,6 +5039,13 @@ function ExportPanel({
     onMargin: (p: "tight" | "wide") => void;
     onCorner: (p: "rounded" | "square") => void;
     onSolidHex: (hex: string) => void;
+    // Curated wallpaper picker (Wallpapers tab). loadWallpapers is called when
+    // the tab is shown; thumbBySource maps a selected image's source path to its
+    // in-scope thumb for the selected-swatch preview.
+    wallpapers: Wallpaper[];
+    wallpapersLoading: boolean;
+    loadWallpapers: () => void;
+    thumbBySource: ThumbMap;
   };
 }) {
   // Transient post-save flash. Driven off lastSavedAt (parent state), reset
@@ -4977,6 +5061,25 @@ function ExportPanel({
     const t = window.setTimeout(() => setSavedFlashAt(0), 1500);
     return () => window.clearTimeout(t);
   }, [savedFlashAt]);
+
+  // Background Style is split into two tabs so the swatch grid stays a fixed
+  // height no matter how many wallpapers exist. Open on Wallpapers if an image
+  // is already the active background, so its selected swatch is visible.
+  const [bgTab, setBgTab] = useState<"gradients" | "wallpapers">(
+    bg.background?.kind === "image" ? "wallpapers" : "gradients",
+  );
+  // Fetch the wallpaper list when the tab is shown (idempotent; re-fetch is a
+  // cheap mtime stat and picks up newly-dropped files).
+  useEffect(() => {
+    if (bgTab === "wallpapers") bg.loadWallpapers();
+  }, [bgTab, bg.loadWallpapers]);
+  // Hoisted so the `.some()` closures below narrow the union (a mutable prop
+  // access wouldn't). The active image path, and whether it's a Browse one-off
+  // (an image that isn't one of the folder wallpapers).
+  const bgImagePath = bg.background?.kind === "image" ? bg.background.path : null;
+  const isBrowsePick =
+    bgImagePath != null && !bg.wallpapers.some((w) => w.source_path === bgImagePath);
+  const browseThumb = isBrowsePick ? bg.thumbBySource[bgImagePath] : undefined;
 
   // Which tool is active (exclusive), persisted so the rail reopens the way
   // the user last left it (pure UI chrome — localStorage, not settings.json).
@@ -5667,41 +5770,100 @@ function ExportPanel({
             <div style={RAIL_EYEBROW}>Background</div>
             <div style={CTX_CARD}>
               <Field label="Style">
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6 }}>
-                  <BgSwatch
-                    label="None"
-                    css="transparent"
-                    none
-                    selected={bg.background == null}
-                    onClick={() => bg.onPick(null)}
-                  />
-                  <BgSwatch
-                    label="Solid color"
-                    css={bg.solidHex}
-                    selected={bg.background?.kind === "solid"}
-                    onClick={() => bg.onPick({ kind: "solid", hex: bg.solidHex })}
-                  />
-                  {GRADIENT_PRESETS.map((g) => (
-                    <BgSwatch
-                      key={g.id}
-                      label={g.id}
-                      css={gradientCss(g.a, g.b)}
-                      selected={bg.background?.kind === "gradient" && bg.background.preset === g.id}
-                      onClick={() => bg.onPick({ kind: "gradient", preset: g.id })}
-                    />
-                  ))}
-                  <BgSwatch
-                    label={bg.background?.kind === "image" ? "Change image" : "Choose image"}
-                    css={
-                      bg.background?.kind === "image"
-                        ? `url("${convertFileSrc(bg.background.path)}") center center / cover no-repeat`
-                        : "var(--bg-input)"
-                    }
-                    image={bg.background?.kind !== "image"}
-                    selected={bg.background?.kind === "image"}
-                    onClick={bg.onPickImage}
-                  />
+                {/* Two tabs so the grid can't grow the panel: Gradients is a
+                    fixed set; Wallpapers scrolls inside a capped-height box no
+                    matter how many images the folder holds. Each tab has its own
+                    None so the background can be cleared from either view. */}
+                <div className="segmented full" style={{ marginBottom: 8 }}>
+                  <button
+                    className={bgTab === "gradients" ? "on" : ""}
+                    onClick={() => setBgTab("gradients")}
+                  >
+                    Gradients
+                  </button>
+                  <button
+                    className={bgTab === "wallpapers" ? "on" : ""}
+                    onClick={() => setBgTab("wallpapers")}
+                  >
+                    Wallpapers
+                  </button>
                 </div>
+                {bgTab === "gradients" ? (
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6 }}>
+                    <BgSwatch
+                      label="None"
+                      css="transparent"
+                      none
+                      selected={bg.background == null}
+                      onClick={() => bg.onPick(null)}
+                    />
+                    <BgSwatch
+                      label="Solid color"
+                      css={bg.solidHex}
+                      selected={bg.background?.kind === "solid"}
+                      onClick={() => bg.onPick({ kind: "solid", hex: bg.solidHex })}
+                    />
+                    {GRADIENT_PRESETS.map((g) => (
+                      <BgSwatch
+                        key={g.id}
+                        label={g.id}
+                        css={gradientCss(g.a, g.b)}
+                        selected={bg.background?.kind === "gradient" && bg.background.preset === g.id}
+                        onClick={() => bg.onPick({ kind: "gradient", preset: g.id })}
+                      />
+                    ))}
+                  </div>
+                ) : (
+                  // Capped-height scroll box: ~3 rows visible, the rest scrolls.
+                  // This is the fixed-panel-height guarantee.
+                  <div style={{ maxHeight: 116, overflowY: "auto", paddingRight: 2 }}>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6 }}>
+                      <BgSwatch
+                        label="None"
+                        css="transparent"
+                        none
+                        selected={bg.background == null}
+                        onClick={() => bg.onPick(null)}
+                      />
+                      {bg.wallpapers.map((w) => (
+                        <BgSwatch
+                          key={w.source_path}
+                          label={w.name}
+                          css={`url("${convertFileSrc(w.thumb_path)}") center center / cover no-repeat`}
+                          selected={
+                            bg.background?.kind === "image" && bg.background.path === w.source_path
+                          }
+                          onClick={() => bg.onPick({ kind: "image", path: w.source_path })}
+                        />
+                      ))}
+                      {/* Browse = one-off file pick (owner decision 2026-08-01).
+                          Selected when the active image isn't one of the folder
+                          wallpapers; its thumb (via thumbBySource) previews it. */}
+                      <BgSwatch
+                        label="Browse…"
+                        browse
+                        css={
+                          browseThumb
+                            ? `url("${convertFileSrc(browseThumb)}") center center / cover no-repeat`
+                            : "var(--bg-input)"
+                        }
+                        selected={isBrowsePick}
+                        onClick={bg.onPickImage}
+                      />
+                    </div>
+                    {bg.wallpapersLoading && bg.wallpapers.length === 0 && (
+                      <div style={{ fontSize: 10.5, color: "var(--fg-tertiary)", padding: "8px 2px 2px" }}>
+                        Loading wallpapers…
+                      </div>
+                    )}
+                    {!bg.wallpapersLoading && bg.wallpapers.length === 0 && (
+                      <div style={{ fontSize: 10.5, color: "var(--fg-tertiary)", lineHeight: 1.3, padding: "8px 2px 2px" }}>
+                        No wallpapers in ~/Pictures/Wallpapers yet. Drop images there, or Browse for a
+                        one-off.
+                      </div>
+                    )}
+                  </div>
+                )}
               </Field>
               {bg.background != null && (
                 <>
