@@ -4,6 +4,22 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-08-01 — Curated wallpaper picker in the Background section (tabs + Rust-side thumbnails).
+
+The Background Style grid was one flat set (None + solid + six gradients + an image slot); it can't absorb a folder of wallpapers in a 320px panel. Added a two-tab Style control — Gradients | Wallpapers — so the grid stays a fixed height regardless of wallpaper count (the Wallpapers grid scrolls inside a capped-height box). Each tab has its own None so the background clears from either view. Solid color stays on the Gradients tab (Wallpapers is purely image-based). Files live in `~/Pictures/Wallpapers`, auto-created on first run.
+
+Decisions:
+1. THUMBNAILS ARE GENERATED RUST-SIDE, not decoded in the webview. Two independent reasons, either decisive: (a) the asset-protocol scope (`tauri.conf.json`) only allows a few dirs — `~/Pictures` is deliberately not one, and adding it wholesale is a scope we don't want; (b) even in scope, that decodes a full 6K HEIC per swatch in the DOM. `sips` (macOS built-in, no new dependency) decodes HEIC/HEIF/JPEG/PNG/TIFF and writes a 640px PNG into the already-scoped cache (`~/Library/Caches/com.zeigen.app/wallpapers`). The webview loads those. New module `src-tauri/src/wallpapers.rs`; one asset-scope line added.
+2. NO NEW BACKGROUND KIND. A wallpaper selection is `Background::Image { path }` with the source path — identical to a Slice 5 Browse pick. The thumbnail is picker chrome only; the compositor is untouched and reads the full-res source directly at export. The byte-identical no-op invariant is preserved by construction (None -> onPick(null) -> serializes absent; full suite green).
+3. CACHE KEYED ON PATH, STALE-CHECKED ON MTIME. Thumb filename is a hash of the source path (so a replaced file reuses + overwrites, no leak); regenerate iff the cached thumb's mtime is older than the source's. Replace-in-place therefore regenerates (a swapped file's mtime is "now" > old thumb). Verified, not assumed: a unit test swaps a landscape file for a portrait one at the same path and asserts the thumb's aspect flips; a second test asserts the warm path doesn't re-shell to sips.
+4. BROWSE = ONE-OFF FILE PICK ONLY. The folder is hardcoded; Browse never repoints it (folding file-vs-folder into one swatch forks every click). Reuses the existing Slice 5 `open()` dialog.
+5. DIRECTORY SYMLINKS ARE SKIPPED. The owner's folder holds an `Apple Stock` symlink to `/System/Library/Desktop Pictures`; following it would re-import exactly the dynamic/solar `.heic` files that made the system wallpaper picker expensive to scope. The listing filter is `is_file() && is_image()` with no recursion — `is_file()` follows symlinks, so a symlink to an image is kept but a symlink to a directory is dropped and never descended. Locked by a test; confirmed against the real folder (10 images listed, Apple Stock excluded).
+6. FIXED THE SLICE 5 PREVIEW GAP as part of this. An image background picked from outside the asset scope rendered blank in the WYSIWYG preview (and the old image swatch) — the export always worked because the compositor reads the file directly. Now `backgroundCss` and the swatches render the in-scope thumb (via a source->thumb map populated by the listing, one-off Browse picks, and sidecar-restored images alike).
+
+Measured on the owner's real folder (11 entries, 10 images, mostly 6K HEIC) at the shipped 640px/8-wide-parallel: cold first-run 0.71s, ~2.9MB cache; warm re-open ~0 (mtime stat only). Under the 2s bar, so generation blocks rather than streaming progressively.
+
+Deferred (unchanged from the background/padding backlog): output aspect ratio, rim on/off. The "user wallpaper picker" backlog item is now delivered.
+
 ## 2026-07-30 — A lane that owns the add-surface must render even when empty.
 
 Bug: a recording with zero suggested zooms had no way to add the first zoom manually. The zoom `SegmentTrack` lane was gated on `segments.length > 0` in `Review.tsx`, so an empty list rendered no lane — and the lane's blank-track click IS the add gesture. Re-suggest was the only path in from zero, and it returns nothing on a clip with no cursor activity; the panel's empty-state copy even pointed at a lane that wasn't there.
