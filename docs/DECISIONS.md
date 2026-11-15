@@ -4,6 +4,16 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-15 — Zoom polish kickoff: reference is Cap; motion blur reopened; cursor-follow stays closed; pan-between-zooms in scope; no typing signal
+
+Owner decisions (Keith) at the start of the zoom-polish / window-capture assignment (`docs/ZOOM-POLISH-AND-CAPTURE-BRIEF.md`, plan in `docs/ZOOM-POLISH-PLAN.md`):
+
+1. **Reference is Cap, not Screen Studio.** No Screen Studio license, so there is no clip to measure. Cap (github.com/CapSoftware/Cap) is the reference we can both measure and read. It is AGPLv3: study the approach, never copy code. Reference clips live in `harness/reference/` (gitignored): `cap.mp4` and `zeigen.mp4`, same kind of session, not identical actions.
+2. **Motion blur is REOPENED.** Supersedes the "out of the value case" conclusion of 2026-07-15 / 2026-07-16. That blind test was a radial blur on the hard 0.6s ramp, so it does not settle whether blur helps on a gentler camera move.
+3. **Continuous cursor-follow stays CLOSED** (2026-07-15 stands). But **panning between nearby consecutive zooms, instead of zooming fully out and back in, is in scope.** If Cap's approach makes a strong case for continuous follow, it gets argued in the plan and Keith decides.
+4. **No typing signal for auto-zoom.** Not worth a keystroke-recording permission. Telemetry stays cursor position, clicks and scrolls.
+5. **Cap-inspired backlog ideas** (export progress, cursor smoothing and style, scene changes on the timeline) are in `docs/BACKLOG.md` and are not planned now. The zoom plan must say whether cursor smoothing should share code with the camera path.
+
 ## 2026-08-01 — Curated wallpaper picker in the Background section (tabs + Rust-side thumbnails).
 
 The Background Style grid was one flat set (None + solid + six gradients + an image slot); it can't absorb a folder of wallpapers in a 320px panel. Added a two-tab Style control — Gradients | Wallpapers — so the grid stays a fixed height regardless of wallpaper count (the Wallpapers grid scrolls inside a capped-height box). Each tab has its own None so the background clears from either view. Solid color stays on the Gradients tab (Wallpapers is purely image-based). Files live in `~/Pictures/Wallpapers`, auto-created on first run.
