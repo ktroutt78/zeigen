@@ -42,3 +42,6 @@ harness/v2-drift/output/*.csv
 harness/v2-drift/__pycache__/
 # Acceptance runs: keep the CSV records tracked, drop the big videos
 harness/v2-drift/acceptance/*.mp4
+
+# Reference clips for zoom comparison (local only)
+harness/reference/*.mp4
