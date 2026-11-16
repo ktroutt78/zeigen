@@ -867,10 +867,53 @@ fn build_compositor_command(
     cmd
 }
 
-// Writes the compositor's cursor.json and one PNG per cursor shape into
-// temp_dir. Positions are the smoothed path's frame fractions; shape sizes and
-// hotspots are converted from screen points to SOURCE VIDEO PIXELS (times the
-// style's size), so the compositor only scales them by the zoom.
+// The drawn cursor's overlay data: the smoothed path (frame fractions at
+// t = i * step) plus each shape with its size and hotspot converted from screen
+// points to SOURCE VIDEO PIXELS (times the style's size), so a renderer only
+// scales them by the zoom. The ONE definition shared by the export
+// (write_cursor_json) and the preview (cursor_preview). `P` is how a shape's
+// image is carried: the log's base64 PNG for the preview, a file for the export.
+// Field order is the compositor's cursor.json layout.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct CursorOverlay<P> {
+    pub step: f64,
+    pub samples: Vec<[f32; 2]>,
+    pub shapes: Vec<CursorOverlayShape<P>>,
+    pub shape_events: Vec<crate::zoom::ShapeEvent>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct CursorOverlayShape<P> {
+    pub png: P,
+    pub width: f64,
+    pub height: f64,
+    pub hot_x: f64,
+    pub hot_y: f64,
+}
+
+fn cursor_overlay_data(track: &CursorTrack, style: CursorStyle, duration: f64) -> CursorOverlay<String> {
+    let k = track.points_to_pixels * style.size;
+    let path = crate::cursor::path(track, style.smoothing.sigma(), duration);
+    CursorOverlay {
+        step: path.step,
+        samples: path.samples,
+        shapes: track
+            .shapes
+            .iter()
+            .map(|s| CursorOverlayShape {
+                png: s.png.clone(),
+                width: s.width * k,
+                height: s.height * k,
+                hot_x: s.hot_x * k,
+                hot_y: s.hot_y * k,
+            })
+            .collect(),
+        shape_events: track.shape_events.clone(),
+    }
+}
+
+// Writes the compositor's cursor.json (cursor_overlay_data) and one PNG per
+// cursor shape into temp_dir.
 fn write_cursor_json(
     track: &CursorTrack,
     style: CursorStyle,
@@ -878,44 +921,17 @@ fn write_cursor_json(
     temp_dir: &Path,
 ) -> Result<PathBuf, String> {
     use base64::Engine;
-    #[derive(Serialize)]
-    struct Shape {
-        png: PathBuf,
-        width: f64,
-        height: f64,
-        hot_x: f64,
-        hot_y: f64,
-    }
-    #[derive(Serialize)]
-    struct Overlay<'a> {
-        step: f64,
-        samples: Vec<[f32; 2]>,
-        shapes: Vec<Shape>,
-        shape_events: &'a [crate::zoom::ShapeEvent],
-    }
-    let k = track.points_to_pixels * style.size;
-    let mut shapes = Vec::with_capacity(track.shapes.len());
-    for (i, s) in track.shapes.iter().enumerate() {
+    let data = cursor_overlay_data(track, style, duration);
+    let mut shapes = Vec::with_capacity(data.shapes.len());
+    for (i, s) in data.shapes.into_iter().enumerate() {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&s.png)
             .map_err(|e| format!("cursor shape {i}: bad PNG data: {e}"))?;
         let png = temp_dir.join(format!("cursor-{i}.png"));
         std::fs::write(&png, bytes).map_err(|e| format!("write {}: {e}", png.display()))?;
-        shapes.push(Shape {
-            png,
-            width: s.width * k,
-            height: s.height * k,
-            hot_x: s.hot_x * k,
-            hot_y: s.hot_y * k,
-        });
+        shapes.push(CursorOverlayShape { png, width: s.width, height: s.height, hot_x: s.hot_x, hot_y: s.hot_y });
     }
-    let path = crate::cursor::path(track, style.smoothing.sigma(), duration);
-    let overlay = Overlay {
-        step: path.step,
-        samples: path.samples,
-        shapes,
-        shape_events: &track.shape_events,
-    };
+    let overlay = CursorOverlay { step: data.step, samples: data.samples, shapes, shape_events: data.shape_events };
     let json = serde_json::to_string(&overlay).map_err(|e| format!("cursor json: {e}"))?;
     let p = temp_dir.join("cursor.json");
     std::fs::write(&p, json).map_err(|e| format!("write cursor.json: {e}"))?;
@@ -1755,6 +1771,20 @@ fn camera_zooms(kfs: &[ZoomKeyframe]) -> Vec<crate::camera::Zoom> {
 #[tauri::command]
 pub fn camera_path(zoom: Vec<ZoomKeyframe>, width: f64, height: f64, duration: f64) -> crate::camera::CameraPath {
     crate::camera::path(&camera_zooms(&zoom), width, height, duration)
+}
+
+// The preview's drawn cursor: the same overlay data the export writes to
+// cursor.json, with each shape's PNG as base64. None = the recording has its
+// cursor in the video (or no cursor log). Resolves the raw screen file exactly
+// as the exports do.
+#[tauri::command]
+pub fn cursor_preview(
+    source_path: String,
+    style: CursorStyle,
+    duration: f64,
+) -> Result<Option<CursorOverlay<String>>, String> {
+    let (screen, _) = export_inputs_from_source(Path::new(&source_path));
+    Ok(cursor_overlay(&screen)?.map(|track| cursor_overlay_data(&track, style, duration)))
 }
 
 // Resolve the next available per-format slot in ~/Movies/Zeigen for a
@@ -3996,6 +4026,84 @@ WATERMARK_SCALE_FRAC=0.08";
         .expect("plain export");
         assert_eq!(stream_md5(out.to_str().unwrap(), "0:v"), stream_md5(screen.to_str().unwrap(), "0:v"),
             "a version-1 recording must stay on -c:v copy");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // "Defined once": the preview command returns exactly the samples, shape
+    // geometry and shape events the export writes to cursor.json for the same
+    // track + style, and each shape's PNG bytes match the file the export wrote.
+    // A version-1 log (cursor in the video) gives the preview nothing to draw.
+    #[test]
+    fn cursor_preview_matches_export_cursor_json() {
+        use base64::Engine;
+        let dir = std::env::temp_dir().join(format!("zeigen-cursor-preview-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let screen = dir.join("screen.mp4");
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let log = serde_json::json!({
+            "version": 2,
+            "video_size": {"width": 1280, "height": 800},
+            "sample_rate_hz": 120,
+            "samples": [
+                {"t": 0.0, "x": 100.0, "y": 100.0}, {"t": 0.5, "x": 300.0, "y": 220.0},
+                {"t": 1.0, "x": 640.0, "y": 400.0}, {"t": 2.0, "x": 900.0, "y": 610.0}
+            ],
+            "events": [{"t": 1.0, "kind": "click", "x": 640.0, "y": 400.0}],
+            "cursor_in_video": false,
+            "points_to_pixels": 2.0,
+            "shapes": [
+                {"png": b64(b"arrow-png"), "width": 17.0, "height": 23.0, "hot_x": 4.0, "hot_y": 2.5},
+                {"png": b64(b"hand-png"), "width": 20.0, "height": 22.0, "hot_x": 7.0, "hot_y": 1.0}
+            ],
+            "shape_events": [{"t": 0.0, "shape": 0}, {"t": 1.2, "shape": 1}],
+        });
+        std::fs::write(crate::zoom::cursor_track_path(&screen), log.to_string()).unwrap();
+        let style = CursorStyle { smoothing: CursorSmoothing::Light, size: 1.5 };
+        let duration = 2.0;
+
+        let preview = cursor_preview(screen.to_string_lossy().into_owned(), style, duration)
+            .expect("preview")
+            .expect("a marked recording has an overlay");
+        let track = cursor_overlay(&screen).unwrap().unwrap();
+        let json_path = write_cursor_json(&track, style, duration, &dir).expect("export json");
+        let mut export: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
+        // Through a JSON string, as Tauri hands it to the frontend.
+        let mut preview_v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&preview).unwrap()).unwrap();
+
+        // PNG payloads differ in carrier (file vs base64) but must be the same bytes.
+        for i in 0..2 {
+            let file = export["shapes"][i]["png"].as_str().unwrap().to_string();
+            let data = preview_v["shapes"][i]["png"].as_str().unwrap().to_string();
+            assert_eq!(
+                std::fs::read(&file).unwrap(),
+                base64::engine::general_purpose::STANDARD.decode(data).unwrap(),
+                "shape {i} PNG bytes"
+            );
+            export["shapes"][i]["png"] = serde_json::Value::Null;
+            preview_v["shapes"][i]["png"] = serde_json::Value::Null;
+        }
+        assert_eq!(preview_v, export, "preview overlay must equal the export's cursor.json");
+        // Spot-check the source-pixel conversion (points * points_to_pixels * size).
+        assert_eq!(preview.shapes[1].width, 20.0 * 2.0 * 1.5);
+        assert_eq!(preview.shapes[0].hot_y, 2.5 * 2.0 * 1.5);
+        assert!(!preview.samples.is_empty());
+
+        // Version-1 log: no overlay.
+        std::fs::write(
+            crate::zoom::cursor_track_path(&screen),
+            serde_json::json!({
+                "version": 1,
+                "video_size": {"width": 1280, "height": 800},
+                "samples": [{"t": 0.0, "x": 1.0, "y": 1.0}],
+                "events": [],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(cursor_preview(screen.to_string_lossy().into_owned(), style, duration).unwrap().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
