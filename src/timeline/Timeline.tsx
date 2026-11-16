@@ -3,7 +3,7 @@ import Waveform from "../Waveform";
 import { I } from "../components/icons";
 import type { RedactionEditor, Trim, ZoomEditor } from "../Review";
 import { fmt, TRIM_EPS, ZOOM_MIN_DURATION } from "../reviewShared";
-import SegmentRow from "./SegmentRow";
+import SegmentRow, { MOVE_THRESHOLD_PX } from "./SegmentRow";
 import CameraShade from "./CameraShade";
 import { tickLabel, timeScale } from "./scale";
 
@@ -266,16 +266,18 @@ export default function Timeline(props: TimelineProps) {
   );
 
   // Anywhere on the tracks that is not a segment: a click sets the playhead,
-  // press+drag scrubs it.
+  // press+drag scrubs it. A click on a row's add ghost adds a segment instead
+  // (SegmentRow handles that), so it leaves the playhead alone.
   const onTrackPointerDown = (e: React.PointerEvent) => {
     if (!scale) return;
     const rect = getRect();
     const startX = e.clientX;
     const wasPlaying = !props.videoRef.current?.paused;
+    const onGhost = (e.target as Element).closest("[data-adds-on-click]") != null;
     let dragging = false;
     setHover(null);
     const onMove = (ev: PointerEvent) => {
-      if (!dragging && Math.abs(ev.clientX - startX) > 3) {
+      if (!dragging && Math.abs(ev.clientX - startX) > MOVE_THRESHOLD_PX) {
         dragging = true;
         if (wasPlaying) props.videoRef.current?.pause();
         props.onScrubStart();
@@ -285,7 +287,7 @@ export default function Timeline(props: TimelineProps) {
     const onUp = (ev: PointerEvent) => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
-      if (!dragging) props.setPlayhead(scale.timeAtClientX(ev.clientX, rect));
+      if (!dragging && !onGhost) props.setPlayhead(scale.timeAtClientX(ev.clientX, rect));
       props.onScrubEnd();
       if (dragging && wasPlaying) props.videoRef.current?.play().catch(() => {});
     };
@@ -567,30 +569,10 @@ export default function Timeline(props: TimelineProps) {
               )}
             </div>
 
-            {/* Zoom row. Always present once the duration is known, so a
-                recording with no zooms still has a surface to click to add one. */}
+            {/* Zoom row. Always present once the duration is known; hovering
+                empty space shows the zoom a click would add. */}
             <div style={{ position: "relative", height: ROW_H, marginTop: ROW_GAP }}>
               <div style={rowBg} />
-              {scale && props.zoom.segments.length === 0 && (
-                <div
-                  style={{
-                    ...rowBg,
-                    border: "1px dashed var(--zoom)",
-                    background: "var(--zoom-soft)",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    fontSize: 11,
-                    fontWeight: 600,
-                    letterSpacing: "0.03em",
-                    color: "var(--zoom)",
-                    opacity: 0.85,
-                    pointerEvents: "none",
-                  }}
-                >
-                  Click to add a zoom
-                </div>
-              )}
               {scale && (
                 <SegmentRow
                   segments={props.zoom.segments}
@@ -599,7 +581,7 @@ export default function Timeline(props: TimelineProps) {
                   trackWidth={trackWidth}
                   selectedIndex={props.zoom.selectedIndex}
                   onSelect={props.zoom.select}
-                  onAddAt={props.zoom.addAt}
+                  ghost={{ place: props.zoom.place, add: props.zoom.addAt }}
                   onChange={(i, p) => props.zoom.update(i, p)}
                   onDragHover={onDragHover}
                   label={(i) => {
