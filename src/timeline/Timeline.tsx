@@ -5,7 +5,7 @@ import type { RedactionEditor, Trim, ZoomEditor } from "../Review";
 import { fmt, TRIM_EPS, ZOOM_MIN_DURATION } from "../reviewShared";
 import SegmentRow from "./SegmentRow";
 import CameraShade from "./CameraShade";
-import { timeScale } from "./scale";
+import { tickLabel, timeScale } from "./scale";
 
 // The Review window's timeline: a header, then a fixed label column beside ONE
 // tracks column holding the ruler and the rows (Video, Zoom, and Blur when the
@@ -293,7 +293,7 @@ export default function Timeline(props: TimelineProps) {
                         whiteSpace: "nowrap",
                       }}
                     >
-                      {fmt(t)}
+                      {tickLabel(t)}
                     </span>
                   )}
                 </div>
