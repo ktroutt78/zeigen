@@ -174,6 +174,11 @@ pub struct ZoomKeyframe {
     // replace only flagged keyframes; user-placed ones are never stomped.
     #[serde(default)]
     pub auto_generated: bool,
+    // Why an auto zoom fired ("drag", "right-click menu", "pause + 2 clicks",
+    // "pause, no click"); kept through manual edits. None for hand-added zooms
+    // and old sidecars, and omitted from the JSON then (byte-identical).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
@@ -2150,6 +2155,7 @@ mod tests {
                 center_y: 540.0,
                 ease: Ease::InOutCubic,
                 auto_generated: true,
+                reason: None,
             },
             ZoomKeyframe {
                 t: 4.6,
@@ -2158,6 +2164,7 @@ mod tests {
                 center_y: 450.0,
                 ease: Ease::Linear,
                 auto_generated: false,
+                reason: None,
             },
         ];
         let json = serde_json::to_string_pretty(&state).unwrap();
@@ -2775,6 +2782,7 @@ WATERMARK_SCALE_FRAC=0.08";
             center_y: 50.0,
             ease: Ease::InOutCubic,
             auto_generated: false,
+            reason: None,
         };
         // Canonical single window: span is edge-scale-1 keyframe to the next;
         // peak interior scale + its center define it.
@@ -2816,6 +2824,7 @@ WATERMARK_SCALE_FRAC=0.08";
             center_y: cy,
             ease: Ease::InOutCubic,
             auto_generated: true,
+            reason: None,
         };
         let track = [
             kf(1.0, 1.0, 960.0, 540.0),
@@ -3065,6 +3074,7 @@ WATERMARK_SCALE_FRAC=0.08";
         let kf = |t: f64, scale: f64| ZoomKeyframe {
             t, scale, center_x: 160.0, center_y: 120.0, ease: Ease::InOutCubic,
             auto_generated: false,
+            reason: None,
         };
         let sidecar = SidecarState {
             zoom: vec![kf(0.3, 1.0), kf(0.9, 2.0), kf(1.1, 2.0), kf(1.7, 1.0)],
@@ -3162,6 +3172,7 @@ WATERMARK_SCALE_FRAC=0.08";
         let kf = |t: f64, scale: f64| ZoomKeyframe {
             t, scale, center_x: 640.0, center_y: 360.0, ease: Ease::InOutCubic,
             auto_generated: false,
+            reason: None,
         };
         let zoomed = SidecarState {
             zoom: vec![kf(0.3, 1.0), kf(0.9, 2.0), kf(1.1, 2.0), kf(1.7, 1.0)],
@@ -3340,6 +3351,7 @@ WATERMARK_SCALE_FRAC=0.08";
         let kf = |t: f64, scale: f64| ZoomKeyframe {
             t, scale, center_x: 640.0, center_y: 360.0, ease: Ease::InOutCubic,
             auto_generated: false,
+            reason: None,
         };
         let zoomed = SidecarState {
             zoom: vec![kf(0.3, 1.0), kf(0.9, 2.0), kf(1.1, 2.0), kf(1.7, 1.0)],
@@ -3456,6 +3468,7 @@ WATERMARK_SCALE_FRAC=0.08";
         let kf = |t: f64, scale: f64| ZoomKeyframe {
             t, scale, center_x: 640.0, center_y: 360.0, ease: Ease::InOutCubic,
             auto_generated: false,
+            reason: None,
         };
         let zoomed = SidecarState {
             zoom: vec![kf(0.3, 1.0), kf(0.9, 2.0), kf(1.1, 2.0), kf(1.7, 1.0)],

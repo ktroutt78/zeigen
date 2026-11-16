@@ -62,6 +62,9 @@ type ZoomKeyframe = {
   center_y: number;
   ease?: ZoomEase;
   auto_generated?: boolean;
+  // Why an auto zoom fired ("drag", "pause + 2 clicks", ...). Absent for
+  // hand-added zooms and old sidecars; kept through manual edits.
+  reason?: string;
 };
 
 // UI model — one zoom window the user edits on the timeline. The sidecar
@@ -73,6 +76,7 @@ type ZoomSegment = {
   center_x: number;
   center_y: number;
   auto_generated: boolean;
+  reason?: string;
 };
 
 // RedactionRegion / RedactionTint now live in ./redaction (imported above), the
@@ -97,9 +101,10 @@ const ZOOM_PREVIEW_POST_S = 1.0;
 
 // Segment -> canonical keyframe run: 1.0 at the edges, full scale between,
 // ramps ZOOM_RAMP_S long (halved for short segments). All keyframes of a
-// segment share its center and auto_generated flag. Key order matters:
+// segment share its center, auto_generated flag and reason. Key order matters:
 // statesEqual compares JSON.stringify against sidecar keyframes as Rust
-// serializes them (t, scale, center_x, center_y, ease, auto_generated).
+// serializes them (t, scale, center_x, center_y, ease, auto_generated, reason),
+// and reason is omitted when absent, as Rust omits it.
 function zoomSegmentsToKeyframes(segments: ZoomSegment[]): ZoomKeyframe[] {
   const kfs: ZoomKeyframe[] = [];
   for (const seg of [...segments].sort((a, b) => a.start - b.start)) {
@@ -108,6 +113,7 @@ function zoomSegmentsToKeyframes(segments: ZoomSegment[]): ZoomKeyframe[] {
       center_y: seg.center_y,
       ease: "in_out_cubic" as ZoomEase,
       auto_generated: seg.auto_generated,
+      ...(seg.reason ? { reason: seg.reason } : {}),
     };
     const dur = seg.end - seg.start;
     const ramp = Math.min(ZOOM_RAMP_S, dur / 2);
@@ -149,6 +155,7 @@ function zoomKeyframesToSegments(kfs: ZoomKeyframe[]): ZoomSegment[] {
       center_x: peak.center_x,
       center_y: peak.center_y,
       auto_generated: peak.auto_generated ?? false,
+      ...(peak.reason ? { reason: peak.reason } : {}),
     });
     i = j;
   }
@@ -4437,7 +4444,7 @@ function Timeline(props: TimelineProps) {
               // safe and needs no second ScrubPreview.
               setHover({ time: t, rect: track.getBoundingClientRect() });
             }}
-            label={() => "zoom"}
+            label={(i) => props.zoom.segments[i]?.reason ?? "zoom"}
             bounds={props.zoom.bounds}
             alwaysBand
             minGap={ZOOM_MIN_DURATION}
@@ -5430,6 +5437,11 @@ function ExportPanel({
                     style={{ width: "100%" }}
                   />
                 </Field>
+                {zoom.segments[zoom.selectedIndex].reason && (
+                  <div style={{ fontSize: 11, color: "var(--fg-tertiary)" }}>
+                    Why: {zoom.segments[zoom.selectedIndex].reason}
+                  </div>
+                )}
                 <div style={{ fontSize: 11, color: "var(--fg-tertiary)" }}>
                   Drag the crosshair on the video to set the zoom center. Adjust
                   timing on the timeline lane. Deselect (Esc) to watch the zoom

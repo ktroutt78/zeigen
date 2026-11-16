@@ -194,6 +194,16 @@ struct Candidate {
     clicks: u32,
     ev0: f64,
     ev1: f64,
+    kind: Kind,
+}
+
+// What fired a candidate. A pause's reason also depends on `clicks` (pause with
+// N corroborating clicks vs a clickless pause).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Kind {
+    Drag,
+    Menu,
+    Pause,
 }
 
 impl Candidate {
@@ -203,7 +213,29 @@ impl Candidate {
     fn cy(&self) -> f64 {
         (self.miny + self.maxy) / 2.0
     }
+    // drag = right-click menu (strong) > pause + clicks > pause, no click.
+    fn strength(&self) -> u8 {
+        match self.kind {
+            Kind::Drag | Kind::Menu => 2,
+            Kind::Pause if self.clicks > 0 => 1,
+            Kind::Pause => 0,
+        }
+    }
+    fn reason(&self) -> String {
+        match self.kind {
+            Kind::Drag => "drag".into(),
+            Kind::Menu => "right-click menu".into(),
+            Kind::Pause if self.clicks == 1 => "pause + 1 click".into(),
+            Kind::Pause if self.clicks > 1 => format!("pause + {} clicks", self.clicks),
+            Kind::Pause => "pause, no click".into(),
+        }
+    }
+    // Bridge `o` into this hold. The merged zoom keeps the stronger reason; two
+    // pauses share Kind::Pause and their click counts add (by the caller).
     fn absorb(&mut self, o: &Candidate) {
+        if o.strength() > self.strength() {
+            self.kind = o.kind;
+        }
         self.minx = self.minx.min(o.minx);
         self.maxx = self.maxx.max(o.maxx);
         self.miny = self.miny.min(o.miny);
@@ -222,8 +254,9 @@ fn fit_scale(span: f64, frame: f64) -> f64 {
 }
 
 // A press-to-release drag or a right-click-to-selection menu: framed by its
-// endpoints (x0,y0)->(x1,y1), not a single point.
+// endpoints (x0,y0)->(x1,y1), not a single point. `kind` is Drag or Menu.
 struct Gesture {
+    kind: Kind,
     t0: f64,
     t1: f64,
     x0: f64,
@@ -283,7 +316,7 @@ pub fn detect(track: &CursorTrack) -> Vec<ZoomKeyframe> {
             .find(|o| o.kind == "left_down" && o.t > e.t && o.t - e.t <= MENU_WINDOW_S)
         {
             Some(sel) => {
-                gestures.push(Gesture { t0: e.t, t1: sel.t, x0: e.x, y0: e.y, x1: sel.x, y1: sel.y });
+                gestures.push(Gesture { kind: Kind::Menu, t0: e.t, t1: sel.t, x0: e.x, y0: e.y, x1: sel.x, y1: sel.y });
                 consumed.push(sel.t);
             }
             None => clicks.push(e),
@@ -295,7 +328,7 @@ pub fn detect(track: &CursorTrack) -> Vec<ZoomKeyframe> {
         }
         match ups.iter().find(|u| u.t >= e.t) {
             Some(u) if dist(e.x, e.y, u.x, u.y) > drag_min => {
-                gestures.push(Gesture { t0: e.t, t1: u.t, x0: e.x, y0: e.y, x1: u.x, y1: u.y });
+                gestures.push(Gesture { kind: Kind::Drag, t0: e.t, t1: u.t, x0: e.x, y0: e.y, x1: u.x, y1: u.y });
             }
             _ => clicks.push(e),
         }
@@ -412,6 +445,7 @@ pub fn detect(track: &CursorTrack) -> Vec<ZoomKeyframe> {
                         clicks: in_dwell.len() as u32,
                         ev0: first_act.unwrap_or(start),
                         ev1: last_act,
+                        kind: Kind::Pause,
                     });
                 }
             }
@@ -438,6 +472,7 @@ pub fn detect(track: &CursorTrack) -> Vec<ZoomKeyframe> {
             clicks: 1,
             ev0: g.t0,
             ev1: g.t1,
+            kind: g.kind,
         });
     }
 
@@ -537,6 +572,7 @@ pub fn detect(track: &CursorTrack) -> Vec<ZoomKeyframe> {
         let (half_w, half_h) = (w / (2.0 * scale), h / (2.0 * scale));
         let cx = cx0.clamp(half_w, w - half_w);
         let cy = cy0.clamp(half_h, h - half_h);
+        let reason = c.reason();
         let kf = |t: f64, scale: f64| ZoomKeyframe {
             t,
             scale,
@@ -544,6 +580,7 @@ pub fn detect(track: &CursorTrack) -> Vec<ZoomKeyframe> {
             center_y: cy,
             ease: Ease::InOutCubic,
             auto_generated: true,
+            reason: Some(reason.clone()),
         };
         let dur = c.end - c.start;
         let ramp = RAMP_S.min(dur / 2.0);
@@ -997,6 +1034,117 @@ mod tests {
         for kf in &kfs {
             assert!(kf.center_x >= 367.5 - 1e-9 && kf.center_y >= 239.0 - 1e-9);
         }
+    }
+
+    // One reason per emitted zoom, in order (every keyframe of a run carries it).
+    fn reasons(kfs: &[ZoomKeyframe]) -> Vec<String> {
+        let mut out = Vec::new();
+        for (i, kf) in kfs.iter().enumerate() {
+            if kf.scale > 1.001 && (i == 0 || kfs[i - 1].scale <= 1.001) {
+                out.push(kf.reason.clone().unwrap());
+            }
+        }
+        assert!(kfs.iter().all(|k| k.reason.is_some()));
+        out
+    }
+
+    #[test]
+    fn reason_drag() {
+        let mut tb = TrackBuilder::new().travel(400.0, 400.0, 0.5);
+        tb.track.events.push(CursorEvent { t: tb.t, kind: "left_down".into(), x: 400.0, y: 400.0 });
+        tb = tb.travel(550.0, 450.0, 1.5);
+        tb.track.events.push(CursorEvent { t: tb.t, kind: "left_up".into(), x: 550.0, y: 450.0 });
+        tb = tb.park(0.5);
+        assert_eq!(reasons(&detect(&tb.build())), ["drag"]);
+    }
+
+    #[test]
+    fn reason_right_click_menu() {
+        let mut tb = TrackBuilder::new().travel(400.0, 400.0, 0.5);
+        tb.track.events.push(CursorEvent { t: tb.t, kind: "right_down".into(), x: 400.0, y: 400.0 });
+        tb = tb.travel(450.0, 480.0, 1.0);
+        tb.track.events.push(CursorEvent { t: tb.t, kind: "left_down".into(), x: 450.0, y: 480.0 });
+        tb.track.events.push(CursorEvent { t: tb.t + 0.05, kind: "left_up".into(), x: 450.0, y: 480.0 });
+        tb = tb.park(0.5);
+        assert_eq!(reasons(&detect(&tb.build())), ["right-click menu"]);
+    }
+
+    #[test]
+    fn reason_pause_with_clicks() {
+        // One clicked dwell: singular.
+        let one = TrackBuilder::new()
+            .travel(500.0, 400.0, 1.0)
+            .click()
+            .travel(590.0, 460.0, 1.5)
+            .park(0.5)
+            .build();
+        assert_eq!(reasons(&detect(&one)), ["pause + 1 click"]);
+        // Two clicked dwells bridged into one hold: the click counts add.
+        let two = TrackBuilder::new()
+            .travel(400.0, 400.0, 1.0)
+            .dwell(1.2)
+            .click()
+            .travel(470.0, 430.0, 0.3)
+            .dwell(2.0)
+            .click()
+            .park(0.5)
+            .build();
+        assert_eq!(reasons(&detect(&two)), ["pause + 2 clicks"]);
+    }
+
+    #[test]
+    fn reason_pause_no_click() {
+        let track = TrackBuilder::new()
+            .travel(500.0, 400.0, 1.0)
+            .dwell(4.0)
+            .travel(1200.0, 800.0, 1.0)
+            .park(0.5)
+            .build();
+        assert_eq!(reasons(&detect(&track)), ["pause, no click"]);
+    }
+
+    // A clickless pause bridged into a drag's hold reads as the drag (the
+    // merged zoom keeps the stronger reason).
+    #[test]
+    fn bridged_zoom_keeps_stronger_reason() {
+        let mut tb = TrackBuilder::new()
+            .travel(400.0, 400.0, 0.5)
+            .dwell(2.0)
+            .travel(600.0, 400.0, 0.2);
+        tb.track.events.push(CursorEvent { t: tb.t, kind: "left_down".into(), x: 600.0, y: 400.0 });
+        tb = tb.travel(450.0, 420.0, 1.5);
+        tb.track.events.push(CursorEvent { t: tb.t, kind: "left_up".into(), x: 450.0, y: 420.0 });
+        tb = tb.park(0.5);
+        assert_eq!(reasons(&detect(&tb.build())), ["drag"]);
+    }
+
+    // Pin of the reasons on the zoom-polish reference recording, in order.
+    #[test]
+    fn reference_recording_pinned_reasons() {
+        let track: CursorTrack = serde_json::from_str(include_str!(
+            "../../harness/reference/zeigen-src/sources/.screen.cursor.json"
+        ))
+        .unwrap();
+        let kfs = detect(&track);
+        let got = reasons(&kfs);
+        println!("reference reasons: {got:?}");
+        println!("reference segments: {}", fmt_segments(&kfs));
+        assert_eq!(
+            got,
+            [
+                "pause, no click",
+                "pause + 2 clicks",
+                "pause, no click",
+                "pause + 1 click",
+                "drag",
+                "drag",
+                "pause, no click",
+                "pause + 3 clicks",
+                "drag",
+                "drag",
+                "pause, no click",
+            ]
+        );
     }
 
     #[test]
