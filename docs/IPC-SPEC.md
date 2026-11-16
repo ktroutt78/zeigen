@@ -126,6 +126,14 @@ The `windows` array lists windows the user could plausibly capture. Filters appl
 {"event": "started", "started_at": "2026-04-24T21:00:00Z"}
 ```
 
+### `first_frame`
+Emitted once per recording, when the writer session starts: the moment that is `t = 0` in the output file (the later of the first screen frame and the first mic sample). `host_s` is that moment on the host clock (`CMClockGetHostTimeClock`), in seconds. The app anchors the bubble position log on its arrival and subtracts `host_s` from the webcam recorder's own `first_frame` `host_s` to get the recording's webcam lead.
+```json
+{"event": "first_frame", "stream": "screen", "host_s": 1557411.6948}
+```
+
+The webcam recorder (`src-tauri/webcam-recorder/main.swift`, not this engine) prints the same event without `stream` when it writes its frame 0: `{"event":"first_frame","host_s":1557411.7948}`.
+
 ### `progress`
 Emitted every 1 second while recording. Not emitted while paused. `elapsed_s` is the gapless output-timeline duration (paused time excluded).
 ```json
