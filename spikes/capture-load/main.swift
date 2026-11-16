@@ -5,7 +5,10 @@
 // frames delivered. Also measures the two polling loops the engine runs.
 //
 //   swiftc -O main.swift -o captureload && ./captureload [seconds-per-phase]
-// The capture phases need Screen Recording permission for the terminal.
+// The capture phases need Screen Recording permission for the terminal. The
+// animated window runs in a child process (`window-only`) so that THIS process
+// stays a plain command-line tool: a process that becomes an app of its own is
+// asked for its own Screen Recording permission instead of using the terminal's.
 import AppKit
 import CryptoKit
 import ScreenCaptureKit
@@ -91,32 +94,52 @@ func config(_ w: Int, _ h: Int, _ rect: CGRect) -> SCStreamConfiguration {
     return c
 }
 
-let app = NSApplication.shared
-app.setActivationPolicy(.accessory)
-Task { @MainActor in
-    let window = makeWindow()
-    let wid = CGWindowID(window.windowNumber)
-    try? await Task.sleep(for: .seconds(1))
-    print("CPU as a percentage of ONE core, averaged over \(Int(phaseSeconds))s per line. Leave the machine alone while it runs.")
-    await measure("no capture (the animated window alone)", frames: nil)
-    await measure("cursor shape check, 20 per second", frames: nil, every: 1.0 / 20, cursorHashPoll)
-    await measure("window position check, 30 per second", frames: nil, every: 1.0 / 30) { boundsPoll(wid) }
+if CommandLine.arguments.contains("window-only") {
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    let window = MainActor.assumeIsolated { makeWindow() }
+    _ = window
+    app.run()
+}
 
-    if pollsOnly { exit(0) }
-    let content: SCShareableContent
-    do { content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) }
-    catch { print("capture phases skipped (no Screen Recording permission for this terminal): \(error)"); exit(0) }
-    guard let scWindow = content.windows.first(where: { $0.windowID == wid }), let scApp = scWindow.owningApplication,
-          let display = content.displays.first(where: { $0.frame.contains(CGPoint(x: scWindow.frame.midX, y: scWindow.frame.midY)) })
-    else { print("could not find the test window in the shareable content"); exit(1) }
+let child = Process()
+child.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+child.arguments = ["window-only"]
+try child.run()
+defer { child.terminate() }
+try await Task.sleep(for: .seconds(2))
 
-    let old = SCContentFilter(desktopIndependentWindow: scWindow)
-    let new = SCContentFilter(display: display, including: [scApp], exceptingWindows: [])
-    let scale = Double(new.pointPixelScale)
-    let (pw, ph) = (Int(scWindow.frame.width * scale), Int(scWindow.frame.height * scale))
-    let crop = scWindow.frame.offsetBy(dx: -display.frame.minX, dy: -display.frame.minY)
-    print("test window \(pw)x\(ph) px on a display at scale \(scale)")
+func childWindowID() -> CGWindowID? {
+    let raw = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+    return raw.first { ($0[kCGWindowOwnerPID as String] as? Int32) == child.processIdentifier
+        && (($0[kCGWindowBounds as String] as? [String: Any])?["Width"] as? Double ?? 0) > 500 }
+        .flatMap { $0[kCGWindowNumber as String] as? CGWindowID }
+}
+guard let wid = childWindowID() else { print("the test window did not open"); child.terminate(); exit(1) }
 
+print("CPU as a percentage of ONE core, averaged over \(Int(phaseSeconds))s per line. Leave the machine alone while it runs.")
+await measure("no capture (the animated window alone)", frames: nil)
+await measure("cursor shape check, 20 per second", frames: nil, every: 1.0 / 20, cursorHashPoll)
+await measure("window position check, 30 per second", frames: nil, every: 1.0 / 30) { boundsPoll(wid) }
+if pollsOnly { child.terminate(); exit(0) }
+
+let content: SCShareableContent
+do { content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) }
+catch { print("capture phases skipped (no Screen Recording permission for this terminal): \(error)"); child.terminate(); exit(0) }
+guard let scWindow = content.windows.first(where: { $0.windowID == wid }), let scApp = scWindow.owningApplication,
+      let display = content.displays.first(where: { $0.frame.contains(CGPoint(x: scWindow.frame.midX, y: scWindow.frame.midY)) })
+else { print("could not find the test window in the shareable content"); child.terminate(); exit(1) }
+
+let old = SCContentFilter(desktopIndependentWindow: scWindow)
+let new = SCContentFilter(display: display, including: [scApp], exceptingWindows: [])
+let scale = Double(new.pointPixelScale)
+let (pw, ph) = (Int(scWindow.frame.width * scale), Int(scWindow.frame.height * scale))
+let crop = scWindow.frame.offsetBy(dx: -display.frame.minX, dy: -display.frame.minY)
+print("test window \(pw)x\(ph) px on a display at scale \(scale)")
+
+// Old, new, then old and new again: the repeat shows how much the numbers move
+// from run to run, so a small difference is not mistaken for a real one.
+for round in 1...2 {
     for (name, filter, rect) in [("OLD capture: the single window", old, CGRect.zero),
                                  ("NEW capture: the app on its display, cropped", new, crop)] {
         let counter = Counter()
@@ -125,13 +148,12 @@ Task { @MainActor in
             try stream.addStreamOutput(counter, type: .screen, sampleHandlerQueue: DispatchQueue(label: "frames"))
             try await stream.startCapture()
         } catch { print("\(name): capture did not start: \(error)"); continue }
-        try? await Task.sleep(for: .seconds(1))
-        await measure(name, frames: counter)
-        if filter === new {
+        try await Task.sleep(for: .seconds(1))
+        await measure("\(name) (\(round))", frames: counter)
+        if filter === new && round == 2 {
             await measure("NEW capture + window position check, 30/s", frames: counter, every: 1.0 / 30) { boundsPoll(wid) }
         }
         try? await stream.stopCapture()
     }
-    exit(0)
 }
-app.run()
+child.terminate()
