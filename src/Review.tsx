@@ -1431,7 +1431,7 @@ export default function Review() {
     [scenes, duration],
   );
 
-  // Step 5 suggestion detection — the manual "Re-suggest" button. Runs the
+  // Suggestion detection: the Generate button on the timeline's Zoom row. Runs the
   // C.1 heuristic over the cursor telemetry on the Rust side; the result
   // replaces auto_generated segments only. Suggestions overlapping a manual
   // zoom are dropped — user-placed segments always win. This path is an
@@ -5375,24 +5375,6 @@ function ExportPanel({
             <div style={RAIL_EYEBROW}>Zoom</div>
             <div style={CTX_CARD}>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            <div style={{ display: "flex", gap: 8 }}>
-              <button
-                className="btn-secondary"
-                style={{ flex: 1, height: 26, fontSize: 11.5 }}
-                onClick={zoom.suggest}
-                disabled={!zoom.canAdd || busy || zoom.suggesting}
-              >
-                {zoom.suggesting ? "Suggesting…" : "Re-suggest"}
-              </button>
-              <button
-                className="btn-secondary"
-                style={{ flex: 1, height: 26, fontSize: 11.5 }}
-                onClick={zoom.clearAll}
-                disabled={busy || zoom.segments.length === 0}
-              >
-                Clear all
-              </button>
-            </div>
             {zoom.selectedIndex != null && zoom.segments[zoom.selectedIndex] ? (
               <>
                 <Field
@@ -5443,8 +5425,8 @@ function ExportPanel({
               </div>
             ) : (
               <div style={{ fontSize: 11, color: "var(--fg-tertiary)" }}>
-                No zooms. Click the timeline lane to add one, or Re-suggest
-                from your cursor activity. Playback previews live.
+                No zooms. Hover the Zoom row on the timeline and click to add
+                one, or press Generate there. Playback previews live.
               </div>
             )}
           </div>

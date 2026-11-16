@@ -20,6 +20,8 @@ Progress: steps 0 to 2 (own files, labelled rows, hover preview with a parked pl
 
 Step 5 as built (2026-11-16): `scene.rs` is the one definition of the layout (scenes in, a sampled path of screen and webcam rectangles out, same spring and grid as the camera path, bubble shrink included); `scene_path_for` in `edit.rs` builds it for both the export (`scene.json`, `SCENE_PATH`) and the preview (`scene_path` command); cicompositor's `composeScene` and the preview's scene loop only look it up. With no scenes and no shrink there is no path and both renderers run their old code. Split screen uses 62% of the width for the screen, a 2% gap, and a tall webcam card. A scene releases 0.7s before its end, like a zoom, so the layout is back to default by the end of its block; scenes within 0.7s of each other go straight from one to the next. The layout chooser for a selected scene sits in the timeline header rather than the side panel (my call, flagged to Keith).
 
+Steps 3 and 4 (timeline zoom with slider, pinch, pan, follow and Fit; hover ghost to add; Generate and trash on the Zoom row) verified by Keith 2026-11-16, all pass. His calls: remove the Zoom panel's duplicate Re-suggest and Clear all buttons (done), and the scene layout chooser in the timeline header is fine.
+
 Also settled by the plan: no Add track control (fixed rows: Video, Zoom, Scene with a webcam, Blur with redactions); auto-zoom detection still runs when Review opens, with a Generate button on the Zoom row.
 
 ## 2026-11-16 — Overlays are kept out of recordings by the engine, not by hiding the windows
