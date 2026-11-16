@@ -4,6 +4,54 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-15 — Window-capture popups MERGED (v0.1.9-window-popups): drag accepted as a known limit; new capture measured CHEAPER than the old
+
+**Keith's decisions:**
+- **Stop the hybrid capture work** (new capture while still, old single-window capture while the window moves). "I rarely drag windows while recording, so it's not worth switching capture kinds mid-recording." The unfinished changes were discarded; the idea is on `docs/BACKLOG.md` ("Clean window drag while recording").
+- **Merge with dragging as a known limit.** The wobble (up to 13px) and the rough display crossing are in `docs/DEBT.md`.
+- **Merge condition:** "If the new capture costs about the same as the old, merge window-capture-popups and tag main v0.1.9-window-popups."
+
+**In the installed build, confirmed by Keith's recordings:** a Tableau dialog (calculation editor) is captured for its whole life, including while moved and resized; a dialog pushed past the window's edge is cut off at the edge (as planned).
+
+**Load while recording, measured** (`spikes/capture-load/captureload`, an animated 1200x832 test window on a 1x display, 8s per line, two rounds; CPU as a share of one core):
+
+| | this process | WindowServer | frames |
+|---|---|---|---|
+| no capture | 0.0% | 31.9% | - |
+| OLD capture (single window) | 1.1% / 1.0% | 44.8% / 44.5% | 29.2 fps |
+| NEW capture (app on its display, cropped) | 0.6% / 0.6% | 29.6% / 29.4% | 29.0 / 29.1 fps |
+| NEW capture + window position check 30/s | 1.5% | 29.2% | 29.1 fps |
+
+So the old single-window capture added about 13 points of WindowServer load; the new capture adds none measurable, at the same frame rate. The two polling loops, measured separately three times: cursor shape check (20/s, on main since the cursor work) 3.2 to 4.2% of a core; window position check (30/s) 0.7 to 0.9%. Conclusion: the choppy Tableau dialog Keith saw live while recording is not caused by the new capture. Caveat: one synthetic workload on a 1x display, not Tableau and not a Retina display.
+
+**Other apps stay out:** observed directly for a Terminal window and a Terminal menu (a menu-layer window of another process) lying over the recorded Chrome window: neither is in the video. A macOS notification banner or a Teams toast was NOT observed directly; they are other processes' windows and are excluded by the same rule. Exceptions that follow from the design: recording Teams itself includes Teams' own pop-ups; a second overlapping window of the recorded app shows.
+
+Process note: the load test was refused Screen Recording three times before it ran. The cause was never established (the run that worked came from the terminal that had been running `appcapture`). Do not treat my explanations in between as findings.
+
+## 2026-11-15 — Window-capture popups: test round 2 = menus PASS; building on the branch, drag to be judged in the installed app
+
+Second round of `spikes/window-app-capture/appcapture` (30 Hz follow, display switch), two runs by Keith on Chrome:
+
+- **Menus PASS (log and video agree).** The right-click context menu and the menu-bar menus are separate windows on layer 101 owned by Google Chrome, and all of them are in the video for as long as they were open. With round 1's print dialog, every kind of app-owned popup tried is captured.
+- **Other apps' windows over the recorded window are correctly left out.** A Terminal window and a Terminal menu overlapped the Chrome window during the run and do not appear, same as today's capture.
+- **Drag within one display: 43 moves, 0 errors at 30 Hz**, but that run's video was overwritten by the next run, so the picture during the drag was not inspected. In the run whose video was inspected (616 frames, full length, no empty band anywhere) the window did not move.
+- **Drag across displays: still untested** (0 display switches in both runs).
+
+Decision (mine, within the standing condition): the approach's core risk, whether popups are captured, is retired, so the engine change is being built on `window-capture-popups`. It is NOT merged until Keith has dragged a window during a real recording in the installed build, within a display and across displays, and the result is clean. If dragging cannot be made clean, that goes back to Keith before any merge.
+
+## 2026-11-15 — Window-capture popups: throwaway test result = popups PASS, window drag FAILS as first written (not shipped; one more test round)
+
+Test: `spikes/window-app-capture/appcapture` (display filter narrowed to one app, cropped to the window, crop re-aimed when the window moves), run by Keith on Chrome, 1920x991 window on a 1x display, with a second display below it.
+
+- **PASS: a separate window owned by the app is captured.** Chrome's print dialog is its own window (1309x864, layer 0, owner Google Chrome) and is in the video for its whole life. A Chrome status bubble (198x22) likewise.
+- **Proves nothing: the page's dropdowns.** On that page they are part of the web page, not windows.
+- **NOT TESTED: menus.** No menu-layer window appears in the test's log, so no right-click or native menu was opened. Whether macOS menus belong to the app's process (and so are included) is still unknown.
+- **FAIL as written: dragging the window.** With a 10 Hz poll the crop lagged: 11, 51 then 67 px of empty black band at the top over three consecutive frames. Then the window was dragged toward the display below and the video simply ENDED (17.2s of a 20s run, no error reported): the filter is tied to one display, and the crop left it. Today's single-window capture follows a dragged window perfectly, including across displays, so this would be a regression.
+- Corners: same black gaps at the window's rounded corners as today's capture, so the existing export handling applies.
+- Two earlier runs crashed on an uncaught error before recording (most likely Screen Recording permission not yet active in that terminal; not confirmed).
+
+Per the standing condition ("if it fails, stop and bring me what you found") nothing is built on `window-capture-popups`. The test now follows at 30 Hz and switches the filter to the new display when the window crosses over; that is unproven until Keith reruns it.
+
 ## 2026-11-15 — zoom-polish: owner test pass in the installed build, ALL GOOD; merged to main
 
 Keith's test pass on the signed install of branch `zoom-polish`, all fine:

@@ -31,14 +31,16 @@ func windowBounds(_ id: CGWindowID) -> CGRect? {
     return CGRect(dictionaryRepresentation: b)
 }
 
-let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+let content: SCShareableContent
+do { content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) }
+catch { die("cannot list windows (Screen Recording permission for this terminal?): \(error)") }
 guard let app = content.applications.first(where: { $0.bundleIdentifier == name || $0.applicationName == name })
 else { die("app not found: \(name). Running: \(content.applications.map(\.applicationName).sorted().joined(separator: ", "))") }
 let appWindows = content.windows.filter { $0.owningApplication?.processID == app.processID && $0.windowLayer == 0 && $0.isOnScreen }
 guard let window = appWindows.max(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height })
 else { die("no on-screen window for \(name)") }
 let centre = CGPoint(x: window.frame.midX, y: window.frame.midY)
-guard let display = content.displays.first(where: { $0.frame.contains(centre) }) else { die("window is not on a display") }
+guard var display = content.displays.first(where: { $0.frame.contains(centre) }) else { die("window is not on a display") }
 
 let filter = SCContentFilter(display: display, including: [app], exceptingWindows: [])
 let scale = Double(filter.pointPixelScale)
@@ -57,19 +59,57 @@ let rc = SCRecordingOutputConfiguration()
 rc.outputURL = outURL
 rc.videoCodecType = .h264
 try stream.addRecordingOutput(SCRecordingOutput(configuration: rc, delegate: delegate))
-try await stream.startCapture()
+do { try await stream.startCapture() } catch { die("capture did not start: \(error)") }
 print("recording \"\(window.title ?? "")\" of \(app.applicationName): \(config.width)x\(config.height) px, window \(window.frame), scale \(scale), for \(seconds)s")
 print("now: open a dropdown, right-click for a menu, trigger a dialog, then drag the window a little")
 
+// Every on-screen window other than the main one that overlaps it, with who owns
+// it. Printed the first time each appears, so the log says which popups opened
+// during the run and whether they belong to the recorded app (the filter only
+// includes the app's own windows).
+func overlapping(_ main: CGRect) -> [(id: Int, owner: String, pid: Int, layer: Int, bounds: CGRect)] {
+    let raw = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+    return raw.compactMap { w in
+        guard let id = w[kCGWindowNumber as String] as? Int, id != Int(window.windowID),
+              let bd = w[kCGWindowBounds as String] as? NSDictionary, let r = CGRect(dictionaryRepresentation: bd),
+              r.intersects(main), r.width < main.width || r.height < main.height
+        else { return nil }
+        return (id, w[kCGWindowOwnerName as String] as? String ?? "?", w[kCGWindowOwnerPID as String] as? Int ?? 0,
+                w[kCGWindowLayer as String] as? Int ?? 0, r)
+    }
+}
+
 var last = window.frame
-var moves = 0
-for _ in 0..<Int(seconds * 10) {
-    try await Task.sleep(nanoseconds: 100_000_000)
+var moves = 0, moveErrors = 0
+var seen = Set(overlapping(last).map(\.id))   // already there at start: not popups
+let t0 = Date()
+var displaySwitches = 0
+for _ in 0..<Int(seconds * 30) {
+    try await Task.sleep(nanoseconds: 33_000_000)
+    for w in overlapping(last) where !seen.contains(w.id) {
+        seen.insert(w.id)
+        if w.layer < 0 || w.bounds.width * w.bounds.height < 4000 { continue }   // desktop layers, tiny helper strips
+        let mine = w.pid == Int(app.processID)
+        print(String(format: "%5.1fs  popup window: owner \"%@\" (%@), layer %d, %.0fx%.0f at (%.0f,%.0f)",
+                     Date().timeIntervalSince(t0), w.owner, mine ? "the recorded app" : "ANOTHER process, not in the filter",
+                     w.layer, w.bounds.width, w.bounds.height, w.bounds.minX, w.bounds.minY))
+    }
     guard let b = windowBounds(window.windowID), b != last else { continue }
     last = b
     moves += 1
+    // The filter is tied to one display: when the window's centre crosses onto
+    // another, switch the filter to that display before re-aiming the crop.
+    if let d = content.displays.first(where: { $0.frame.contains(CGPoint(x: b.midX, y: b.midY)) }),
+       d.displayID != display.displayID {
+        display = d
+        displaySwitches += 1
+        print(String(format: "%5.1fs  window moved to display %u", Date().timeIntervalSince(t0), d.displayID))
+        do { try await stream.updateContentFilter(SCContentFilter(display: d, including: [app], exceptingWindows: [])) }
+        catch { moveErrors += 1; print("        could not switch display: \(error)") }
+    }
     config.sourceRect = crop(b)
-    try await stream.updateConfiguration(config)
+    do { try await stream.updateConfiguration(config) }
+    catch { moveErrors += 1; print(String(format: "%5.1fs  could not re-aim the crop: %@", Date().timeIntervalSince(t0), "\(error)")) }
 }
 try await stream.stopCapture()
-print("done: \(outURL.path)  (crop re-aimed \(moves) times)")
+print("done: \(outURL.path)  (window moved \(moves) times, \(displaySwitches) display switches, \(moveErrors) errors, \(seen.count) other windows seen over it)")

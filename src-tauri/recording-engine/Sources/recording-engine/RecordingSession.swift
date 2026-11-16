@@ -81,6 +81,25 @@ final class RecordingSession: NSObject,
 
     let capturedWindowID: UInt32?
 
+    // Window capture records the window's display narrowed to the window's
+    // app, cropped to the window (so the app's menus, popovers, sheets and
+    // dialogs are in the picture). The crop has to follow the window, so
+    // this holds what the follow loop needs. nil for display/area capture
+    // and for the single-window fallback.
+    private struct WindowFollow {
+        let windowID: UInt32
+        let app: SCRunningApplication
+        let displays: [SCDisplay]
+        let startDisplay: SCDisplay
+        let startFrame: CGRect
+        let width: Int
+        let height: Int
+        let maxFPS: Int
+        let showsCursor: Bool
+    }
+    private let windowFollow: WindowFollow?
+    private var followTask: Task<Void, Never>?
+
     var frameCount: Int { lock.withLock { frames } }
     var droppedCount: Int { lock.withLock { dropped } }
     var writerStarted: Bool { lock.withLock { started } }
@@ -131,6 +150,7 @@ final class RecordingSession: NSObject,
         // Screen points → video pixels, recorded in the sidecar so the export
         // can size the cursor it draws.
         let pointsToPixels: Double
+        var followTarget: (windowID: UInt32, app: SCRunningApplication, display: SCDisplay, frame: CGRect)?
         switch source {
         case .display(let displayID):
             guard let display = shareable.displays.first(where: { $0.displayID == displayID }) else {
@@ -159,7 +179,21 @@ final class RecordingSession: NSObject,
             guard let window = shareable.windows.first(where: { $0.windowID == windowID }) else {
                 throw EngineError(code: "WINDOW_NOT_FOUND", message: "window_id \(windowID) not present")
             }
-            filter = SCContentFilter(desktopIndependentWindow: window)
+            // Record the display the window's centre is on, narrowed to the
+            // window's app and cropped to the window: the app's popups are
+            // separate windows, which a single-window filter leaves out.
+            // Fallback, for this recording only: when SCK reports no owning
+            // app or no display contains the window's centre, capture the
+            // single window as before (no popups, no follow needed).
+            let centre = CGPoint(x: window.frame.midX, y: window.frame.midY)
+            if let app = window.owningApplication,
+               let display = shareable.displays.first(where: { $0.frame.contains(centre) }) {
+                filter = SCContentFilter(display: display, including: [app], exceptingWindows: [])
+                sourceRect = Self.cropRect(window.frame, on: display)
+                followTarget = (windowID, app, display, window.frame)
+            } else {
+                filter = SCContentFilter(desktopIndependentWindow: window)
+            }
             // SCWindow.frame is in points; SCK delivers at the size we ask
             // for in config.width/height. Ask for native pixels so the
             // capture isn't downscaled on a Retina display: multiply the
@@ -295,28 +329,17 @@ final class RecordingSession: NSObject,
             captureSession = cs
         }
 
-        let config = SCStreamConfiguration()
-        config.width = width
-        config.height = height
-        config.sourceRect = sourceRect
-        config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(maxFPS))
-        config.queueDepth = 6
-        // Burned in only when telemetry is off (see showsCursor above). The
-        // sidecar's "cursor_in_video" mark records which case this is.
-        config.showsCursor = showsCursor
-        config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-        // Exclude the window's own drop shadow from single-window captures.
-        // Default (false) INCLUDES the shadow, which frames the window inside the
-        // window-sized buffer: the window (and its rounded corners) ends up INSET,
-        // surrounded by the shadow region that 4:2:0 flattens to opaque black. Over
-        // a background canvas that black shows as crescents at the window's corners
-        // that no frame-corner clip can reach, and the inset also scaled the window
-        // DOWN (lost resolution). Excluding it makes the window fill the frame at
-        // native size, so its corners sit at the frame corners where the export's
-        // corner-clip aligns. No effect on display/area filters. (macOS 14+.)
-        config.ignoreShadowsSingleWindow = true
-        // captureMicrophone deliberately left unset: V2.2 routes mic
-        // through AVCaptureSession (Track B).
+        let config = Self.makeConfig(
+            width: width, height: height, sourceRect: sourceRect,
+            maxFPS: maxFPS, showsCursor: showsCursor)
+        if let t = followTarget {
+            self.windowFollow = WindowFollow(
+                windowID: t.windowID, app: t.app, displays: shareable.displays,
+                startDisplay: t.display, startFrame: t.frame,
+                width: width, height: height, maxFPS: maxFPS, showsCursor: showsCursor)
+        } else {
+            self.windowFollow = nil
+        }
 
         let stream = SCStream(filter: filter, configuration: config, delegate: nil)
 
@@ -374,6 +397,96 @@ final class RecordingSession: NSObject,
         }
         cursorTracker?.start()
         startHeartbeat()
+        if windowFollow != nil {
+            followTask = Task { [weak self] in await self?.followWindow() }
+        }
+    }
+
+    // Keeps the crop on the window: checked at ~30 Hz while it sits still and at
+    // ~120 Hz while it is moving (and for half a second after). The crop can only
+    // move after the window has, so during a drag it trails by a varying few
+    // pixels, which shows as the window shaking in the frame; at 30 Hz that was
+    // 5 to 19 px on a real drag (owner, 2026-11-15), hence the faster rate while
+    // moving. Runs from stream start until stop/teardown,
+    // including while paused so the crop is right at resume. A bounds change
+    // re-aims sourceRect (position and size: a resized window is scaled into
+    // the fixed output size). When the window's centre crosses onto another
+    // display, the content filter switches to that display first; without it
+    // the crop leaves the filtered display and the video silently ends.
+    // Errors are logged and never stop the recording.
+    private func followWindow() async {
+        guard let f = windowFollow else { return }
+        var display = f.startDisplay
+        var last = f.startFrame
+        var fastChecksLeft = 0   // > 0 while the window is, or was just, moving
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .milliseconds(fastChecksLeft > 0 ? 8 : 33))
+            fastChecksLeft = max(0, fastChecksLeft - 1)
+            guard !Task.isCancelled,
+                  let bounds = CursorTracker.queryWindowFrame(f.windowID), bounds != last
+            else { continue }
+            last = bounds
+            fastChecksLeft = 60
+            let centre = CGPoint(x: bounds.midX, y: bounds.midY)
+            if let d = f.displays.first(where: { $0.frame.contains(centre) }), d.displayID != display.displayID {
+                do {
+                    try await stream.updateContentFilter(
+                        SCContentFilter(display: d, including: [f.app], exceptingWindows: []))
+                    display = d
+                } catch {
+                    logStderr("window follow: could not switch to display \(d.displayID): \(error)")
+                }
+            }
+            guard !Task.isCancelled else { break }
+            let config = Self.makeConfig(
+                width: f.width, height: f.height, sourceRect: Self.cropRect(bounds, on: display),
+                maxFPS: f.maxFPS, showsCursor: f.showsCursor)
+            do {
+                try await stream.updateConfiguration(config)
+            } catch {
+                logStderr("window follow: could not re-aim the crop to \(bounds): \(error)")
+            }
+        }
+    }
+
+    // A global window frame (points, top-left origin) as a sourceRect, which
+    // is relative to the captured display's top-left.
+    private static func cropRect(_ frame: CGRect, on display: SCDisplay) -> CGRect {
+        frame.offsetBy(dx: -display.frame.minX, dy: -display.frame.minY)
+    }
+
+    // The one place the stream configuration is built: at init, and again by
+    // the window follow loop each time it re-aims the crop.
+    private static func makeConfig(
+        width: Int, height: Int, sourceRect: CGRect, maxFPS: Int, showsCursor: Bool
+    ) -> SCStreamConfiguration {
+        let config = SCStreamConfiguration()
+        config.width = width
+        config.height = height
+        config.sourceRect = sourceRect
+        config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(maxFPS))
+        config.queueDepth = 6
+        // Burned in only when telemetry is off (see showsCursor in init). The
+        // sidecar's "cursor_in_video" mark records which case this is.
+        config.showsCursor = showsCursor
+        config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        // Exclude the window's own drop shadow. Applies ONLY to single-window
+        // filters, i.e. today the window-capture fallback (no owning app or
+        // no display found); the normal window path records a display
+        // filtered to the app, where it has no effect. In a single-window
+        // capture the default (false) INCLUDES the shadow, which frames the
+        // window inside the window-sized buffer: the window (and its rounded
+        // corners) ends up INSET, surrounded by the shadow region that 4:2:0
+        // flattens to opaque black. Over a background canvas that black shows
+        // as crescents at the window's corners that no frame-corner clip can
+        // reach, and the inset also scaled the window DOWN (lost resolution).
+        // Excluding it makes the window fill the frame at native size, so its
+        // corners sit at the frame corners where the export's corner-clip
+        // aligns. (macOS 14+.)
+        config.ignoreShadowsSingleWindow = true
+        // captureMicrophone deliberately left unset: V2.2 routes mic
+        // through AVCaptureSession (Track B).
+        return config
     }
 
     private func startHeartbeat() {
@@ -476,6 +589,11 @@ final class RecordingSession: NSObject,
     func stop() async throws -> RecordingResult {
         heartbeatTimer?.cancel()
         heartbeatTimer = nil
+        // Wait for the follow loop to finish so no crop/filter update is in
+        // flight when the stream stops.
+        followTask?.cancel()
+        await followTask?.value
+        followTask = nil
         // Stop sampling at the stop command so telemetry ends where the
         // cutoff clamp ends the video; the sidecar is written after the
         // writer finalizes, below.
@@ -632,6 +750,12 @@ final class RecordingSession: NSObject,
     func tearDownAfterFatalError() async {
         heartbeatTimer?.cancel()
         heartbeatTimer = nil
+        // Cancelled but not awaited: this path bounds a possibly stalled
+        // stream (D-14 below), and an in-flight update could stall with it.
+        // The loop checks cancellation before every update, so at most one
+        // already-issued call lands, and its error is only logged.
+        followTask?.cancel()
+        followTask = nil
         // Fatal path saves partial video state on the way out; no telemetry
         // sidecar is written — just stop sampling and remove the monitor.
         cursorTracker?.stop()

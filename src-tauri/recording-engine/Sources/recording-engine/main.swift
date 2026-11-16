@@ -3,8 +3,9 @@ import CoreGraphics
 import Foundation
 
 // Initialize the CoreGraphics window-server connection in this CLI binary.
-// SCK's window-capture path (SCContentFilter(desktopIndependentWindow:),
-// SCShareableContent.windows access, etc.) and CGWindowList* APIs assert
+// SCK's window-capture path (SCShareableContent.windows access, the
+// single-window fallback filter, the follow loop's window-bounds polls)
+// and CGWindowList* APIs assert
 // "CGS_REQUIRE_INIT" if CG isn't initialized — which it isn't by default
 // in a daemon-style Swift CLI process. Do NOT use NSApplication.shared for
 // this: it registers the process with Launch Services as a launching
