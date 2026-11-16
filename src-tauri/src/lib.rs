@@ -13,6 +13,7 @@ mod tray;
 mod wallpapers;
 mod webcam;
 mod camera;
+mod cursor;
 mod zoom;
 
 use std::path::PathBuf;
