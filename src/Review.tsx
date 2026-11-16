@@ -190,6 +190,49 @@ function cameraAt(
   };
 }
 
+// The drawn cursor (cursor_preview command): the SAME overlay data the export
+// writes to cursor.json (edit.rs cursor_overlay_data), with each shape's PNG as
+// base64. samples[i] = [x, y] at t = i * step, frame fractions, top-left origin;
+// shape width/height/hot_x/hot_y are SOURCE VIDEO PIXELS (hot_y from the top).
+// null = the recording has its cursor baked into the video.
+type CursorOverlay = {
+  step: number;
+  samples: [number, number][];
+  shapes: { png: string; width: number; height: number; hot_x: number; hot_y: number }[];
+  shape_events: { t: number; shape: number }[];
+};
+
+// Cursor position at t: linear between neighbouring samples, held at the last
+// sample past the end. Must behave exactly like cursorAt in compositor-engine/main.swift.
+function cursorAt(o: CursorOverlay, t: number): [number, number] {
+  const x = Math.max(t, 0) / o.step;
+  const i = Math.floor(x);
+  if (i >= o.samples.length - 1) return o.samples[o.samples.length - 1];
+  const a = o.samples[i], b = o.samples[i + 1], u = x - i;
+  return [a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u];
+}
+
+// Shape at t: the last shape event with event.t <= t, else the first event.
+// Mirrors cursorShapeAt in compositor-engine/main.swift.
+function cursorShapeAt(o: CursorOverlay, t: number): number {
+  for (let i = o.shape_events.length - 1; i >= 0; i--) {
+    if (o.shape_events[i].t <= t) return o.shape_events[i].shape;
+  }
+  return o.shape_events[0].shape;
+}
+
+// Mirror of Rust CursorStyle. The defaults (smooth, 1.0) are never written to
+// the sidecar, so an untouched recording's sidecar stays byte-identical.
+type CursorSmoothing = "off" | "light" | "smooth";
+type CursorStyle = { smoothing: CursorSmoothing; size: number };
+const DEFAULT_CURSOR_STYLE: CursorStyle = { smoothing: "smooth", size: 1 };
+const CURSOR_MIN_SIZE = 0.75;
+const CURSOR_MAX_SIZE = 2.5;
+
+function cursorIsDefault(c: CursorStyle | null | undefined): boolean {
+  return !c || (c.smoothing === "smooth" && Math.abs(c.size - 1) < 1e-6);
+}
+
 // Timeline + stage + right-panel Zoom section share this.
 type ZoomEditor = {
   segments: ZoomSegment[];
@@ -346,6 +389,10 @@ type SidecarState = {
   // capture still gates off Rounded corners. Metadata — not an edit (excluded from
   // the dirty check); the export never reads it.
   source_kind?: string | null;
+  // Drawn-cursor style (CURSOR-SMOOTHING-PLAN). null/undefined = the defaults
+  // (smooth, 1.0); only written when changed, same convention as bubble_zone.
+  // Declared last, matching Rust's field order.
+  cursor?: CursorStyle | null;
 };
 
 // Mirror of Rust FrameStyle. Every knob is the no-op at 0. padding is the
@@ -721,6 +768,9 @@ function statesEqual(a: SidecarState, b: SidecarState, duration: number | null):
     if (ga.kind === "gradient" && gb.kind === "gradient" && ga.preset !== gb.preset) return false;
     if (ga.kind === "image" && gb.kind === "image" && ga.path !== gb.path) return false;
   }
+  const ca = a.cursor ?? DEFAULT_CURSOR_STYLE;
+  const cb = b.cursor ?? DEFAULT_CURSOR_STYLE;
+  if (ca.smoothing !== cb.smoothing || Math.abs(ca.size - cb.size) > 1e-6) return false;
   return true;
 }
 
@@ -741,6 +791,7 @@ function isLogicallyEmpty(s: SidecarState, duration: number | null): boolean {
   const noZone = s.bubble_zone == null;
   const noZoom = !s.zoom || s.zoom.length === 0;
   const noRedactions = !s.redactions || s.redactions.length === 0;
+  const noCursor = cursorIsDefault(s.cursor);
   return (
     normalizeTrim(s.trim, duration) == null &&
     noBubble &&
@@ -748,7 +799,8 @@ function isLogicallyEmpty(s: SidecarState, duration: number | null): boolean {
     noRoundness &&
     noZone &&
     noZoom &&
-    noRedactions
+    noRedactions &&
+    noCursor
   );
 }
 
@@ -770,6 +822,9 @@ function sidecarWritePayload(s: SidecarState, duration: number): SidecarState {
     frame: frameIsNoop(s.frame) ? undefined : s.frame,
     background: s.background ?? undefined,
     source_kind: s.source_kind ?? undefined,
+    cursor: cursorIsDefault(s.cursor)
+      ? undefined
+      : { smoothing: s.cursor!.smoothing, size: s.cursor!.size },
   };
 }
 
@@ -1010,6 +1065,32 @@ export default function Review() {
   // auto-load below so it never runs before we know whether the sidecar
   // already carried a zoom track (which would double-suggest).
   const [sidecarLoaded, setSidecarLoaded] = useState(false);
+
+  // Drawn cursor (CURSOR-SMOOTHING-PLAN). The overlay is what the export draws
+  // for the current style, fetched from Rust like the camera path: debounced,
+  // and a stale response never overwrites a newer one. Waits for the sidecar so
+  // a saved style is fetched once, not the default first. A refetch keeps the
+  // previous overlay on screen until the new one arrives.
+  const [cursorStyle, setCursorStyle] = useState<CursorStyle>(DEFAULT_CURSOR_STYLE);
+  const [cursorOverlay, setCursorOverlay] = useState<CursorOverlay | null>(null);
+  const cursorReqRef = useRef(0);
+  useEffect(() => {
+    const req = ++cursorReqRef.current;
+    if (!sourcePath || duration == null || !sidecarLoaded) {
+      setCursorOverlay(null);
+      return;
+    }
+    const timer = setTimeout(() => {
+      invoke<CursorOverlay | null>("cursor_preview", { sourcePath, style: cursorStyle, duration })
+        .then((o) => {
+          if (req === cursorReqRef.current) setCursorOverlay(o);
+        })
+        .catch((err) => {
+          if (req === cursorReqRef.current) setError(`cursor: ${err}`);
+        });
+    }, 100);
+    return () => clearTimeout(timer);
+  }, [sourcePath, duration, sidecarLoaded, cursorStyle]);
 
   useEffect(() => {
     invoke<AppSettings>("get_settings")
@@ -1401,6 +1482,7 @@ export default function Review() {
             frame: state.frame ?? null,
             background: state.background ?? null,
             source_kind: state.source_kind ?? null,
+            cursor: state.cursor ?? null,
           });
           if (state.trim) setTrim(state.trim);
           if (state.bubble_position_log) setBubblePositionLog(state.bubble_position_log);
@@ -1421,6 +1503,7 @@ export default function Review() {
           }
           // Reopened recording: the persisted source wins over the (absent) param.
           if (state.source_kind) setSourceKind(state.source_kind);
+          if (state.cursor) setCursorStyle({ ...DEFAULT_CURSOR_STYLE, ...state.cursor });
         } else {
           setSnapshot(EMPTY_STATE);
         }
@@ -1529,8 +1612,9 @@ export default function Review() {
       frame,
       background,
       source_kind: sourceKind,
+      cursor: cursorIsDefault(cursorStyle) ? null : cursorStyle,
     }),
-    [trim, bubblePositionLog, thumbnailTime, bubbleRoundness, bubbleZone, bubbleScale, zoomSegments, redactions, frame, background, sourceKind],
+    [trim, bubblePositionLog, thumbnailTime, bubbleRoundness, bubbleZone, bubbleScale, zoomSegments, redactions, frame, background, sourceKind, cursorStyle],
   );
 
   const dirty = useMemo(
@@ -2360,6 +2444,7 @@ export default function Review() {
           background={background}
           solidHex={solidHex}
           thumbBySource={thumbBySource}
+          cursorOverlay={cursorOverlay}
         />
         <ExportPanel
           sourcePath={sourcePath}
@@ -2421,6 +2506,7 @@ export default function Review() {
             loadWallpapers,
             thumbBySource,
           }}
+          cursor={cursorOverlay ? { style: cursorStyle, onChange: setCursorStyle } : null}
         />
       </div>
       {error && <ErrorStrip error={error} onDismiss={() => setError(null)} />}
@@ -2572,6 +2658,8 @@ type LeftColumnProps = {
   background: Background | null;
   solidHex: string;
   thumbBySource: ThumbMap;
+  // Drawn cursor overlay (null = cursor baked into the video).
+  cursorOverlay: CursorOverlay | null;
 };
 
 function LeftColumn(props: LeftColumnProps) {
@@ -2612,6 +2700,7 @@ function LeftColumn(props: LeftColumnProps) {
         background={props.background}
         solidHex={props.solidHex}
         thumbBySource={props.thumbBySource}
+        cursorOverlay={props.cursorOverlay}
       />
       <Timeline
         assetUrl={props.assetUrl}
@@ -2862,6 +2951,8 @@ type VideoStageProps = {
   background: Background | null;
   solidHex: string;
   thumbBySource: ThumbMap;
+  // Drawn cursor overlay (null = cursor baked into the video).
+  cursorOverlay: CursorOverlay | null;
 };
 
 function VideoStage(props: VideoStageProps) {
@@ -3077,6 +3168,11 @@ function VideoStage(props: VideoStageProps) {
               No source path
             </div>
           )}
+          {/* Drawn cursor: inside the zoom layer so it moves and grows with the
+              zoomed content, like the export's content-plane cursor; below the
+              bubble, redaction and watermark layers (export draws it before
+              redaction). */}
+          <CursorLayer overlay={props.cursorOverlay} videoRef={props.videoRef} videoDims={videoDims} />
         </div>
         </div>
         <div style={{ position: "absolute", inset: 0, pointerEvents: "none", clipPath: bubbleClipPath }}>
@@ -3131,6 +3227,78 @@ function VideoStage(props: VideoStageProps) {
           insetFrac={insetFrac}
         />
       </div>
+    </div>
+  );
+}
+
+// The preview's drawn cursor, the same overlay the export draws (cursor_preview).
+// Lives in the zoom layer, whose own (untransformed) box is what the <video>
+// fills with object-fit: contain, so the video's content box is
+// contentBox(layer size). The clip div sits on that box (the cursor is cut at the
+// frame edge, as in the export; with a background the frame wrapper also rounds
+// it). Position and shape follow video.currentTime with the compositor's lookup
+// rules in a rAF loop, written imperatively; src changes only with the shape.
+function CursorLayer({
+  overlay,
+  videoRef,
+  videoDims,
+}: {
+  overlay: CursorOverlay | null;
+  videoRef: React.MutableRefObject<HTMLVideoElement | null>;
+  videoDims: { w: number; h: number } | null;
+}) {
+  const clipRef = useRef<HTMLDivElement | null>(null);
+  const imgRef = useRef<HTMLImageElement | null>(null);
+  const srcs = useMemo(
+    () => overlay?.shapes.map((sh) => `data:image/png;base64,${sh.png}`) ?? [],
+    [overlay],
+  );
+  useEffect(() => {
+    const clip = clipRef.current;
+    const img = imgRef.current;
+    const video = videoRef.current;
+    const layer = clip?.parentElement;
+    if (!overlay || !clip || !img || !video || !layer || !videoDims) return;
+    let raf = 0;
+    let shown = -1;
+    const tick = () => {
+      raf = requestAnimationFrame(tick);
+      const b = contentBox({ width: layer.clientWidth, height: layer.clientHeight }, videoDims);
+      clip.style.left = `${b.x}px`;
+      clip.style.top = `${b.y}px`;
+      clip.style.width = `${b.w}px`;
+      clip.style.height = `${b.h}px`;
+      const t = video.currentTime;
+      const [x, y] = cursorAt(overlay, t);
+      const i = cursorShapeAt(overlay, t);
+      if (i !== shown) {
+        img.src = srcs[i];
+        shown = i;
+      }
+      const shape = overlay.shapes[i];
+      const k = b.w / videoDims.w; // layer px per source px
+      img.style.left = `${x * b.w - shape.hot_x * k}px`;
+      img.style.top = `${y * b.h - shape.hot_y * k}px`;
+      img.style.width = `${shape.width * k}px`;
+    };
+    tick();
+    return () => cancelAnimationFrame(raf);
+  }, [overlay, srcs, videoRef, videoDims]);
+  if (!overlay || !videoDims) return null;
+  return (
+    <div ref={clipRef} style={{ position: "absolute", overflow: "hidden", pointerEvents: "none" }}>
+      <img
+        ref={imgRef}
+        alt=""
+        draggable={false}
+        style={{
+          position: "absolute",
+          display: "block",
+          height: "auto",
+          maxWidth: "none",
+          pointerEvents: "none",
+        }}
+      />
     </div>
   );
 }
@@ -5022,6 +5190,7 @@ function ExportPanel({
   setError,
   watermark,
   bg,
+  cursor,
 }: {
   sourcePath: string | null;
   zoom: ZoomEditor;
@@ -5082,6 +5251,9 @@ function ExportPanel({
     loadWallpapers: () => void;
     thumbBySource: ThumbMap;
   };
+  // Drawn-cursor controls; null when the recording has its cursor baked in
+  // (nothing to adjust), which hides them.
+  cursor: { style: CursorStyle; onChange: (s: CursorStyle) => void } | null;
 }) {
   // Transient post-save flash. Driven off lastSavedAt (parent state), reset
   // to 0 by a 1.5s timer.
@@ -5474,6 +5646,40 @@ function ExportPanel({
             )}
           </div>
             </div>
+            {cursor && (
+              <>
+                <div style={RAIL_EYEBROW}>Cursor</div>
+                <div style={CTX_CARD}>
+                  <Field label="Smoothing">
+                    <div className="segmented full">
+                      {(["off", "light", "smooth"] as const).map((m) => (
+                        <button
+                          key={m}
+                          className={cursor.style.smoothing === m ? "on" : ""}
+                          onClick={() => cursor.onChange({ ...cursor.style, smoothing: m })}
+                        >
+                          {m === "off" ? "Off" : m === "light" ? "Light" : "Smooth"}
+                        </button>
+                      ))}
+                    </div>
+                  </Field>
+                  <Field label={`Size — ${cursor.style.size.toFixed(2)}x`}>
+                    <input
+                      type="range"
+                      className="slider"
+                      min={Math.round(CURSOR_MIN_SIZE * 100)}
+                      max={Math.round(CURSOR_MAX_SIZE * 100)}
+                      step={5}
+                      value={Math.round(cursor.style.size * 100)}
+                      onChange={(e) =>
+                        cursor.onChange({ ...cursor.style, size: Number(e.target.value) / 100 })
+                      }
+                      style={{ width: "100%" }}
+                    />
+                  </Field>
+                </div>
+              </>
+            )}
           </>
         )}
 
