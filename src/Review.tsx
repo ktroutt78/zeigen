@@ -18,6 +18,7 @@ import {
   type RedactionRegion,
   type RedactionTint,
 } from "./redaction";
+import { fmt, parseStampFromPath, TRIM_EPS, ZOOM_MIN_DURATION, ZOOM_RAMP_S } from "./reviewShared";
 
 // Review window. Left column is player + timeline; right column is an
 // accordion panel (Trim / Bubble / Zoom / Watermark / Export sections plus a
@@ -83,11 +84,8 @@ type ZoomSegment = {
 // single source of the rect-through-zoom transform + frost constants shared with
 // the compositor. SidecarState below still references them.
 
+// ZOOM_MIN_DURATION and ZOOM_RAMP_S live in ./reviewShared (shared with the timeline).
 const ZOOM_DEFAULT_DURATION = 3;
-const ZOOM_MIN_DURATION = 0.5;
-// Ramp length of the stored keyframe shape (sidecar format) and the lane's ramp
-// shading. The motion itself comes from the camera path (camera.rs). 2.5x cap.
-const ZOOM_RAMP_S = 0.6;
 const ZOOM_MIN_SCALE = 1.1;
 const ZOOM_MAX_SCALE = 2.5;
 const ZOOM_DEFAULT_SCALE = 2.0;
@@ -533,7 +531,6 @@ const EMPTY_STATE: SidecarState = {
 };
 
 const SIDECAR_DEBOUNCE_MS = 350;
-const TRIM_EPS = 0.05;
 
 // Keyboard transport constants. FRAME_SECONDS assumes 30fps — same
 // assumption composite.rs's mask/shadow loop inputs make; screen
@@ -655,22 +652,6 @@ function readParams(): ReviewParams {
 function basename(p: string): string {
   const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
   return i >= 0 ? p.slice(i + 1) : p;
-}
-
-// Parse the recording stamp out of a path (scratch or final). All Phase 6
-// commands that touch the per-recording exports temp dir need this stamp
-// so they can compose the dir name independent of where the recording
-// currently lives. Returns null for paths that don't look like ours.
-function parseStampFromPath(p: string): string | null {
-  const m = p.match(/recording-(\d{4}-\d{2}-\d{2}-\d{6})/);
-  return m ? m[1] : null;
-}
-
-function fmt(s: number | null | undefined): string {
-  if (s == null || !isFinite(s)) return "--:--";
-  const m = Math.floor(s / 60);
-  const ss = Math.floor(s % 60);
-  return `${String(m).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
 }
 
 // Shift-held tracker. A click event's shiftKey proved unreliable in the WKWebView
