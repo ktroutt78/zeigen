@@ -124,8 +124,12 @@ export default function SegmentRow({
     const fixedStart = segments[idx].start;
     const fixedEnd = segments[idx].end;
     const b = segBounds(idx);
+    // The handle sits inside the block, so the press lands a few px off the
+    // edge; keep that offset or the edge jumps to the pointer on the first move.
+    const grab =
+      scale.rawTimeAtClientX(e.clientX, rect) - (side === "start" ? fixedStart : fixedEnd);
     const onMove = (ev: PointerEvent) => {
-      const t = scale.rawTimeAtClientX(ev.clientX, rect);
+      const t = scale.rawTimeAtClientX(ev.clientX, rect) - grab;
       if (side === "start") {
         const ns = Math.max(b.min, Math.min(fixedEnd - minGap, t));
         onChange(idx, { start: ns });
