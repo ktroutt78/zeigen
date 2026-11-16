@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { I } from "../components/icons";
 import type { TimeScale } from "./scale";
 
 // One timeline row of time-bounded segments (the Zoom row, the Blur row). Each
@@ -6,12 +7,20 @@ import type { TimeScale } from "./scale";
 // preserved), 12px hit areas inside each edge resize it. Every x<->time
 // conversion uses the tracks column's rect (getRect), the same rect the ruler,
 // the Video row and the playhead use. The row itself ignores the pointer, so
-// bare hover reaches the tracks column's hover-scrub; only blocks (and the
-// optional add surface) take presses, and they stopPropagation.
+// bare hover reaches the tracks column's hover-scrub; only blocks take presses,
+// and they stopPropagation.
+//
+// Optional hover-to-add (`ghost`): over empty row space a dashed ghost shows
+// the span ghost.place gives for the time under the pointer, and a click there
+// adds it. The add surface lets every event bubble, so the tracks column still
+// hover-previews and still scrubs on a drag; it marks itself
+// data-adds-on-click while a ghost shows, and the tracks column skips its
+// click-to-set-playhead for presses that start on it.
 
 export type TrackSegment = { start: number; end: number };
 
-const MOVE_THRESHOLD_PX = 3;
+// Movement beyond this turns a press into a drag (here and in the tracks column).
+export const MOVE_THRESHOLD_PX = 3;
 const EDGE_HIT_PX = 12;
 const LABEL_MIN_PX = 28;
 
@@ -34,8 +43,12 @@ type SegmentRowProps = {
   // Allowed [min, max] window per segment. Default: the whole recording.
   bounds?: (i: number) => { min: number; max: number };
   minGap?: number;
-  // A plain click on empty row space calls this with the clicked time.
-  onAddAt?: (t: number) => void;
+  // Hover-to-add: place(t) is the span a new segment at t would get (null
+  // where none fits); add(t) adds it.
+  ghost?: {
+    place: (t: number) => TrackSegment | null;
+    add: (t: number) => void;
+  };
   // Drawn inside a block behind its label (the zoom row's camera shading).
   background?: (i: number, blockWidth: number) => React.ReactNode;
   color: string;
@@ -54,26 +67,37 @@ export default function SegmentRow({
   label,
   bounds,
   minGap = 0.1,
-  onAddAt,
+  ghost,
   background,
   color,
   colorSoft,
 }: SegmentRowProps) {
   const [hovered, setHovered] = useState<number | null>(null);
 
-  const onAddDown = (e: React.PointerEvent) => {
-    if (!onAddAt) return;
-    e.stopPropagation();
-    const rect = getRect();
+  // The time under the pointer while it hovers empty row space with no
+  // button down. The ghost's span is derived at render, so it always matches
+  // the current segments (after an add, t is inside the new block: no ghost).
+  const [ghostT, setGhostT] = useState<number | null>(null);
+  const ghostSpan = ghost && ghostT != null ? ghost.place(ghostT) : null;
+
+  const onGhostMove = (e: React.PointerEvent) =>
+    setGhostT(e.buttons === 0 ? scale.timeAtClientX(e.clientX, getRect()) : null);
+
+  // No stopPropagation: the tracks column's handler also runs and scrubs on a
+  // drag. A release without a drag adds the ghost's segment, from the same t
+  // the ghost was drawn from.
+  const onGhostDown = (e: React.PointerEvent) => {
+    if (!ghost || !ghostSpan || ghostT == null) return;
+    const t = ghostT;
     const startX = e.clientX;
     let moved = false;
     const onMove = (ev: PointerEvent) => {
       if (Math.abs(ev.clientX - startX) > MOVE_THRESHOLD_PX) moved = true;
     };
-    const onUp = (ev: PointerEvent) => {
+    const onUp = () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
-      if (!moved) onAddAt(scale.timeAtClientX(ev.clientX, rect));
+      if (!moved) ghost.add(t);
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
@@ -158,11 +182,43 @@ export default function SegmentRow({
 
   return (
     <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
-      {onAddAt && (
+      {ghost && (
         <div
-          onPointerDown={onAddDown}
-          style={{ position: "absolute", inset: 0, pointerEvents: "auto", cursor: "copy" }}
+          data-adds-on-click={ghostSpan ? "" : undefined}
+          onPointerDown={onGhostDown}
+          onPointerMove={onGhostMove}
+          onPointerLeave={() => setGhostT(null)}
+          style={{
+            position: "absolute",
+            inset: 0,
+            pointerEvents: "auto",
+            cursor: ghostSpan ? "copy" : undefined,
+          }}
         />
+      )}
+      {ghostSpan && (
+        <div
+          style={{
+            position: "absolute",
+            left: `${scale.pct(ghostSpan.start)}%`,
+            width: `${scale.widthPct(ghostSpan.start, ghostSpan.end)}%`,
+            top: 0,
+            bottom: 0,
+            boxSizing: "border-box",
+            border: `1px dashed ${color}`,
+            borderRadius: 5,
+            background: colorSoft,
+            opacity: 0.7,
+            color,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            overflow: "hidden",
+            pointerEvents: "none",
+          }}
+        >
+          {I.plus}
+        </div>
       )}
       {order.map((idx) => {
         const seg = segments[idx];

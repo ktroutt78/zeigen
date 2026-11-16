@@ -3,7 +3,7 @@ import Waveform from "../Waveform";
 import { I } from "../components/icons";
 import type { RedactionEditor, Trim, ZoomEditor } from "../Review";
 import { fmt, TRIM_EPS, ZOOM_MIN_DURATION } from "../reviewShared";
-import SegmentRow from "./SegmentRow";
+import SegmentRow, { MOVE_THRESHOLD_PX } from "./SegmentRow";
 import CameraShade from "./CameraShade";
 import { tickLabel, timeScale } from "./scale";
 
@@ -38,7 +38,9 @@ type TimelineProps = {
   thumbnailTime: number | null;
 };
 
-const LABEL_COL_W = 84;
+// Wide enough for "ZOOM" plus its Generate and trash buttons, clear of the
+// EDGE_PAD the scroll viewport reaches into this column.
+const LABEL_COL_W = 120;
 const RULER_H = 18;
 const ROW_H = 36;
 const ROW_GAP = 6;
@@ -84,6 +86,7 @@ export default function Timeline(props: TimelineProps) {
   const [trackWidth, setTrackWidth] = useState(0);
   const [viewportWidth, setViewportWidth] = useState(0);
   const [hover, setHover] = useState<number | null>(null);
+  const [zoomLabelHover, setZoomLabelHover] = useState(false);
   const playheadRef = useRef<HTMLDivElement | null>(null);
   // Zoom factor: the tracks column is zoom x the viewport's width (1 = fit).
   // zoomRef is the latest requested value, ahead of the render, so a burst of
@@ -266,16 +269,18 @@ export default function Timeline(props: TimelineProps) {
   );
 
   // Anywhere on the tracks that is not a segment: a click sets the playhead,
-  // press+drag scrubs it.
+  // press+drag scrubs it. A click on a row's add ghost adds a segment instead
+  // (SegmentRow handles that), so it leaves the playhead alone.
   const onTrackPointerDown = (e: React.PointerEvent) => {
     if (!scale) return;
     const rect = getRect();
     const startX = e.clientX;
     const wasPlaying = !props.videoRef.current?.paused;
+    const onGhost = (e.target as Element).closest("[data-adds-on-click]") != null;
     let dragging = false;
     setHover(null);
     const onMove = (ev: PointerEvent) => {
-      if (!dragging && Math.abs(ev.clientX - startX) > 3) {
+      if (!dragging && Math.abs(ev.clientX - startX) > MOVE_THRESHOLD_PX) {
         dragging = true;
         if (wasPlaying) props.videoRef.current?.pause();
         props.onScrubStart();
@@ -285,7 +290,7 @@ export default function Timeline(props: TimelineProps) {
     const onUp = (ev: PointerEvent) => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
-      if (!dragging) props.setPlayhead(scale.timeAtClientX(ev.clientX, rect));
+      if (!dragging && !onGhost) props.setPlayhead(scale.timeAtClientX(ev.clientX, rect));
       props.onScrubEnd();
       if (dragging && wasPlaying) props.videoRef.current?.play().catch(() => {});
     };
@@ -313,10 +318,36 @@ export default function Timeline(props: TimelineProps) {
   const trimLen =
     props.trim && props.duration != null ? Math.max(0, props.trim.out - props.trim.in) : null;
 
+  // Zoom row label controls: Generate re-runs detection (the panel's
+  // Re-suggest: replaces only untouched automatic zooms), trash clears the
+  // row (the panel's Clear all). Trash shows while the label is hovered.
+  const zoomControls = (
+    <>
+      <button
+        className="btn-ghost"
+        style={zoomButton}
+        disabled={!props.zoom.canAdd || props.zoom.suggesting}
+        title={props.zoom.suggesting ? "Generating zooms…" : "Generate zooms from the recording"}
+        onClick={props.zoom.suggest}
+      >
+        {I.sparkle}
+      </button>
+      <button
+        className="btn-ghost"
+        style={{ ...zoomButton, visibility: zoomLabelHover ? "visible" : "hidden" }}
+        disabled={props.zoom.segments.length === 0}
+        title="Remove all zooms"
+        onClick={props.zoom.clearAll}
+      >
+        {I.trash}
+      </button>
+    </>
+  );
+
   const hasBlur = props.redact.regions.length > 0;
-  const rows: { name: string; icon: React.ReactNode }[] = [
+  const rows: { name: string; icon: React.ReactNode; controls?: React.ReactNode; onHover?: (h: boolean) => void }[] = [
     { name: "Video", icon: I.video },
-    { name: "Zoom", icon: I.zoomIn },
+    { name: "Zoom", icon: I.zoomIn, controls: zoomControls, onHover: setZoomLabelHover },
     ...(hasBlur ? [{ name: "Blur", icon: I.blur }] : []),
   ];
 
@@ -411,6 +442,8 @@ export default function Timeline(props: TimelineProps) {
           {rows.map((r) => (
             <div
               key={r.name}
+              onPointerEnter={() => r.onHover?.(true)}
+              onPointerLeave={() => r.onHover?.(false)}
               style={{
                 ...labelStyle,
                 height: ROW_H,
@@ -422,6 +455,12 @@ export default function Timeline(props: TimelineProps) {
             >
               {r.icon}
               {r.name}
+              {r.controls && (
+                // Clear of the scroll viewport, which reaches EDGE_PAD into this column.
+                <span style={{ marginLeft: "auto", marginRight: EDGE_PAD + 2, display: "flex" }}>
+                  {r.controls}
+                </span>
+              )}
             </div>
           ))}
         </div>
@@ -567,30 +606,10 @@ export default function Timeline(props: TimelineProps) {
               )}
             </div>
 
-            {/* Zoom row. Always present once the duration is known, so a
-                recording with no zooms still has a surface to click to add one. */}
+            {/* Zoom row. Always present once the duration is known; hovering
+                empty space shows the zoom a click would add. */}
             <div style={{ position: "relative", height: ROW_H, marginTop: ROW_GAP }}>
               <div style={rowBg} />
-              {scale && props.zoom.segments.length === 0 && (
-                <div
-                  style={{
-                    ...rowBg,
-                    border: "1px dashed var(--zoom)",
-                    background: "var(--zoom-soft)",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    fontSize: 11,
-                    fontWeight: 600,
-                    letterSpacing: "0.03em",
-                    color: "var(--zoom)",
-                    opacity: 0.85,
-                    pointerEvents: "none",
-                  }}
-                >
-                  Click to add a zoom
-                </div>
-              )}
               {scale && (
                 <SegmentRow
                   segments={props.zoom.segments}
@@ -599,7 +618,7 @@ export default function Timeline(props: TimelineProps) {
                   trackWidth={trackWidth}
                   selectedIndex={props.zoom.selectedIndex}
                   onSelect={props.zoom.select}
-                  onAddAt={props.zoom.addAt}
+                  ghost={{ place: props.zoom.place, add: props.zoom.addAt }}
                   onChange={(i, p) => props.zoom.update(i, p)}
                   onDragHover={onDragHover}
                   label={(i) => {
