@@ -406,6 +406,9 @@ type SidecarState = {
   // Bubble size while the screen is zoomed, 1 = unchanged. null/undefined = 1;
   // written only when set.
   bubble_zoom_scale?: number | null;
+  // Measured webcam lead (ms), written at finalize; the export reads it.
+  // Metadata, not an edit: carried through every rewrite, never compared.
+  webcam_lead_ms?: number | null;
 };
 
 // Mirror of Rust FrameStyle. Every knob is the no-op at 0. padding is the
@@ -791,6 +794,8 @@ function isLogicallyEmpty(s: SidecarState, duration: number | null): boolean {
   const noRedactions = !s.redactions || s.redactions.length === 0;
   const noCursor = cursorIsDefault(s.cursor);
   const noScenes = (!s.scenes || s.scenes.length === 0) && s.bubble_zoom_scale == null;
+  // Finalize-time data like the bubble log: deleting it would lose the lead.
+  const noLead = s.webcam_lead_ms == null;
   // A background, frame margin or bubble size is an edit the export reads from
   // the sidecar: without these checks a recording whose ONLY edit was one of
   // them had its sidecar deleted and exported without it.
@@ -805,7 +810,8 @@ function isLogicallyEmpty(s: SidecarState, duration: number | null): boolean {
     noZoom &&
     noRedactions &&
     noCursor &&
-    noScenes
+    noScenes &&
+    noLead
   );
 }
 
@@ -832,6 +838,7 @@ function sidecarWritePayload(s: SidecarState, duration: number): SidecarState {
       : { smoothing: s.cursor!.smoothing, size: s.cursor!.size },
     scenes: s.scenes && s.scenes.length > 0 ? s.scenes : undefined,
     bubble_zoom_scale: s.bubble_zoom_scale ?? undefined,
+    webcam_lead_ms: s.webcam_lead_ms ?? undefined,
   };
 }
 
@@ -851,8 +858,9 @@ export default function Review() {
   const sourcePath = params.path;
   // Phase 15 c3 dual-stream inputs. screenPath drives the screen <video>
   // (and the NR preview pipeline); webcamPath drives the bubble <video>;
-  // webcamLeadMs is the camera-start delay applied via currentTime
-  // offset to match composite::WEBCAM_LEAD_MS at export time. For
+  // webcamLeadMs is the webcam's start offset applied via currentTime
+  // (measured per recording at finalize, the same value the export reads
+  // from the sidecar; may be negative). For
   // screen-only recordings webcamPath is null and the bubble renders
   // nothing — playback is single-stream against screenPath.
   const screenPath = params.screenPath ?? sourcePath;
@@ -1062,6 +1070,7 @@ export default function Review() {
   // Rounded is gated off for it; our arc can't coincide with the OS curve (DECISIONS
   // 2026-07-29). Metadata: persisted but excluded from the dirty check.
   const [sourceKind, setSourceKind] = useState<string | null>(params.sourceKind);
+  const [webcamLeadMs, setWebcamLeadMs] = useState<number | null>(null);
   const isWindowSource = sourceKind === "window";
   // Mandatory corner-clip for window captures: kills the SCK black-corner wedges. The
   // EXPORT measures the exact reach in the compositor; this generous fixed fraction is
@@ -1562,6 +1571,7 @@ export default function Review() {
             cursor: state.cursor ?? null,
             scenes: state.scenes ?? [],
             bubble_zoom_scale: state.bubble_zoom_scale ?? null,
+            webcam_lead_ms: state.webcam_lead_ms ?? null,
           });
           if (state.trim) setTrim(state.trim);
           if (state.bubble_position_log) setBubblePositionLog(state.bubble_position_log);
@@ -1585,6 +1595,7 @@ export default function Review() {
           if (state.cursor) setCursorStyle({ ...DEFAULT_CURSOR_STYLE, ...state.cursor });
           if (state.scenes && state.scenes.length > 0) setScenes(state.scenes);
           if (state.bubble_zoom_scale != null) setBubbleZoomScale(state.bubble_zoom_scale);
+          if (state.webcam_lead_ms != null) setWebcamLeadMs(state.webcam_lead_ms);
         } else {
           setSnapshot(EMPTY_STATE);
         }
@@ -1696,8 +1707,9 @@ export default function Review() {
       cursor: cursorIsDefault(cursorStyle) ? null : cursorStyle,
       scenes,
       bubble_zoom_scale: bubbleZoomScale === 1 ? null : bubbleZoomScale,
+      webcam_lead_ms: webcamLeadMs,
     }),
-    [trim, bubblePositionLog, thumbnailTime, bubbleRoundness, bubbleZone, bubbleScale, zoomSegments, redactions, frame, background, sourceKind, cursorStyle, scenes, bubbleZoomScale],
+    [trim, bubblePositionLog, thumbnailTime, bubbleRoundness, bubbleZone, bubbleScale, zoomSegments, redactions, frame, background, sourceKind, cursorStyle, scenes, bubbleZoomScale, webcamLeadMs],
   );
 
   const dirty = useMemo(

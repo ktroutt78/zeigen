@@ -79,14 +79,13 @@ enum Event {
     case resumed(elapsed_s: Double)
     case stopped(output_path: String, duration_s: Double, bytes: Int64, frames: Int, dropped: Int)
     case window_frame(x: Int, y: Int, width: Int, height: Int, on_screen: Bool)
-    // Phase 15 #4 fix: emitted exactly once per recording, when SCK
-    // delivers the first sample buffer for the screen stream. Rust uses
-    // the receive timestamp to anchor bubble_position_log entries to
-    // screen.mp4 PTS=0 (which corresponds to this first frame) instead
-    // of the earlier engine_start invocation time. `stream` is currently
-    // always "screen"; the field future-proofs against a similar fix
-    // for the webcam stream if WEBCAM_LEAD_MS is ever retired.
-    case first_frame(stream: String)
+    // Emitted exactly once per recording, when the writer session starts
+    // (screen.mp4's time zero). Rust uses the receive timestamp to anchor
+    // bubble_position_log entries to screen.mp4 PTS=0, and `host_s` (that
+    // time zero on the host clock, seconds) to measure the webcam lead
+    // against the webcam recorder's own first_frame host_s. `stream` is
+    // always "screen".
+    case first_frame(stream: String, host_s: Double)
     // V3 Phase A: emitted after `stopped` when capture_cursor was on and
     // at least one video frame was written.
     case cursor_track_written(path: String, sample_count: Int)
@@ -137,8 +136,8 @@ func emit(_ event: Event) {
         ]
     case .window_frame(let x, let y, let width, let height, let on_screen):
         json = ["event": "window_frame", "x": x, "y": y, "width": width, "height": height, "on_screen": on_screen]
-    case .first_frame(let stream):
-        json = ["event": "first_frame", "stream": stream]
+    case .first_frame(let stream, let host_s):
+        json = ["event": "first_frame", "stream": stream, "host_s": host_s]
     case .cursor_track_written(let path, let sample_count):
         json = ["event": "cursor_track_written", "path": path, "sample_count": sample_count]
     case .stream_stopped:

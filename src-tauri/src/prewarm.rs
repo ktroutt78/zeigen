@@ -7,10 +7,9 @@
 // frame doesn't pay them.
 //
 // Two parallel tracks run from prewarm_capture:
-//   Track A — throwaway webcam ffmpeg with the same args as the real
-//     WebcamSegmenter, output discarded to mpegts→pipe→/dev/null. Killed
-//     after ~500ms. stderr stays Stdio::null() — no diagnostic stderr
-//     piping on the capture path.
+//   Track A — throwaway webcam-recorder (the same helper the real
+//     WebcamSegmenter runs) writing into Track B's .prewarm scratch dir,
+//     which Track B deletes. Killed after ~500ms.
 //   Track B — engine Start with a .prewarm-prefixed scratch path, ~800ms
 //     wait (covers cold SCK first-frame), engine Stop, ~400ms flush wait,
 //     scratch deletion.
@@ -27,8 +26,8 @@
 // issued. Both tracks' wait loops check the flag every 50ms so a cancel
 // short-circuits within ~50ms.
 
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::path::{Path, PathBuf};
+use std::process::Child;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -36,8 +35,6 @@ use chrono::Local;
 use tauri::{AppHandle, Manager};
 
 use crate::engine::{EngineClient, EngineCommand};
-
-const FFMPEG_PATH: &str = "/opt/homebrew/bin/ffmpeg";
 
 const TRACK_A_DURATION_MS: u64 = 500;
 const TRACK_B_START_WAIT_MS: u64 = 800;
@@ -67,42 +64,6 @@ fn movies_dir() -> Result<PathBuf, String> {
     Ok(PathBuf::from(home).join("Movies/Zeigen"))
 }
 
-fn spawn_throwaway_webcam(camera_index: u32) -> Result<Child, String> {
-    // Args mirror WebcamSegmenter::start_segment exactly so the
-    // OS-level caches the real recording will hit are the same ones
-    // this throwaway warms. Output goes to mpegts→pipe:1 with stdout
-    // tied to Stdio::null so the encoder runs (warming VT) but the
-    // bytes are discarded with no scratch file.
-    Command::new(FFMPEG_PATH)
-        .args([
-            "-y",
-            "-hide_banner",
-            "-f",
-            "avfoundation",
-            "-framerate",
-            "30",
-            "-video_size",
-            "1280x720",
-            "-i",
-            &camera_index.to_string(),
-            "-c:v",
-            "h264_videotoolbox",
-            "-b:v",
-            "4M",
-            "-pix_fmt",
-            "nv12",
-            "-an",
-            "-f",
-            "mpegts",
-            "pipe:1",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("spawn throwaway webcam ffmpeg: {e}"))
-}
-
 // Wait up to `total_ms`, in `ABORT_POLL_MS` increments, returning early
 // if the shared aborted flag flips. Returns true if aborted during wait.
 fn wait_with_abort_poll(app: &AppHandle, total_ms: u64) -> bool {
@@ -125,8 +86,10 @@ fn wait_with_abort_poll(app: &AppHandle, total_ms: u64) -> bool {
     false
 }
 
-fn run_track_a(app: AppHandle, camera_index: u32) -> Result<(), String> {
-    let child = spawn_throwaway_webcam(camera_index)?;
+fn run_track_a(app: AppHandle, camera_name: &str, scratch_dir: &Path) -> Result<(), String> {
+    // Same helper and camera as the real recording, so it joins the
+    // preview's camera stream the same way; the file is thrown away.
+    let child = crate::webcam::spawn_recorder(camera_name, &scratch_dir.join("webcam.mp4"))?;
     // Park the child for the abort path.
     {
         let state = app.state::<Mutex<PrewarmHandle>>();
@@ -150,6 +113,7 @@ fn run_track_a(app: AppHandle, camera_index: u32) -> Result<(), String> {
 #[allow(clippy::too_many_arguments)]
 fn run_track_b(
     app: AppHandle,
+    scratch_dir: PathBuf,
     display_id: Option<u32>,
     window_id: Option<u32>,
     microphone_uid: Option<String>,
@@ -159,15 +123,6 @@ fn run_track_b(
     area_width: Option<f64>,
     area_height: Option<f64>,
 ) -> Result<(), String> {
-    // Scratch dir with .prewarm prefix so the launch-time scratch
-    // sweeper (lib.rs::sweep_stale_scratch) can recognize it as
-    // disposable independently from real recording-* dirs.
-    let stamp = Local::now().format("%Y-%m-%d-%H%M%S-%3f").to_string();
-    let scratch_dir = movies_dir()?
-        .join(".scratch")
-        .join(format!(".prewarm-{stamp}"));
-    std::fs::create_dir_all(&scratch_dir)
-        .map_err(|e| format!("create prewarm scratch: {e}"))?;
     let output_path = scratch_dir.join("screen.mp4");
 
     {
@@ -248,7 +203,7 @@ pub fn prewarm_capture(
     display_id: Option<u32>,
     window_id: Option<u32>,
     microphone_uid: Option<String>,
-    camera_index: Option<u32>,
+    camera_name: Option<String>,
     max_fps: Option<u32>,
     area_x: Option<f64>,
     area_y: Option<f64>,
@@ -267,12 +222,24 @@ pub fn prewarm_capture(
         *guard = PrewarmHandle::default();
     }
 
+    // Scratch dir with .prewarm prefix so the launch-time scratch
+    // sweeper (lib.rs::sweep_stale_scratch) can recognize it as
+    // disposable independently from real recording-* dirs. Track B
+    // owns its removal; Track A's throwaway webcam file lands here too.
+    let stamp = Local::now().format("%Y-%m-%d-%H%M%S-%3f").to_string();
+    let scratch_dir = movies_dir()?
+        .join(".scratch")
+        .join(format!(".prewarm-{stamp}"));
+    std::fs::create_dir_all(&scratch_dir)
+        .map_err(|e| format!("create prewarm scratch: {e}"))?;
+
     let app_a = app.clone();
     let app_b = app.clone();
+    let scratch_a = scratch_dir.clone();
 
     let track_a = std::thread::spawn(move || {
-        if let Some(idx) = camera_index {
-            if let Err(e) = run_track_a(app_a, idx) {
+        if let Some(name) = camera_name {
+            if let Err(e) = run_track_a(app_a, &name, &scratch_a) {
                 eprintln!("[prewarm] Track A failed: {e}");
             }
         }
@@ -280,6 +247,7 @@ pub fn prewarm_capture(
     let track_b = std::thread::spawn(move || {
         if let Err(e) = run_track_b(
             app_b,
+            scratch_dir,
             display_id,
             window_id,
             microphone_uid,
