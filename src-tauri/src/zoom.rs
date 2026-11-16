@@ -1269,7 +1269,9 @@ mod tests {
     //                    starts there any more (the moment itself was right)
     //   new              a zoom overlapping no marked zoom: nobody has judged
     //                    it, so Keith has to before the rule is accepted
-    const MARKED_CLIPS: [(&str, &str, &str, &str); 3] = [
+    //   missing          found if a zoom now covers at least half of the span
+    //                    Keith wanted one in
+    const MARKED_CLIPS: [(&str, &str, &str, &str); 4] = [
         (
             "clip1-clickthrough",
             include_str!("../tests/fixtures/zoom-rules/clip1-clickthrough.cursor.json"),
@@ -1288,6 +1290,14 @@ mod tests {
             include_str!("../tests/fixtures/zoom-rules/clip3-scroll.marks.json"),
             include_str!("../tests/fixtures/zoom-rules/clip3-scroll.detected.json"),
         ),
+        // Recorded with rules 1 to 3 already in, so its calls are about that
+        // detector's output, not the baseline's.
+        (
+            "clip4-mixed",
+            include_str!("../tests/fixtures/zoom-rules/clip4-mixed.cursor.json"),
+            include_str!("../tests/fixtures/zoom-rules/clip4-mixed.marks.json"),
+            include_str!("../tests/fixtures/zoom-rules/clip4-mixed.detected.json"),
+        ),
     ];
 
     #[derive(Default, Debug, PartialEq)]
@@ -1298,6 +1308,8 @@ mod tests {
         unwanted_total: u32,
         too_long_fixed: u32,
         too_long_total: u32,
+        missing_found: u32,
+        missing_total: u32,
         new_unjudged: u32,
     }
 
@@ -1366,13 +1378,30 @@ mod tests {
                     if kind.is_empty() { call } else { kind },
                 );
             }
+            for m in marks["missing"].as_array().unwrap() {
+                let span = (m["start"].as_f64().unwrap(), m["end"].as_f64().unwrap());
+                score.missing_total += 1;
+                let mut covered = 0.0;
+                for (k, g) in got.iter().enumerate() {
+                    if overlap(*g, span) > 0.0 {
+                        judged[k] = true;
+                        covered += overlap(*g, span);
+                    }
+                }
+                let verdict = if covered >= (span.1 - span.0) / 2.0 {
+                    score.missing_found += 1;
+                    "found"
+                } else {
+                    "still missing"
+                };
+                println!("  {:5.1}-{:5.1}s  {:18} Keith: wanted a zoom    -> {verdict}", span.0, span.1, "(none)");
+            }
             for (k, g) in got.iter().enumerate() {
                 if !judged[k] {
                     score.new_unjudged += 1;
                     println!("  {:5.1}-{:5.1}s  NEW zoom nobody has judged", g.0, g.1);
                 }
             }
-            assert!(marks["missing"].as_array().unwrap().is_empty(), "missing zooms are not scored yet");
         }
         println!("{score:?}");
         score
@@ -1406,13 +1435,17 @@ mod tests {
             // Rule 1 (resting cursor): unwanted 0 -> 1, too long 0 -> 1.
             // Rule 2 (stop click): unwanted 1 -> 2.
             // Rule 3 (scroll releases): too long 1 -> 2.
+            // Clip 4 added (marked against rules 1 to 3): right 2 -> 4 of 4,
+            // and two zooms Keith wanted that are missing, 0 of 2 found.
             Score {
-                right_kept: 2,
-                right_total: 2,
+                right_kept: 4,
+                right_total: 4,
                 unwanted_gone: 2,
                 unwanted_total: 2,
                 too_long_fixed: 2,
                 too_long_total: 2,
+                missing_found: 0,
+                missing_total: 2,
                 new_unjudged: 0,
             }
         );
