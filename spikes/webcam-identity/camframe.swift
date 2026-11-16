@@ -2,7 +2,7 @@
 // when Zeigen records.
 //
 // Grabs one frame from the first camera whose name contains "iPhone".
-//   camframe out.png [frame number, default 90] [60 = switch to the 60 fps mode]
+//   camframe out.png [frame number, default 90] [60 = ask for the 60 fps mode; did not take effect when tried]
 //   swiftc -O camframe.swift -o /somewhere/else/camframe
 // (Build the binary outside this folder: a loose binary next to Info.plist picks
 // up that plist's bundle id.)
@@ -12,7 +12,6 @@
 // - This tool running, a second copy joins (same 30 fps mode): both zoomed.
 // - This tool running, ffmpeg joins: both go wide. ContinuityCaptureAgent logs a
 //   StopStream/StartStream pair as the stream moves from FR:30 to FR:60.
-// - This tool alone switching itself to the 60 fps mode mid-stream: goes wide.
 // So the zoom is lost whenever the phone stream restarts in a different mode.
 // ffmpeg's avfoundation input always picks the 1280x720 [1-60] mode; the preview
 // uses [1-30]. Bundle identity is not the cause: every process here was seen by
