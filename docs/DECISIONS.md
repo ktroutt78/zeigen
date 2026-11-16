@@ -4,6 +4,73 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-15 — zoom-polish: owner test pass in the installed build, ALL GOOD; merged to main
+
+Keith's test pass on the signed install of branch `zoom-polish`, all fine:
+- Re-aim works in a real save (the one item not yet judged when the previous entries were written).
+- Cursor tile is good.
+- Blur in a real save looks right.
+- Drawn cursor in WINDOW and AREA recordings, after PAUSE/RESUME, with TRIM and a REDACTION box, and in a GIF export. "GIF is a bit choppy, but that's GIF frame rate, same as before."
+
+That closes the capture-side unknowns recorded earlier (the system cursor really is left out of the video in display, window and area modes, and the cursor log stays aligned across a pause).
+
+Merged to main. What the merge contains: one Rust camera path played by export and preview (spring glide, zooms within 2.5s joined by a pan, one-glide re-aim), auto-zoom depth 1.5x/1.7x, a reason on every auto zoom, cursor captured out of the video and drawn smoothed at export and preview (defaults Smooth, size 1.7; Cursor tile), motion blur 0.25 at export.
+
+NOT in the merge, by decision:
+- **Window-capture popups** (problem 3 of `docs/ZOOM-POLISH-PLAN.md`): its own branch, still gated on the throwaway `appcapture` test passing.
+- **Auto-zoom rule changes** (pause-with-no-click, no zoom in the first second): wait for Keith's three marked-up reference clips.
+- **Wider zoom-segment handles:** moved onto the backlog item "Zoom gets its own timeline row".
+- `docs/DEBT.md` items stay as written.
+
+## 2026-11-15 — Motion blur default 0.25; cursor defaults Smooth at size 1.7
+
+Keith judged three renders of his own cursorless test recording (`harness/reference/blur-0.mp4`, `blur-0.25.mp4`, `blur-0.5.mp4`):
+
+- **Motion blur = 0.25, on by default.** "0 looks jagged and 0.5 makes the camera feel like it's rushing; 0.25 smooths it without being noticeable." (0.5 is roughly Cap's amount, so Zeigen deliberately blurs less than Cap.) The value is the fraction of the frame interval the shutter is open; it is one constant in `edit.rs` (`MOTION_BLUR`), passed whenever there is a camera path. Export-only, per `docs/DEBT.md`. Supersedes the 2026-07-15 "blur is out of the value case" finding: that test was a radial blur on the hard 0.6s ramp; this is a blur along the camera's real motion on the spring glide, with a drawn cursor that stays sharp.
+- **Cursor defaults for new recordings: Smooth, size 1.7.** The style is stored in the sidecar only when it differs from the default, so a recording saved earlier at the old default size (1.0) with no stored style now reads as 1.7. Only tonight's test recordings are affected.
+- Blur cost, measured on that 70s clip: export took 10 to 13s at all three strengths; no measurable increase.
+
+Re-aim (previous entry) is built but NOT yet judged by Keith in the app.
+
+## 2026-11-15 — Camera RE-AIM while zoomed: reopened and approved as a one-glide rule (NOT continuous follow)
+
+Supersedes, for this one case, "continuous cursor-follow stays CLOSED" (2026-11-15 kickoff) and the 2026-07-15 "do not revisit follow-the-cursor" entry. Those still stand for CONTINUOUS follow.
+
+Keith, after testing the installed build: "The camera doesn't follow the mouse after zooming. Several times the cursor left the zoomed view and stayed out." Decision: **when the cursor leaves a box inside the zoomed view, glide the camera once to bring it back, the way Cap does.** It lives in the camera path module (`src-tauri/src/camera.rs`) so preview and export stay identical.
+
+As built (my tuning, Keith judges by eye):
+- The box is the middle 70% of the zoomed view. Inside it the cursor moves nothing.
+- On leaving it, the camera aims at the time-average of where the cursor goes next (for as long as those positions fit in one box), so one glide lands where the cursor comes to rest, not on the point where it crossed the edge.
+- The glide starts 0.2s before the crossing (the recording is finished, so the future is known).
+- A cursor that leaves the recorded frame is not chased. Pinned against a frame edge, the camera does not move.
+- Active from a zoom's start until it releases, including the gap before a joined next zoom.
+- Uses the raw cursor log, so it also works on old recordings with a baked-in cursor.
+
+Measured on Keith's first cursorless test recording (`harness/reference/cursorless-src/`, 70s, 7 zooms): 9 re-aims; time the in-frame cursor is outside the zoomed view drops from 7.6s to 0.0s. On the earlier reference (`zeigen-src`, 104s, 11 zooms): 13 re-aims; 5.1s to 0.1s.
+
+Also from that test: the drawn cursor "works and looks good." Cursor controls move from the bottom of the Zoom panel to their own Cursor tile in the tool rail ("I couldn't find them at the bottom of Zoom, and they aren't zoom settings").
+
+## 2026-11-15 — Cursor smoothing APPROVED and moved ahead of motion blur; cursor-shape test PASSED
+
+Keith, after the camera checkpoint: "What looks crazy is the cursor, not the camera." Cursor smoothing moved up from the backlog to the next priority. Plan: `docs/CURSOR-SMOOTHING-PLAN.md`. His calls:
+
+1. **Cursor smoothing comes BEFORE motion blur.** A drawn cursor is composited after the blur and stays sharp, so blur is judged on strength only.
+2. **Every save renders, including recordings with no edits** (~13s per ~100s is fine). New recordings have no cursor in the raw video, so the untouched-copy fast path is gone for them.
+3. **Size slider in; custom cursor icon stays on the backlog.**
+4. **Every export path must draw the cursor, confirmed one by one**, so none can silently produce a cursorless video.
+
+Also confirmed by Keith in the installed app: the preview glides like the export and the reason labels are readable. "The zoom lane doesn't feel like a real track yet" -> backlog item "Zoom gets its own timeline row", not planned.
+
+**Cursor-shape throwaway test: PASSED** (`spikes/cursor-shape/`). A plain helper process with no app bundle and no window read `NSCursor.currentSystem` with no permission prompt: 143 polls over 8s, none empty, three distinct shapes captured as the owner moved the mouse (arrow, pointing hand, one more), each with a hotspot and multiple pixel sizes, ~2ms per poll. So the engine can log real shapes; the all-arrows fallback is not needed. Not yet proven inside the engine's own process/threading; that is part of the capture step.
+
+**Export paths that actually exist** (checked in code 2026-11-15): Save MP4 and Save GIF (`save_recording`) and Copy to clipboard (`clipboard.rs`). All three go through `edit::run_edit_pipeline`. There is NO LinkedIn or R2 code in the tree (LinkedIn was removed 2026-07, hosted sharing was dropped in Phase 6), although CLAUDE.md's Scope line still lists them.
+
+## 2026-11-15 — Camera-path checkpoint APPROVED; long pans stay (join by time only)
+
+Keith watched `harness/reference/zeigen-new.mp4` (new camera path + 1.5x/1.7x depth, no blur) side by side with the old export: "the new motion looks better than the old." Approved to continue to the preview.
+
+**Long pans are fine.** Two joined zooms in that clip pan ~42% of the frame width at 1.7x (5.9s, 100.8s; peak ~105 px/frame at 1280 wide vs ~57 for Cap's longest pan). Offered the alternative of joining only when targets are also close on screen; Keith chose to keep joining by TIME ONLY (any two zooms within ~2.5s pan into each other). Do not add a distance rule without a new complaint.
+
 ## 2026-11-15 — Zoom polish plan APPROVED (docs/ZOOM-POLISH-PLAN.md) with five owner decisions
 
 Keith approved the plan. His calls:

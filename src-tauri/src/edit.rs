@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
 use crate::composite::{Watermark, FFMPEG_PATH, FFPROBE_PATH};
+use crate::zoom::CursorTrack;
 
 // Resolved at startup from AppHandle::path().resource_dir(). Read by
 // run_edit_pipeline when building the MP4 audio filter.
@@ -108,6 +109,51 @@ pub struct SidecarState {
     // Metadata only: the export never reads it. Declared last; absent on legacy sidecars.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_kind: Option<String>,
+    // Drawn-cursor style (CURSOR-SMOOTHING-PLAN). None = the defaults (Smooth,
+    // size 1.7) and is skipped when serialized, so existing sidecars stay
+    // byte-identical. Only read when the recording's cursor log says the cursor
+    // is not in the video. Declared last.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<CursorStyle>,
+}
+
+// How the export draws the cursor. `size` multiplies the cursor's natural size.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(default)]
+pub struct CursorStyle {
+    pub smoothing: CursorSmoothing,
+    pub size: f64,
+}
+
+impl Default for CursorStyle {
+    fn default() -> Self {
+        CursorStyle { smoothing: CursorSmoothing::Smooth, size: 1.7 }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CursorSmoothing {
+    Off,
+    Light,
+    #[default]
+    Smooth,
+}
+
+// Smoothing width in seconds for each setting (cursor::path's sigma). The ONE
+// place these live; tuned by the owner on the reference recording.
+const CURSOR_SIGMA_OFF: f64 = 0.0;
+const CURSOR_SIGMA_LIGHT: f64 = 0.08;
+const CURSOR_SIGMA_SMOOTH: f64 = 0.15;
+
+impl CursorSmoothing {
+    pub fn sigma(self) -> f64 {
+        match self {
+            CursorSmoothing::Off => CURSOR_SIGMA_OFF,
+            CursorSmoothing::Light => CURSOR_SIGMA_LIGHT,
+            CursorSmoothing::Smooth => CURSOR_SIGMA_SMOOTH,
+        }
+    }
 }
 
 // Frame styling for the padded recording (BACKGROUND-PADDING-PLAN §Q5). Every
@@ -174,6 +220,11 @@ pub struct ZoomKeyframe {
     // replace only flagged keyframes; user-placed ones are never stomped.
     #[serde(default)]
     pub auto_generated: bool,
+    // Why an auto zoom fired ("drag", "right-click menu", "pause + 2 clicks",
+    // "pause, no click"); kept through manual edits. None for hand-added zooms
+    // and old sidecars, and omitted from the JSON then (byte-identical).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
@@ -238,7 +289,7 @@ pub struct Position {
 // source-frame FRACTIONS, top-left origin — same convention as
 // Annotation.position — so it survives the 2x backing scale and the export
 // downscale unchanged (no pixel space to get wrong). The compositor transforms
-// it through the active zoom (zoomAt/centerAt) so the panel stays glued to the
+// it through the active zoom (the camera path) so the panel stays glued to the
 // content it covers; nothing here tracks motion — the rect is static in source
 // space. Time range is original-timeline seconds, the same basis as
 // Annotation.start_time and the compositor's tSrc gate.
@@ -699,7 +750,7 @@ fn build_compositor_command(
     src_dims: (u32, u32),
     out_dims: (u32, u32),
     trim: Option<(f64, f64)>,
-    zoom_json: Option<&Path>,
+    camera_json: Option<&Path>,
     webcam: Option<&Path>,
     bubble: Option<&crate::composite::V3BubbleAssets>,
     fps: f64,
@@ -707,19 +758,20 @@ fn build_compositor_command(
     redact_json: Option<&Path>,
     frame_bg: Option<(FrameStyle, &Background)>,
     window_source: bool,
+    cursor_json: Option<&Path>,
 ) -> Command {
     let (w, h) = src_dims;
     let (out_w, out_h) = out_dims;
     let mut cmd = Command::new(bin);
-    cmd.arg(screen_path).arg(video_only).arg("identity");
+    cmd.arg(screen_path).arg(video_only);
     // Below-source target -> compositor appends a terminal Lanczos downscale to
     // these even, aspect-matched dims. Equal to source -> not set, output == source.
     if (out_w, out_h) != (w, h) {
         cmd.env("OUTPUT_WIDTH", out_w.to_string())
             .env("OUTPUT_HEIGHT", out_h.to_string());
     }
-    if let Some(zj) = zoom_json {
-        cmd.env("ZOOM_SEGMENTS", zj);
+    if let Some(cj) = camera_json {
+        cmd.env("CAMERA_PATH", cj).env("MOTION_BLUR", MOTION_BLUR.to_string());
     }
     // Trim window (original-timeline seconds). Compositor renders only this span and
     // rebases output PTS to 0; the audio mux trims the screen audio to match.
@@ -764,6 +816,11 @@ fn build_compositor_command(
     // present; absent -> the pre-redaction command exactly.
     if let Some(rj) = redact_json {
         cmd.env("REDACT_REGIONS", rj);
+    }
+    // Drawn cursor (CURSOR-SMOOTHING-PLAN). Only for recordings whose cursor is
+    // not in the video; absent -> the command is unchanged.
+    if let Some(cj) = cursor_json {
+        cmd.env("CURSOR_PATH", cj);
     }
     // Background canvas + padding (BACKGROUND-PADDING-PLAN Slice 1). Emitted only when
     // the inset stage is active (Some) — a padding-0 / no-background export gets no env
@@ -810,6 +867,77 @@ fn build_compositor_command(
     cmd
 }
 
+// The drawn cursor's overlay data: the smoothed path (frame fractions at
+// t = i * step) plus each shape with its size and hotspot converted from screen
+// points to SOURCE VIDEO PIXELS (times the style's size), so a renderer only
+// scales them by the zoom. The ONE definition shared by the export
+// (write_cursor_json) and the preview (cursor_preview). `P` is how a shape's
+// image is carried: the log's base64 PNG for the preview, a file for the export.
+// Field order is the compositor's cursor.json layout.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct CursorOverlay<P> {
+    pub step: f64,
+    pub samples: Vec<[f32; 2]>,
+    pub shapes: Vec<CursorOverlayShape<P>>,
+    pub shape_events: Vec<crate::zoom::ShapeEvent>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct CursorOverlayShape<P> {
+    pub png: P,
+    pub width: f64,
+    pub height: f64,
+    pub hot_x: f64,
+    pub hot_y: f64,
+}
+
+fn cursor_overlay_data(track: &CursorTrack, style: CursorStyle, duration: f64) -> CursorOverlay<String> {
+    let k = track.points_to_pixels * style.size;
+    let path = crate::cursor::path(track, style.smoothing.sigma(), duration);
+    CursorOverlay {
+        step: path.step,
+        samples: path.samples,
+        shapes: track
+            .shapes
+            .iter()
+            .map(|s| CursorOverlayShape {
+                png: s.png.clone(),
+                width: s.width * k,
+                height: s.height * k,
+                hot_x: s.hot_x * k,
+                hot_y: s.hot_y * k,
+            })
+            .collect(),
+        shape_events: track.shape_events.clone(),
+    }
+}
+
+// Writes the compositor's cursor.json (cursor_overlay_data) and one PNG per
+// cursor shape into temp_dir.
+fn write_cursor_json(
+    track: &CursorTrack,
+    style: CursorStyle,
+    duration: f64,
+    temp_dir: &Path,
+) -> Result<PathBuf, String> {
+    use base64::Engine;
+    let data = cursor_overlay_data(track, style, duration);
+    let mut shapes = Vec::with_capacity(data.shapes.len());
+    for (i, s) in data.shapes.into_iter().enumerate() {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&s.png)
+            .map_err(|e| format!("cursor shape {i}: bad PNG data: {e}"))?;
+        let png = temp_dir.join(format!("cursor-{i}.png"));
+        std::fs::write(&png, bytes).map_err(|e| format!("write {}: {e}", png.display()))?;
+        shapes.push(CursorOverlayShape { png, width: s.width, height: s.height, hot_x: s.hot_x, hot_y: s.hot_y });
+    }
+    let overlay = CursorOverlay { step: data.step, samples: data.samples, shapes, shape_events: data.shape_events };
+    let json = serde_json::to_string(&overlay).map_err(|e| format!("cursor json: {e}"))?;
+    let p = temp_dir.join("cursor.json");
+    std::fs::write(&p, json).map_err(|e| format!("write cursor.json: {e}"))?;
+    Ok(p)
+}
+
 // Shared V3 render half: cicompositor renders zoom + bubble + watermark to a
 // video-only mp4 (downscaled to `resolution` if below source). No audio, no GIF
 // palette — the caller appends its own tail. Drives on_progress across [0.02,
@@ -824,6 +952,7 @@ fn v3_render(
     webcam_size: crate::composite::WebcamSize,
     watermark: Option<&Watermark>,
     resolution: Mp4Resolution,
+    cursor: Option<&CursorTrack>,
     on_progress: &impl Fn(f64),
 ) -> Result<V3Render, String> {
     on_progress(0.02);
@@ -892,42 +1021,39 @@ fn v3_render(
         _ => None,
     };
 
-    // Zoom -> ZOOM_SEGMENTS JSON. cx/cy are source px (top-origin); cicompositor
-    // wants top-origin fractions and applies ZOOM_RENDER_RAMP_S itself per edge.
-    #[derive(serde::Serialize)]
-    struct V3ZoomSeg {
-        start: f64,
-        end: f64,
-        scale: f64,
-        ramp: f64,
-        cxf: f64,
-        cyf: f64,
-    }
+    // Zoom -> CAMERA_PATH JSON: the sampled camera path (camera.rs), the ONE
+    // definition of zoom motion. The compositor only looks it up. No segments ->
+    // None: no file, no env. A zero duration would yield a one-sample path, so the
+    // duration is probed strictly here rather than defaulted.
     let segs = zoom_keyframes_to_segments(&sidecar.zoom);
-    let zoom_json_path = if segs.is_empty() {
+    let camera_json_path = if segs.is_empty() {
         None
     } else {
-        let items: Vec<V3ZoomSeg> = segs
-            .iter()
-            .map(|s| V3ZoomSeg {
-                start: s.start,
-                end: s.end,
-                scale: s.scale,
-                ramp: ZOOM_RENDER_RAMP_S,
-                cxf: s.cx / w as f64,
-                cyf: s.cy / h as f64,
-            })
-            .collect();
-        let json = serde_json::to_string(&items).map_err(|e| format!("zoom json: {e}"))?;
-        let p = temp_dir.join("zoom.json");
-        std::fs::write(&p, json).map_err(|e| format!("write zoom.json: {e}"))?;
+        let zooms = camera_zooms(&sidecar.zoom);
+        let dur = probe_duration_seconds(screen_path)?;
+        let path = crate::camera::path(&zooms, &camera_cursor(screen_path)?, w as f64, h as f64, dur);
+        let json = serde_json::to_string(&path).map_err(|e| format!("camera json: {e}"))?;
+        let p = temp_dir.join("camera.json");
+        std::fs::write(&p, json).map_err(|e| format!("write camera.json: {e}"))?;
         Some(p)
+    };
+
+    // Cursor -> CURSOR_PATH JSON: the smoothed path (cursor.rs) plus the shapes,
+    // for a recording whose cursor is not in the video. None -> no file, no env.
+    let cursor_json_path = match cursor {
+        Some(track) => Some(write_cursor_json(
+            track,
+            sidecar.cursor.unwrap_or_default(),
+            probe_duration_seconds(screen_path)?,
+            &temp_dir,
+        )?),
+        None => None,
     };
 
     // Redaction -> REDACT_REGIONS JSON. The sidecar rect is ALREADY in the shape the
     // compositor consumes (source-space fractions, top-left origin; original-timeline
     // seconds; tint "light"/"dark"), so it serializes straight through — no conversion
-    // like zoom's cx/w. Empty = None: no file, no env, so the command is byte-identical
+    // like zoom's camera path. Empty = None: no file, no env, so the command is byte-identical
     // to a pre-redaction export (the compositor never enters its redaction branch).
     let redact_json_path = if sidecar.redactions.is_empty() {
         None
@@ -971,7 +1097,7 @@ fn v3_render(
         (w, h),
         (out_w, out_h),
         trim,
-        zoom_json_path.as_deref(),
+        camera_json_path.as_deref(),
         webcam.as_deref(),
         bubble.as_ref(),
         fps,
@@ -979,6 +1105,7 @@ fn v3_render(
         redact_json_path.as_deref(),
         frame_bg,
         sidecar.source_kind.as_deref() == Some("window"),
+        cursor_json_path.as_deref(),
     );
     let comp = cmd
         .output()
@@ -1012,6 +1139,7 @@ fn run_v3_export(
     webcam_size: crate::composite::WebcamSize,
     watermark: Option<&Watermark>,
     resolution: Mp4Resolution,
+    cursor: Option<&CursorTrack>,
     on_progress: impl Fn(f64),
 ) -> Result<Option<String>, String> {
     let render = v3_render(
@@ -1021,6 +1149,7 @@ fn run_v3_export(
         webcam_size,
         watermark,
         resolution,
+        cursor,
         &on_progress,
     )?;
 
@@ -1090,6 +1219,7 @@ fn run_v3_gif(
     watermark: Option<&Watermark>,
     resolution: GifResolution,
     fps: u32,
+    cursor: Option<&CursorTrack>,
     on_progress: impl Fn(f64),
 ) -> Result<Option<String>, String> {
     let render = v3_render(
@@ -1099,6 +1229,7 @@ fn run_v3_gif(
         webcam_size,
         watermark,
         Mp4Resolution::Source,
+        cursor,
         &on_progress,
     )?;
     let filter = gif_palette_filter("0:v", resolution, fps);
@@ -1470,6 +1601,33 @@ fn has_background(sidecar: &SidecarState) -> bool {
     ) && sidecar.frame.map_or(false, |f| f.padding > 0.0)
 }
 
+// The cursor the export must draw, read from the cursor log next to the raw
+// screen file (CURSOR-SMOOTHING-PLAN). No log = an old recording with the
+// cursor burned in. A log that says the cursor is in the video needs nothing.
+// A log that exists but can't be read, or says the cursor is NOT in the video
+// but gives nothing to draw, is an error: never fall through to a cursorless
+// export.
+pub(crate) fn cursor_overlay(screen_path: &Path) -> Result<Option<CursorTrack>, String> {
+    let p = crate::zoom::cursor_track_path(screen_path);
+    if !p.exists() {
+        return Ok(None);
+    }
+    let data = std::fs::read_to_string(&p)
+        .map_err(|e| format!("couldn't read the cursor log {}: {e}", p.display()))?;
+    let track: CursorTrack = serde_json::from_str(&data)
+        .map_err(|e| format!("the cursor log {} is damaged: {e}", p.display()))?;
+    if track.cursor_in_video {
+        return Ok(None);
+    }
+    if track.shapes.is_empty() || track.shape_events.is_empty() {
+        return Err("this recording has no cursor in the video and its cursor log has no cursor shapes".into());
+    }
+    if track.samples.is_empty() {
+        return Err("this recording has no cursor in the video and its cursor log has no cursor positions".into());
+    }
+    Ok(Some(track))
+}
+
 pub(crate) fn run_edit_pipeline(
     screen_path: &Path,
     webcam_segments: &[std::path::PathBuf],
@@ -1483,6 +1641,13 @@ pub(crate) fn run_edit_pipeline(
     if !screen_path.is_file() {
         return Err(format!("screen capture missing: {}", screen_path.display()));
     }
+    // Every export path draws the cursor (CURSOR-SMOOTHING-PLAN). Save as MP4,
+    // Save as GIF and Copy to clipboard all come through this function, and the
+    // two plain branches below are the only ones that skip the compositor. So a
+    // recording whose cursor is not in the video always takes the compositor,
+    // which draws it. This is the ONE place that rule lives.
+    let cursor = cursor_overlay(screen_path)?;
+    let has_cursor = cursor.is_some();
     // GIF, handled first. An edited GIF (zoom/webcam/watermark) renders on
     // cicompositor then palettegen; a plain/trim/downscale-only GIF is a one-pass
     // palettegen. A V3 render failure fails the GIF loudly (no fallback), same as MP4.
@@ -1490,7 +1655,7 @@ pub(crate) fn run_edit_pipeline(
         let has_zoom = !zoom_keyframes_to_segments(&sidecar.zoom).is_empty();
         let has_webcam = !webcam_segments.is_empty();
         let effective_wm = watermark.as_ref().filter(|w| w.logo_path.is_file());
-        if has_zoom || has_webcam || effective_wm.is_some() || has_background(sidecar) {
+        if has_zoom || has_webcam || effective_wm.is_some() || has_background(sidecar) || has_cursor {
             let note = run_v3_gif(
                 screen_path,
                 webcam_segments,
@@ -1500,6 +1665,7 @@ pub(crate) fn run_edit_pipeline(
                 effective_wm,
                 resolution,
                 fps,
+                cursor.as_ref(),
                 on_progress,
             )?;
             return Ok(note
@@ -1520,7 +1686,7 @@ pub(crate) fn run_edit_pipeline(
     let effective_wm = watermark.as_ref().filter(|w| w.logo_path.is_file());
     let has_zoom = !zoom_keyframes_to_segments(&sidecar.zoom).is_empty();
     let has_webcam = !webcam_segments.is_empty();
-    if has_zoom || has_webcam || effective_wm.is_some() || has_background(sidecar) {
+    if has_zoom || has_webcam || effective_wm.is_some() || has_background(sidecar) || has_cursor {
         match run_v3_export(
             screen_path,
             webcam_segments,
@@ -1529,6 +1695,7 @@ pub(crate) fn run_edit_pipeline(
             webcam_size,
             effective_wm,
             resolution,
+            cursor.as_ref(),
             on_progress,
         ) {
             // V3 success. Ok(None) is the clean path; Ok(Some(note)) is a success
@@ -1591,9 +1758,61 @@ fn zoom_keyframes_to_segments(kfs: &[ZoomKeyframe]) -> Vec<ZoomSeg> {
     segs
 }
 
-// Zoom ramp duration (s) at each segment edge — the in_out_cubic ease window.
-// cicompositor applies it per edge; mirrors Review.tsx. (V3-shared.)
-const ZOOM_RENDER_RAMP_S: f64 = 0.6;
+// Motion blur strength for camera moves: the fraction of the frame interval the
+// "shutter" is open. Owner's pick 2026-11-15 from 0 / 0.25 / 0.5 renders: 0 looked
+// jagged, 0.5 made the camera feel rushed. Export-only (docs/DEBT.md).
+const MOTION_BLUR: f64 = 0.25;
+
+// The ONE keyframes -> camera zooms conversion, shared by the export (v3_render)
+// and the preview (camera_path) so they cannot convert differently.
+fn camera_zooms(kfs: &[ZoomKeyframe]) -> Vec<crate::camera::Zoom> {
+    zoom_keyframes_to_segments(kfs)
+        .iter()
+        .map(|s| crate::camera::Zoom { start: s.start, end: s.end, scale: s.scale, cx: s.cx, cy: s.cy })
+        .collect()
+}
+
+// The preview's camera path: the same path the export writes to camera.json.
+#[tauri::command]
+pub fn camera_path(
+    source_path: String,
+    zoom: Vec<ZoomKeyframe>,
+    width: f64,
+    height: f64,
+    duration: f64,
+) -> Result<crate::camera::CameraPath, String> {
+    let (screen, _) = export_inputs_from_source(Path::new(&source_path));
+    Ok(crate::camera::path(&camera_zooms(&zoom), &camera_cursor(&screen)?, width, height, duration))
+}
+
+// The cursor positions the camera re-aims on: the recording's raw cursor log,
+// whether or not the cursor is baked into the video. No log = no re-aiming. The
+// ONE loader for both the export and the preview.
+fn camera_cursor(screen_path: &Path) -> Result<Vec<(f64, f64, f64)>, String> {
+    let p = crate::zoom::cursor_track_path(screen_path);
+    if !p.exists() {
+        return Ok(Vec::new());
+    }
+    let data = std::fs::read_to_string(&p)
+        .map_err(|e| format!("couldn't read the cursor log {}: {e}", p.display()))?;
+    let track: CursorTrack = serde_json::from_str(&data)
+        .map_err(|e| format!("the cursor log {} is damaged: {e}", p.display()))?;
+    Ok(track.samples.iter().map(|s| (s.t, s.x, s.y)).collect())
+}
+
+// The preview's drawn cursor: the same overlay data the export writes to
+// cursor.json, with each shape's PNG as base64. None = the recording has its
+// cursor in the video (or no cursor log). Resolves the raw screen file exactly
+// as the exports do.
+#[tauri::command]
+pub fn cursor_preview(
+    source_path: String,
+    style: CursorStyle,
+    duration: f64,
+) -> Result<Option<CursorOverlay<String>>, String> {
+    let (screen, _) = export_inputs_from_source(Path::new(&source_path));
+    Ok(cursor_overlay(&screen)?.map(|track| cursor_overlay_data(&track, style, duration)))
+}
 
 // Resolve the next available per-format slot in ~/Movies/Zeigen for a
 // given stamp + extension. First call returns `recording-<stamp>.<ext>`;
@@ -2096,6 +2315,7 @@ mod tests {
             frame: None,
             background: None,
             source_kind: None,
+            cursor: None,
         }
     }
 
@@ -2154,6 +2374,7 @@ mod tests {
                 center_y: 540.0,
                 ease: Ease::InOutCubic,
                 auto_generated: true,
+                reason: None,
             },
             ZoomKeyframe {
                 t: 4.6,
@@ -2162,6 +2383,7 @@ mod tests {
                 center_y: 450.0,
                 ease: Ease::Linear,
                 auto_generated: false,
+                reason: None,
             },
         ];
         let json = serde_json::to_string_pretty(&state).unwrap();
@@ -2489,7 +2711,7 @@ mod tests {
         let bin = Path::new("/S/cicompositor");
         let screen = Path::new("/S/in.mp4");
         let video_only = Path::new("/S/v3-video.mp4");
-        let zoom = Path::new("/S/zoom.json");
+        let camera = Path::new("/S/camera.json");
         let redact = Path::new("/S/redactions.json");
         let webcam = Path::new("/S/webcam.mp4");
         let bubble = crate::composite::V3BubbleAssets {
@@ -2506,15 +2728,15 @@ mod tests {
         };
         // Representative full config: downscale + zoom + bubble + watermark, no trim
         // (keeps bubble lead/skip on the simple untrimmed path). Redaction ABSENT.
-        let mk = |rj: Option<&Path>| {
+        let mk = |rj: Option<&Path>, cj: Option<&Path>| {
             build_compositor_command(
                 bin, screen, video_only, (3024, 1964), (1920, 1246), None,
-                Some(zoom), Some(webcam), Some(&bubble), 30.0, Some(&wm), rj, None, false,
+                Some(camera), Some(webcam), Some(&bubble), 30.0, Some(&wm), rj, None, false, cj,
             )
         };
-        let base = mk(None);
+        let base = mk(None, None);
         let expected = "\
-ARGS: /S/in.mp4 /S/v3-video.mp4 identity
+ARGS: /S/in.mp4 /S/v3-video.mp4
 ENV:
 BUBBLE_DIAMETER=240
 BUBBLE_LEAD_FRAMES=3
@@ -2523,23 +2745,33 @@ BUBBLE_PADDING=60
 BUBBLE_SHADOW_PNG=/S/shadow.png
 BUBBLE_WEBCAM=/S/webcam.mp4
 BUBBLE_ZONE=br
+CAMERA_PATH=/S/camera.json
+MOTION_BLUR=0.25
 OUTPUT_HEIGHT=1246
 OUTPUT_WIDTH=1920
 WATERMARK_CORNER=tr
 WATERMARK_OPACITY=0.9
 WATERMARK_PNG=/S/logo.png
-WATERMARK_SCALE_FRAC=0.08
-ZOOM_SEGMENTS=/S/zoom.json";
+WATERMARK_SCALE_FRAC=0.08";
         assert_eq!(pin(&base), expected, "pre-redaction command must be byte-identical to today");
 
         // Non-empty redaction: adds EXACTLY REDACT_REGIONS, args unchanged, nothing else.
-        let redacted = mk(Some(redact));
+        let redacted = mk(Some(redact), None);
         assert_eq!(args_of(&redacted), args_of(&base), "redaction must not touch args");
         let added: Vec<String> = envs_of(&redacted).difference(&envs_of(&base)).cloned().collect();
         let removed: Vec<String> = envs_of(&base).difference(&envs_of(&redacted)).cloned().collect();
         assert_eq!(added, vec!["REDACT_REGIONS=/S/redactions.json".to_string()],
             "redaction adds exactly the REDACT_REGIONS env");
         assert!(removed.is_empty(), "redaction removes/changes no existing env: {removed:?}");
+
+        // Drawn cursor (CURSOR-SMOOTHING-PLAN): adds EXACTLY CURSOR_PATH, only when present.
+        let cursored = mk(None, Some(Path::new("/S/cursor.json")));
+        assert_eq!(args_of(&cursored), args_of(&base), "cursor must not touch args");
+        let added: Vec<String> = envs_of(&cursored).difference(&envs_of(&base)).cloned().collect();
+        let removed: Vec<String> = envs_of(&base).difference(&envs_of(&cursored)).cloned().collect();
+        assert_eq!(added, vec!["CURSOR_PATH=/S/cursor.json".to_string()],
+            "cursor adds exactly the CURSOR_PATH env");
+        assert!(removed.is_empty(), "cursor removes/changes no existing env: {removed:?}");
     }
 
     // BACKGROUND-PADDING-PLAN Slice 1 gate — BOTH directions the owner asked to verify.
@@ -2591,7 +2823,7 @@ ZOOM_SEGMENTS=/S/zoom.json";
         let mk = |fb: Option<(FrameStyle, &Background)>| {
             build_compositor_command(
                 bin, Path::new("/S/in.mp4"), Path::new("/S/v3.mp4"), (1920, 1080), (1920, 1080),
-                None, None, None, None, 0.0, None, None, fb, false,
+                None, None, None, None, 0.0, None, None, fb, false, None,
             )
         };
         let bg = Background::Gradient { preset: "indigo".into() };
@@ -2637,7 +2869,7 @@ ZOOM_SEGMENTS=/S/zoom.json";
         let mk = |fb: Option<(FrameStyle, &Background)>| {
             build_compositor_command(
                 bin, Path::new("/S/in.mp4"), Path::new("/S/v3.mp4"), (1920, 1080), (1920, 1080),
-                None, None, None, None, 0.0, None, None, fb, false,
+                None, None, None, None, 0.0, None, None, fb, false, None,
             )
         };
         let bg = Background::Image { path: "/tmp/wall.heic".into() };
@@ -2671,7 +2903,7 @@ ZOOM_SEGMENTS=/S/zoom.json";
         let mk = |win: bool| {
             build_compositor_command(
                 bin, Path::new("/S/in.mp4"), Path::new("/S/v3.mp4"), (1920, 1080), (1920, 1080),
-                None, None, None, None, 0.0, None, None, Some((frame, &bg)), win,
+                None, None, None, None, 0.0, None, None, Some((frame, &bg)), win, None,
             )
         };
         assert!(envs(&mk(true)).iter().any(|e| e == "WINDOW_CORNER=1"),
@@ -2709,7 +2941,7 @@ ZOOM_SEGMENTS=/S/zoom.json";
         let mk = |fb: Option<(FrameStyle, &Background)>| {
             build_compositor_command(
                 bin, screen, video_only, (1920, 1080), (1920, 1080), None,
-                None, None, None, 0.0, None, None, fb, false,
+                None, None, None, 0.0, None, None, fb, false, None,
             )
         };
         let base = mk(None);
@@ -2779,6 +3011,7 @@ ZOOM_SEGMENTS=/S/zoom.json";
             center_y: 50.0,
             ease: Ease::InOutCubic,
             auto_generated: false,
+            reason: None,
         };
         // Canonical single window: span is edge-scale-1 keyframe to the next;
         // peak interior scale + its center define it.
@@ -2807,6 +3040,65 @@ ZOOM_SEGMENTS=/S/zoom.json";
         // No effective zoom -> no segments (stays on the copy path).
         assert!(zoom_keyframes_to_segments(&[]).is_empty());
         assert!(zoom_keyframes_to_segments(&[kf(0.0, 1.0, 0.0), kf(1.0, 1.0, 0.0)]).is_empty());
+    }
+
+    // The preview's camera_path command must produce exactly the path the export
+    // computes from the equivalent camera zooms.
+    #[test]
+    fn camera_path_command_matches_camera_module() {
+        let kf = |t: f64, scale: f64, cx: f64, cy: f64| ZoomKeyframe {
+            t,
+            scale,
+            center_x: cx,
+            center_y: cy,
+            ease: Ease::InOutCubic,
+            auto_generated: true,
+            reason: None,
+        };
+        let track = [
+            kf(1.0, 1.0, 960.0, 540.0),
+            kf(1.6, 1.7, 400.0, 300.0),
+            kf(3.4, 1.7, 400.0, 300.0),
+            kf(4.0, 1.0, 960.0, 540.0),
+            kf(5.0, 1.0, 960.0, 540.0),
+            kf(5.6, 2.0, 1500.0, 800.0),
+            kf(7.4, 2.0, 1500.0, 800.0),
+            kf(8.0, 1.0, 960.0, 540.0),
+        ];
+        let zooms = [
+            crate::camera::Zoom { start: 1.0, end: 4.0, scale: 1.7, cx: 400.0, cy: 300.0 },
+            crate::camera::Zoom { start: 5.0, end: 8.0, scale: 2.0, cx: 1500.0, cy: 800.0 },
+        ];
+        let dir = std::env::temp_dir().join(format!("zeigen-camera-cmd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("recording-x.mp4");
+        std::fs::write(&source, b"").unwrap();
+        let src = source.to_string_lossy().into_owned();
+
+        // No cursor log: no re-aiming.
+        assert_eq!(
+            camera_path(src.clone(), track.to_vec(), 1920.0, 1080.0, 10.0).unwrap(),
+            crate::camera::path(&zooms, &[], 1920.0, 1080.0, 10.0)
+        );
+
+        // With a cursor log the command re-aims on exactly those positions: the
+        // cursor walks out of the first zoom's view at 2.5s.
+        let samples: Vec<(f64, f64, f64)> = (0..1200)
+            .map(|i| {
+                let t = i as f64 / 120.0;
+                (t, if t < 2.5 { 400.0 } else { 1100.0 }, 300.0)
+            })
+            .collect();
+        let json = format!(
+            r#"{{"video_size":{{"width":1920,"height":1080}},"samples":[{}]}}"#,
+            samples.iter().map(|(t, x, y)| format!(r#"{{"t":{t},"x":{x},"y":{y}}}"#)).collect::<Vec<_>>().join(",")
+        );
+        std::fs::write(crate::zoom::cursor_track_path(&source), json).unwrap();
+        let with_cursor = camera_path(src, track.to_vec(), 1920.0, 1080.0, 10.0).unwrap();
+        assert_eq!(with_cursor, crate::camera::path(&zooms, &samples, 1920.0, 1080.0, 10.0));
+        assert_ne!(with_cursor, crate::camera::path(&zooms, &[], 1920.0, 1080.0, 10.0), "the cursor log must re-aim");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // The OnceLock set in lib.rs::run setup doesn't fire under cargo test,
@@ -3035,6 +3327,7 @@ ZOOM_SEGMENTS=/S/zoom.json";
         let kf = |t: f64, scale: f64| ZoomKeyframe {
             t, scale, center_x: 160.0, center_y: 120.0, ease: Ease::InOutCubic,
             auto_generated: false,
+            reason: None,
         };
         let sidecar = SidecarState {
             zoom: vec![kf(0.3, 1.0), kf(0.9, 2.0), kf(1.1, 2.0), kf(1.7, 1.0)],
@@ -3056,7 +3349,7 @@ ZOOM_SEGMENTS=/S/zoom.json";
             crate::composite::WebcamSize::Medium,
             wm.as_ref(),
             Mp4Resolution::Source,
-            |_| {},
+            None, |_| {},
         )
         .expect("v3 export");
 
@@ -3069,6 +3362,60 @@ ZOOM_SEGMENTS=/S/zoom.json";
             "V3 output carries the 709 transfer tag");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Renders a real recording through the real export path, for judging zoom feel
+    // against the Cap reference (harness/zoom-measure). Not a regression test.
+    //   ZEIGEN_REF_DIR = folder holding sidecar.json + sources/{screen,webcam}.mp4
+    //                    + sources/.screen.cursor.json
+    //   ZEIGEN_REF_OUT = output mp4
+    //   ZEIGEN_REF_REDETECT=1 re-runs zoom detection instead of the sidecar's zooms
+    //   ZEIGEN_REF_CURSOR_SMOOTHING / ZEIGEN_REF_CURSOR_SIZE override the drawn cursor
+    //   cargo test --lib render_reference_export -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn render_reference_export() {
+        ensure_audio_model_for_tests();
+        let dir = PathBuf::from(std::env::var("ZEIGEN_REF_DIR").expect("ZEIGEN_REF_DIR"));
+        let out = PathBuf::from(std::env::var("ZEIGEN_REF_OUT").expect("ZEIGEN_REF_OUT"));
+        let mut sidecar: SidecarState =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("sidecar.json")).unwrap()).unwrap();
+        if std::env::var("ZEIGEN_REF_REDETECT").is_ok() {
+            let track: crate::zoom::CursorTrack = serde_json::from_str(
+                &std::fs::read_to_string(dir.join("sources/.screen.cursor.json")).unwrap(),
+            )
+            .unwrap();
+            sidecar.zoom = crate::zoom::detect(&track);
+        }
+        // Drawn-cursor comparisons: ZEIGEN_REF_CURSOR_SMOOTHING = off|light|smooth,
+        // ZEIGEN_REF_CURSOR_SIZE = multiplier. Only matter for a recording whose
+        // cursor is not in the video.
+        if let Ok(v) = std::env::var("ZEIGEN_REF_CURSOR_SMOOTHING") {
+            let mut style = sidecar.cursor.unwrap_or_default();
+            style.smoothing = serde_json::from_value(serde_json::json!(v)).expect("off|light|smooth");
+            sidecar.cursor = Some(style);
+        }
+        if let Ok(v) = std::env::var("ZEIGEN_REF_CURSOR_SIZE") {
+            let mut style = sidecar.cursor.unwrap_or_default();
+            style.size = v.parse().expect("ZEIGEN_REF_CURSOR_SIZE number");
+            sidecar.cursor = Some(style);
+        }
+        let screen = dir.join("sources/screen.mp4");
+        let cursor = cursor_overlay(&screen).expect("cursor log");
+        let started = std::time::Instant::now();
+        run_v3_export(
+            &screen,
+            &[dir.join("sources/webcam.mp4")],
+            &out,
+            &sidecar,
+            crate::composite::WebcamSize::Medium,
+            None,
+            Mp4Resolution::Source,
+            cursor.as_ref(),
+            |_| {},
+        )
+        .expect("reference export");
+        println!("rendered {} in {:.1}s", out.display(), started.elapsed().as_secs_f64());
     }
 
     // Downscale and webcam-without-zoom are V3 paths now (reclaimed from V2).
@@ -3095,6 +3442,7 @@ ZOOM_SEGMENTS=/S/zoom.json";
         let kf = |t: f64, scale: f64| ZoomKeyframe {
             t, scale, center_x: 640.0, center_y: 360.0, ease: Ease::InOutCubic,
             auto_generated: false,
+            reason: None,
         };
         let zoomed = SidecarState {
             zoom: vec![kf(0.3, 1.0), kf(0.9, 2.0), kf(1.1, 2.0), kf(1.7, 1.0)],
@@ -3104,7 +3452,7 @@ ZOOM_SEGMENTS=/S/zoom.json";
         // (a) Downscale to 480p with zoom (formerly "fb:480p downscale").
         let out480 = dir.join("out-480.mp4");
         run_v3_export(&screen, &[], &out480, &zoomed,
-            crate::composite::WebcamSize::Medium, None, Mp4Resolution::P480, |_| {})
+            crate::composite::WebcamSize::Medium, None, Mp4Resolution::P480, None, |_| {})
             .expect("v3 480p export");
         let (dw, dh) = probe_dimensions(&out480).unwrap();
         assert_eq!(dh, 480, "480p downscale height");
@@ -3121,7 +3469,7 @@ ZOOM_SEGMENTS=/S/zoom.json";
         };
         let outwc = dir.join("out-wc.mp4");
         run_v3_export(&screen, std::slice::from_ref(&webcam), &outwc, &no_zoom,
-            crate::composite::WebcamSize::Medium, None, Mp4Resolution::Source, |_| {})
+            crate::composite::WebcamSize::Medium, None, Mp4Resolution::Source, None, |_| {})
             .expect("v3 webcam-no-zoom export");
         assert_eq!(probe_dimensions(&outwc).unwrap(), (1280, 720), "source res preserved");
         assert_eq!(ffprobe_field(&outwc, "stream=codec_type", "a:0"), "audio",
@@ -3162,7 +3510,7 @@ ZOOM_SEGMENTS=/S/zoom.json";
         // --- Common case: single clean segment -> no concat, no note. ---
         let out_one = dir.join("out-one.mp4");
         let note_one = run_v3_export(&screen, std::slice::from_ref(&seg0), &out_one, &sidecar,
-            crate::composite::WebcamSize::Medium, None, Mp4Resolution::Source, |_| {})
+            crate::composite::WebcamSize::Medium, None, Mp4Resolution::Source, None, |_| {})
             .expect("v3 single-segment export");
         assert!(note_one.is_none(), "single segment carries no caveat note");
         assert_eq!(ffprobe_field(&out_one, "stream=codec_type", "a:0"), "audio");
@@ -3170,7 +3518,7 @@ ZOOM_SEGMENTS=/S/zoom.json";
         // --- Multi-segment: concat + drift note. ---
         let out_multi = dir.join("out-multi.mp4");
         let note = run_v3_export(&screen, &[seg0.clone(), seg1.clone()], &out_multi, &sidecar,
-            crate::composite::WebcamSize::Medium, None, Mp4Resolution::Source, |_| {})
+            crate::composite::WebcamSize::Medium, None, Mp4Resolution::Source, None, |_| {})
             .expect("v3 multi-segment export")
             .expect("multi-segment export carries a caveat note");
         // The note is specific about direction and magnitude (owner's ask).
@@ -3273,6 +3621,7 @@ ZOOM_SEGMENTS=/S/zoom.json";
         let kf = |t: f64, scale: f64| ZoomKeyframe {
             t, scale, center_x: 640.0, center_y: 360.0, ease: Ease::InOutCubic,
             auto_generated: false,
+            reason: None,
         };
         let zoomed = SidecarState {
             zoom: vec![kf(0.3, 1.0), kf(0.9, 2.0), kf(1.1, 2.0), kf(1.7, 1.0)],
@@ -3286,7 +3635,7 @@ ZOOM_SEGMENTS=/S/zoom.json";
         // (a) zoom GIF at 720p -> valid, height 720.
         let gz = dir.join("zoom.gif");
         run_v3_gif(&screen, &[], &gz, &zoomed,
-            crate::composite::WebcamSize::Medium, None, GifResolution::P720, 15, |_| {})
+            crate::composite::WebcamSize::Medium, None, GifResolution::P720, 15, None, |_| {})
             .expect("v3 zoom gif");
         assert!(is_gif(&gz), "zoom gif valid");
         assert_eq!(probe_dimensions(&gz).unwrap().1, 720, "720p gif height");
@@ -3294,7 +3643,7 @@ ZOOM_SEGMENTS=/S/zoom.json";
         // (b) zoom+webcam GIF at 480p -> valid, 854x480 (aspect-preserved, matches -2:480).
         let gzw = dir.join("zoomwc.gif");
         run_v3_gif(&screen, std::slice::from_ref(&webcam), &gzw, &zoomed,
-            crate::composite::WebcamSize::Medium, None, GifResolution::P480, 12, |_| {})
+            crate::composite::WebcamSize::Medium, None, GifResolution::P480, 12, None, |_| {})
             .expect("v3 zoom+wc gif");
         assert!(is_gif(&gzw), "zoom+wc gif valid");
         assert_eq!(probe_dimensions(&gzw).unwrap(), (854, 480), "480p gif dims");
@@ -3302,7 +3651,7 @@ ZOOM_SEGMENTS=/S/zoom.json";
         // (c) watermark-only GIF -> valid.
         let gwm = dir.join("wm.gif");
         run_v3_gif(&screen, &[], &gwm, &SidecarState::default(),
-            crate::composite::WebcamSize::Medium, wm.as_ref(), GifResolution::Source, 15, |_| {})
+            crate::composite::WebcamSize::Medium, wm.as_ref(), GifResolution::Source, 15, None, |_| {})
             .expect("v3 wm gif");
         assert!(is_gif(&gwm), "watermark gif valid");
 
@@ -3343,14 +3692,14 @@ ZOOM_SEGMENTS=/S/zoom.json";
 
         let one = dir.join("one.gif");
         let note_one = run_v3_gif(&screen, std::slice::from_ref(&seg0), &one, &sidecar,
-            crate::composite::WebcamSize::Medium, None, GifResolution::Source, 12, |_| {})
+            crate::composite::WebcamSize::Medium, None, GifResolution::Source, 12, None, |_| {})
             .expect("single-segment gif");
         assert!(note_one.is_none(), "single segment carries no caveat note");
         assert_eq!(&std::fs::read(&one).unwrap()[..6], b"GIF89a", "single-seg gif valid");
 
         let multi = dir.join("multi.gif");
         let note = run_v3_gif(&screen, &[seg0.clone(), seg1.clone()], &multi, &sidecar,
-            crate::composite::WebcamSize::Medium, None, GifResolution::Source, 12, |_| {})
+            crate::composite::WebcamSize::Medium, None, GifResolution::Source, 12, None, |_| {})
             .expect("multi-segment gif")
             .expect("multi-segment gif carries a caveat note");
         assert!(note.contains("2 segments"), "note names the segment count: {note}");
@@ -3389,6 +3738,7 @@ ZOOM_SEGMENTS=/S/zoom.json";
         let kf = |t: f64, scale: f64| ZoomKeyframe {
             t, scale, center_x: 640.0, center_y: 360.0, ease: Ease::InOutCubic,
             auto_generated: false,
+            reason: None,
         };
         let zoomed = SidecarState {
             zoom: vec![kf(0.3, 1.0), kf(0.9, 2.0), kf(1.1, 2.0), kf(1.7, 1.0)],
@@ -3520,7 +3870,7 @@ ZOOM_SEGMENTS=/S/zoom.json";
             };
             let v3 = dir.join(format!("v3-{}.mp4", if tin < lead { "b" } else { "a" }));
             run_v3_export(&gray, std::slice::from_ref(&webcam), &v3, &sc,
-                crate::composite::WebcamSize::Medium, None, Mp4Resolution::Source, |_| {})
+                crate::composite::WebcamSize::Medium, None, Mp4Resolution::Source, None, |_| {})
                 .expect("v3 trim export");
 
             let f3 = flip_frame(&crop_luma_series(&v3, bx, by, bw, bh)).map(|v| v as i64).unwrap_or(-1);
@@ -3554,7 +3904,7 @@ ZOOM_SEGMENTS=/S/zoom.json";
         let sc = SidecarState { trim: Some(Trim { start: tin, out: tout }), ..Default::default() };
         let v3 = dir.join("v3-frame.mp4");
         run_v3_export(&ts, &[], &v3, &sc, crate::composite::WebcamSize::Medium, None,
-            Mp4Resolution::Source, |_| {}).expect("v3 frame export");
+            Mp4Resolution::Source, None, |_| {}).expect("v3 frame export");
 
         // Frame accuracy by argmax-margin: V3 frame 0 must match the SOURCE frame at
         // trim_in far better than either neighbor (robust to the double/triple-encode
@@ -3579,4 +3929,317 @@ ZOOM_SEGMENTS=/S/zoom.json";
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // ---- Drawn cursor (CURSOR-SMOOTHING-PLAN: every export path draws the cursor) ----
+
+    // A synthetic recording captured WITHOUT its cursor: black 640x360 (+ tone),
+    // `secs` long, and a version-2 cursor log next to it with the cursor parked at
+    // (160, 180) = 25% across, 50% down for the whole clip. One shape: a 32x32 px
+    // solid white PNG declared as 16x16 points with points_to_pixels 2, hotspot at
+    // its top-left, so the export should draw a white 32x32 square at (160..192,
+    // 180..212). `marked` = false writes a version-1 log instead (no v2 fields:
+    // cursor baked in).
+    fn synth_cursorless_recording(dir: &Path, secs: f64, marked: bool) -> PathBuf {
+        use base64::Engine;
+        let screen = dir.join("screen.mp4");
+        let out = Command::new(FFMPEG_PATH)
+            .args([
+                "-y", "-v", "error",
+                "-f", "lavfi", "-i", &format!("color=c=black:s=640x360:r=30:d={secs}"),
+                "-f", "lavfi", "-i", &format!("sine=frequency=440:duration={secs}"),
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest",
+            ])
+            .arg(&screen)
+            .output()
+            .expect("spawn ffmpeg synth");
+        assert!(out.status.success(), "synth screen: {}", String::from_utf8_lossy(&out.stderr));
+        let png = dir.join("shape.png");
+        let out = Command::new(FFMPEG_PATH)
+            .args(["-y", "-v", "error", "-f", "lavfi", "-i", "color=c=white:s=32x32", "-frames:v", "1"])
+            .arg(&png)
+            .output()
+            .expect("spawn ffmpeg png");
+        assert!(out.status.success(), "synth png: {}", String::from_utf8_lossy(&out.stderr));
+        let b64 = base64::engine::general_purpose::STANDARD.encode(std::fs::read(&png).unwrap());
+        let mut log = serde_json::json!({
+            "version": 1,
+            "video_size": {"width": 640, "height": 360},
+            "sample_rate_hz": 120,
+            "samples": [{"t": 0.0, "x": 160.0, "y": 180.0}, {"t": secs, "x": 160.0, "y": 180.0}],
+            "events": [],
+        });
+        if marked {
+            log["version"] = serde_json::json!(2);
+            log["cursor_in_video"] = serde_json::json!(false);
+            log["points_to_pixels"] = serde_json::json!(2.0);
+            log["shapes"] = serde_json::json!([
+                {"png": b64, "width": 16.0, "height": 16.0, "hot_x": 0.0, "hot_y": 0.0}
+            ]);
+            log["shape_events"] = serde_json::json!([{"t": 0.0, "shape": 0}]);
+        }
+        std::fs::write(crate::zoom::cursor_track_path(&screen), log.to_string()).unwrap();
+        screen
+    }
+
+    // One decoded frame at `t` as 8-bit gray, plus its width.
+    fn gray_frame(video: &Path, t: f64) -> (usize, Vec<u8>) {
+        let (w, _) = probe_dimensions(video).expect("probe dims");
+        let out = Command::new(FFMPEG_PATH)
+            .args(["-v", "error", "-ss", &format!("{t}"), "-i"])
+            .arg(video)
+            .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-"])
+            .output()
+            .expect("ffmpeg frame");
+        assert!(out.status.success() && !out.stdout.is_empty(), "frame grab failed");
+        (w as usize, out.stdout)
+    }
+
+    // White at every `inside` point, dark at every `outside` point (top-left px).
+    fn assert_cursor_pixels(video: &Path, t: f64, inside: &[(usize, usize)], outside: &[(usize, usize)]) {
+        let (w, px) = gray_frame(video, t);
+        for &(x, y) in inside {
+            let v = px[y * w + x];
+            assert!(v > 180, "{}: expected cursor (white) at ({x},{y}), got {v}", video.display());
+        }
+        for &(x, y) in outside {
+            let v = px[y * w + x];
+            assert!(v < 60, "{}: expected background (dark) at ({x},{y}), got {v}", video.display());
+        }
+    }
+
+    // The unzoomed square spans (160..192, 180..212).
+    const CURSOR_INSIDE: [(usize, usize); 3] = [(176, 196), (164, 184), (188, 208)];
+    const CURSOR_OUTSIDE: [(usize, usize); 5] = [(150, 196), (202, 196), (176, 170), (176, 222), (480, 90)];
+
+    // Save as MP4, no other edits: the cursorless recording must leave the copy
+    // path and come out with the cursor drawn where the log says.
+    //
+    // Copy to clipboard is covered by THIS test, not executed: clipboard_copy_recording
+    // writes to the user's real pasteboard, so a test can't call it. It exports through
+    // run_edit_pipeline with an MP4 mode (asserted structurally below), which is
+    // exactly the call exercised here.
+    // The pixel checks below measure the cursor at its logged size, so they pin the
+    // size to 1.0 instead of the app default (1.7). No other edits.
+    fn unit_size_cursor_sidecar() -> SidecarState {
+        SidecarState {
+            cursor: Some(CursorStyle { smoothing: CursorSmoothing::Smooth, size: 1.0 }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn cursor_drawn_on_mp4_and_clipboard_exports() {
+        ensure_audio_model_for_tests();
+        let dir = std::env::temp_dir().join(format!("zeigen-cursor-mp4-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let screen = synth_cursorless_recording(&dir, 2.0, true);
+        let out = dir.join("out-cursor.mp4");
+        run_edit_pipeline(
+            &screen, &[], &out, &unit_size_cursor_sidecar(),
+            PipelineMode::Mp4 { resolution: Mp4Resolution::Source },
+            crate::composite::WebcamSize::Medium, None, |_| {},
+        )
+        .expect("mp4 export");
+        assert_ne!(stream_md5(out.to_str().unwrap(), "0:v"), stream_md5(screen.to_str().unwrap(), "0:v"),
+            "a cursorless recording must not take the copy path");
+        assert_cursor_pixels(&out, 1.0, &CURSOR_INSIDE, &CURSOR_OUTSIDE);
+
+        let clipboard = include_str!("clipboard.rs");
+        assert!(clipboard.contains("edit::run_edit_pipeline(") && clipboard.contains("PipelineMode::Mp4"),
+            "clipboard copy must export through run_edit_pipeline (MP4), which draws the cursor");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Save as GIF, no other edits: same check through the GIF branch.
+    #[test]
+    fn cursor_drawn_on_gif_export() {
+        let dir = std::env::temp_dir().join(format!("zeigen-cursor-gif-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let screen = synth_cursorless_recording(&dir, 2.0, true);
+        let out = dir.join("out-cursor.gif");
+        run_edit_pipeline(
+            &screen, &[], &out, &unit_size_cursor_sidecar(),
+            PipelineMode::Gif { resolution: GifResolution::Source, fps: 15 },
+            crate::composite::WebcamSize::Medium, None, |_| {},
+        )
+        .expect("gif export");
+        assert_cursor_pixels(&out, 1.0, &CURSOR_INSIDE, &CURSOR_OUTSIDE);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A version-1 log (cursor baked into the video) changes nothing: the plain
+    // export stays on the -c:v copy path.
+    #[test]
+    fn version1_cursor_log_stays_on_copy_path() {
+        ensure_audio_model_for_tests();
+        let dir = std::env::temp_dir().join(format!("zeigen-cursor-v1-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let screen = synth_cursorless_recording(&dir, 2.0, false);
+        assert!(cursor_overlay(&screen).unwrap().is_none());
+        let out = dir.join("out-v1.mp4");
+        run_edit_pipeline(
+            &screen, &[], &out, &SidecarState::default(),
+            PipelineMode::Mp4 { resolution: Mp4Resolution::Source },
+            crate::composite::WebcamSize::Medium, None, |_| {},
+        )
+        .expect("plain export");
+        assert_eq!(stream_md5(out.to_str().unwrap(), "0:v"), stream_md5(screen.to_str().unwrap(), "0:v"),
+            "a version-1 recording must stay on -c:v copy");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // "Defined once": the preview command returns exactly the samples, shape
+    // geometry and shape events the export writes to cursor.json for the same
+    // track + style, and each shape's PNG bytes match the file the export wrote.
+    // A version-1 log (cursor in the video) gives the preview nothing to draw.
+    #[test]
+    fn cursor_preview_matches_export_cursor_json() {
+        use base64::Engine;
+        let dir = std::env::temp_dir().join(format!("zeigen-cursor-preview-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let screen = dir.join("screen.mp4");
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let log = serde_json::json!({
+            "version": 2,
+            "video_size": {"width": 1280, "height": 800},
+            "sample_rate_hz": 120,
+            "samples": [
+                {"t": 0.0, "x": 100.0, "y": 100.0}, {"t": 0.5, "x": 300.0, "y": 220.0},
+                {"t": 1.0, "x": 640.0, "y": 400.0}, {"t": 2.0, "x": 900.0, "y": 610.0}
+            ],
+            "events": [{"t": 1.0, "kind": "click", "x": 640.0, "y": 400.0}],
+            "cursor_in_video": false,
+            "points_to_pixels": 2.0,
+            "shapes": [
+                {"png": b64(b"arrow-png"), "width": 17.0, "height": 23.0, "hot_x": 4.0, "hot_y": 2.5},
+                {"png": b64(b"hand-png"), "width": 20.0, "height": 22.0, "hot_x": 7.0, "hot_y": 1.0}
+            ],
+            "shape_events": [{"t": 0.0, "shape": 0}, {"t": 1.2, "shape": 1}],
+        });
+        std::fs::write(crate::zoom::cursor_track_path(&screen), log.to_string()).unwrap();
+        let style = CursorStyle { smoothing: CursorSmoothing::Light, size: 1.5 };
+        let duration = 2.0;
+
+        let preview = cursor_preview(screen.to_string_lossy().into_owned(), style, duration)
+            .expect("preview")
+            .expect("a marked recording has an overlay");
+        let track = cursor_overlay(&screen).unwrap().unwrap();
+        let json_path = write_cursor_json(&track, style, duration, &dir).expect("export json");
+        let mut export: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
+        // Through a JSON string, as Tauri hands it to the frontend.
+        let mut preview_v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&preview).unwrap()).unwrap();
+
+        // PNG payloads differ in carrier (file vs base64) but must be the same bytes.
+        for i in 0..2 {
+            let file = export["shapes"][i]["png"].as_str().unwrap().to_string();
+            let data = preview_v["shapes"][i]["png"].as_str().unwrap().to_string();
+            assert_eq!(
+                std::fs::read(&file).unwrap(),
+                base64::engine::general_purpose::STANDARD.decode(data).unwrap(),
+                "shape {i} PNG bytes"
+            );
+            export["shapes"][i]["png"] = serde_json::Value::Null;
+            preview_v["shapes"][i]["png"] = serde_json::Value::Null;
+        }
+        assert_eq!(preview_v, export, "preview overlay must equal the export's cursor.json");
+        // Spot-check the source-pixel conversion (points * points_to_pixels * size).
+        assert_eq!(preview.shapes[1].width, 20.0 * 2.0 * 1.5);
+        assert_eq!(preview.shapes[0].hot_y, 2.5 * 2.0 * 1.5);
+        assert!(!preview.samples.is_empty());
+
+        // Version-1 log: no overlay.
+        std::fs::write(
+            crate::zoom::cursor_track_path(&screen),
+            serde_json::json!({
+                "version": 1,
+                "video_size": {"width": 1280, "height": 800},
+                "samples": [{"t": 0.0, "x": 1.0, "y": 1.0}],
+                "events": [],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(cursor_preview(screen.to_string_lossy().into_owned(), style, duration).unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A marked log with nothing to draw, or a damaged log, fails the export
+    // instead of producing a file without a cursor.
+    #[test]
+    fn unusable_cursor_log_fails_the_export() {
+        let dir = std::env::temp_dir().join(format!("zeigen-cursor-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let screen = synth_cursorless_recording(&dir, 1.0, true);
+        let log = crate::zoom::cursor_track_path(&screen);
+        let export = |name: &str, mode: PipelineMode| {
+            let out = dir.join(name);
+            let r = run_edit_pipeline(&screen, &[], &out, &SidecarState::default(), mode,
+                crate::composite::WebcamSize::Medium, None, |_| {});
+            (r.map(|_| ()), out.exists())
+        };
+        let mp4 = PipelineMode::Mp4 { resolution: Mp4Resolution::Source };
+        let gif = PipelineMode::Gif { resolution: GifResolution::Source, fps: 15 };
+
+        let mut no_shapes: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&log).unwrap()).unwrap();
+        no_shapes["shapes"] = serde_json::json!([]);
+        no_shapes["shape_events"] = serde_json::json!([]);
+        std::fs::write(&log, no_shapes.to_string()).unwrap();
+        for (name, mode) in [("noshape.mp4", mp4), ("noshape.gif", gif)] {
+            let (r, written) = export(name, mode);
+            let e = r.expect_err("no shapes must fail");
+            assert!(e.contains("no cursor shapes"), "unclear error: {e}");
+            assert!(!written, "no output file on failure");
+        }
+
+        std::fs::write(&log, "{\"version\":2,\"cursor_in_video\":false,\"samp").unwrap();
+        for (name, mode) in [("corrupt.mp4", mp4), ("corrupt.gif", gif)] {
+            let (r, written) = export(name, mode);
+            let e = r.expect_err("corrupt log must fail");
+            assert!(e.contains("cursor log"), "unclear error: {e}");
+            assert!(!written, "no output file on failure");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A 2x zoom held on the cursor: the square is drawn twice as large, at the
+    // position the zoom mapping puts it. Window 320x180 centred on (160, 180)
+    // -> origin (0, 90), so the hotspot lands at ((160-0)*2, (180-90)*2) =
+    // (320, 180) and the 64x64 square spans (320..384, 180..244).
+    #[test]
+    fn cursor_follows_zoom_mapping() {
+        ensure_audio_model_for_tests();
+        let dir = std::env::temp_dir().join(format!("zeigen-cursor-zoom-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let screen = synth_cursorless_recording(&dir, 4.0, true);
+        let kf = |t: f64, scale: f64| ZoomKeyframe {
+            t, scale, center_x: 160.0, center_y: 180.0, ease: Ease::InOutCubic,
+            auto_generated: false, reason: None,
+        };
+        let sidecar = SidecarState {
+            zoom: vec![kf(0.0, 1.0), kf(0.6, 2.0), kf(3.4, 2.0), kf(4.0, 1.0)],
+            ..unit_size_cursor_sidecar()
+        };
+        let out = dir.join("out-zoom.mp4");
+        run_edit_pipeline(
+            &screen, &[], &out, &sidecar,
+            PipelineMode::Mp4 { resolution: Mp4Resolution::Source },
+            crate::composite::WebcamSize::Medium, None, |_| {},
+        )
+        .expect("zoomed export");
+        // t=2.0: the camera has long settled at 2x (spring) and has not yet released.
+        assert_cursor_pixels(
+            &out, 2.0,
+            &[(352, 212), (326, 186), (378, 238)],
+            &[(310, 212), (394, 212), (352, 170), (352, 254), (176, 196), (560, 60)],
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

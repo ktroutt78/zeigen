@@ -12,6 +12,8 @@ mod thumbs;
 mod tray;
 mod wallpapers;
 mod webcam;
+mod camera;
+mod cursor;
 mod zoom;
 
 use std::path::PathBuf;
@@ -190,10 +192,10 @@ fn engine_start(
             area_y: area_y_send,
             area_width: area_w_send,
             area_height: area_h_send,
-            // Telemetry only — the cursor stays burned in (the engine
-            // decoupled these for the zoom layer, ZOOM-LAYER-PLAN.md
-            // step 1). Writes a hidden .cursor.json next to the scratch
-            // mp4; the video path is untouched.
+            // The engine leaves the cursor OUT of the video and writes a
+            // hidden .cursor.json (position, clicks, shapes) next to the
+            // scratch mp4; the export draws the cursor from it
+            // (CURSOR-SMOOTHING-PLAN).
             capture_cursor: true,
         })?;
 
@@ -814,6 +816,8 @@ pub fn run() {
             edit::read_sidecar,
             edit::write_sidecar,
             edit::delete_sidecar,
+            edit::camera_path,
+            edit::cursor_preview,
             edit::save_recording,
             zoom::suggest_zooms,
             edit::probe_audio_track,

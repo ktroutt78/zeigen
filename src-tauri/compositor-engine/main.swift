@@ -1,27 +1,33 @@
-// V3 Core Image compositor.
-//   Phase 1 (DONE): identity re-encode, color round-trip proved (color mgmt off).
-//   Phase 2 (DONE): zoom transform — SINGLE-resample lanczos with sub-pixel window.
-//   Phase 5 (DONE, off by default): velocity-driven radial motion blur.
+// Core Image export compositor: the single render path for every zoom, webcam
+// bubble, redaction, watermark and background frame at export.
 //
 // Decodes a video, routes every frame through a CIContext, and re-encodes via
 // AVAssetWriter -> VideoToolbox H.264 with EXPLICIT 8M ABR and BT.709 tags. Video
 // only; audio stays in ffmpeg and muxes later.
 //
-// Zoom: crop the source to the sub-pixel window rect (CI is continuous -> the
-// fractional crop is EXACT and free), then ONE CILanczosScaleTransform up to full
-// frame. That is one resample with sub-pixel positioning, vs V2's three
-// (lanczos-up-4x -> zoompan bicubic -> lanczos-down) and its s/4 pixel quantization.
-// Zoom math (in_out_cubic ramps, clamped off-center window, Y-flip) mirrors
-// gpuzoom.swift / Review.tsx exactly, so geometry matches V2.
+// Zoom: the camera path (scale + window centre over time) is computed ONCE in Rust
+// (src-tauri/src/camera.rs) and handed over as a sampled file (env CAMERA_PATH).
+// This file contains no easing maths: it looks up each frame's (scale, centre),
+// crops the source to the sub-pixel window (CI is continuous -> the fractional crop
+// is EXACT), then ONE CILanczosScaleTransform up to full frame. The path keeps the
+// window inside the frame by construction, so nothing is clamped here.
 //
-// The per-frame velocity is computed here (marked below) so the Phase 5 motion blur
-// consumes it as radius = floor + k*|velocity|.
+// Motion blur (env MOTION_BLUR, 0 = off): while the camera moves, the content plane
+// is averaged over the camera positions it passed through during the last part of the
+// frame interval, so pans smear along their travel and zooms smear outward. Still
+// frames are untouched. The drawn cursor and every overlay go on AFTER it.
 //
-// NOT wired into the app: nothing in the Rust export path invokes this. V2 (ffmpeg)
-// stays the default. Build: swiftc -O main.swift -o cicompositor
-// Run:   ./cicompositor <in.mp4> <out.mp4> [scenario]   (scenario omitted = identity)
-//   scenarios: const | slow | multi   (clip-relative; mirror gpuzoom.swift)
-//   env VELLOG=<path> writes a per-frame velocity CSV for validation.
+// Build: swiftc -O main.swift -o cicompositor
+// Run:   ./cicompositor <in.mp4> <out.mp4>
+//   env CAMERA_PATH=<json> {"step": s, "samples": [[scale, cx, cy], ...]} where
+//     sample i is at t = i*step, cx/cy the window centre as top-left fractions.
+//   env CURSOR_PATH=<json> {"step", "samples": [[x, y], ...], "shapes": [{"png", "width",
+//     "height", "hot_x", "hot_y"}], "shape_events": [{"t", "shape"}]} draws the cursor for a
+//     recording captured without it. Path from cursor.rs (top-left frame fractions at
+//     t = i*step); shape sizes and hotspots in SOURCE px, hotspot from the image's top-left.
+//
+// Layer order per frame: zoom resample (motion-blurred while the camera moves) -> cursor -> redaction ->
+// webcam bubble -> watermark -> background inset -> output downscale.
 import Foundation
 import AVFoundation
 import CoreImage
@@ -33,67 +39,79 @@ func fail(_ msg: String) -> Never {
     exit(1)
 }
 
-// --- Zoom model (mirrors gpuzoom.swift / Review.tsx zoomAt) ---
-func easeInOutCubic(_ u: Double) -> Double { u < 0.5 ? 4*u*u*u : 1 - pow(-2*u+2, 3)/2 }
-struct Seg { let start, end, scale, ramp, cxf, cyf: Double }  // cxf/cyf are top-left fractions
-func zoomAt(_ segs: [Seg], _ t: Double) -> Double {
-    for s in segs where t >= s.start && t <= s.end {
-        let ramp = min(s.ramp, (s.end - s.start) / 2)
-        if ramp <= 0 { return s.scale }
-        if t < s.start + ramp { return 1 + (s.scale - 1) * easeInOutCubic((t - s.start) / ramp) }
-        if t > s.end - ramp   { return 1 + (s.scale - 1) * easeInOutCubic((s.end - t) / ramp) }
-        return s.scale
-    }
-    return 1.0
-}
-func centerAt(_ segs: [Seg], _ t: Double) -> (Double, Double) {
-    for s in segs where t >= s.start && t <= s.end { return (s.cxf, s.cyf) }
-    return (0.5, 0.5)
+// --- Camera path (computed in Rust, camera.rs): sample i = [scale, cxf, cyf] at
+// t = i*step, centre as top-left fractions. Linear lookup between samples, held at
+// the last sample past the end. No path -> unzoomed.
+struct CameraPath: Decodable { let step: Double; let samples: [[Double]] }
+func cameraAt(_ p: CameraPath?, _ t: Double) -> (Double, Double, Double) {
+    guard let p, let last = p.samples.last else { return (1.0, 0.5, 0.5) }
+    let x = max(t, 0) / p.step
+    let i = Int(x)
+    if i >= p.samples.count - 1 { return (last[0], last[1], last[2]) }
+    let a = p.samples[i], b = p.samples[i + 1], u = x - Double(i)
+    return (a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u, a[2] + (b[2] - a[2]) * u)
 }
 
 let args = CommandLine.arguments
-guard args.count == 3 || args.count == 4 else {
-    fail("usage: cicompositor <in.mp4> <out.mp4> [scenario]")
+guard args.count == 3 else {
+    fail("usage: cicompositor <in.mp4> <out.mp4>")
 }
 let inURL = URL(fileURLWithPath: args[1])
 let outURL = URL(fileURLWithPath: args[2])
-let scenario = args.count == 4 ? args[3] : "identity"
-var segs: [Seg] = []
-switch scenario {
-case "identity": segs = []
-case "const": segs = [Seg(start: 0, end: 9999, scale: 2.0, ramp: 0.0, cxf: 0.5, cyf: 0.5)]
-case "slow":  segs = [Seg(start: 0, end: 5, scale: 1.6, ramp: 2.5, cxf: 1750.0/1920, cyf: 520.0/1080)]
-case "multi": segs = [Seg(start: 1.5, end: 5.0, scale: 2.0, ramp: 0.6, cxf: 0.09, cyf: 0.60),
-                      Seg(start: 6.0, end: 9.5, scale: 2.2, ramp: 0.6, cxf: 0.50, cyf: 0.48),
-                      Seg(start: 10.5, end: 14.0, scale: 2.0, ramp: 0.6, cxf: 0.911, cyf: 0.48)]
-// realistic single punch-in: 0.6s ramp to 2x off-center, hold, 0.6s out
-case "punch": segs = [Seg(start: 1.0, end: 4.0, scale: 2.0, ramp: 0.6, cxf: 0.66, cyf: 0.42)]
-default: fail("unknown scenario \(scenario)")
-}
 let env = ProcessInfo.processInfo.environment
 
-// Zoom segments may come from a JSON file (env ZOOM_SEGMENTS), overriding the scenario.
-// Array of {start,end,scale,ramp,cxf,cyf}. Lets the harness drive arbitrary sequences
-// (incl. long non-repeating ones for the perf/thermal gate) without hardcoded scenarios,
-// and mirrors how the app's sidecar zoom track would feed the compositor.
-if let zp = env["ZOOM_SEGMENTS"], let data = FileManager.default.contents(atPath: zp) {
-    struct JSeg: Decodable { let start, end, scale, ramp, cxf, cyf: Double }
-    guard let js = try? JSONDecoder().decode([JSeg].self, from: data) else { fail("bad ZOOM_SEGMENTS json") }
-    segs = js.map { Seg(start: $0.start, end: $0.end, scale: $0.scale, ramp: $0.ramp, cxf: $0.cxf, cyf: $0.cyf) }
+var camera: CameraPath? = nil
+if let cp = env["CAMERA_PATH"] {
+    guard let data = FileManager.default.contents(atPath: cp) else { fail("cannot read CAMERA_PATH \(cp)") }
+    guard let p = try? JSONDecoder().decode(CameraPath.self, from: data) else { fail("bad CAMERA_PATH json") }
+    camera = p
 }
-let velLogPath = env["VELLOG"]
-var velLog = "t,scale,dscale,blur_vel,blur_amount,content_speed\n"
+// --- Drawn cursor (CURSOR-SMOOTHING-PLAN): the smoothed path is computed ONCE in Rust
+// (cursor.rs); this only looks it up, with the same linear rule as cameraAt. The shape
+// in effect at t is the last shape event with event.t <= t. Any unreadable input fails
+// the export: a recording captured without its cursor must never export without one.
+struct CursorFile: Decodable {
+    struct Shape: Decodable { let png: String; let width, height, hot_x, hot_y: Double }
+    struct Event: Decodable { let t: Double; let shape: Int }
+    let step: Double
+    let samples: [[Double]]
+    let shapes: [Shape]
+    let shape_events: [Event]
+}
+struct CursorShape { let image: CIImage; let width, hotX, hotY: Double }  // source px
+var cursorFile: CursorFile? = nil
+var cursorShapes: [CursorShape] = []
+if let cp = env["CURSOR_PATH"] {
+    guard let data = FileManager.default.contents(atPath: cp) else { fail("cannot read CURSOR_PATH \(cp)") }
+    guard let f = try? JSONDecoder().decode(CursorFile.self, from: data),
+          !f.samples.isEmpty, !f.shapes.isEmpty, !f.shape_events.isEmpty
+    else { fail("bad CURSOR_PATH json") }
+    guard f.shape_events.allSatisfy({ $0.shape >= 0 && $0.shape < f.shapes.count })
+    else { fail("CURSOR_PATH shape index out of range") }
+    cursorShapes = f.shapes.map { s in
+        guard let img = CIImage(contentsOf: URL(fileURLWithPath: s.png)), img.extent.width > 0
+        else { fail("cannot load cursor shape \(s.png)") }
+        return CursorShape(image: img, width: s.width, hotX: s.hot_x, hotY: s.hot_y)
+    }
+    cursorFile = f
+}
+func cursorAt(_ p: CursorFile, _ t: Double) -> (Double, Double) {
+    let x = max(t, 0) / p.step
+    let i = Int(x)
+    if i >= p.samples.count - 1 { let l = p.samples[p.samples.count - 1]; return (l[0], l[1]) }
+    let a = p.samples[i], b = p.samples[i + 1], u = x - Double(i)
+    return (a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u)
+}
+func cursorShapeAt(_ p: CursorFile, _ t: Double) -> Int {
+    (p.shape_events.last(where: { $0.t <= t }) ?? p.shape_events[0]).shape
+}
 
-// Motion blur (Phase 5): ONE CI layer, radius = floor + k*|v|, applied only while
-// moving. For our scale-ramp zooms the motion is RADIAL (content flows out from the
-// focus), so the correct blur is CIZoomBlur centered on the focus, NOT a directional
-// smear. floor kills slow-ramp shimmer; k*|v| kills fast-ramp strobe. Default OFF so
-// Phase 2 behavior is unchanged unless BLUR=on.
-let blurOn = env["BLUR"] == "on"
-let blurFloor = Double(env["BLUR_FLOOR"] ?? "2.0")!
-let blurK = Double(env["BLUR_K"] ?? "0.35")!
-let blurMax = Double(env["BLUR_MAX"] ?? "40")!
-let blurEps = Double(env["BLUR_EPS"] ?? "0.4")!
+// Motion blur strength: the fraction of the frame interval the "shutter" is open.
+// 0 = off; 0.5 = a 180-degree shutter (the smear is half the distance the picture
+// moved since the previous frame). Rust passes the app's chosen value.
+let motionBlur = Double(env["MOTION_BLUR"] ?? "") ?? 0
+// Most camera positions averaged for one frame (reached on the fastest moves).
+let motionBlurMaxTaps = 24
 
 // --- Watermark (Phase 4): screen-anchored logo PNG composited on the FINAL zoomed
 // frame (output space — does NOT zoom, and applied after motion blur so it stays
@@ -517,8 +535,8 @@ let done = DispatchSemaphore(value: 0)
 var frames = 0
 let t0 = Date()
 let Wd = Double(W), Hd = Double(H)
-// velocity-tracking state (a fixed source point's output-space motion frame to frame)
-var prevO0x = Wd / 2, prevO0y = Hd / 2, prevScale = 1.0, havePrev = false
+// the previous frame's camera, for motion blur
+var prevS = 1.0, prevQx = Wd / 2, prevQy = Hd / 2, havePrev = false
 
 // Background canvas (WxH = source dims; canvas = source in v1). Static for the whole
 // render, so build once. A gradient is a CILinearGradient light-corner (top-left) ->
@@ -856,17 +874,56 @@ writerInput.requestMediaDataWhenReady(on: queue) {
         // decoder put on the YCbCr buffer, so input color is interpreted, not guessed.
         let src = CIImage(cvPixelBuffer: pixels)
 
-        // Zoom geometry (mirror gpuzoom/Review.tsx): clamped off-center window of
-        // size W/s x H/s, focus mapped to output center. q is CI bottom-left px.
-        let s = zoomAt(segs, t)
-        let (cxf, cyf) = centerAt(segs, t)
+        // Zoom geometry from the camera path: window of size W/s x H/s centred on
+        // q (CI bottom-left px, Y flipped from the path's top-left fractions). The
+        // path keeps the window in-frame; clampedToExtent covers float rounding.
+        let (s, cxf, cyf) = cameraAt(camera, t)
         let cx = cxf * Wd, cy = Hd - cyf * Hd
         let hw = Wd / (2 * s), hh = Hd / (2 * s)
-        let qx = min(max(cx, hw), Wd - hw)
-        let qy = min(max(cy, hh), Hd - hh)
+        let qx = cx, qy = cy
+
+        // How far the picture moved since the previous frame, at its fastest corner
+        // (output px). A source point p lands at (p - windowOrigin) * s, so between
+        // two cameras an output point o moves by (o - C)(1 - s0/s) - (q - q0) * s0.
+        var moved = 0.0
+        if havePrev {
+            for (ox, oy) in [(0.0, 0.0), (Wd, 0.0), (0.0, Hd), (Wd, Hd)] {
+                let dx = (ox - Wd / 2) * (1 - prevS / s) - (qx - prevQx) * prevS
+                let dy = (oy - Hd / 2) * (1 - prevS / s) - (qy - prevQy) * prevS
+                moved = max(moved, hypot(dx, dy))
+            }
+        }
+        let smear = moved * motionBlur
+        let frameRect = CGRect(x: 0, y: 0, width: Wd, height: Hd)
 
         var out = src
-        if s > 1.0001 {
+        if smear > 1.0 {
+            // Motion blur: average the frame over the camera positions between the
+            // previous frame's camera and this one, covering the last `motionBlur` of
+            // the interval. Each tap is a plain affine resample (it is being blurred
+            // anyway); about one tap per 2px of smear.
+            let taps = min(motionBlurMaxTaps, max(2, Int((smear / 2).rounded(.up))))
+            // Weight each tap by scaling its ALPHA only: CIColorMatrix works on
+            // unpremultiplied colour, so the premultiplied result is colour/taps and
+            // the taps add up to the plain average at full opacity.
+            let weight = CIVector(x: 0, y: 0, z: 0, w: 1 / CGFloat(taps))
+            let clamped = src.clampedToExtent()
+            var sum: CIImage? = nil
+            for i in 0..<taps {
+                let u = (Double(i) + 0.5) / Double(taps) * motionBlur   // 0 = now, 1 = previous frame
+                let ts = s + (prevS - s) * u
+                let tqx = qx + (prevQx - qx) * u, tqy = qy + (prevQy - qy) * u
+                let tap = clamped
+                    .transformed(by: CGAffineTransform(
+                        a: ts, b: 0, c: 0, d: ts,
+                        tx: -ts * (tqx - Wd / (2 * ts)), ty: -ts * (tqy - Hd / (2 * ts))))
+                    .cropped(to: frameRect)
+                    .applyingFilter("CIColorMatrix", parameters: ["inputAVector": weight])
+                sum = sum.map { tap.applyingFilter("CIAdditionCompositing",
+                    parameters: [kCIInputBackgroundImageKey: $0]) } ?? tap
+            }
+            out = sum!.cropped(to: frameRect)
+        } else if s > 1.0001 {
             // ONE lanczos resample: sub-pixel window crop (exact, CI is continuous)
             // -> translate window origin to 0 (exact) -> lanczos scale by s to WxH.
             let win = CGRect(x: qx - hw, y: qy - hh, width: Wd / s, height: Hd / s)
@@ -875,28 +932,29 @@ writerInput.requestMediaDataWhenReady(on: queue) {
                 by: CGAffineTransform(translationX: -win.origin.x, y: -win.origin.y))
             let scaled = atOrigin.applyingFilter("CILanczosScaleTransform",
                 parameters: [kCIInputScaleKey: s, kCIInputAspectRatioKey: 1.0])
-            out = scaled.cropped(to: CGRect(x: 0, y: 0, width: W, height: H))
+            out = scaled.cropped(to: frameRect)
         }
 
-        // --- velocity for motion blur. The scale-ramp zoom moves content RADIALLY
-        // from the focus, so the driver is the corner radial speed from the scale
-        // rate, plus any off-center translational drift of the focus reference point.
-        let o0x = s * (Wd / 2 - qx) + Wd / 2
-        let o0y = s * (Hd / 2 - qy) + Hd / 2
-        let transSpeed = havePrev ? hypot(o0x - prevO0x, o0y - prevO0y) : 0.0
-        let radialEdge = havePrev ? 0.5 * hypot(Wd, Hd) * abs(s - prevScale) / s : 0.0
-        let blurVel = radialEdge + transSpeed
-        let blurAmount = (blurVel > blurEps) ? min(blurFloor + blurK * blurVel, blurMax) : 0.0
-
-        // Phase 5 motion blur: ONE radial CIZoomBlur layer from the focus (output
-        // center), amount = floor + k*|v|. floor absorbs slow-ramp shimmer; k*|v|
-        // absorbs fast-ramp strobe. Applied to the content plane (pre-overlay).
-        if blurOn && blurAmount > 0 {
-            out = out.clampedToExtent()
-                .applyingFilter("CIZoomBlur", parameters: [
-                    "inputCenter": CIVector(x: Wd / 2, y: Hd / 2),
-                    "inputAmount": blurAmount])
-                .cropped(to: CGRect(x: 0, y: 0, width: W, height: H))
+        // --- Drawn cursor: on the content plane AFTER the zoom and the motion blur (so it
+        // stays sharp) and BEFORE redaction (so a panel still covers it). The hotspot maps
+        // to output with the SAME transform as the redaction rects, (src - winOrigin) * s,
+        // and the image grows with the zoom. Plain affine scale (it moves every frame, so
+        // no Lanczos) and no integer snapping, so a moving cursor moves smoothly.
+        if let cf = cursorFile {
+            let (fx, fy) = cursorAt(cf, t)
+            let shape = cursorShapes[cursorShapeAt(cf, t)]
+            let hx = (fx * Wd - (qx - hw)) * s           // hotspot, output px
+            let hy = (Hd - fy * Hd - (qy - hh)) * s      // (CI bottom-left)
+            let k = shape.width * s / shape.image.extent.width
+            let w = shape.image.extent.width * k, h = shape.image.extent.height * k
+            // Image top-left sits hotX left of / hotY above the hotspot.
+            let x0 = hx - shape.hotX * s, y0 = hy + shape.hotY * s - h
+            if CGRect(x: x0, y: y0, width: w, height: h).intersects(frameRect) {
+                out = shape.image
+                    .transformed(by: CGAffineTransform(a: k, b: 0, c: 0, d: k, tx: x0, ty: y0))
+                    .composited(over: out)
+                    .cropped(to: frameRect)
+            }
         }
 
         // --- Frosted-glass redaction. Each active region: transform its source-space
@@ -1045,11 +1103,7 @@ writerInput.requestMediaDataWhenReady(on: queue) {
                     parameters: [kCIInputScaleKey: sScale, kCIInputAspectRatioKey: sAspect])
                 .cropped(to: CGRect(x: 0, y: 0, width: outW, height: outH))
         }
-        if velLogPath != nil {
-            velLog += String(format: "%.4f,%.5f,%.5f,%.4f,%.4f,%.4f\n",
-                t, s, s - prevScale, blurVel, blurAmount, transSpeed)
-        }
-        prevO0x = o0x; prevO0y = o0y; prevScale = s; havePrev = true
+        prevS = s; prevQx = qx; prevQy = qy; havePrev = true
 
         guard let pool = adaptor.pixelBufferPool else { fail("no pixel buffer pool") }
         var outPB: CVPixelBuffer?
@@ -1075,17 +1129,16 @@ writerInput.requestMediaDataWhenReady(on: queue) {
 
 done.wait()
 if writer.status == .completed {
-    if let vp = velLogPath { try? velLog.write(toFile: vp, atomically: true, encoding: .utf8) }
     let dt = Date().timeIntervalSince(t0)
-    // scenario is the ZOOM preset (always "identity" when env-driven); the inset note
-    // surfaces background/padding so a padded render is visible without sampling pixels.
+    // The inset note surfaces background/padding so a padded render is visible
+    // without sampling pixels.
     let bgDesc = bgIsImage ? "image" : (bgIsGradient ? "gradient:\(env["BACKGROUND_GRADIENT"] ?? "?")" : "solid")
     let insetNote = insetActive
         ? String(format: "  bg=%@ pad=%.2f corner=%.3f shadow=%.2f inset=%.3f",
                  bgDesc, framePadding, frameCornerFrac, frameShadow, frameInsetFrac)
         : ""
-    print(String(format: "OK  %dx%d->%dx%d  %d frames  scenario=%@%@  wall=%.2fs",
-                 W, H, outW, outH, frames, scenario, insetNote, dt))
+    print(String(format: "OK  %dx%d->%dx%d  %d frames%@  wall=%.2fs",
+                 W, H, outW, outH, frames, insetNote, dt))
 } else {
     fail("writer status \(writer.status.rawValue): \(writer.error?.localizedDescription ?? "?")")
 }

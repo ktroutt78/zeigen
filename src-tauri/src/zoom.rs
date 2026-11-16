@@ -33,7 +33,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::edit::{Ease, ZoomKeyframe};
 
@@ -118,14 +118,16 @@ const MENU_WINDOW_S: f64 = 4.0;
 const BRIDGE_GAP_S: f64 = 3.0;
 const MERGE_MIN_SCALE: f64 = 1.7;
 
-// Shape of the output. Interior-aware scale: unclamped mid-frame centers zoom
+// Shape of the output. Depths lowered 2026-11-15 (owner decision: 1.5x interior,
+// 1.7x edge-clamped, matching the Cap reference). Same segments and timings as
+// before — only depth and the clamped centres moved. Interior-aware scale: unclamped mid-frame centers zoom
 // shallower (INTERIOR_SCALE) since they show less surrounding context, while
 // edge-clamped centers keep the deeper SUGGESTED_SCALE (clamping already
 // reveals extra context for free). Same 600ms in_out_cubic ramps as manual
 // zooms; segments shorter than MIN_ZOOM_S after trimming are too twitchy.
 const MIN_ZOOM_S: f64 = 2.0;
-const SUGGESTED_SCALE: f64 = 2.0;
-const INTERIOR_SCALE: f64 = 1.7;
+const SUGGESTED_SCALE: f64 = 1.7;
+const INTERIOR_SCALE: f64 = 1.5;
 const RAMP_S: f64 = 0.6;
 
 // ---- Telemetry parsing -------------------------------------------------
@@ -136,6 +138,42 @@ pub struct CursorTrack {
     pub samples: Vec<CursorSample>,
     #[serde(default)]
     pub events: Vec<CursorEvent>,
+    // Version 2 (CURSOR-SMOOTHING-PLAN, docs/IPC-SPEC.md). A version-1 log has
+    // none of these: its video has the cursor burned in, so a missing
+    // cursor_in_video means true.
+    #[serde(default = "default_true")]
+    pub cursor_in_video: bool,
+    #[serde(default = "default_one")]
+    pub points_to_pixels: f64,
+    #[serde(default)]
+    pub shapes: Vec<CursorShape>,
+    #[serde(default)]
+    pub shape_events: Vec<ShapeEvent>,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_one() -> f64 {
+    1.0
+}
+
+// One cursor image: base64 PNG plus its size and hotspot in screen points
+// (hotspot from the image's top-left).
+#[derive(Deserialize)]
+pub struct CursorShape {
+    pub png: String,
+    pub width: f64,
+    pub height: f64,
+    pub hot_x: f64,
+    pub hot_y: f64,
+}
+
+// The shape in effect from `t` until the next event.
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq)]
+pub struct ShapeEvent {
+    pub t: f64,
+    pub shape: usize,
 }
 
 #[derive(Deserialize)]
@@ -192,6 +230,16 @@ struct Candidate {
     clicks: u32,
     ev0: f64,
     ev1: f64,
+    kind: Kind,
+}
+
+// What fired a candidate. A pause's reason also depends on `clicks` (pause with
+// N corroborating clicks vs a clickless pause).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Kind {
+    Drag,
+    Menu,
+    Pause,
 }
 
 impl Candidate {
@@ -201,7 +249,29 @@ impl Candidate {
     fn cy(&self) -> f64 {
         (self.miny + self.maxy) / 2.0
     }
+    // drag = right-click menu (strong) > pause + clicks > pause, no click.
+    fn strength(&self) -> u8 {
+        match self.kind {
+            Kind::Drag | Kind::Menu => 2,
+            Kind::Pause if self.clicks > 0 => 1,
+            Kind::Pause => 0,
+        }
+    }
+    fn reason(&self) -> String {
+        match self.kind {
+            Kind::Drag => "drag".into(),
+            Kind::Menu => "right-click menu".into(),
+            Kind::Pause if self.clicks == 1 => "pause + 1 click".into(),
+            Kind::Pause if self.clicks > 1 => format!("pause + {} clicks", self.clicks),
+            Kind::Pause => "pause, no click".into(),
+        }
+    }
+    // Bridge `o` into this hold. The merged zoom keeps the stronger reason; two
+    // pauses share Kind::Pause and their click counts add (by the caller).
     fn absorb(&mut self, o: &Candidate) {
+        if o.strength() > self.strength() {
+            self.kind = o.kind;
+        }
         self.minx = self.minx.min(o.minx);
         self.maxx = self.maxx.max(o.maxx);
         self.miny = self.miny.min(o.miny);
@@ -220,8 +290,9 @@ fn fit_scale(span: f64, frame: f64) -> f64 {
 }
 
 // A press-to-release drag or a right-click-to-selection menu: framed by its
-// endpoints (x0,y0)->(x1,y1), not a single point.
+// endpoints (x0,y0)->(x1,y1), not a single point. `kind` is Drag or Menu.
 struct Gesture {
+    kind: Kind,
     t0: f64,
     t1: f64,
     x0: f64,
@@ -281,7 +352,7 @@ pub fn detect(track: &CursorTrack) -> Vec<ZoomKeyframe> {
             .find(|o| o.kind == "left_down" && o.t > e.t && o.t - e.t <= MENU_WINDOW_S)
         {
             Some(sel) => {
-                gestures.push(Gesture { t0: e.t, t1: sel.t, x0: e.x, y0: e.y, x1: sel.x, y1: sel.y });
+                gestures.push(Gesture { kind: Kind::Menu, t0: e.t, t1: sel.t, x0: e.x, y0: e.y, x1: sel.x, y1: sel.y });
                 consumed.push(sel.t);
             }
             None => clicks.push(e),
@@ -293,7 +364,7 @@ pub fn detect(track: &CursorTrack) -> Vec<ZoomKeyframe> {
         }
         match ups.iter().find(|u| u.t >= e.t) {
             Some(u) if dist(e.x, e.y, u.x, u.y) > drag_min => {
-                gestures.push(Gesture { t0: e.t, t1: u.t, x0: e.x, y0: e.y, x1: u.x, y1: u.y });
+                gestures.push(Gesture { kind: Kind::Drag, t0: e.t, t1: u.t, x0: e.x, y0: e.y, x1: u.x, y1: u.y });
             }
             _ => clicks.push(e),
         }
@@ -410,6 +481,7 @@ pub fn detect(track: &CursorTrack) -> Vec<ZoomKeyframe> {
                         clicks: in_dwell.len() as u32,
                         ev0: first_act.unwrap_or(start),
                         ev1: last_act,
+                        kind: Kind::Pause,
                     });
                 }
             }
@@ -436,6 +508,7 @@ pub fn detect(track: &CursorTrack) -> Vec<ZoomKeyframe> {
             clicks: 1,
             ev0: g.t0,
             ev1: g.t1,
+            kind: g.kind,
         });
     }
 
@@ -535,6 +608,7 @@ pub fn detect(track: &CursorTrack) -> Vec<ZoomKeyframe> {
         let (half_w, half_h) = (w / (2.0 * scale), h / (2.0 * scale));
         let cx = cx0.clamp(half_w, w - half_w);
         let cy = cy0.clamp(half_h, h - half_h);
+        let reason = c.reason();
         let kf = |t: f64, scale: f64| ZoomKeyframe {
             t,
             scale,
@@ -542,6 +616,7 @@ pub fn detect(track: &CursorTrack) -> Vec<ZoomKeyframe> {
             center_y: cy,
             ease: Ease::InOutCubic,
             auto_generated: true,
+            reason: Some(reason.clone()),
         };
         let dur = c.end - c.start;
         let ramp = RAMP_S.min(dur / 2.0);
@@ -591,6 +666,10 @@ mod tests {
                     video_size: VideoSize { width: 1470.0, height: 956.0 },
                     samples: Vec::new(),
                     events: Vec::new(),
+                    cursor_in_video: true,
+                    points_to_pixels: 1.0,
+                    shapes: Vec::new(),
+                    shape_events: Vec::new(),
                 },
                 t: 0.0,
                 x: 700.0,
@@ -728,7 +807,7 @@ mod tests {
         }
         // Rule 1 vetoes the 1.30-4.26 post-click-still dwell; only the drag
         // survives (down from 2 pre-rule-1, 4 at the committed baseline).
-        assert_eq!(got, "13.67-15.73s @(1102,717) 2.0x");
+        assert_eq!(got, "13.67-15.73s @(1038,675) 1.7x");
     }
 
     // Fixture #2: the ~162s demo recording from the 2026-07-13 owner judging
@@ -762,7 +841,7 @@ mod tests {
         // fixtures (091633 @1470, 220817 @1512) are UNCHANGED by the scaling.
         assert_eq!(
             got,
-            "7.86-10.62s @(480,270) 2.0x; 14.42-20.92s @(869,638) 1.7x; 22.60-26.08s @(480,270) 2.0x; 29.77-42.17s @(497,314) 1.9x; 47.67-51.36s @(664,590) 1.4x; 61.52-65.49s @(684,604) 1.4x; 69.23-75.40s @(480,439) 2.0x; 80.34-83.64s @(480,413) 2.0x; 85.42-88.12s @(480,528) 2.0x; 89.32-93.52s @(952,686) 1.7x; 95.40-98.12s @(480,750) 2.0x; 108.59-113.74s @(480,644) 2.0x; 117.85-120.96s @(1146,662) 1.7x; 122.18-126.95s @(662,353) 1.7x; 135.76-141.47s @(985,376) 1.7x; 143.91-148.76s @(1355,430) 1.7x; 149.96-152.22s @(565,530) 1.7x; 153.68-157.44s @(643,534) 1.5x"
+            "7.86-10.62s @(565,318) 1.7x; 14.42-20.92s @(869,638) 1.5x; 22.60-26.08s @(565,318) 1.7x; 29.77-42.17s @(565,318) 1.7x; 47.67-51.36s @(664,590) 1.4x; 61.52-65.49s @(684,604) 1.4x; 69.23-75.40s @(565,439) 1.7x; 80.34-83.64s @(565,413) 1.7x; 85.42-88.12s @(565,528) 1.7x; 89.32-93.52s @(952,686) 1.5x; 95.40-98.12s @(565,750) 1.7x; 108.59-113.74s @(565,644) 1.7x; 117.85-120.96s @(1146,662) 1.5x; 122.18-126.95s @(662,360) 1.5x; 135.76-141.47s @(985,376) 1.5x; 143.91-148.76s @(1355,430) 1.7x; 149.96-152.22s @(565,530) 1.7x; 153.68-157.44s @(643,534) 1.5x"
         );
     }
 
@@ -794,7 +873,7 @@ mod tests {
         }
         assert_eq!(
             got,
-            "6.72-11.26s @(434,246) 2.0x; 14.39-20.65s @(378,303) 2.0x; 23.72-27.25s @(472,315) 1.6x; 30.41-33.85s @(378,477) 2.0x; 36.00-39.36s @(506,554) 1.7x; 40.56-43.43s @(797,693) 1.7x; 47.35-49.40s @(1134,662) 2.0x; 51.37-55.20s @(1134,707) 2.0x; 56.94-62.02s @(378,619) 2.0x; 67.56-72.29s @(489,542) 1.5x; 90.81-99.60s @(378,246) 2.0x; 103.11-105.30s @(1134,736) 2.0x"
+            "6.72-11.26s @(445,289) 1.7x; 14.39-20.65s @(445,303) 1.7x; 23.72-27.25s @(504,327) 1.5x; 30.41-33.85s @(445,477) 1.7x; 36.00-39.36s @(506,554) 1.5x; 40.56-43.43s @(797,693) 1.7x; 47.35-49.40s @(1067,662) 1.7x; 51.37-55.20s @(1067,693) 1.7x; 56.94-62.02s @(445,619) 1.7x; 67.56-72.29s @(489,542) 1.5x; 90.81-99.60s @(445,289) 1.7x; 103.11-105.30s @(1067,693) 1.7x"
         );
     }
 
@@ -995,6 +1074,117 @@ mod tests {
         for kf in &kfs {
             assert!(kf.center_x >= 367.5 - 1e-9 && kf.center_y >= 239.0 - 1e-9);
         }
+    }
+
+    // One reason per emitted zoom, in order (every keyframe of a run carries it).
+    fn reasons(kfs: &[ZoomKeyframe]) -> Vec<String> {
+        let mut out = Vec::new();
+        for (i, kf) in kfs.iter().enumerate() {
+            if kf.scale > 1.001 && (i == 0 || kfs[i - 1].scale <= 1.001) {
+                out.push(kf.reason.clone().unwrap());
+            }
+        }
+        assert!(kfs.iter().all(|k| k.reason.is_some()));
+        out
+    }
+
+    #[test]
+    fn reason_drag() {
+        let mut tb = TrackBuilder::new().travel(400.0, 400.0, 0.5);
+        tb.track.events.push(CursorEvent { t: tb.t, kind: "left_down".into(), x: 400.0, y: 400.0 });
+        tb = tb.travel(550.0, 450.0, 1.5);
+        tb.track.events.push(CursorEvent { t: tb.t, kind: "left_up".into(), x: 550.0, y: 450.0 });
+        tb = tb.park(0.5);
+        assert_eq!(reasons(&detect(&tb.build())), ["drag"]);
+    }
+
+    #[test]
+    fn reason_right_click_menu() {
+        let mut tb = TrackBuilder::new().travel(400.0, 400.0, 0.5);
+        tb.track.events.push(CursorEvent { t: tb.t, kind: "right_down".into(), x: 400.0, y: 400.0 });
+        tb = tb.travel(450.0, 480.0, 1.0);
+        tb.track.events.push(CursorEvent { t: tb.t, kind: "left_down".into(), x: 450.0, y: 480.0 });
+        tb.track.events.push(CursorEvent { t: tb.t + 0.05, kind: "left_up".into(), x: 450.0, y: 480.0 });
+        tb = tb.park(0.5);
+        assert_eq!(reasons(&detect(&tb.build())), ["right-click menu"]);
+    }
+
+    #[test]
+    fn reason_pause_with_clicks() {
+        // One clicked dwell: singular.
+        let one = TrackBuilder::new()
+            .travel(500.0, 400.0, 1.0)
+            .click()
+            .travel(590.0, 460.0, 1.5)
+            .park(0.5)
+            .build();
+        assert_eq!(reasons(&detect(&one)), ["pause + 1 click"]);
+        // Two clicked dwells bridged into one hold: the click counts add.
+        let two = TrackBuilder::new()
+            .travel(400.0, 400.0, 1.0)
+            .dwell(1.2)
+            .click()
+            .travel(470.0, 430.0, 0.3)
+            .dwell(2.0)
+            .click()
+            .park(0.5)
+            .build();
+        assert_eq!(reasons(&detect(&two)), ["pause + 2 clicks"]);
+    }
+
+    #[test]
+    fn reason_pause_no_click() {
+        let track = TrackBuilder::new()
+            .travel(500.0, 400.0, 1.0)
+            .dwell(4.0)
+            .travel(1200.0, 800.0, 1.0)
+            .park(0.5)
+            .build();
+        assert_eq!(reasons(&detect(&track)), ["pause, no click"]);
+    }
+
+    // A clickless pause bridged into a drag's hold reads as the drag (the
+    // merged zoom keeps the stronger reason).
+    #[test]
+    fn bridged_zoom_keeps_stronger_reason() {
+        let mut tb = TrackBuilder::new()
+            .travel(400.0, 400.0, 0.5)
+            .dwell(2.0)
+            .travel(600.0, 400.0, 0.2);
+        tb.track.events.push(CursorEvent { t: tb.t, kind: "left_down".into(), x: 600.0, y: 400.0 });
+        tb = tb.travel(450.0, 420.0, 1.5);
+        tb.track.events.push(CursorEvent { t: tb.t, kind: "left_up".into(), x: 450.0, y: 420.0 });
+        tb = tb.park(0.5);
+        assert_eq!(reasons(&detect(&tb.build())), ["drag"]);
+    }
+
+    // Pin of the reasons on the zoom-polish reference recording, in order.
+    #[test]
+    fn reference_recording_pinned_reasons() {
+        let track: CursorTrack = serde_json::from_str(include_str!(
+            "../../harness/reference/zeigen-src/sources/.screen.cursor.json"
+        ))
+        .unwrap();
+        let kfs = detect(&track);
+        let got = reasons(&kfs);
+        println!("reference reasons: {got:?}");
+        println!("reference segments: {}", fmt_segments(&kfs));
+        assert_eq!(
+            got,
+            [
+                "pause, no click",
+                "pause + 2 clicks",
+                "pause, no click",
+                "pause + 1 click",
+                "drag",
+                "drag",
+                "pause, no click",
+                "pause + 3 clicks",
+                "drag",
+                "drag",
+                "pause, no click",
+            ]
+        );
     }
 
     #[test]

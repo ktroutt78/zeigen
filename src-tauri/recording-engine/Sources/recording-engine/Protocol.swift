@@ -16,11 +16,11 @@ struct Command: Decodable {
     let area_y: Double?
     let area_width: Double?
     let area_height: Double?
-    // V3 Phase A telemetry, decoupled from cursor rendering for the zoom
-    // layer (2026-07-13). Default true: a cursor telemetry sidecar is
-    // written at stop. The cursor stays burned into the pixels regardless
-    // (showsCursor is always true) — capture output is identical with the
-    // flag on or off; the only difference is the sidecar file.
+    // V3 Phase A telemetry. Default true: the system cursor is left OUT of
+    // the pixels and a cursor telemetry sidecar (position, clicks, cursor
+    // shapes) is written at stop, from which the export draws the cursor
+    // (CURSOR-SMOOTHING-PLAN). False: the cursor is burned in as before and
+    // no sidecar is written.
     let capture_cursor: Bool?
 }
 

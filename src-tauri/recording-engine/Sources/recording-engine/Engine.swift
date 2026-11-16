@@ -255,6 +255,14 @@ actor Engine {
             if let path = result.cursorTrackPath, let count = result.cursorSampleCount {
                 emit(.cursor_track_written(path: path, sample_count: count))
             }
+            // The cursor was left out of the video, so without its log the
+            // recording has no cursor. The video itself is saved (`stopped`
+            // above); this error makes the loss visible instead of silent.
+            if let reason = result.cursorTrackError {
+                emit(.error(
+                    code: "CURSOR_TRACK_FAILED",
+                    message: "The cursor log couldn't be written (\(reason)). This recording has no cursor."))
+            }
         } catch {
             emit(.error(code: "WRITER_FAILED", message: "stop failed: \(error)"))
         }
@@ -326,4 +334,7 @@ struct RecordingResult {
     // was written (nil when the flag was off or no video frame landed).
     let cursorTrackPath: String?
     let cursorSampleCount: Int?
+    // Set when the tracker existed (cursor left out of the video) but the
+    // sidecar could not be produced for a recording that has a video file.
+    let cursorTrackError: String?
 }

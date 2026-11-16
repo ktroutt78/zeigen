@@ -62,6 +62,9 @@ type ZoomKeyframe = {
   center_y: number;
   ease?: ZoomEase;
   auto_generated?: boolean;
+  // Why an auto zoom fired ("drag", "pause + 2 clicks", ...). Absent for
+  // hand-added zooms and old sidecars; kept through manual edits.
+  reason?: string;
 };
 
 // UI model — one zoom window the user edits on the timeline. The sidecar
@@ -73,6 +76,7 @@ type ZoomSegment = {
   center_x: number;
   center_y: number;
   auto_generated: boolean;
+  reason?: string;
 };
 
 // RedactionRegion / RedactionTint now live in ./redaction (imported above), the
@@ -81,13 +85,14 @@ type ZoomSegment = {
 
 const ZOOM_DEFAULT_DURATION = 3;
 const ZOOM_MIN_DURATION = 0.5;
-// V3-PLAN C.1 calm rules: 600ms ease-in-out ramps, 2.5x scale cap.
+// Ramp length of the stored keyframe shape (sidecar format) and the lane's ramp
+// shading. The motion itself comes from the camera path (camera.rs). 2.5x cap.
 const ZOOM_RAMP_S = 0.6;
 const ZOOM_MIN_SCALE = 1.1;
 const ZOOM_MAX_SCALE = 2.5;
 const ZOOM_DEFAULT_SCALE = 2.0;
 // Looped slow preview of the selected zoom (Slice 1.5). Half speed so the
-// 600ms ramps read as motion; a short pre-roll to see the ramp-in enter and
+// zoom-in and zoom-out read as motion; a short pre-roll to see the ramp-in enter and
 // a longer tail to see it settle. The window is clamped inside the trim
 // range so the loop's own wrap never collides with the trim-out wrap.
 const ZOOM_PREVIEW_RATE = 0.5;
@@ -96,9 +101,10 @@ const ZOOM_PREVIEW_POST_S = 1.0;
 
 // Segment -> canonical keyframe run: 1.0 at the edges, full scale between,
 // ramps ZOOM_RAMP_S long (halved for short segments). All keyframes of a
-// segment share its center and auto_generated flag. Key order matters:
+// segment share its center, auto_generated flag and reason. Key order matters:
 // statesEqual compares JSON.stringify against sidecar keyframes as Rust
-// serializes them (t, scale, center_x, center_y, ease, auto_generated).
+// serializes them (t, scale, center_x, center_y, ease, auto_generated, reason),
+// and reason is omitted when absent, as Rust omits it.
 function zoomSegmentsToKeyframes(segments: ZoomSegment[]): ZoomKeyframe[] {
   const kfs: ZoomKeyframe[] = [];
   for (const seg of [...segments].sort((a, b) => a.start - b.start)) {
@@ -107,6 +113,7 @@ function zoomSegmentsToKeyframes(segments: ZoomSegment[]): ZoomKeyframe[] {
       center_y: seg.center_y,
       ease: "in_out_cubic" as ZoomEase,
       auto_generated: seg.auto_generated,
+      ...(seg.reason ? { reason: seg.reason } : {}),
     };
     const dur = seg.end - seg.start;
     const ramp = Math.min(ZOOM_RAMP_S, dur / 2);
@@ -148,42 +155,86 @@ function zoomKeyframesToSegments(kfs: ZoomKeyframe[]): ZoomSegment[] {
       center_x: peak.center_x,
       center_y: peak.center_y,
       auto_generated: peak.auto_generated ?? false,
+      ...(peak.reason ? { reason: peak.reason } : {}),
     });
     i = j;
   }
   return segments;
 }
 
-function easeInOutCubic(u: number): number {
-  return u < 0.5 ? 4 * u * u * u : 1 - Math.pow(-2 * u + 2, 3) / 2;
+// The camera path from Rust (camera.rs via the camera_path command): the ONE
+// definition of zoom motion, the same path the export plays. samples[i] =
+// [scale, cx, cy] at t = i * step; (cx, cy) is the crop window's centre as a
+// fraction of the frame, top-left origin, always inside the frame.
+type CameraPath = { step: number; samples: [number, number, number][] };
+
+// Camera at playhead time t: linear interpolation between neighbouring samples,
+// held at the last sample past the end. A lookup, not motion maths; it must
+// behave exactly like cameraAt in compositor-engine/main.swift.
+function cameraAt(
+  path: CameraPath | null,
+  t: number,
+): { scale: number; cx: number; cy: number } | null {
+  if (!path || path.samples.length === 0) return null;
+  const x = Math.max(t, 0) / path.step;
+  const i = Math.floor(x);
+  if (i >= path.samples.length - 1) {
+    const [scale, cx, cy] = path.samples[path.samples.length - 1];
+    return { scale, cx, cy };
+  }
+  const a = path.samples[i], b = path.samples[i + 1], u = x - i;
+  return {
+    scale: a[0] + (b[0] - a[0]) * u,
+    cx: a[1] + (b[1] - a[1]) * u,
+    cy: a[2] + (b[2] - a[2]) * u,
+  };
 }
 
-// Zoom state at playhead time t — the reference implementation of the
-// sidecar keyframe semantics (600ms in_out_cubic ramps at the segment
-// edges, full scale between) expressed over the canonical segment shape.
-// The step-4 export renderer must reproduce exactly this curve for
-// preview/export parity; do not change one without the other.
-function zoomAt(
-  segments: ZoomSegment[],
-  t: number,
-): { scale: number; center_x: number; center_y: number } | null {
-  for (const seg of segments) {
-    if (t < seg.start || t > seg.end) continue;
-    const dur = seg.end - seg.start;
-    const ramp = Math.min(ZOOM_RAMP_S, dur / 2);
-    let scale: number;
-    if (ramp <= 0) {
-      scale = seg.scale;
-    } else if (t < seg.start + ramp) {
-      scale = 1 + (seg.scale - 1) * easeInOutCubic((t - seg.start) / ramp);
-    } else if (t > seg.end - ramp) {
-      scale = 1 + (seg.scale - 1) * easeInOutCubic((seg.end - t) / ramp);
-    } else {
-      scale = seg.scale;
-    }
-    return { scale, center_x: seg.center_x, center_y: seg.center_y };
+// The drawn cursor (cursor_preview command): the SAME overlay data the export
+// writes to cursor.json (edit.rs cursor_overlay_data), with each shape's PNG as
+// base64. samples[i] = [x, y] at t = i * step, frame fractions, top-left origin;
+// shape width/height/hot_x/hot_y are SOURCE VIDEO PIXELS (hot_y from the top).
+// null = the recording has its cursor baked into the video.
+type CursorOverlay = {
+  step: number;
+  samples: [number, number][];
+  shapes: { png: string; width: number; height: number; hot_x: number; hot_y: number }[];
+  shape_events: { t: number; shape: number }[];
+};
+
+// Cursor position at t: linear between neighbouring samples, held at the last
+// sample past the end. Must behave exactly like cursorAt in compositor-engine/main.swift.
+function cursorAt(o: CursorOverlay, t: number): [number, number] {
+  const x = Math.max(t, 0) / o.step;
+  const i = Math.floor(x);
+  if (i >= o.samples.length - 1) return o.samples[o.samples.length - 1];
+  const a = o.samples[i], b = o.samples[i + 1], u = x - i;
+  return [a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u];
+}
+
+// Shape at t: the last shape event with event.t <= t, else the first event.
+// Mirrors cursorShapeAt in compositor-engine/main.swift.
+function cursorShapeAt(o: CursorOverlay, t: number): number {
+  for (let i = o.shape_events.length - 1; i >= 0; i--) {
+    if (o.shape_events[i].t <= t) return o.shape_events[i].shape;
   }
-  return null;
+  return o.shape_events[0].shape;
+}
+
+// Mirror of Rust CursorStyle. The defaults (smooth, 1.7) are never written to
+// the sidecar, so an untouched recording's sidecar stays byte-identical.
+type CursorSmoothing = "off" | "light" | "smooth";
+type CursorStyle = { smoothing: CursorSmoothing; size: number };
+const DEFAULT_CURSOR_STYLE: CursorStyle = { smoothing: "smooth", size: 1.7 };
+const CURSOR_MIN_SIZE = 0.75;
+const CURSOR_MAX_SIZE = 2.5;
+
+function cursorIsDefault(c: CursorStyle | null | undefined): boolean {
+  return (
+    !c ||
+    (c.smoothing === DEFAULT_CURSOR_STYLE.smoothing &&
+      Math.abs(c.size - DEFAULT_CURSOR_STYLE.size) < 1e-6)
+  );
 }
 
 // Timeline + stage + right-panel Zoom section share this.
@@ -210,6 +261,9 @@ type ZoomEditor = {
   // the stage: un-suppresses the live zoom transform (so the motion is
   // visible) and hides the crop-box edit layer for the duration.
   looping: boolean;
+  // The camera path for the current segments (null = no zooms), looked up with
+  // cameraAt by the stage and the redaction layer.
+  camera: CameraPath | null;
 };
 
 // Stage overlay + right-panel Redact section share this.
@@ -339,6 +393,10 @@ type SidecarState = {
   // capture still gates off Rounded corners. Metadata — not an edit (excluded from
   // the dirty check); the export never reads it.
   source_kind?: string | null;
+  // Drawn-cursor style (CURSOR-SMOOTHING-PLAN). null/undefined = the defaults
+  // (smooth, 1.0); only written when changed, same convention as bubble_zone.
+  // Declared last, matching Rust's field order.
+  cursor?: CursorStyle | null;
 };
 
 // Mirror of Rust FrameStyle. Every knob is the no-op at 0. padding is the
@@ -714,6 +772,9 @@ function statesEqual(a: SidecarState, b: SidecarState, duration: number | null):
     if (ga.kind === "gradient" && gb.kind === "gradient" && ga.preset !== gb.preset) return false;
     if (ga.kind === "image" && gb.kind === "image" && ga.path !== gb.path) return false;
   }
+  const ca = a.cursor ?? DEFAULT_CURSOR_STYLE;
+  const cb = b.cursor ?? DEFAULT_CURSOR_STYLE;
+  if (ca.smoothing !== cb.smoothing || Math.abs(ca.size - cb.size) > 1e-6) return false;
   return true;
 }
 
@@ -734,14 +795,21 @@ function isLogicallyEmpty(s: SidecarState, duration: number | null): boolean {
   const noZone = s.bubble_zone == null;
   const noZoom = !s.zoom || s.zoom.length === 0;
   const noRedactions = !s.redactions || s.redactions.length === 0;
+  const noCursor = cursorIsDefault(s.cursor);
+  // A background, frame margin or bubble size is an edit the export reads from
+  // the sidecar: without these checks a recording whose ONLY edit was one of
+  // them had its sidecar deleted and exported without it.
+  const noFrame = frameIsNoop(s.frame) && s.background == null && s.bubble_scale == null;
   return (
+    noFrame &&
     normalizeTrim(s.trim, duration) == null &&
     noBubble &&
     noThumb &&
     noRoundness &&
     noZone &&
     noZoom &&
-    noRedactions
+    noRedactions &&
+    noCursor
   );
 }
 
@@ -763,6 +831,9 @@ function sidecarWritePayload(s: SidecarState, duration: number): SidecarState {
     frame: frameIsNoop(s.frame) ? undefined : s.frame,
     background: s.background ?? undefined,
     source_kind: s.source_kind ?? undefined,
+    cursor: cursorIsDefault(s.cursor)
+      ? undefined
+      : { smoothing: s.cursor!.smoothing, size: s.cursor!.size },
   };
 }
 
@@ -894,6 +965,32 @@ export default function Review() {
   // step-2 keyframe schema — converted on read and in currentState below.
   const [zoomSegments, setZoomSegments] = useState<ZoomSegment[]>([]);
   const [zoomSelectedIndex, setZoomSelectedIndex] = useState<number | null>(null);
+  // The camera path Rust computes from the segments — the same one the export
+  // plays. Debounced (segment drags fire per pointer move and a long path is a
+  // lot of JSON); a stale response never overwrites a newer one.
+  const [cameraPath, setCameraPath] = useState<CameraPath | null>(null);
+  const cameraReqRef = useRef(0);
+  useEffect(() => {
+    const req = ++cameraReqRef.current;
+    if (zoomSegments.length === 0 || !videoDims || duration == null || !sourcePath) {
+      setCameraPath(null);
+      return;
+    }
+    const timer = setTimeout(() => {
+      invoke<CameraPath>("camera_path", {
+        sourcePath,
+        zoom: zoomSegmentsToKeyframes(zoomSegments),
+        width: videoDims.w,
+        height: videoDims.h,
+        duration,
+      })
+        .then((p) => {
+          if (req === cameraReqRef.current) setCameraPath(p);
+        })
+        .catch((e) => setError(`camera: ${e}`));
+    }, 100);
+    return () => clearTimeout(timer);
+  }, [zoomSegments, videoDims, duration, sourcePath]);
 
   // Redaction panels (REDACTION-PLAN). Stored source-space; drawn on the flat
   // frame, previewed through the active zoom via the shared ./redaction transform.
@@ -978,6 +1075,32 @@ export default function Review() {
   // auto-load below so it never runs before we know whether the sidecar
   // already carried a zoom track (which would double-suggest).
   const [sidecarLoaded, setSidecarLoaded] = useState(false);
+
+  // Drawn cursor (CURSOR-SMOOTHING-PLAN). The overlay is what the export draws
+  // for the current style, fetched from Rust like the camera path: debounced,
+  // and a stale response never overwrites a newer one. Waits for the sidecar so
+  // a saved style is fetched once, not the default first. A refetch keeps the
+  // previous overlay on screen until the new one arrives.
+  const [cursorStyle, setCursorStyle] = useState<CursorStyle>(DEFAULT_CURSOR_STYLE);
+  const [cursorOverlay, setCursorOverlay] = useState<CursorOverlay | null>(null);
+  const cursorReqRef = useRef(0);
+  useEffect(() => {
+    const req = ++cursorReqRef.current;
+    if (!sourcePath || duration == null || !sidecarLoaded) {
+      setCursorOverlay(null);
+      return;
+    }
+    const timer = setTimeout(() => {
+      invoke<CursorOverlay | null>("cursor_preview", { sourcePath, style: cursorStyle, duration })
+        .then((o) => {
+          if (req === cursorReqRef.current) setCursorOverlay(o);
+        })
+        .catch((err) => {
+          if (req === cursorReqRef.current) setError(`cursor: ${err}`);
+        });
+    }, 100);
+    return () => clearTimeout(timer);
+  }, [sourcePath, duration, sidecarLoaded, cursorStyle]);
 
   useEffect(() => {
     invoke<AppSettings>("get_settings")
@@ -1369,6 +1492,7 @@ export default function Review() {
             frame: state.frame ?? null,
             background: state.background ?? null,
             source_kind: state.source_kind ?? null,
+            cursor: state.cursor ?? null,
           });
           if (state.trim) setTrim(state.trim);
           if (state.bubble_position_log) setBubblePositionLog(state.bubble_position_log);
@@ -1389,6 +1513,7 @@ export default function Review() {
           }
           // Reopened recording: the persisted source wins over the (absent) param.
           if (state.source_kind) setSourceKind(state.source_kind);
+          if (state.cursor) setCursorStyle({ ...DEFAULT_CURSOR_STYLE, ...state.cursor });
         } else {
           setSnapshot(EMPTY_STATE);
         }
@@ -1497,8 +1622,9 @@ export default function Review() {
       frame,
       background,
       source_kind: sourceKind,
+      cursor: cursorIsDefault(cursorStyle) ? null : cursorStyle,
     }),
-    [trim, bubblePositionLog, thumbnailTime, bubbleRoundness, bubbleZone, bubbleScale, zoomSegments, redactions, frame, background, sourceKind],
+    [trim, bubblePositionLog, thumbnailTime, bubbleRoundness, bubbleZone, bubbleScale, zoomSegments, redactions, frame, background, sourceKind, cursorStyle],
   );
 
   const dirty = useMemo(
@@ -2214,6 +2340,7 @@ export default function Review() {
     suggest: suggestZooms,
     suggesting,
     looping: loopingZoom,
+    camera: cameraPath,
   };
 
   const redactionEditor: RedactionEditor = {
@@ -2327,6 +2454,7 @@ export default function Review() {
           background={background}
           solidHex={solidHex}
           thumbBySource={thumbBySource}
+          cursorOverlay={cursorOverlay}
         />
         <ExportPanel
           sourcePath={sourcePath}
@@ -2388,6 +2516,7 @@ export default function Review() {
             loadWallpapers,
             thumbBySource,
           }}
+          cursor={cursorOverlay ? { style: cursorStyle, onChange: setCursorStyle } : null}
         />
       </div>
       {error && <ErrorStrip error={error} onDismiss={() => setError(null)} />}
@@ -2539,6 +2668,8 @@ type LeftColumnProps = {
   background: Background | null;
   solidHex: string;
   thumbBySource: ThumbMap;
+  // Drawn cursor overlay (null = cursor baked into the video).
+  cursorOverlay: CursorOverlay | null;
 };
 
 function LeftColumn(props: LeftColumnProps) {
@@ -2579,6 +2710,7 @@ function LeftColumn(props: LeftColumnProps) {
         background={props.background}
         solidHex={props.solidHex}
         thumbBySource={props.thumbBySource}
+        cursorOverlay={props.cursorOverlay}
       />
       <Timeline
         assetUrl={props.assetUrl}
@@ -2829,6 +2961,8 @@ type VideoStageProps = {
   background: Background | null;
   solidHex: string;
   thumbBySource: ThumbMap;
+  // Drawn cursor overlay (null = cursor baked into the video).
+  cursorOverlay: CursorOverlay | null;
 };
 
 function VideoStage(props: VideoStageProps) {
@@ -2843,7 +2977,7 @@ function VideoStage(props: VideoStageProps) {
   const videoDims = props.watermarkPreview.videoDims;
 
   // Live zoom preview (step 3) — CSS scale+translate on the <video> only,
-  // driven per-frame by the playhead against the interpolated zoom curve
+  // driven per-frame by the playhead against the camera path (cameraAt)
   // (same rAF-outside-React pattern as BubbleLayer; React never writes
   // `transform` in the video's style object, so these imperative writes
   // survive re-renders). The webcam bubble is screen-anchored and must not
@@ -2852,7 +2986,7 @@ function VideoStage(props: VideoStageProps) {
   // deselect to watch the applied zoom. The exception is the looped slow
   // preview (zoom.looping) — it un-suppresses the transform while selected
   // so the motion is visible, time-multiplexing edit vs. watch.
-  const zoomSegs = props.zoom.segments;
+  const camera = props.zoom.camera;
   const zoomEditing = props.zoom.selectedIndex != null;
   const zoomLooping = props.zoom.looping;
   const videoRefForZoom = props.videoRef;
@@ -2913,7 +3047,7 @@ function VideoStage(props: VideoStageProps) {
       layer.style.transform = "";
       layer.style.transformOrigin = "";
     };
-    if (zoomSegs.length === 0 || (zoomEditing && !zoomLooping) || redactFlat || !videoDims) {
+    if (!camera || (zoomEditing && !zoomLooping) || redactFlat || !videoDims) {
       reset();
       return;
     }
@@ -2922,15 +3056,14 @@ function VideoStage(props: VideoStageProps) {
       raf = requestAnimationFrame(tick);
       const stage = stageRef.current;
       if (!stage) return;
-      const z = zoomAt(zoomSegs, video.currentTime);
+      const z = cameraAt(camera, video.currentTime);
       if (!z || z.scale <= 1.001) {
         layer.style.transform = "";
         return;
       }
-      // Framing: a crop rect of size content/s centered on the zoom
-      // center, clamped inside the frame, scaled up to fill the content
-      // box. The export renderer (edit.rs zoom_filter_fragment) mirrors this
-      // math for preview/export parity — change one, change the other.
+      // Framing: the camera path's crop window (size content/s, centre
+      // already inside the frame) scaled up to fill the content box. The
+      // export plays the same path, so the framing matches.
       const rect = stage.getBoundingClientRect();
       // When a background is active the video lives inside the inset frame wrapper,
       // so the zoom crop is relative to THAT box (origin 0,0, shrunk by padding),
@@ -2941,10 +3074,8 @@ function VideoStage(props: VideoStageProps) {
           ? { x: 0, y: 0, w: full.w * (1 - insetFrac), h: full.h * (1 - insetFrac) }
           : full;
       const s = z.scale;
-      const px = b.x + (z.center_x / videoDims.w) * b.w;
-      const py = b.y + (z.center_y / videoDims.h) * b.h;
-      const qx = Math.min(Math.max(px, b.x + b.w / (2 * s)), b.x + b.w - b.w / (2 * s));
-      const qy = Math.min(Math.max(py, b.y + b.h / (2 * s)), b.y + b.h - b.h / (2 * s));
+      const qx = b.x + z.cx * b.w;
+      const qy = b.y + z.cy * b.h;
       layer.style.transformOrigin = "0 0";
       layer.style.transform = `translate(${b.x + b.w / 2 - s * qx}px, ${
         b.y + b.h / 2 - s * qy
@@ -2955,7 +3086,7 @@ function VideoStage(props: VideoStageProps) {
       cancelAnimationFrame(raf);
       reset();
     };
-  }, [zoomSegs, zoomEditing, zoomLooping, redactFlat, videoDims, videoRefForZoom, insetFrac]);
+  }, [camera, zoomEditing, zoomLooping, redactFlat, videoDims, videoRefForZoom, insetFrac]);
 
   const onStageClick = (e: React.MouseEvent) => {
     // Click on the empty stage background = deselect any zoom, which leaves
@@ -3047,6 +3178,11 @@ function VideoStage(props: VideoStageProps) {
               No source path
             </div>
           )}
+          {/* Drawn cursor: inside the zoom layer so it moves and grows with the
+              zoomed content, like the export's content-plane cursor; below the
+              bubble, redaction and watermark layers (export draws it before
+              redaction). */}
+          <CursorLayer overlay={props.cursorOverlay} videoRef={props.videoRef} videoDims={videoDims} />
         </div>
         </div>
         <div style={{ position: "absolute", inset: 0, pointerEvents: "none", clipPath: bubbleClipPath }}>
@@ -3083,7 +3219,7 @@ function VideoStage(props: VideoStageProps) {
           stageRef={stageRef}
           videoDims={videoDims}
           editor={props.redact}
-          zoomSegs={props.zoom.segments}
+          camera={props.zoom.camera}
           videoRef={props.videoRef}
           flat={redactFlat}
           insetFrac={insetFrac}
@@ -3101,6 +3237,78 @@ function VideoStage(props: VideoStageProps) {
           insetFrac={insetFrac}
         />
       </div>
+    </div>
+  );
+}
+
+// The preview's drawn cursor, the same overlay the export draws (cursor_preview).
+// Lives in the zoom layer, whose own (untransformed) box is what the <video>
+// fills with object-fit: contain, so the video's content box is
+// contentBox(layer size). The clip div sits on that box (the cursor is cut at the
+// frame edge, as in the export; with a background the frame wrapper also rounds
+// it). Position and shape follow video.currentTime with the compositor's lookup
+// rules in a rAF loop, written imperatively; src changes only with the shape.
+function CursorLayer({
+  overlay,
+  videoRef,
+  videoDims,
+}: {
+  overlay: CursorOverlay | null;
+  videoRef: React.MutableRefObject<HTMLVideoElement | null>;
+  videoDims: { w: number; h: number } | null;
+}) {
+  const clipRef = useRef<HTMLDivElement | null>(null);
+  const imgRef = useRef<HTMLImageElement | null>(null);
+  const srcs = useMemo(
+    () => overlay?.shapes.map((sh) => `data:image/png;base64,${sh.png}`) ?? [],
+    [overlay],
+  );
+  useEffect(() => {
+    const clip = clipRef.current;
+    const img = imgRef.current;
+    const video = videoRef.current;
+    const layer = clip?.parentElement;
+    if (!overlay || !clip || !img || !video || !layer || !videoDims) return;
+    let raf = 0;
+    let shown = -1;
+    const tick = () => {
+      raf = requestAnimationFrame(tick);
+      const b = contentBox({ width: layer.clientWidth, height: layer.clientHeight }, videoDims);
+      clip.style.left = `${b.x}px`;
+      clip.style.top = `${b.y}px`;
+      clip.style.width = `${b.w}px`;
+      clip.style.height = `${b.h}px`;
+      const t = video.currentTime;
+      const [x, y] = cursorAt(overlay, t);
+      const i = cursorShapeAt(overlay, t);
+      if (i !== shown) {
+        img.src = srcs[i];
+        shown = i;
+      }
+      const shape = overlay.shapes[i];
+      const k = b.w / videoDims.w; // layer px per source px
+      img.style.left = `${x * b.w - shape.hot_x * k}px`;
+      img.style.top = `${y * b.h - shape.hot_y * k}px`;
+      img.style.width = `${shape.width * k}px`;
+    };
+    tick();
+    return () => cancelAnimationFrame(raf);
+  }, [overlay, srcs, videoRef, videoDims]);
+  if (!overlay || !videoDims) return null;
+  return (
+    <div ref={clipRef} style={{ position: "absolute", overflow: "hidden", pointerEvents: "none" }}>
+      <img
+        ref={imgRef}
+        alt=""
+        draggable={false}
+        style={{
+          position: "absolute",
+          display: "block",
+          height: "auto",
+          maxWidth: "none",
+          pointerEvents: "none",
+        }}
+      />
     </div>
   );
 }
@@ -3546,7 +3754,7 @@ function RedactionLayer({
   stageRef,
   videoDims,
   editor,
-  zoomSegs,
+  camera,
   videoRef,
   flat,
   insetFrac,
@@ -3554,7 +3762,7 @@ function RedactionLayer({
   stageRef: React.MutableRefObject<HTMLDivElement | null>;
   videoDims: { w: number; h: number } | null;
   editor: RedactionEditor;
-  zoomSegs: ZoomSegment[];
+  camera: CameraPath | null;
   videoRef: React.MutableRefObject<HTMLVideoElement | null>;
   flat: boolean;
   // Background/padding preview inset (Slice 4): redaction rects render on — and
@@ -3615,7 +3823,12 @@ function RedactionLayer({
       editor.regions.forEach((region, i) => {
         const node = boxRefs.current[i];
         const active = t >= region.start && t <= region.end;
-        const zoom = flat ? null : zoomAt(zoomSegs, t);
+        const cam = flat ? null : cameraAt(camera, t);
+        const zoom = cam && {
+          scale: cam.scale,
+          center_x: cam.cx * videoDims.w,
+          center_y: cam.cy * videoDims.h,
+        };
         const out = active ? sourceRectToOutputRect(region, zoom, videoDims.w, videoDims.h) : null;
         if (!out) {
           if (node) node.style.display = "none";
@@ -3682,7 +3895,7 @@ function RedactionLayer({
     };
     tick();
     return () => cancelAnimationFrame(raf);
-  }, [editor.regions, zoomSegs, videoDims, videoRef, stageRef, flat, size, insetFrac]);
+  }, [editor.regions, camera, videoDims, videoRef, stageRef, flat, size, insetFrac]);
 
   if (!videoDims) return null;
   const b = contentBox({ width: size.width, height: size.height }, videoDims, insetFrac);
@@ -4409,7 +4622,7 @@ function Timeline(props: TimelineProps) {
               // safe and needs no second ScrubPreview.
               setHover({ time: t, rect: track.getBoundingClientRect() });
             }}
-            label={() => "zoom"}
+            label={(i) => props.zoom.segments[i]?.reason ?? "zoom"}
             bounds={props.zoom.bounds}
             alwaysBand
             minGap={ZOOM_MIN_DURATION}
@@ -4762,11 +4975,11 @@ type SaveSpec = {
 // Which editing tool the rail toolbar has active (exclusive — one at a time).
 // The contextual card below the toolbar swaps to match; Export is a permanent
 // block, not a tool. Persisted so the rail reopens on the last tool. Order
-// mirrors the working flow: Trim, Bubble, Zoom, Watermark, Mark. A persisted
+// matches the rail: Zoom, Cursor, Bubble, Redact, Watermark, Frame, Mark. A persisted
 // id from an older build (e.g. "export"/"annotate"/"share") falls back to the
 // default.
-type ToolId = "bubble" | "zoom" | "redact" | "watermark" | "background" | "mark";
-const TOOL_IDS: ToolId[] = ["zoom", "bubble", "redact", "watermark", "background", "mark"];
+type ToolId = "bubble" | "zoom" | "cursor" | "redact" | "watermark" | "background" | "mark";
+const TOOL_IDS: ToolId[] = ["zoom", "cursor", "bubble", "redact", "watermark", "background", "mark"];
 const DEFAULT_TOOL: ToolId = "zoom";
 // Key versioned away from the old "review-panel-open-section" accordion format.
 const TOOL_LS_KEY = "review-panel-active-tool";
@@ -4987,6 +5200,7 @@ function ExportPanel({
   setError,
   watermark,
   bg,
+  cursor,
 }: {
   sourcePath: string | null;
   zoom: ZoomEditor;
@@ -5047,6 +5261,9 @@ function ExportPanel({
     loadWallpapers: () => void;
     thumbBySource: ThumbMap;
   };
+  // Drawn-cursor controls; null when the recording has its cursor baked in
+  // (nothing to adjust), which hides them.
+  cursor: { style: CursorStyle; onChange: (s: CursorStyle) => void } | null;
 }) {
   // Transient post-save flash. Driven off lastSavedAt (parent state), reset
   // to 0 by a 1.5s timer.
@@ -5274,6 +5491,12 @@ function ExportPanel({
           icon={RailIcon.zoom}
         />
         <ToolTile
+          label="Cursor"
+          active={activeTool === "cursor"}
+          onClick={() => setActiveTool("cursor")}
+          icon={RailIcon.cursor}
+        />
+        <ToolTile
           label="Bubble"
           active={activeTool === "bubble"}
           disabled={!hasBubble}
@@ -5402,6 +5625,11 @@ function ExportPanel({
                     style={{ width: "100%" }}
                   />
                 </Field>
+                {zoom.segments[zoom.selectedIndex].reason && (
+                  <div style={{ fontSize: 11, color: "var(--fg-tertiary)" }}>
+                    Why: {zoom.segments[zoom.selectedIndex].reason}
+                  </div>
+                )}
                 <div style={{ fontSize: 11, color: "var(--fg-tertiary)" }}>
                   Drag the crosshair on the video to set the zoom center. Adjust
                   timing on the timeline lane. Deselect (Esc) to watch the zoom
@@ -5433,6 +5661,50 @@ function ExportPanel({
               </div>
             )}
           </div>
+            </div>
+          </>
+        )}
+
+        {activeTool === "cursor" && (
+          <>
+            <div style={RAIL_EYEBROW}>Cursor</div>
+            <div style={CTX_CARD}>
+              {cursor ? (
+                <>
+                  <Field label="Smoothing">
+                    <div className="segmented full">
+                      {(["off", "light", "smooth"] as const).map((m) => (
+                        <button
+                          key={m}
+                          className={cursor.style.smoothing === m ? "on" : ""}
+                          onClick={() => cursor.onChange({ ...cursor.style, smoothing: m })}
+                        >
+                          {m === "off" ? "Off" : m === "light" ? "Light" : "Smooth"}
+                        </button>
+                      ))}
+                    </div>
+                  </Field>
+                  <Field label={`Size — ${cursor.style.size.toFixed(2)}x`}>
+                    <input
+                      type="range"
+                      className="slider"
+                      min={Math.round(CURSOR_MIN_SIZE * 100)}
+                      max={Math.round(CURSOR_MAX_SIZE * 100)}
+                      step={5}
+                      value={Math.round(cursor.style.size * 100)}
+                      onChange={(e) =>
+                        cursor.onChange({ ...cursor.style, size: Number(e.target.value) / 100 })
+                      }
+                      style={{ width: "100%" }}
+                    />
+                  </Field>
+                </>
+              ) : (
+                <div style={{ fontSize: 11.5, color: "var(--fg-tertiary)" }}>
+                  This recording's cursor is part of the video, so it can't be
+                  restyled. Recordings made from now on can.
+                </div>
+              )}
             </div>
           </>
         )}

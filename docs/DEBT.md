@@ -2,6 +2,22 @@
 
 Things left worse than we'd like, with why. Newest at top. Remove an entry when it is paid.
 
+## Zoom lane shading no longer matches the real motion (2026-11-15)
+
+The timeline's zoom segments still shade 0.6s "ramp" shoulders at each end. The real motion is now the spring glide (about 0.7s, released before the segment end), zooms within 2.5s of each other are joined by a pan with no zoom-out at all, and the camera re-aims inside a segment. None of that is drawn on the lane. Belongs with the backlog item "Zoom gets its own timeline row".
+
+## Scrub thumbnails and the poster frame have no cursor (2026-11-15)
+
+New recordings have no cursor in the raw video. The preview and every export draw one; the timeline scrub thumbnails and the embedded poster frame are taken from the raw video and do not. Left out on purpose in `docs/CURSOR-SMOOTHING-PLAN.md`.
+
+## Cursor shape logging cost is unmeasured (2026-11-15)
+
+While recording, the engine reads and hashes the system cursor image about 20 times a second (`CursorTracker.swift`). Measured standalone at about 2ms per read, so an estimated 4% of one core; never measured during a real recording. If it shows up, compare something cheaper than a hash of the full image.
+
+## Detector still forces a 1.2s gap between zooms (2026-11-15)
+
+`zoom.rs` still clips suggestions so they sit at least 1.2s apart (`MERGE_GAP_S`). The camera now joins zooms within 2.5s with a pan, so the forced gap is pointless but harmless. Left alone because detector behaviour is frozen until the reference clips are marked up.
+
 ## Motion blur is export-only (2026-11-15)
 
 The exported video smears moving camera frames; the Review preview does not. The camera path itself (timing, framing) is identical in both. Reason: the preview is a CSS transform on a `<video>` element and cannot do a directional or radial smear cheaply; matching it would mean rebuilding the preview on a different drawing technology for a ~0.7s effect. Accepted by Keith 2026-11-15 (`docs/DECISIONS.md`). Violates the standing rule "preview and export must match" for this one effect.

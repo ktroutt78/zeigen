@@ -36,7 +36,7 @@ type Case = {
   W: number;
   H: number;
   region: RedactionRegion;
-  // constant zoom (ramp 0) as the compositor's ZOOM_SEGMENTS wants it, or null
+  // constant zoom (scale + focus as fractions), or null
   zoom: { scale: number; cxf: number; cyf: number } | null;
 };
 
@@ -60,9 +60,15 @@ for (const c of cases) {
   writeFileSync(redactPath, JSON.stringify([c.region]));
   const env: NodeJS.ProcessEnv = { ...process.env, REDACT_REGIONS: redactPath, REDACT_DEBUG: "on" };
   if (c.zoom) {
-    const zp = join(WORK, `z-${c.name}.json`);
-    writeFileSync(zp, JSON.stringify([{ start: 0, end: 5, scale: c.zoom.scale, ramp: 0, cxf: c.zoom.cxf, cyf: c.zoom.cyf }]));
-    env.ZOOM_SEGMENTS = zp;
+    // A constant camera path (two equal samples). The path carries the crop
+    // window's centre, which must keep the window in-frame, so the focus is
+    // clamped to [0.5/s, 1-0.5/s] here.
+    const lo = 0.5 / c.zoom.scale;
+    const clamp = (f: number) => Math.min(Math.max(f, lo), 1 - lo);
+    const sample = [c.zoom.scale, clamp(c.zoom.cxf), clamp(c.zoom.cyf)];
+    const zp = join(WORK, `camera-${c.name}.json`);
+    writeFileSync(zp, JSON.stringify({ step: 100000, samples: [sample, sample] }));
+    env.CAMERA_PATH = zp;
   }
   const out = join(WORK, `o-${c.name}.mp4`);
   const res = spawnSync(COMPOSITOR, [input, out], { env, encoding: "utf8" });

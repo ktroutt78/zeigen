@@ -44,7 +44,7 @@ Fields:
 - `output_path` (string) — absolute path; parent directory must already exist.
 - `max_fps` (uint, optional) — frame rate ceiling. Default 30. SCK delivers VFR; this is the max, not the guaranteed rate.
 - `area_x`, `area_y`, `area_width`, `area_height` (float, optional) — sub-region of the display to capture. All four must be present together alongside `display_id`; partial sets are rejected. Units are logical points relative to the display's top-left origin. When present, SCK is configured via `SCStreamConfiguration.sourceRect` and the output mp4's pixel dimensions are `area_width × scale` by `area_height × scale` where `scale = SCDisplay.width / SCDisplay.frame.width` for the chosen display. Forbidden with `window_id`.
-- `capture_cursor` (bool, optional, default `true`) — V3 Phase A cursor telemetry, decoupled from cursor rendering on 2026-07-13 (zoom-layer step 1; see `ZOOM-LAYER-PLAN.md`). The system cursor is ALWAYS composited into the video (`SCStreamConfiguration.showsCursor = true`) regardless of this flag. When true, the engine additionally samples cursor position at 120 Hz plus click/scroll events, writing a `.<stem>.cursor.json` telemetry sidecar next to the output mp4 at stop (same hidden-dotfile convention as the annotations sidecar), and a `cursor_track_written` event follows `stopped`. When false: no telemetry file, no extra event. The video stream is identical either way — the flag's only observable effect is the sidecar and its event. The app sends `true` on real recordings (`lib.rs`) and `false` on the prewarm throwaway (`prewarm.rs`). Pre-decouple semantics (flag also set `showsCursor = false` for the dropped Phase B synthetic cursor) are gone.
+- `capture_cursor` (bool, optional, default `true`) — cursor telemetry, and whether the cursor is in the pixels. When true (CURSOR-SMOOTHING-PLAN, 2026-11-15), the system cursor is left OUT of the video (`SCStreamConfiguration.showsCursor = false`): the engine samples cursor position at 120 Hz plus click/scroll events and the cursor's shape at 20 Hz, writes a `.<stem>.cursor.json` telemetry sidecar next to the output mp4 at stop (same hidden-dotfile convention as the annotations sidecar), and a `cursor_track_written` event follows `stopped`; the export draws the cursor from the sidecar. When false, the cursor is burned into the video (`showsCursor = true`) and there is no sidecar and no extra event. The app sends `true` on real recordings (`lib.rs`) and `false` on the prewarm throwaway (`prewarm.rs`). Recordings made before this change have the cursor burned in and a version-1 sidecar.
 
 For window captures the engine sizes the output to native pixels (window's point size × the containing display's scale factor) and fixes that resolution for the lifetime of the recording. Resizing the window mid-record is allowed but the resized content gets letterboxed/padded inside the original frame.
 
@@ -161,12 +161,18 @@ Emitted after `stop` completes.
 ```
 
 ### `cursor_track_written`
-Emitted once, immediately after `stopped`, when `capture_cursor` was on and at least one video frame was written. `path` is the telemetry sidecar (hidden dotfile next to the mp4); `sample_count` is the number of cursor position samples in it.
+Emitted once, immediately after `stopped`, when `capture_cursor` was on and at least one video frame was written. If the sidecar could not be written for a recording that has a video file, `error` with code `CURSOR_TRACK_FAILED` follows `stopped` instead (the video is saved, but has no cursor). `path` is the telemetry sidecar (hidden dotfile next to the mp4); `sample_count` is the number of cursor position samples in it.
 ```json
 {"event": "cursor_track_written", "path": "/Users/you/Movies/Zeigen/.recording-2026-04-24-110000.cursor.json", "sample_count": 14203}
 ```
 
 The sidecar format (V3-PLAN A.3): `version`, `anchor` (`first_frame_pts` seconds on the output timeline + `first_frame_mach` raw mach ticks — persisted, never recomputed), `video_size` (pixels), `sample_rate_hz` (120), `samples` (`t`/`x`/`y` — seconds on the gapless output timeline, video pixel space), and `events` (`kind` one of `left_down`, `left_up`, `right_down`, `scroll`). Events are detected by polling `CGEventSource` counter deltas on the sampler tick (permission-free; see DECISIONS.md 2026-07-11), so timestamps quantize to ±8.3 ms and scroll events carry **no `dy`** — scroll direction/magnitude would require the Input Monitoring permission. Telemetry is capture-owned and immutable — it is a separate file from the user-edited annotations sidecar and must stay that way.
+
+Version 2 (CURSOR-SMOOTHING-PLAN) keeps every version-1 field unchanged and adds:
+- `cursor_in_video` (bool) — whether the system cursor is in the video pixels. `false` whenever the engine writes a sidecar today; a recording with no sidecar is an old-style one with the cursor burned in.
+- `points_to_pixels` (number) — screen points to video pixels for this recording (the capture's backing scale; for window capture, pixel width / window point width at start). Sizes the drawn cursor.
+- `shapes` — each distinct cursor image once: `png` (base64 PNG of the one pixel representation whose width is nearest 4x the point width), `width`/`height` (points), `hot_x`/`hot_y` (hotspot in points from the image's top-left).
+- `shape_events` — `t` (seconds, same timeline as `samples`) and `shape` (index into `shapes`), one per change. Always opens at `t = 0` with the shape in effect at the first video frame. Changes during a pause are logged at resume.
 
 ### `window_frame`
 Only emitted while a `window`-mode recording is active. 5Hz cadence (200ms). Reports the captured window's current `CGWindowListCopyWindowInfo` bounds so the consumer can map screen-space coordinates (e.g., the floating bubble) into window-relative fractions even as the user moves or resizes the window mid-record. `on_screen: false` means the window has been minimized, hidden, or moved to a Space the engine isn't observing — frame values are still the last-known bounds.
@@ -190,6 +196,7 @@ Codes:
 - `MIC_SESSION_FAILED` — AVCaptureSession reported a runtime error mid-recording; engine finalizes whatever was written and returns to idle
 - `INVALID_COMMAND` — malformed JSON or unknown command; engine stays running
 - `INVALID_STATE` — command is not valid from the current state (e.g., `pause` when idle, `resume` when recording, `start` when already recording, `pause` before writer-start has anchored the muxed timeline); engine stays running
+- `CURSOR_TRACK_FAILED` — emitted after `stopped` when the cursor was left out of the video but its telemetry sidecar could not be written; the recording is saved without a cursor, engine stays running
 - `INTERNAL` — anything else; engine exits after emitting this
 
 ## State machine
