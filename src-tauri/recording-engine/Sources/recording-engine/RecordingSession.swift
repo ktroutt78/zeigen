@@ -402,8 +402,12 @@ final class RecordingSession: NSObject,
         }
     }
 
-    // Keeps the crop on the window at ~30 Hz (10 Hz left a visible empty band
-    // during a drag in the spike). Runs from stream start until stop/teardown,
+    // Keeps the crop on the window: checked at ~30 Hz while it sits still and at
+    // ~120 Hz while it is moving (and for half a second after). The crop can only
+    // move after the window has, so during a drag it trails by a varying few
+    // pixels, which shows as the window shaking in the frame; at 30 Hz that was
+    // 5 to 19 px on a real drag (owner, 2026-11-15), hence the faster rate while
+    // moving. Runs from stream start until stop/teardown,
     // including while paused so the crop is right at resume. A bounds change
     // re-aims sourceRect (position and size: a resized window is scaled into
     // the fixed output size). When the window's centre crosses onto another
@@ -414,12 +418,15 @@ final class RecordingSession: NSObject,
         guard let f = windowFollow else { return }
         var display = f.startDisplay
         var last = f.startFrame
+        var fastChecksLeft = 0   // > 0 while the window is, or was just, moving
         while !Task.isCancelled {
-            try? await Task.sleep(for: .milliseconds(33))
+            try? await Task.sleep(for: .milliseconds(fastChecksLeft > 0 ? 8 : 33))
+            fastChecksLeft = max(0, fastChecksLeft - 1)
             guard !Task.isCancelled,
                   let bounds = CursorTracker.queryWindowFrame(f.windowID), bounds != last
             else { continue }
             last = bounds
+            fastChecksLeft = 60
             let centre = CGPoint(x: bounds.midX, y: bounds.midY)
             if let d = f.displays.first(where: { $0.frame.contains(centre) }), d.displayID != display.displayID {
                 do {
