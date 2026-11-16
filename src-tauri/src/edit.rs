@@ -238,7 +238,7 @@ pub struct Position {
 // source-frame FRACTIONS, top-left origin — same convention as
 // Annotation.position — so it survives the 2x backing scale and the export
 // downscale unchanged (no pixel space to get wrong). The compositor transforms
-// it through the active zoom (zoomAt/centerAt) so the panel stays glued to the
+// it through the active zoom (the camera path) so the panel stays glued to the
 // content it covers; nothing here tracks motion — the rect is static in source
 // space. Time range is original-timeline seconds, the same basis as
 // Annotation.start_time and the compositor's tSrc gate.
@@ -699,7 +699,7 @@ fn build_compositor_command(
     src_dims: (u32, u32),
     out_dims: (u32, u32),
     trim: Option<(f64, f64)>,
-    zoom_json: Option<&Path>,
+    camera_json: Option<&Path>,
     webcam: Option<&Path>,
     bubble: Option<&crate::composite::V3BubbleAssets>,
     fps: f64,
@@ -711,15 +711,15 @@ fn build_compositor_command(
     let (w, h) = src_dims;
     let (out_w, out_h) = out_dims;
     let mut cmd = Command::new(bin);
-    cmd.arg(screen_path).arg(video_only).arg("identity");
+    cmd.arg(screen_path).arg(video_only);
     // Below-source target -> compositor appends a terminal Lanczos downscale to
     // these even, aspect-matched dims. Equal to source -> not set, output == source.
     if (out_w, out_h) != (w, h) {
         cmd.env("OUTPUT_WIDTH", out_w.to_string())
             .env("OUTPUT_HEIGHT", out_h.to_string());
     }
-    if let Some(zj) = zoom_json {
-        cmd.env("ZOOM_SEGMENTS", zj);
+    if let Some(cj) = camera_json {
+        cmd.env("CAMERA_PATH", cj);
     }
     // Trim window (original-timeline seconds). Compositor renders only this span and
     // rebases output PTS to 0; the audio mux trims the screen audio to match.
@@ -892,42 +892,30 @@ fn v3_render(
         _ => None,
     };
 
-    // Zoom -> ZOOM_SEGMENTS JSON. cx/cy are source px (top-origin); cicompositor
-    // wants top-origin fractions and applies ZOOM_RENDER_RAMP_S itself per edge.
-    #[derive(serde::Serialize)]
-    struct V3ZoomSeg {
-        start: f64,
-        end: f64,
-        scale: f64,
-        ramp: f64,
-        cxf: f64,
-        cyf: f64,
-    }
+    // Zoom -> CAMERA_PATH JSON: the sampled camera path (camera.rs), the ONE
+    // definition of zoom motion. The compositor only looks it up. No segments ->
+    // None: no file, no env. A zero duration would yield a one-sample path, so the
+    // duration is probed strictly here rather than defaulted.
     let segs = zoom_keyframes_to_segments(&sidecar.zoom);
-    let zoom_json_path = if segs.is_empty() {
+    let camera_json_path = if segs.is_empty() {
         None
     } else {
-        let items: Vec<V3ZoomSeg> = segs
+        let zooms: Vec<crate::camera::Zoom> = segs
             .iter()
-            .map(|s| V3ZoomSeg {
-                start: s.start,
-                end: s.end,
-                scale: s.scale,
-                ramp: ZOOM_RENDER_RAMP_S,
-                cxf: s.cx / w as f64,
-                cyf: s.cy / h as f64,
-            })
+            .map(|s| crate::camera::Zoom { start: s.start, end: s.end, scale: s.scale, cx: s.cx, cy: s.cy })
             .collect();
-        let json = serde_json::to_string(&items).map_err(|e| format!("zoom json: {e}"))?;
-        let p = temp_dir.join("zoom.json");
-        std::fs::write(&p, json).map_err(|e| format!("write zoom.json: {e}"))?;
+        let dur = probe_duration_seconds(screen_path)?;
+        let path = crate::camera::path(&zooms, w as f64, h as f64, dur);
+        let json = serde_json::to_string(&path).map_err(|e| format!("camera json: {e}"))?;
+        let p = temp_dir.join("camera.json");
+        std::fs::write(&p, json).map_err(|e| format!("write camera.json: {e}"))?;
         Some(p)
     };
 
     // Redaction -> REDACT_REGIONS JSON. The sidecar rect is ALREADY in the shape the
     // compositor consumes (source-space fractions, top-left origin; original-timeline
     // seconds; tint "light"/"dark"), so it serializes straight through — no conversion
-    // like zoom's cx/w. Empty = None: no file, no env, so the command is byte-identical
+    // like zoom's camera path. Empty = None: no file, no env, so the command is byte-identical
     // to a pre-redaction export (the compositor never enters its redaction branch).
     let redact_json_path = if sidecar.redactions.is_empty() {
         None
@@ -971,7 +959,7 @@ fn v3_render(
         (w, h),
         (out_w, out_h),
         trim,
-        zoom_json_path.as_deref(),
+        camera_json_path.as_deref(),
         webcam.as_deref(),
         bubble.as_ref(),
         fps,
@@ -1590,10 +1578,6 @@ fn zoom_keyframes_to_segments(kfs: &[ZoomKeyframe]) -> Vec<ZoomSeg> {
     }
     segs
 }
-
-// Zoom ramp duration (s) at each segment edge — the in_out_cubic ease window.
-// cicompositor applies it per edge; mirrors Review.tsx. (V3-shared.)
-const ZOOM_RENDER_RAMP_S: f64 = 0.6;
 
 // Resolve the next available per-format slot in ~/Movies/Zeigen for a
 // given stamp + extension. First call returns `recording-<stamp>.<ext>`;
@@ -2489,7 +2473,7 @@ mod tests {
         let bin = Path::new("/S/cicompositor");
         let screen = Path::new("/S/in.mp4");
         let video_only = Path::new("/S/v3-video.mp4");
-        let zoom = Path::new("/S/zoom.json");
+        let camera = Path::new("/S/camera.json");
         let redact = Path::new("/S/redactions.json");
         let webcam = Path::new("/S/webcam.mp4");
         let bubble = crate::composite::V3BubbleAssets {
@@ -2509,12 +2493,12 @@ mod tests {
         let mk = |rj: Option<&Path>| {
             build_compositor_command(
                 bin, screen, video_only, (3024, 1964), (1920, 1246), None,
-                Some(zoom), Some(webcam), Some(&bubble), 30.0, Some(&wm), rj, None, false,
+                Some(camera), Some(webcam), Some(&bubble), 30.0, Some(&wm), rj, None, false,
             )
         };
         let base = mk(None);
         let expected = "\
-ARGS: /S/in.mp4 /S/v3-video.mp4 identity
+ARGS: /S/in.mp4 /S/v3-video.mp4
 ENV:
 BUBBLE_DIAMETER=240
 BUBBLE_LEAD_FRAMES=3
@@ -2523,13 +2507,13 @@ BUBBLE_PADDING=60
 BUBBLE_SHADOW_PNG=/S/shadow.png
 BUBBLE_WEBCAM=/S/webcam.mp4
 BUBBLE_ZONE=br
+CAMERA_PATH=/S/camera.json
 OUTPUT_HEIGHT=1246
 OUTPUT_WIDTH=1920
 WATERMARK_CORNER=tr
 WATERMARK_OPACITY=0.9
 WATERMARK_PNG=/S/logo.png
-WATERMARK_SCALE_FRAC=0.08
-ZOOM_SEGMENTS=/S/zoom.json";
+WATERMARK_SCALE_FRAC=0.08";
         assert_eq!(pin(&base), expected, "pre-redaction command must be byte-identical to today");
 
         // Non-empty redaction: adds EXACTLY REDACT_REGIONS, args unchanged, nothing else.

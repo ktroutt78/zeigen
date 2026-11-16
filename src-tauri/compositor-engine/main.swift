@@ -1,26 +1,24 @@
-// V3 Core Image compositor.
-//   Phase 1 (DONE): identity re-encode, color round-trip proved (color mgmt off).
-//   Phase 2 (DONE): zoom transform — SINGLE-resample lanczos with sub-pixel window.
-//   Phase 5 (DONE, off by default): velocity-driven radial motion blur.
+// Core Image export compositor: the single render path for every zoom, webcam
+// bubble, redaction, watermark and background frame at export.
 //
 // Decodes a video, routes every frame through a CIContext, and re-encodes via
 // AVAssetWriter -> VideoToolbox H.264 with EXPLICIT 8M ABR and BT.709 tags. Video
 // only; audio stays in ffmpeg and muxes later.
 //
-// Zoom: crop the source to the sub-pixel window rect (CI is continuous -> the
-// fractional crop is EXACT and free), then ONE CILanczosScaleTransform up to full
-// frame. That is one resample with sub-pixel positioning, vs V2's three
-// (lanczos-up-4x -> zoompan bicubic -> lanczos-down) and its s/4 pixel quantization.
-// Zoom math (in_out_cubic ramps, clamped off-center window, Y-flip) mirrors
-// gpuzoom.swift / Review.tsx exactly, so geometry matches V2.
+// Zoom: the camera path (scale + window centre over time) is computed ONCE in Rust
+// (src-tauri/src/camera.rs) and handed over as a sampled file (env CAMERA_PATH).
+// This file contains no easing maths: it looks up each frame's (scale, centre),
+// crops the source to the sub-pixel window (CI is continuous -> the fractional crop
+// is EXACT), then ONE CILanczosScaleTransform up to full frame. The path keeps the
+// window inside the frame by construction, so nothing is clamped here.
 //
-// The per-frame velocity is computed here (marked below) so the Phase 5 motion blur
-// consumes it as radius = floor + k*|velocity|.
+// The per-frame velocity is computed here (marked below) so the motion blur
+// consumes it as radius = floor + k*|velocity| (off by default).
 //
-// NOT wired into the app: nothing in the Rust export path invokes this. V2 (ffmpeg)
-// stays the default. Build: swiftc -O main.swift -o cicompositor
-// Run:   ./cicompositor <in.mp4> <out.mp4> [scenario]   (scenario omitted = identity)
-//   scenarios: const | slow | multi   (clip-relative; mirror gpuzoom.swift)
+// Build: swiftc -O main.swift -o cicompositor
+// Run:   ./cicompositor <in.mp4> <out.mp4>
+//   env CAMERA_PATH=<json> {"step": s, "samples": [[scale, cx, cy], ...]} where
+//     sample i is at t = i*step, cx/cy the window centre as top-left fractions.
 //   env VELLOG=<path> writes a per-frame velocity CSV for validation.
 import Foundation
 import AVFoundation
@@ -33,53 +31,32 @@ func fail(_ msg: String) -> Never {
     exit(1)
 }
 
-// --- Zoom model (mirrors gpuzoom.swift / Review.tsx zoomAt) ---
-func easeInOutCubic(_ u: Double) -> Double { u < 0.5 ? 4*u*u*u : 1 - pow(-2*u+2, 3)/2 }
-struct Seg { let start, end, scale, ramp, cxf, cyf: Double }  // cxf/cyf are top-left fractions
-func zoomAt(_ segs: [Seg], _ t: Double) -> Double {
-    for s in segs where t >= s.start && t <= s.end {
-        let ramp = min(s.ramp, (s.end - s.start) / 2)
-        if ramp <= 0 { return s.scale }
-        if t < s.start + ramp { return 1 + (s.scale - 1) * easeInOutCubic((t - s.start) / ramp) }
-        if t > s.end - ramp   { return 1 + (s.scale - 1) * easeInOutCubic((s.end - t) / ramp) }
-        return s.scale
-    }
-    return 1.0
-}
-func centerAt(_ segs: [Seg], _ t: Double) -> (Double, Double) {
-    for s in segs where t >= s.start && t <= s.end { return (s.cxf, s.cyf) }
-    return (0.5, 0.5)
+// --- Camera path (computed in Rust, camera.rs): sample i = [scale, cxf, cyf] at
+// t = i*step, centre as top-left fractions. Linear lookup between samples, held at
+// the last sample past the end. No path -> unzoomed.
+struct CameraPath: Decodable { let step: Double; let samples: [[Double]] }
+func cameraAt(_ p: CameraPath?, _ t: Double) -> (Double, Double, Double) {
+    guard let p, let last = p.samples.last else { return (1.0, 0.5, 0.5) }
+    let x = max(t, 0) / p.step
+    let i = Int(x)
+    if i >= p.samples.count - 1 { return (last[0], last[1], last[2]) }
+    let a = p.samples[i], b = p.samples[i + 1], u = x - Double(i)
+    return (a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u, a[2] + (b[2] - a[2]) * u)
 }
 
 let args = CommandLine.arguments
-guard args.count == 3 || args.count == 4 else {
-    fail("usage: cicompositor <in.mp4> <out.mp4> [scenario]")
+guard args.count == 3 else {
+    fail("usage: cicompositor <in.mp4> <out.mp4>")
 }
 let inURL = URL(fileURLWithPath: args[1])
 let outURL = URL(fileURLWithPath: args[2])
-let scenario = args.count == 4 ? args[3] : "identity"
-var segs: [Seg] = []
-switch scenario {
-case "identity": segs = []
-case "const": segs = [Seg(start: 0, end: 9999, scale: 2.0, ramp: 0.0, cxf: 0.5, cyf: 0.5)]
-case "slow":  segs = [Seg(start: 0, end: 5, scale: 1.6, ramp: 2.5, cxf: 1750.0/1920, cyf: 520.0/1080)]
-case "multi": segs = [Seg(start: 1.5, end: 5.0, scale: 2.0, ramp: 0.6, cxf: 0.09, cyf: 0.60),
-                      Seg(start: 6.0, end: 9.5, scale: 2.2, ramp: 0.6, cxf: 0.50, cyf: 0.48),
-                      Seg(start: 10.5, end: 14.0, scale: 2.0, ramp: 0.6, cxf: 0.911, cyf: 0.48)]
-// realistic single punch-in: 0.6s ramp to 2x off-center, hold, 0.6s out
-case "punch": segs = [Seg(start: 1.0, end: 4.0, scale: 2.0, ramp: 0.6, cxf: 0.66, cyf: 0.42)]
-default: fail("unknown scenario \(scenario)")
-}
 let env = ProcessInfo.processInfo.environment
 
-// Zoom segments may come from a JSON file (env ZOOM_SEGMENTS), overriding the scenario.
-// Array of {start,end,scale,ramp,cxf,cyf}. Lets the harness drive arbitrary sequences
-// (incl. long non-repeating ones for the perf/thermal gate) without hardcoded scenarios,
-// and mirrors how the app's sidecar zoom track would feed the compositor.
-if let zp = env["ZOOM_SEGMENTS"], let data = FileManager.default.contents(atPath: zp) {
-    struct JSeg: Decodable { let start, end, scale, ramp, cxf, cyf: Double }
-    guard let js = try? JSONDecoder().decode([JSeg].self, from: data) else { fail("bad ZOOM_SEGMENTS json") }
-    segs = js.map { Seg(start: $0.start, end: $0.end, scale: $0.scale, ramp: $0.ramp, cxf: $0.cxf, cyf: $0.cyf) }
+var camera: CameraPath? = nil
+if let cp = env["CAMERA_PATH"] {
+    guard let data = FileManager.default.contents(atPath: cp) else { fail("cannot read CAMERA_PATH \(cp)") }
+    guard let p = try? JSONDecoder().decode(CameraPath.self, from: data) else { fail("bad CAMERA_PATH json") }
+    camera = p
 }
 let velLogPath = env["VELLOG"]
 var velLog = "t,scale,dscale,blur_vel,blur_amount,content_speed\n"
@@ -856,14 +833,13 @@ writerInput.requestMediaDataWhenReady(on: queue) {
         // decoder put on the YCbCr buffer, so input color is interpreted, not guessed.
         let src = CIImage(cvPixelBuffer: pixels)
 
-        // Zoom geometry (mirror gpuzoom/Review.tsx): clamped off-center window of
-        // size W/s x H/s, focus mapped to output center. q is CI bottom-left px.
-        let s = zoomAt(segs, t)
-        let (cxf, cyf) = centerAt(segs, t)
+        // Zoom geometry from the camera path: window of size W/s x H/s centred on
+        // q (CI bottom-left px, Y flipped from the path's top-left fractions). The
+        // path keeps the window in-frame; clampedToExtent covers float rounding.
+        let (s, cxf, cyf) = cameraAt(camera, t)
         let cx = cxf * Wd, cy = Hd - cyf * Hd
         let hw = Wd / (2 * s), hh = Hd / (2 * s)
-        let qx = min(max(cx, hw), Wd - hw)
-        let qy = min(max(cy, hh), Hd - hh)
+        let qx = cx, qy = cy
 
         var out = src
         if s > 1.0001 {
@@ -1077,15 +1053,15 @@ done.wait()
 if writer.status == .completed {
     if let vp = velLogPath { try? velLog.write(toFile: vp, atomically: true, encoding: .utf8) }
     let dt = Date().timeIntervalSince(t0)
-    // scenario is the ZOOM preset (always "identity" when env-driven); the inset note
-    // surfaces background/padding so a padded render is visible without sampling pixels.
+    // The inset note surfaces background/padding so a padded render is visible
+    // without sampling pixels.
     let bgDesc = bgIsImage ? "image" : (bgIsGradient ? "gradient:\(env["BACKGROUND_GRADIENT"] ?? "?")" : "solid")
     let insetNote = insetActive
         ? String(format: "  bg=%@ pad=%.2f corner=%.3f shadow=%.2f inset=%.3f",
                  bgDesc, framePadding, frameCornerFrac, frameShadow, frameInsetFrac)
         : ""
-    print(String(format: "OK  %dx%d->%dx%d  %d frames  scenario=%@%@  wall=%.2fs",
-                 W, H, outW, outH, frames, scenario, insetNote, dt))
+    print(String(format: "OK  %dx%d->%dx%d  %d frames%@  wall=%.2fs",
+                 W, H, outW, outH, frames, insetNote, dt))
 } else {
     fail("writer status \(writer.status.rawValue): \(writer.error?.localizedDescription ?? "?")")
 }
