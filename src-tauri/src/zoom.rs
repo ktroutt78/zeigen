@@ -62,7 +62,10 @@ const DWELL_MIN_S: f64 = 0.8;
 // hand: no zoom, and nothing for a neighbouring zoom to bridge into. Measured
 // as the share of 0.1s slices, between the dwell's first and last movement, in
 // which the cursor travelled more than JITTER_STEP_PX. On the marked clips the two unwanted pauses moved for
-// 9% of their length and the wanted reading pause for 65 to 89%.
+// 9% of their length and the wanted reading pause for 65 to 89%. The movement
+// must also add up to DWELL_MIN_S: a cursor that glides in and then sits to
+// the end of the dwell has only its arrival to show (0.4 to 0.6s on the marked
+// clips; the reading pauses had 1.1 to 1.8s).
 // And after the last sign of life (click or >JITTER_STEP_PX movement) a zoom
 // holds only PARK_TAIL_S before letting go, so a click followed by minutes of
 // parked cursor doesn't pin the zoom forever.
@@ -427,8 +430,9 @@ pub fn detect(track: &CursorTrack) -> Vec<ZoomKeyframe> {
                 match (slices.iter().position(|m| *m), slices.iter().rposition(|m| *m)) {
                     (Some(first), Some(last)) => {
                         let active = &slices[first..=last];
-                        let moving = active.iter().filter(|m| **m).count();
-                        (moving as f64) < READING_MOVE_FRAC * active.len() as f64
+                        let moving = active.iter().filter(|m| **m).count() as f64;
+                        moving < READING_MOVE_FRAC * active.len() as f64
+                            || moving * 0.1 < DWELL_MIN_S
                     }
                     _ => true,
                 }
@@ -869,7 +873,7 @@ mod tests {
         // fixtures (091633 @1470, 220817 @1512) are UNCHANGED by the scaling.
         assert_eq!(
             got,
-            "17.81-20.92s @(947,669) 1.5x; 29.77-42.17s @(565,318) 1.7x; 47.67-51.36s @(664,590) 1.4x; 61.52-65.49s @(684,604) 1.4x; 69.23-75.40s @(565,439) 1.7x; 80.34-83.64s @(565,413) 1.7x; 85.42-88.12s @(565,528) 1.7x; 89.32-93.52s @(952,686) 1.5x; 95.40-98.12s @(565,750) 1.7x; 108.59-113.74s @(565,644) 1.7x; 117.85-120.96s @(1146,662) 1.5x; 122.18-126.95s @(662,360) 1.5x; 135.76-141.47s @(985,376) 1.5x; 143.91-148.76s @(1355,430) 1.7x; 149.96-152.22s @(565,530) 1.7x; 153.68-157.44s @(643,534) 1.5x"
+            "17.81-20.92s @(947,669) 1.5x; 29.77-42.17s @(565,318) 1.7x; 47.67-51.36s @(664,590) 1.4x; 61.52-65.49s @(684,604) 1.4x; 69.23-75.40s @(565,439) 1.7x; 80.34-83.64s @(565,413) 1.7x; 85.42-88.12s @(565,528) 1.7x; 89.32-93.52s @(952,686) 1.5x; 108.59-113.74s @(565,644) 1.7x; 117.85-120.96s @(1146,662) 1.5x; 122.18-126.95s @(662,360) 1.5x; 135.76-141.47s @(985,376) 1.5x; 143.91-148.76s @(1355,430) 1.7x; 149.96-152.22s @(565,530) 1.7x; 153.68-157.44s @(643,534) 1.5x"
         );
     }
 
@@ -901,7 +905,7 @@ mod tests {
         }
         assert_eq!(
             got,
-            "6.72-10.25s @(445,289) 1.7x; 11.68-14.12s @(731,622) 1.5x; 15.36-20.65s @(445,303) 1.7x; 23.72-27.25s @(504,327) 1.5x; 30.41-33.85s @(445,477) 1.7x; 36.00-39.36s @(506,554) 1.5x; 40.56-43.43s @(797,693) 1.7x; 47.35-49.40s @(1067,662) 1.7x; 51.37-55.20s @(1067,693) 1.7x; 56.94-62.02s @(445,619) 1.7x; 67.56-72.29s @(489,542) 1.5x; 90.81-99.60s @(445,289) 1.7x; 103.11-105.30s @(1067,693) 1.7x"
+            "11.68-14.12s @(731,622) 1.5x; 15.36-20.65s @(445,303) 1.7x; 23.72-27.25s @(504,327) 1.5x; 30.41-33.85s @(445,477) 1.7x; 36.00-39.36s @(506,554) 1.5x; 40.56-43.43s @(797,693) 1.7x; 47.35-49.40s @(1067,662) 1.7x; 51.37-55.20s @(1067,693) 1.7x; 56.94-62.02s @(445,619) 1.7x; 67.56-72.29s @(489,542) 1.5x; 90.81-99.60s @(445,289) 1.7x; 103.11-105.30s @(1067,693) 1.7x"
         );
     }
 
@@ -939,6 +943,18 @@ mod tests {
             .park(1.0)
             .build();
         assert_eq!(detect(&track).len(), 0, "a resting cursor must not zoom");
+    }
+
+    #[test]
+    fn arriving_then_resting_does_not_zoom() {
+        // The arrival glide alone is not reading, even when the cursor never
+        // leaves again inside the same dwell.
+        let track = TrackBuilder::new()
+            .park(2.0)
+            .travel(600.0, 300.0, 0.6)
+            .park(4.0)
+            .build();
+        assert_eq!(detect(&track).len(), 0);
     }
 
     #[test]
@@ -1222,7 +1238,6 @@ mod tests {
                 "pause + 3 clicks",
                 "drag",
                 "drag",
-                "pause, no click",
             ]
         );
     }
