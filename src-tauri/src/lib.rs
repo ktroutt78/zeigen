@@ -821,7 +821,6 @@ pub fn run() {
             zoom::suggest_zooms,
             edit::probe_audio_track,
             edit::render_preview_audio,
-            thumbs::extract_thumb_sprite,
             wallpapers::list_wallpapers,
             wallpapers::wallpaper_thumb,
             discard_recording,

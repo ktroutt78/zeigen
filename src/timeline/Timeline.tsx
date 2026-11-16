@@ -1,28 +1,31 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Waveform from "../Waveform";
-import ScrubPreview from "../ScrubPreview";
 import { I } from "../components/icons";
 import type { RedactionEditor, Trim, ZoomEditor } from "../Review";
-import { fmt, parseStampFromPath, TRIM_EPS, ZOOM_MIN_DURATION } from "../reviewShared";
+import { fmt, TRIM_EPS, ZOOM_MIN_DURATION } from "../reviewShared";
 import SegmentRow from "./SegmentRow";
 import CameraShade from "./CameraShade";
 import { timeScale } from "./scale";
 
 // The Review window's timeline: a header, then a fixed label column beside ONE
 // tracks column holding the ruler and the rows (Video, Zoom, and Blur when the
-// recording has redactions), with one playhead through all of them. Every
+// recording has redactions), with one playhead through all of them. Hovering
+// shows that moment in the preview and leaves the playhead alone; a click sets
+// the playhead; a drag scrubs it. Every
 // time<->position conversion goes through ./scale against the tracks column's
 // rect, so all rows line up by construction.
 
 type TimelineProps = {
   assetUrl: string | null;
-  sourcePath: string | null;
   videoRef: React.MutableRefObject<HTMLVideoElement | null>;
   duration: number | null;
-  currentTime: number;
   trim: Trim | null;
   setTrim: React.Dispatch<React.SetStateAction<Trim | null>>;
-  seek: (t: number) => void;
+  // The playhead (not the frame the preview happens to show), see Review.
+  getPlayhead: () => number;
+  setPlayhead: (t: number) => void;
+  // Show a moment in the preview without moving the playhead; null ends it.
+  previewAt: (t: number | null) => void;
   // Bracket every seek-per-pointermove drag (track scrub, trim handles) so
   // Review can suspend webcam aligns for the duration and do one align at
   // pointer-up.
@@ -61,12 +64,23 @@ const fmtScale = (s: number) => `${Number(s.toFixed(1))}x`;
 export default function Timeline(props: TimelineProps) {
   const tracksRef = useRef<HTMLDivElement | null>(null);
   const [trackWidth, setTrackWidth] = useState(0);
-  const [hover, setHover] = useState<{ time: number; rect: DOMRect } | null>(null);
-  // Hover-scrub (Model A): true while a bare-hover skim is driving the playhead,
-  // so onScrubStart/End fire once per skim session (webcam bubble aligns once at
-  // the end, not per tick). Reset when a drag ends so the two stay in sync.
-  const skimmingRef = useRef(false);
-  const stamp = props.sourcePath ? parseStampFromPath(props.sourcePath) : null;
+  const [hover, setHover] = useState<number | null>(null);
+  const playheadRef = useRef<HTMLDivElement | null>(null);
+
+  // The playhead line is positioned every frame straight from the playhead, so
+  // it glides during playback instead of stepping with the video's progress events.
+  const { duration, getPlayhead } = props;
+  useEffect(() => {
+    if (duration == null) return;
+    const s = timeScale(duration);
+    let raf = 0;
+    const tick = () => {
+      if (playheadRef.current) playheadRef.current.style.left = `${s.pct(getPlayhead())}%`;
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [duration, getPlayhead]);
 
   useEffect(() => {
     const el = tracksRef.current;
@@ -85,7 +99,6 @@ export default function Timeline(props: TimelineProps) {
 
   const inPct = scale && props.trim != null ? scale.pct(props.trim.in) : 0;
   const outPct = scale && props.trim != null ? scale.pct(props.trim.out) : 100;
-  const playPct = scale ? scale.pct(props.currentTime) : 0;
 
   // Trim with your eyes: the video seeks to follow the handle during drag
   // so the user sees the exact frame they're cutting on. The bound NOT
@@ -114,14 +127,12 @@ export default function Timeline(props: TimelineProps) {
             ? Math.max(0, Math.min(fixedOut - 0.1, t))
             : Math.min(duration, Math.max(fixedIn + 0.1, t));
         props.setTrim(side === "in" ? { in: next, out: fixedOut } : { in: fixedIn, out: next });
-        props.seek(next);
-        setHover({ time: next, rect });
+        props.setPlayhead(next);
       };
       const onMove = (ev: PointerEvent) => move(ev.clientX);
       const onUp = () => {
         window.removeEventListener("pointermove", onMove);
         window.removeEventListener("pointerup", onUp);
-        setHover(null);
         props.onScrubEnd();
         if (wasPlaying) video?.play().catch(() => {});
       };
@@ -131,99 +142,50 @@ export default function Timeline(props: TimelineProps) {
     [props, scale],
   );
 
-  // Ruler and Video row: press+drag scrubs, a plain click sets the playhead.
+  // Anywhere on the tracks that is not a segment: a click sets the playhead,
+  // press+drag scrubs it.
   const onTrackPointerDown = (e: React.PointerEvent) => {
     if (!scale) return;
     const rect = getRect();
     const startX = e.clientX;
     const wasPlaying = !props.videoRef.current?.paused;
-    let movedPastThreshold = false;
-    const seekAt = (clientX: number) => {
-      props.seek(scale.timeAtClientX(clientX, rect));
-    };
+    let dragging = false;
+    setHover(null);
     const onMove = (ev: PointerEvent) => {
-      if (!movedPastThreshold && Math.abs(ev.clientX - startX) > 3) {
-        movedPastThreshold = true;
+      if (!dragging && Math.abs(ev.clientX - startX) > 3) {
+        dragging = true;
         if (wasPlaying) props.videoRef.current?.pause();
         props.onScrubStart();
       }
-      if (movedPastThreshold) seekAt(ev.clientX);
-      setHover({ time: scale.timeAtClientX(ev.clientX, rect), rect });
+      if (dragging) props.setPlayhead(scale.timeAtClientX(ev.clientX, rect));
     };
     const onUp = (ev: PointerEvent) => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
-      if (!movedPastThreshold) {
-        seekAt(ev.clientX);
-      } else {
-        props.onScrubEnd();
-        // Drag ended the scrub session; keep skim state in sync so the next
-        // bare-hover re-arms onScrubStart instead of seeking un-gated.
-        skimmingRef.current = false;
-        if (wasPlaying) props.videoRef.current?.play().catch(() => {});
-      }
-      const overTrack =
-        ev.clientX >= rect.left &&
-        ev.clientX <= rect.right &&
-        ev.clientY >= rect.top &&
-        ev.clientY <= rect.bottom;
-      if (!overTrack) setHover(null);
+      if (!dragging) props.setPlayhead(scale.timeAtClientX(ev.clientX, rect));
+      props.onScrubEnd();
+      if (dragging && wasPlaying) props.videoRef.current?.play().catch(() => {});
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
   };
 
-  // Hover-scrub seek: a bare hover (no button) over a PAUSED video moves the
-  // playhead + scrubs live via the gated seek (Model A: the playhead follows the
-  // cursor and stays where you left it). Paused-only so it never fights playback;
-  // gated seek + one-shot onScrubStart keep it from seek-flooding or churning the
-  // webcam decoder. Applies over the whole tracks column (ruler and every row).
-  const skimSeek = (clientX: number) => {
-    if (!scale) return;
-    if (!props.videoRef.current?.paused) {
-      // Playing (e.g. Space pressed while hovering): don't scrub over playback,
-      // and end any active skim so scrubbingRef doesn't stay set during play.
-      endSkim();
-      return;
-    }
-    const rect = getRect();
-    // HOLD when the pointer is outside the track horizontally. The panel is to the
-    // RIGHT, so mousing toward it used to sweep the playhead to the clip end
-    // (scale.timeAtClientX clamps to [0, duration]). Freezing on horizontal exit
-    // keeps the frame you left — the one "Set to playhead" reads — instead of
-    // dragging it to the end as you leave.
-    if (clientX < rect.left - 1 || clientX > rect.right + 1) {
-      endSkim();
-      return;
-    }
-    if (!skimmingRef.current) {
-      skimmingRef.current = true;
-      props.onScrubStart();
-    }
-    props.seek(scale.timeAtClientX(clientX, rect));
-  };
-  const endSkim = () => {
-    if (skimmingRef.current) {
-      skimmingRef.current = false;
-      props.onScrubEnd();
-    }
-  };
-
-  // Bare hover only: drags drive the scrub preview themselves (track scrub,
-  // trim handles, segment moves via onDragHover).
+  // Bare hover: the hover line follows the mouse and the preview shows that
+  // moment (Review ignores the preview while playing). Drags handle themselves.
   const onTracksPointerMove = (e: React.PointerEvent) => {
     if (!scale || e.buttons !== 0) return;
-    const rect = getRect();
-    setHover({ time: scale.timeAtClientX(e.clientX, rect), rect });
-    skimSeek(e.clientX);
+    const t = scale.timeAtClientX(e.clientX, getRect());
+    setHover(t);
+    props.previewAt(t);
   };
 
   const onTracksPointerLeave = () => {
     setHover(null);
-    endSkim();
+    props.previewAt(null);
   };
 
-  const onDragHover = (t: number | null) => setHover(t == null ? null : { time: t, rect: getRect() });
+  // A segment being moved or resized: preview the edge being placed.
+  const onDragHover = (t: number | null) => props.previewAt(t);
 
   const trimLen =
     props.trim && props.duration != null ? Math.max(0, props.trim.out - props.trim.in) : null;
@@ -295,15 +257,13 @@ export default function Timeline(props: TimelineProps) {
         {/* Tracks column: ruler + rows + playhead, one rect for all of them. */}
         <div
           ref={tracksRef}
+          onPointerDown={onTrackPointerDown}
           onPointerMove={onTracksPointerMove}
           onPointerLeave={onTracksPointerLeave}
-          style={{ position: "relative", flex: 1, minWidth: 0, touchAction: "none" }}
+          style={{ position: "relative", flex: 1, minWidth: 0, touchAction: "none", cursor: "pointer" }}
         >
           {/* Ruler */}
-          <div
-            onPointerDown={onTrackPointerDown}
-            style={{ position: "relative", height: RULER_H, cursor: "pointer" }}
-          >
+          <div style={{ position: "relative", height: RULER_H }}>
             {scale &&
               trackWidth > 0 &&
               scale.ticks(trackWidth).map((t) => (
@@ -342,7 +302,6 @@ export default function Timeline(props: TimelineProps) {
 
           {/* Video row: waveform, trim dimming, thumbnail tick, trim handles. */}
           <div
-            onPointerDown={onTrackPointerDown}
             style={{ position: "relative", height: ROW_H, marginTop: ROW_GAP, cursor: "pointer" }}
           >
             <div style={{ ...rowBg, overflow: "hidden" }}>
@@ -394,7 +353,7 @@ export default function Timeline(props: TimelineProps) {
                   onPointerDown={(e) => {
                     e.stopPropagation();
                     e.preventDefault();
-                    props.seek(t);
+                    props.setPlayhead(t);
                   }}
                   title={title}
                   style={{
@@ -503,11 +462,27 @@ export default function Timeline(props: TimelineProps) {
             </div>
           )}
 
+          {/* Hover line: where a click would put the playhead. */}
+          {hover != null && scale && (
+            <div
+              style={{
+                position: "absolute",
+                left: `${scale.pct(hover)}%`,
+                top: 0,
+                bottom: 0,
+                borderLeft: "1px solid var(--fg-tertiary)",
+                pointerEvents: "none",
+                zIndex: 1,
+              }}
+            />
+          )}
+
           {/* Playhead: one line through the ruler and every row, head in the ruler. */}
           <div
+            ref={playheadRef}
             style={{
               position: "absolute",
-              left: `${playPct}%`,
+              left: 0,
               top: 4,
               bottom: 0,
               width: 0,
@@ -534,14 +509,6 @@ export default function Timeline(props: TimelineProps) {
         </div>
       </div>
 
-      <ScrubPreview
-        assetUrl={props.assetUrl}
-        recordingId={stamp}
-        sourcePath={props.sourcePath}
-        duration={props.duration}
-        hoverTime={hover?.time ?? null}
-        trackRect={hover?.rect ?? null}
-      />
     </div>
   );
 }

@@ -1555,7 +1555,7 @@ export default function Review() {
 
   // The main <video> plays the NR preview once ready; falls back to the
   // raw scratch during the eager render window and on D-10 failure. The
-  // timeline waveform + scrub-preview stay on the raw URL (D-12 — waveform
+  // timeline waveform stays on the raw URL (D-12 — waveform
   // shows the unprocessed signal for the Phase 12 c1 clipping highlight).
   const playbackUrl = useMemo(() => {
     if (previewState.status === "ready") return previewState.url;
@@ -1974,10 +1974,28 @@ export default function Review() {
     primeFirstFrame();
   };
 
+  // Hover preview (TIMELINE-PLAN step 2). While the mouse is over the timeline
+  // the video shows the hovered moment, and this holds where the playhead
+  // really is; null when the video is simply at the playhead. Everything that
+  // means "the playhead" reads getPlayhead / the currentTime state, never
+  // video.currentTime directly.
+  const parkedRef = useRef<number | null>(null);
+  // Put the video back on the playhead right now (not through the seek gate),
+  // for anything about to play or step from it.
+  const unpark = () => {
+    const p = parkedRef.current;
+    if (p == null) return;
+    parkedRef.current = null;
+    scrubbingRef.current = false;
+    seekTargetRef.current = null;
+    const v = videoRef.current;
+    if (v) v.currentTime = p;
+  };
+
   const onTimeUpdate = () => {
     const v = videoRef.current;
     if (!v) return;
-    setCurrentTime(v.currentTime);
+    if (parkedRef.current == null) setCurrentTime(v.currentTime);
     // Loop-back only applies during active playback. Without the !v.paused
     // guard, seeking to trim.out itself while paused (trim-handle drag,
     // playhead scrub) would immediately snap back to trim.in — the out
@@ -1990,6 +2008,7 @@ export default function Review() {
   const togglePlay = useCallback(() => {
     const v = videoRef.current;
     if (!v) return;
+    unpark();
     if (v.paused) {
       if (trim && (v.currentTime < trim.in || v.currentTime >= trim.out - 0.01)) {
         v.currentTime = trim.in;
@@ -2051,6 +2070,7 @@ export default function Review() {
       // Let the pause event own teardown (endZoomLoop).
       videoRef.current?.pause();
     } else {
+      unpark();
       startZoomLoop();
     }
   }, [startZoomLoop]);
@@ -2178,6 +2198,44 @@ export default function Review() {
     }
   }, [webcamLeadSec]);
 
+  // The playhead, as opposed to whatever frame the preview is showing.
+  // seekTargetRef covers a gated seek that has not landed yet.
+  const getPlayhead = useCallback(
+    () => parkedRef.current ?? seekTargetRef.current ?? videoRef.current?.currentTime ?? 0,
+    [],
+  );
+  const setPlayhead = useCallback(
+    (t: number) => {
+      const clamped = Math.max(0, Math.min(duration ?? Infinity, t));
+      if (parkedRef.current != null) parkedRef.current = clamped;
+      setCurrentTime(clamped);
+      seek(clamped);
+    },
+    [duration, seek],
+  );
+  // Show moment t in the preview without moving the playhead; null returns the
+  // preview to the playhead. Ignored during playback.
+  const previewAt = useCallback(
+    (t: number | null) => {
+      const v = videoRef.current;
+      if (!v) return;
+      if (t == null) {
+        const p = parkedRef.current;
+        if (p == null) return;
+        parkedRef.current = null;
+        seek(p);
+        endScrub();
+        return;
+      }
+      if (!v.paused) return;
+      if (parkedRef.current == null) parkedRef.current = getPlayhead();
+      // Same bracket as a scrub drag: no webcam align per preview seek, one at the end.
+      scrubbingRef.current = true;
+      seek(t);
+    },
+    [seek, endScrub, getPlayhead],
+  );
+
   // Applying playbackRate as a property (not a JSX attribute — HTMLMediaElement
   // has no such DOM attribute). Fires the video's native 'ratechange' event,
   // which the webcam sync layer (BubbleLayer's onRateChange) already listens
@@ -2192,9 +2250,9 @@ export default function Review() {
       const v = videoRef.current;
       if (!v) return;
       v.pause();
-      seek(v.currentTime + dir * FRAME_SECONDS);
+      setPlayhead(getPlayhead() + dir * FRAME_SECONDS);
     },
-    [seek],
+    [setPlayhead, getPlayhead],
   );
 
   // Global keyboard shortcuts: Space → play/pause, ←/→ → seek, ,/. →
@@ -2221,10 +2279,10 @@ export default function Review() {
         else togglePlay();
       } else if (e.key === "ArrowLeft") {
         e.preventDefault();
-        seek((videoRef.current?.currentTime ?? 0) - SEEK_SECONDS);
+        setPlayhead(getPlayhead() - SEEK_SECONDS);
       } else if (e.key === "ArrowRight") {
         e.preventDefault();
-        seek((videoRef.current?.currentTime ?? 0) + SEEK_SECONDS);
+        setPlayhead(getPlayhead() + SEEK_SECONDS);
       } else if (e.key === ",") {
         e.preventDefault();
         frameStep(-1);
@@ -2244,14 +2302,14 @@ export default function Review() {
         else setPlaybackRate((r) => cyclePlaybackRate(r, 1));
       } else if (key === "i" && duration != null) {
         e.preventDefault();
-        const t = videoRef.current?.currentTime ?? 0;
+        const t = getPlayhead();
         setTrim((prev) => {
           const out = prev?.out ?? duration;
           return { in: Math.max(0, Math.min(out - 0.1, t)), out };
         });
       } else if (key === "o" && duration != null) {
         e.preventDefault();
-        const t = videoRef.current?.currentTime ?? 0;
+        const t = getPlayhead();
         setTrim((prev) => {
           const trimIn = prev?.in ?? 0;
           return { in: trimIn, out: Math.min(duration, Math.max(trimIn + 0.1, t)) };
@@ -2321,7 +2379,7 @@ export default function Review() {
     thumbnailTime,
     setThumbnailTime,
     previewUrl: playbackUrl,
-    getCurrentTime: () => videoRef.current?.currentTime ?? 0,
+    getCurrentTime: getPlayhead,
   };
 
   // Post-trim length shown in the header.
@@ -2379,7 +2437,12 @@ export default function Review() {
           videoRef={videoRef}
           onLoadedMetadata={onLoadedMetadata}
           onTimeUpdate={onTimeUpdate}
-          onPlay={() => setPlaying(true)}
+          onPlay={() => {
+            // Anything that starts playback takes the playhead with it.
+            parkedRef.current = null;
+            scrubbingRef.current = false;
+            setPlaying(true);
+          }}
           onPause={() => {
             setPlaying(false);
             endZoomLoop();
@@ -2390,6 +2453,9 @@ export default function Review() {
           togglePlay={togglePlay}
           playbackRate={playbackRate}
           seek={seek}
+          getPlayhead={getPlayhead}
+          setPlayhead={setPlayhead}
+          previewAt={previewAt}
           scrubbingRef={scrubbingRef}
           onScrubStart={beginScrub}
           onScrubEnd={endScrub}
@@ -2600,6 +2666,9 @@ type LeftColumnProps = {
   togglePlay: () => void;
   playbackRate: number;
   seek: (t: number) => void;
+  getPlayhead: () => number;
+  setPlayhead: (t: number) => void;
+  previewAt: (t: number | null) => void;
   // Scrub-drag lifecycle (see beginScrub/endScrub in Review). scrubbingRef
   // reaches BubbleLayer's sync layer; the callbacks reach Timeline's drag
   // handlers.
@@ -2673,13 +2742,13 @@ function LeftColumn(props: LeftColumnProps) {
       />
       <Timeline
         assetUrl={props.assetUrl}
-        sourcePath={props.sourcePath}
         videoRef={props.videoRef}
         duration={props.duration}
-        currentTime={props.currentTime}
         trim={props.trim}
         setTrim={props.setTrim}
-        seek={props.seek}
+        getPlayhead={props.getPlayhead}
+        setPlayhead={props.setPlayhead}
+        previewAt={props.previewAt}
         onScrubStart={props.onScrubStart}
         onScrubEnd={props.onScrubEnd}
         audioStart={props.audioStart}

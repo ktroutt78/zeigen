@@ -27,7 +27,7 @@ type SegmentRowProps = {
   onSelect: (i: number | null) => void;
   onChange: (i: number, patch: { start?: number; end?: number }) => void;
   // Fired during a move/resize with the time being positioned (start for a
-  // move, the moving edge for a resize) to drive the scrub thumbnail; null at
+  // move, the moving edge for a resize) so the preview can show that frame; null at
   // the end.
   onDragHover: (time: number | null) => void;
   label: (i: number) => string;
