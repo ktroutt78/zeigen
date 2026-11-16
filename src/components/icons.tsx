@@ -174,6 +174,7 @@ export const I = {
   plus: <Icon d={P.plus}/>,
   search: <Icon d={<><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></>}/>,
   zoomIn: <Icon d={<><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14M7 5v4M5 7h4"/></>}/>,
+  zoomOut: <Icon d={<><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14M5 7h4"/></>}/>,
   blur: <Icon d={<><circle cx="8" cy="8" r="5.5" strokeDasharray="1.5 2"/><circle cx="8" cy="8" r="2"/></>}/>,
   check: <Icon d={P.check}/>,
   resize: <Icon d={P.resize}/>,

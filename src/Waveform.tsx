@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from "react";
 // bucketing so the only durable allocation is the ~16KB peak cache.
 
 const PEAK_CACHE_SIZE = 4096;
+const MAX_CANVAS_PX = 8192;
 const SILENCE_THRESHOLD = 0.001;
 const CLIPPING_THRESHOLD = 0.98;
 // Brighter than the body text so the audio signature reads clearly on the
@@ -138,14 +139,17 @@ export default function Waveform({ assetUrl, videoDuration, audioStart }: Props)
 
     const draw = () => {
       const rect = container.getBoundingClientRect();
-      const w = Math.max(1, Math.floor(rect.width));
+      const cssW = Math.max(1, Math.floor(rect.width));
       const h = Math.max(1, Math.floor(rect.height));
       const dpr = window.devicePixelRatio || 1;
+      // Drawn at most MAX_CANVAS_PX device px wide; a zoomed-in timeline
+      // wider than that stretches the canvas with CSS.
+      const w = Math.min(cssW, Math.floor(MAX_CANVAS_PX / dpr));
       if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
         canvas.width = w * dpr;
         canvas.height = h * dpr;
       }
-      canvas.style.width = `${w}px`;
+      canvas.style.width = `${cssW}px`;
       canvas.style.height = `${h}px`;
 
       const ctx = canvas.getContext("2d");
