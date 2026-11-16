@@ -22,6 +22,15 @@ Step 5 as built (2026-11-16): `scene.rs` is the one definition of the layout (sc
 
 Steps 3 and 4 (timeline zoom with slider, pinch, pan, follow and Fit; hover ghost to add; Generate and trash on the Zoom row) verified by Keith 2026-11-16, all pass. His calls: remove the Zoom panel's duplicate Re-suggest and Clear all buttons (done), and the scene layout chooser in the timeline header is fine.
 
+Step 5 (Scene row, layouts, bubble size during zoom, scene export) checked by Keith on the installed build 2026-11-16. Passed: adding with the dashed "+", Full webcam in and out, Split screen, No bubble, Full screen, drag/resize/delete, a scene over a zoom (Zoom row dims, screen returns already zoomed), Size during zoom, preview matches export, lip-sync in a Full webcam export. His calls:
+
+- The roughly half-second animated transition is approved.
+- Keep both No bubble and Full screen as separate layouts.
+- Size during zoom: default stays 100%. Slider widened from 50-100% to 50-120% so the bubble can also grow during a zoom (done; it grows about the same corner it shrinks toward).
+- Split screen: the webcam card is the same height as the screen picture and lined up with it, instead of running nearly top to bottom (done in `scene.rs`, so preview and export both follow).
+- Full webcam sharpness is fine for the MacBook camera. Keep 720p.
+- Not yet answered: whether a recording with no scenes at 100% looks the same as before (item 9 came back unfilled).
+
 Also settled by the plan: no Add track control (fixed rows: Video, Zoom, Scene with a webcam, Blur with redactions); auto-zoom detection still runs when Review opens, with a Generate button on the Zoom row.
 
 ## 2026-11-16 — Overlays are kept out of recordings by the engine, not by hiding the windows

@@ -1859,7 +1859,7 @@ fn scene_path_for(
         bubble: Rect { x: screen.x + bx / wd * k, y: screen.y + by / hd * k, w: d / wd * k, h: d / hd * k },
         bubble_radius: sidecar.bubble_roundness.map_or(0.5, |r| r.clamp(0.0, 1.0) / 2.0),
         anchor: (ax, ay),
-        shrink: sidecar.bubble_zoom_scale.unwrap_or(1.0).clamp(0.1, 1.0),
+        shrink: sidecar.bubble_zoom_scale.unwrap_or(1.0).clamp(0.1, 1.2),
     };
     let scenes: Vec<Scene> =
         sidecar.scenes.iter().map(|s| Scene { start: s.start, end: s.end, layout: s.layout }).collect();

@@ -5347,7 +5347,7 @@ function ExportPanel({
                       type="range"
                       className="slider"
                       min={50}
-                      max={100}
+                      max={120}
                       step={5}
                       value={Math.round(bubbleZoomScale * 100)}
                       onChange={(e) => onBubbleZoomScale(Number(e.target.value) / 100)}

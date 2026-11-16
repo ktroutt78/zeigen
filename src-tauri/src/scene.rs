@@ -24,7 +24,7 @@ use crate::camera::{CameraPath, Spring, SETTLE_S, STEP_S};
 pub enum Layout {
     // Screen as usual, webcam faded out.
     NoBubble,
-    // Screen on the left, webcam as a tall card on the right.
+    // Screen on the left, webcam as a card of the same height on the right.
     Split,
     // Webcam fills the picture.
     FullWebcam,
@@ -62,7 +62,7 @@ pub struct Geometry {
     // The point of the bubble that stays put when it shrinks, 0..1 across it
     // (its zone corner: bottom-right bubble = (1, 1)).
     pub anchor: (f64, f64),
-    // Bubble size while the screen is zoomed, 1.0 = unchanged.
+    // Bubble size while the screen is zoomed, 1.0 = unchanged, above 1 grows it.
     pub shrink: f64,
 }
 
@@ -99,12 +99,13 @@ fn targets(layout: Option<Layout>, g: &Geometry) -> [f64; FIELDS + 1] {
         Some(Layout::FullWebcam) => [s.x, s.y, s.w, s.h, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0],
         Some(Layout::Split) => {
             // The recording keeps its shape (same fraction of width and height),
-            // centred in the left share; the card takes the right share, full height.
+            // centred in the left share; the card takes the right share, with the
+            // same top and bottom edges as the recording.
             let m = SPLIT_MARGIN;
-            let my = m * g.aspect;
             let sw = SPLIT_SCREEN_W - 1.5 * m;
             let cx = SPLIT_SCREEN_W + 0.5 * m;
-            [m, (1.0 - sw) / 2.0, sw, sw, 1.0, cx, my, 1.0 - m - cx, 1.0 - 2.0 * my, SPLIT_CARD_RADIUS, 1.0, 0.0]
+            let y = (1.0 - sw) / 2.0;
+            [m, y, sw, sw, 1.0, cx, y, 1.0 - m - cx, sw, SPLIT_CARD_RADIUS, 1.0, 0.0]
         }
     }
 }
@@ -113,7 +114,7 @@ fn targets(layout: Option<Layout>, g: &Geometry) -> [f64; FIELDS + 1] {
 // take their existing path untouched.
 pub fn path(scenes: &[Scene], camera: Option<&CameraPath>, g: &Geometry, duration: f64) -> Option<ScenePath> {
     let mut scenes: Vec<Scene> = scenes.iter().copied().filter(|s| s.end > s.start).collect();
-    if scenes.is_empty() && g.shrink >= 1.0 {
+    if scenes.is_empty() && g.shrink == 1.0 {
         return None;
     }
     scenes.sort_by(|a, b| a.start.total_cmp(&b.start));
@@ -213,7 +214,9 @@ mod tests {
         // Split: both pictures inside the canvas, side by side, recording shape kept.
         let s = targets(Some(Layout::Split), &g);
         assert!((s[2] - s[3]).abs() < 1e-12);
-        assert!(s[0] + s[2] < s[5] && s[5] + s[7] < 1.0 && s[6] > 0.0 && s[6] + s[8] < 1.0);
+        assert!(s[0] + s[2] < s[5] && s[5] + s[7] < 1.0);
+        // The card has the recording's top and bottom edges.
+        assert!(s[6] == s[1] && s[8] == s[3]);
     }
 
     #[test]
@@ -248,6 +251,10 @@ mod tests {
         // Bottom-right corner stays put.
         assert!(((zoomed[5] + zoomed[7]) - (wide[5] + wide[7])).abs() < 1e-6);
         assert!(((zoomed[6] + zoomed[8]) - (wide[6] + wide[8])).abs() < 1e-6);
+        // Above 100% the bubble grows instead, still about its corner.
+        let big = at(&path(&[], Some(&cam), &geo(1.2), 10.0).unwrap(), 4.0);
+        assert!((big[7] as f64 - g.bubble.w * 1.2).abs() < 1e-6);
+        assert!(((big[5] + big[7]) - (wide[5] + wide[7])).abs() < 1e-6);
         // No shrink while the webcam is full picture.
         let p = path(&[Scene { start: 3.0, end: 5.5, layout: Layout::FullWebcam }], Some(&cam), &g, 10.0).unwrap();
         assert!(at(&p, 4.0)[7] > 0.99);
