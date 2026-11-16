@@ -35,7 +35,7 @@ export const Icon = ({
 );
 
 // Tool-rail icons: Lucide (MIT), inlined at their native 24x24 viewBox (no lucide-react
-// dependency — we use six). Rendered stroke-only to sit with the app's line-icon look,
+// dependency — we use seven). Rendered stroke-only to sit with the app's line-icon look,
 // a touch thinner than Lucide's default 2. currentColor so the rail's active highlight
 // (.rail-tool.on color) drives them.
 const lucide = (children: ReactNode, size = 20) => (
@@ -61,6 +61,12 @@ export const RailIcon = {
       <line x1="21" y1="21" x2="16.65" y2="16.65" />
       <line x1="11" y1="8" x2="11" y2="14" />
       <line x1="8" y1="11" x2="14" y2="11" />
+    </>,
+  ),
+  // mouse-pointer-2
+  cursor: lucide(
+    <>
+      <path d="M4.037 4.688a.495.495 0 0 1 .651-.651l16 6.5a.5.5 0 0 1-.063.947l-6.124 1.58a2 2 0 0 0-1.438 1.435l-1.579 6.126a.5.5 0 0 1-.947.063z" />
     </>,
   ),
   // webcam

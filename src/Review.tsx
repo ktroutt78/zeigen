@@ -4971,11 +4971,11 @@ type SaveSpec = {
 // Which editing tool the rail toolbar has active (exclusive — one at a time).
 // The contextual card below the toolbar swaps to match; Export is a permanent
 // block, not a tool. Persisted so the rail reopens on the last tool. Order
-// mirrors the working flow: Trim, Bubble, Zoom, Watermark, Mark. A persisted
+// matches the rail: Zoom, Cursor, Bubble, Redact, Watermark, Frame, Mark. A persisted
 // id from an older build (e.g. "export"/"annotate"/"share") falls back to the
 // default.
-type ToolId = "bubble" | "zoom" | "redact" | "watermark" | "background" | "mark";
-const TOOL_IDS: ToolId[] = ["zoom", "bubble", "redact", "watermark", "background", "mark"];
+type ToolId = "bubble" | "zoom" | "cursor" | "redact" | "watermark" | "background" | "mark";
+const TOOL_IDS: ToolId[] = ["zoom", "cursor", "bubble", "redact", "watermark", "background", "mark"];
 const DEFAULT_TOOL: ToolId = "zoom";
 // Key versioned away from the old "review-panel-open-section" accordion format.
 const TOOL_LS_KEY = "review-panel-active-tool";
@@ -5487,6 +5487,12 @@ function ExportPanel({
           icon={RailIcon.zoom}
         />
         <ToolTile
+          label="Cursor"
+          active={activeTool === "cursor"}
+          onClick={() => setActiveTool("cursor")}
+          icon={RailIcon.cursor}
+        />
+        <ToolTile
           label="Bubble"
           active={activeTool === "bubble"}
           disabled={!hasBubble}
@@ -5652,10 +5658,15 @@ function ExportPanel({
             )}
           </div>
             </div>
-            {cursor && (
-              <>
-                <div style={RAIL_EYEBROW}>Cursor</div>
-                <div style={CTX_CARD}>
+          </>
+        )}
+
+        {activeTool === "cursor" && (
+          <>
+            <div style={RAIL_EYEBROW}>Cursor</div>
+            <div style={CTX_CARD}>
+              {cursor ? (
+                <>
                   <Field label="Smoothing">
                     <div className="segmented full">
                       {(["off", "light", "smooth"] as const).map((m) => (
@@ -5683,9 +5694,14 @@ function ExportPanel({
                       style={{ width: "100%" }}
                     />
                   </Field>
+                </>
+              ) : (
+                <div style={{ fontSize: 11.5, color: "var(--fg-tertiary)" }}>
+                  This recording's cursor is part of the video, so it can't be
+                  restyled. Recordings made from now on can.
                 </div>
-              </>
-            )}
+              )}
+            </div>
           </>
         )}
 
