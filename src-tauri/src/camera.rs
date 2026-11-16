@@ -65,7 +65,7 @@ pub struct CameraPath {
 
 // Critically damped spring, closed form from the last retarget.
 #[derive(Clone, Copy)]
-struct Spring {
+pub(crate) struct Spring {
     x0: f64,
     v0: f64,
     target: f64,
@@ -73,17 +73,17 @@ struct Spring {
 }
 
 impl Spring {
-    fn at_rest(x: f64) -> Self {
+    pub(crate) fn at_rest(x: f64) -> Self {
         Spring { x0: x, v0: 0.0, target: x, t0: 0.0 }
     }
-    fn at(&self, t: f64) -> (f64, f64) {
+    pub(crate) fn at(&self, t: f64) -> (f64, f64) {
         let dt = t - self.t0;
         let a = self.x0 - self.target;
         let b = self.v0 + OMEGA * a;
         let e = (-OMEGA * dt).exp();
         (self.target + (a + b * dt) * e, (b - OMEGA * (a + b * dt)) * e)
     }
-    fn retarget(&mut self, t: f64, target: f64) {
+    pub(crate) fn retarget(&mut self, t: f64, target: f64) {
         let (x, v) = self.at(t);
         *self = Spring { x0: x, v0: v, target, t0: t };
     }
