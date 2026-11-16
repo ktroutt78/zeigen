@@ -4,6 +4,34 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-15 — Auto-zoom rules: three reference clips marked by Keith; baseline score pinned
+
+Keith recorded and marked three window recordings in the installed build (v0.1.9). Logs, what the app showed him, and his calls are in `src-tauri/tests/fixtures/zoom-rules/`; videos in `harness/reference/zoom-rules/` (not in git). Six auto zooms in total:
+
+| Clip | Zoom | Reason shown | Keith's call |
+|---|---|---|---|
+| 1 click-through (39.6s) | 2.8 to 9.9s | pause + 7 clicks | right |
+| 1 | 21.5 to 38.3s | drag | right moment, held too long (nothing was happening after he closed the note at about 30s) |
+| 2 talking (49.9s) | 43.6 to 48.0s | pause, no click | should not have zoomed (moved the mouse while talking, no clicks) |
+| 3 scroll and read (39.3s) | 0.8 to 14.6s | pause + 2 clicks | right to zoom on the click, held too long (wanted it back out soon after the click; it held through the first scroll) |
+| 3 | 15.8 to 21.7s | pause, no click | right ("zoomed out some which was nice"; he was moving the mouse along a record as he read it) |
+| 3 | 35.4 to 39.3s | pause + 1 click | should not have zoomed (the click was the stop-recording button) |
+
+Nothing missing in any clip. In clip 1, seven clicks and one drag between 10s and 21s got no zoom and needed none. In clip 3 the second scroll got no zoom and none was missed.
+
+**Baseline** (`cargo test --lib marked_clips -- --nocapture`, pinned in `zoom.rs` `marked_clips_score`): right zooms kept 2 of 2, unwanted zooms gone 0 of 2, over-long zooms fixed 0 of 2, new unjudged zooms 0. A second test proves the frozen detector reproduces exactly the zooms Keith was looking at.
+
+**Why each wrong one happened** (read from the detector's own candidates, not guessed):
+- Clip 1 over-long: the real activity ended at 29.5s. A separate "pause, no click" (cursor resting 31.8 to 38.2s, 73px of movement in 5.6s) sat within 300px and 3s of it, so the detector bridged it into the drag zoom.
+- Clip 2: a "pause, no click" where the cursor arrived, sat perfectly still for 3.2s, and left. The only "activity" was the arrival and departure.
+- Clip 3 over-long: the click zoom alone would have ended at 8.7s (cursor kept wandering in place until 8.0s after clicks at 1.7s and 2.2s); the scroll starting at 9.2s then held it to 14.6s under the "scrolling means reading, hold the zoom" rule.
+- Clip 3 stop click: the cursor travelled to the stop button and waited there 4s; the stop click itself, in the last tenth of a second, turned that wait into "pause + 1 click".
+- The one no-click pause Keith liked (clip 3, 15.8 to 21.7s) differs measurably from the two he did not: the cursor was moving for 2.4 of its 4.7s along a 477px line. The unwanted ones were at rest.
+
+**Limits:** six zooms on three clips of 40 to 50 seconds (the plan asked for 60 to 90). Enough to rank the first rules, thin for tuning thresholds. Keith's wanted end time for clip 3's first zoom is my reading of "earlier" (3 to 9s), flagged as such in the marks file.
+
+**Open before the first rule:** click and scroll times in every cursor log sit on a half-second grid (`docs/DEBT.md`); probe in `spikes/click-timing/`.
+
 ## 2026-11-15 — Window-capture popups MERGED (v0.1.9-window-popups): drag accepted as a known limit; new capture measured CHEAPER than the old
 
 **Keith's decisions:**
