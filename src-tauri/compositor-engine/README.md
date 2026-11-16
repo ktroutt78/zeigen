@@ -16,6 +16,11 @@ swiftc -O main.swift -o cicompositor
 ./cicompositor <in.mp4> <out.mp4>
 ```
 
+Zoom comes in as a sampled camera path computed by `src-tauri/src/camera.rs`:
+env `CAMERA_PATH=<json>`, `{"step": s, "samples": [[scale, cx, cy], ...]}`, sample
+`i` at `t = i*step`, centre as top-left frame fractions. The compositor only looks
+it up; it has no easing maths of its own.
+
 ## Phase 1 — identity re-encode (DONE, color proved)
 
 Goal: prove the color round-trip is correct on the simplest possible pipeline
