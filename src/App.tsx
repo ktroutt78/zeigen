@@ -1006,6 +1006,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   MIC_NO_FIRST_SAMPLE: "The microphone produced no audio. Check the mic and try recording again.",
   CLOCK_MISMATCH: "Couldn't sync the audio and video clocks. Try recording again.",
   MIC_SESSION_FAILED: "The microphone stopped mid-recording. Your recording was saved up to that point.",
+  CURSOR_TRACK_FAILED: "The cursor couldn't be recorded, so this recording has no cursor.",
   INVALID_COMMAND: "The recorder received an invalid command. Try again.",
   INVALID_STATE: "The recorder wasn't ready for that action. Try again.",
   INTERNAL: "The recorder hit an unexpected error and had to stop.",
