@@ -254,7 +254,9 @@ async function openIdentifyOverlays(displays: DisplayShape[]) {
               height: display.height,
               primaryCocoaHeight,
             });
-            await invoke("make_capture_invisible", { label });
+            // Not hidden from capture: a window with sharingType none never
+            // reaches USB-driven displays (DisplayLink, InstantView), and this
+            // overlay is never up during a recording.
           } catch (e) {
             console.error(`[identify] ${label} setup failed`, e);
           }
@@ -319,7 +321,7 @@ async function openIdentifyWindowOverlay(window: WindowSource) {
             height: window.height,
             primaryCocoaHeight,
           });
-          await invoke("make_capture_invisible", { label });
+          // Not hidden from capture, same reason as the display identify overlay.
         } catch (e) {
           console.error(`[identify-window] ${label} setup failed`, e);
         }

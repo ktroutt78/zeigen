@@ -1219,3 +1219,17 @@ Treat as final. Titlebars, save paths, viewer UI, share URLs all use "Zeigen." P
 ## 2026-04-25 — Tauri bundle ID: com.zeigen.app
 
 Renamed from `com.dashcast.app` while still in dev. No installed builds in the wild, so no migration needed.
+
+## 2026-11-16 — USB-driven displays: the real cause is "hidden from capture", not window placement
+
+Replaces the conclusion of the 2026-04-26 entry "DisplayLink-driven displays don't get overlay UI".
+
+Keith's BenQ (1) is driven by Silicon Motion InstantView (v3.24), a USB display driver of the same kind as DisplayLink. Zeigen's identify overlay showed nothing there; Cap's showed.
+
+Evidence:
+- macOS lists the display as an ordinary NSScreen, and `NSWindow.setFrame` to its frame (-1920, 0, 1920, 1080) is accepted exactly.
+- `spikes/overlay-usb-display/overlaytest.swift` puts two boxes on every display: A is an ordinary window, B is identical but with `sharingType = .none`. Keith saw A and B on the built-in and the directly connected BenQ, and only A on the InstantView BenQ.
+
+Cause: these drivers capture a virtual screen and send it over USB, so a window excluded from screen capture never reaches the monitor. Every Zeigen overlay is marked that way (`make_capture_invisible`, added 2026-04-25, one day before the old entry blamed placement).
+
+Fix so far: the two identify overlays (display and window) are no longer marked. They are never up during a recording, so nothing is lost. The remaining overlays are in `docs/DEBT.md` with a proposed fix awaiting Keith.
