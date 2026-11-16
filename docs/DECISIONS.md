@@ -4,6 +4,17 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-16 — Webcam recorded by our own Swift helper; stop fixes
+
+Keith approved all three after the diagnosis below.
+
+- **Stop always finishes the file**, even when macOS already stopped the stream. **A macOS-side stop is treated as Stop**: the engine clamps the recording there and emits `stream_stopped`, the app runs its normal Stop, Review opens.
+- **Join test passed first, as Keith required**: with Zeigen's iPhone preview live, a plain `AVCaptureSession` capture with the 720p preset joined twice with no StopStream/StartStream in ContinuityCaptureAgent's log, and its frames carried the zoom and the background blur.
+- **`webcam-recorder`** (`src-tauri/webcam-recorder/main.swift`) replaces ffmpeg for the webcam and for the countdown warm-up. It sets a session preset only. Two things restart the phone and must not come back: choosing `activeFormat`/frame durations, and setting `videoSettings` on the video output (asking for a pixel format made the session pick the 1080p mode; caught in my iPhone test of the implementer's build, 1080p and a restart with it, 720p and none without).
+- It writes a fixed 30 fps grid (gaps filled by repeating a frame), because the export matches webcam to screen by frame count.
+- **Webcam lead is measured per recording** instead of the fixed 105 ms tuned for ffmpeg: the helper reports its first frame's capture time, the engine reports `screen.mp4`'s time zero (writer start, where the audio starts too), and the difference goes to the preview and into the sidecar (`webcam_lead_ms`) for the export. It can be negative. Only the first segment is measured; after a pause the old behaviour stands.
+- Not verified at the time of merge: a recording through the app, the measured lead and lip-sync, prewarm, pause/resume. Keith checks on the installed build.
+
 ## 2026-11-16 — iPhone camera: why the zoom is lost on record, and why one recording was unplayable (diagnosis only)
 
 Two reports from Keith with the iPhone as the camera. Nothing is fixed yet; both fixes are proposed to him.
