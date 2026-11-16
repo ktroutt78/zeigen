@@ -14,9 +14,9 @@ The timeline's zoom segments still shade 0.6s "ramp" shoulders at each end. The 
 
 New recordings have no cursor in the raw video. The preview and every export draw one; the timeline scrub thumbnails and the embedded poster frame are taken from the raw video and do not. Left out on purpose in `docs/CURSOR-SMOOTHING-PLAN.md`.
 
-## Cursor shape logging cost is unmeasured (2026-11-15)
+## Cursor shape logging costs 3 to 4% of a core while recording (2026-11-15)
 
-While recording, the engine reads and hashes the system cursor image about 20 times a second (`CursorTracker.swift`). Measured standalone at about 2ms per read, so an estimated 4% of one core; never measured during a real recording. If it shows up, compare something cheaper than a hash of the full image.
+While recording, the engine reads and hashes the system cursor image about 20 times a second (`CursorTracker.swift`). Measured standalone three times at 3.2 to 4.2% of one core (`spikes/capture-load`), with no change in WindowServer's load. Not measured inside a real recording. If it ever matters, compare something cheaper than a hash of the full image.
 
 ## Detector still forces a 1.2s gap between zooms (2026-11-15)
 

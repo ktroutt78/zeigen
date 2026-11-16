@@ -4,6 +4,30 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-15 — Window-capture popups MERGED (v0.1.9-window-popups): drag accepted as a known limit; new capture measured CHEAPER than the old
+
+**Keith's decisions:**
+- **Stop the hybrid capture work** (new capture while still, old single-window capture while the window moves). "I rarely drag windows while recording, so it's not worth switching capture kinds mid-recording." The unfinished changes were discarded; the idea is on `docs/BACKLOG.md` ("Clean window drag while recording").
+- **Merge with dragging as a known limit.** The wobble (up to 13px) and the rough display crossing are in `docs/DEBT.md`.
+- **Merge condition:** "If the new capture costs about the same as the old, merge window-capture-popups and tag main v0.1.9-window-popups."
+
+**In the installed build, confirmed by Keith's recordings:** a Tableau dialog (calculation editor) is captured for its whole life, including while moved and resized; a dialog pushed past the window's edge is cut off at the edge (as planned).
+
+**Load while recording, measured** (`spikes/capture-load/captureload`, an animated 1200x832 test window on a 1x display, 8s per line, two rounds; CPU as a share of one core):
+
+| | this process | WindowServer | frames |
+|---|---|---|---|
+| no capture | 0.0% | 31.9% | - |
+| OLD capture (single window) | 1.1% / 1.0% | 44.8% / 44.5% | 29.2 fps |
+| NEW capture (app on its display, cropped) | 0.6% / 0.6% | 29.6% / 29.4% | 29.0 / 29.1 fps |
+| NEW capture + window position check 30/s | 1.5% | 29.2% | 29.1 fps |
+
+So the old single-window capture added about 13 points of WindowServer load; the new capture adds none measurable, at the same frame rate. The two polling loops, measured separately three times: cursor shape check (20/s, on main since the cursor work) 3.2 to 4.2% of a core; window position check (30/s) 0.7 to 0.9%. Conclusion: the choppy Tableau dialog Keith saw live while recording is not caused by the new capture. Caveat: one synthetic workload on a 1x display, not Tableau and not a Retina display.
+
+**Other apps stay out:** observed directly for a Terminal window and a Terminal menu (a menu-layer window of another process) lying over the recorded Chrome window: neither is in the video. A macOS notification banner or a Teams toast was NOT observed directly; they are other processes' windows and are excluded by the same rule. Exceptions that follow from the design: recording Teams itself includes Teams' own pop-ups; a second overlapping window of the recorded app shows.
+
+Process note: the load test was refused Screen Recording three times before it ran. The cause was never established (the run that worked came from the terminal that had been running `appcapture`). Do not treat my explanations in between as findings.
+
 ## 2026-11-15 — Window-capture popups: test round 2 = menus PASS; building on the branch, drag to be judged in the installed app
 
 Second round of `spikes/window-app-capture/appcapture` (30 Hz follow, display switch), two runs by Keith on Chrome:
