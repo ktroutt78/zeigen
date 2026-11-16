@@ -12,8 +12,10 @@
 // is EXACT), then ONE CILanczosScaleTransform up to full frame. The path keeps the
 // window inside the frame by construction, so nothing is clamped here.
 //
-// The per-frame velocity is computed here (marked below) so the motion blur
-// consumes it as radius = floor + k*|velocity| (off by default).
+// Motion blur (env MOTION_BLUR, 0 = off): while the camera moves, the content plane
+// is averaged over the camera positions it passed through during the last part of the
+// frame interval, so pans smear along their travel and zooms smear outward. Still
+// frames are untouched. The drawn cursor and every overlay go on AFTER it.
 //
 // Build: swiftc -O main.swift -o cicompositor
 // Run:   ./cicompositor <in.mp4> <out.mp4>
@@ -23,9 +25,8 @@
 //     "height", "hot_x", "hot_y"}], "shape_events": [{"t", "shape"}]} draws the cursor for a
 //     recording captured without it. Path from cursor.rs (top-left frame fractions at
 //     t = i*step); shape sizes and hotspots in SOURCE px, hotspot from the image's top-left.
-//   env VELLOG=<path> writes a per-frame velocity CSV for validation.
 //
-// Layer order per frame: zoom resample -> motion blur (off) -> cursor -> redaction ->
+// Layer order per frame: zoom resample (motion-blurred while the camera moves) -> cursor -> redaction ->
 // webcam bubble -> watermark -> background inset -> output downscale.
 import Foundation
 import AVFoundation
@@ -105,19 +106,12 @@ func cursorShapeAt(_ p: CursorFile, _ t: Double) -> Int {
     (p.shape_events.last(where: { $0.t <= t }) ?? p.shape_events[0]).shape
 }
 
-let velLogPath = env["VELLOG"]
-var velLog = "t,scale,dscale,blur_vel,blur_amount,content_speed\n"
-
-// Motion blur (Phase 5): ONE CI layer, radius = floor + k*|v|, applied only while
-// moving. For our scale-ramp zooms the motion is RADIAL (content flows out from the
-// focus), so the correct blur is CIZoomBlur centered on the focus, NOT a directional
-// smear. floor kills slow-ramp shimmer; k*|v| kills fast-ramp strobe. Default OFF so
-// Phase 2 behavior is unchanged unless BLUR=on.
-let blurOn = env["BLUR"] == "on"
-let blurFloor = Double(env["BLUR_FLOOR"] ?? "2.0")!
-let blurK = Double(env["BLUR_K"] ?? "0.35")!
-let blurMax = Double(env["BLUR_MAX"] ?? "40")!
-let blurEps = Double(env["BLUR_EPS"] ?? "0.4")!
+// Motion blur strength: the fraction of the frame interval the "shutter" is open.
+// 0 = off; 0.5 = a 180-degree shutter (the smear is half the distance the picture
+// moved since the previous frame). Rust passes the app's chosen value.
+let motionBlur = Double(env["MOTION_BLUR"] ?? "") ?? 0
+// Most camera positions averaged for one frame (reached on the fastest moves).
+let motionBlurMaxTaps = 24
 
 // --- Watermark (Phase 4): screen-anchored logo PNG composited on the FINAL zoomed
 // frame (output space — does NOT zoom, and applied after motion blur so it stays
@@ -541,8 +535,8 @@ let done = DispatchSemaphore(value: 0)
 var frames = 0
 let t0 = Date()
 let Wd = Double(W), Hd = Double(H)
-// velocity-tracking state (a fixed source point's output-space motion frame to frame)
-var prevO0x = Wd / 2, prevO0y = Hd / 2, prevScale = 1.0, havePrev = false
+// the previous frame's camera, for motion blur
+var prevS = 1.0, prevQx = Wd / 2, prevQy = Hd / 2, havePrev = false
 
 // Background canvas (WxH = source dims; canvas = source in v1). Static for the whole
 // render, so build once. A gradient is a CILinearGradient light-corner (top-left) ->
@@ -888,8 +882,48 @@ writerInput.requestMediaDataWhenReady(on: queue) {
         let hw = Wd / (2 * s), hh = Hd / (2 * s)
         let qx = cx, qy = cy
 
+        // How far the picture moved since the previous frame, at its fastest corner
+        // (output px). A source point p lands at (p - windowOrigin) * s, so between
+        // two cameras an output point o moves by (o - C)(1 - s0/s) - (q - q0) * s0.
+        var moved = 0.0
+        if havePrev {
+            for (ox, oy) in [(0.0, 0.0), (Wd, 0.0), (0.0, Hd), (Wd, Hd)] {
+                let dx = (ox - Wd / 2) * (1 - prevS / s) - (qx - prevQx) * prevS
+                let dy = (oy - Hd / 2) * (1 - prevS / s) - (qy - prevQy) * prevS
+                moved = max(moved, hypot(dx, dy))
+            }
+        }
+        let smear = moved * motionBlur
+        let frameRect = CGRect(x: 0, y: 0, width: Wd, height: Hd)
+
         var out = src
-        if s > 1.0001 {
+        if smear > 1.0 {
+            // Motion blur: average the frame over the camera positions between the
+            // previous frame's camera and this one, covering the last `motionBlur` of
+            // the interval. Each tap is a plain affine resample (it is being blurred
+            // anyway); about one tap per 2px of smear.
+            let taps = min(motionBlurMaxTaps, max(2, Int((smear / 2).rounded(.up))))
+            // Weight each tap by scaling its ALPHA only: CIColorMatrix works on
+            // unpremultiplied colour, so the premultiplied result is colour/taps and
+            // the taps add up to the plain average at full opacity.
+            let weight = CIVector(x: 0, y: 0, z: 0, w: 1 / CGFloat(taps))
+            let clamped = src.clampedToExtent()
+            var sum: CIImage? = nil
+            for i in 0..<taps {
+                let u = (Double(i) + 0.5) / Double(taps) * motionBlur   // 0 = now, 1 = previous frame
+                let ts = s + (prevS - s) * u
+                let tqx = qx + (prevQx - qx) * u, tqy = qy + (prevQy - qy) * u
+                let tap = clamped
+                    .transformed(by: CGAffineTransform(
+                        a: ts, b: 0, c: 0, d: ts,
+                        tx: -ts * (tqx - Wd / (2 * ts)), ty: -ts * (tqy - Hd / (2 * ts))))
+                    .cropped(to: frameRect)
+                    .applyingFilter("CIColorMatrix", parameters: ["inputAVector": weight])
+                sum = sum.map { tap.applyingFilter("CIAdditionCompositing",
+                    parameters: [kCIInputBackgroundImageKey: $0]) } ?? tap
+            }
+            out = sum!.cropped(to: frameRect)
+        } else if s > 1.0001 {
             // ONE lanczos resample: sub-pixel window crop (exact, CI is continuous)
             // -> translate window origin to 0 (exact) -> lanczos scale by s to WxH.
             let win = CGRect(x: qx - hw, y: qy - hh, width: Wd / s, height: Hd / s)
@@ -898,28 +932,7 @@ writerInput.requestMediaDataWhenReady(on: queue) {
                 by: CGAffineTransform(translationX: -win.origin.x, y: -win.origin.y))
             let scaled = atOrigin.applyingFilter("CILanczosScaleTransform",
                 parameters: [kCIInputScaleKey: s, kCIInputAspectRatioKey: 1.0])
-            out = scaled.cropped(to: CGRect(x: 0, y: 0, width: W, height: H))
-        }
-
-        // --- velocity for motion blur. The scale-ramp zoom moves content RADIALLY
-        // from the focus, so the driver is the corner radial speed from the scale
-        // rate, plus any off-center translational drift of the focus reference point.
-        let o0x = s * (Wd / 2 - qx) + Wd / 2
-        let o0y = s * (Hd / 2 - qy) + Hd / 2
-        let transSpeed = havePrev ? hypot(o0x - prevO0x, o0y - prevO0y) : 0.0
-        let radialEdge = havePrev ? 0.5 * hypot(Wd, Hd) * abs(s - prevScale) / s : 0.0
-        let blurVel = radialEdge + transSpeed
-        let blurAmount = (blurVel > blurEps) ? min(blurFloor + blurK * blurVel, blurMax) : 0.0
-
-        // Phase 5 motion blur: ONE radial CIZoomBlur layer from the focus (output
-        // center), amount = floor + k*|v|. floor absorbs slow-ramp shimmer; k*|v|
-        // absorbs fast-ramp strobe. Applied to the content plane (pre-overlay).
-        if blurOn && blurAmount > 0 {
-            out = out.clampedToExtent()
-                .applyingFilter("CIZoomBlur", parameters: [
-                    "inputCenter": CIVector(x: Wd / 2, y: Hd / 2),
-                    "inputAmount": blurAmount])
-                .cropped(to: CGRect(x: 0, y: 0, width: W, height: H))
+            out = scaled.cropped(to: frameRect)
         }
 
         // --- Drawn cursor: on the content plane AFTER the zoom and the motion blur (so it
@@ -936,7 +949,6 @@ writerInput.requestMediaDataWhenReady(on: queue) {
             let w = shape.image.extent.width * k, h = shape.image.extent.height * k
             // Image top-left sits hotX left of / hotY above the hotspot.
             let x0 = hx - shape.hotX * s, y0 = hy + shape.hotY * s - h
-            let frameRect = CGRect(x: 0, y: 0, width: Wd, height: Hd)
             if CGRect(x: x0, y: y0, width: w, height: h).intersects(frameRect) {
                 out = shape.image
                     .transformed(by: CGAffineTransform(a: k, b: 0, c: 0, d: k, tx: x0, ty: y0))
@@ -1091,11 +1103,7 @@ writerInput.requestMediaDataWhenReady(on: queue) {
                     parameters: [kCIInputScaleKey: sScale, kCIInputAspectRatioKey: sAspect])
                 .cropped(to: CGRect(x: 0, y: 0, width: outW, height: outH))
         }
-        if velLogPath != nil {
-            velLog += String(format: "%.4f,%.5f,%.5f,%.4f,%.4f,%.4f\n",
-                t, s, s - prevScale, blurVel, blurAmount, transSpeed)
-        }
-        prevO0x = o0x; prevO0y = o0y; prevScale = s; havePrev = true
+        prevS = s; prevQx = qx; prevQy = qy; havePrev = true
 
         guard let pool = adaptor.pixelBufferPool else { fail("no pixel buffer pool") }
         var outPB: CVPixelBuffer?
@@ -1121,7 +1129,6 @@ writerInput.requestMediaDataWhenReady(on: queue) {
 
 done.wait()
 if writer.status == .completed {
-    if let vp = velLogPath { try? velLog.write(toFile: vp, atomically: true, encoding: .utf8) }
     let dt = Date().timeIntervalSince(t0)
     // The inset note surfaces background/padding so a padded render is visible
     // without sampling pixels.
