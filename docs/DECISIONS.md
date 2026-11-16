@@ -4,6 +4,17 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-15 — Window-capture popups: test round 2 = menus PASS; building on the branch, drag to be judged in the installed app
+
+Second round of `spikes/window-app-capture/appcapture` (30 Hz follow, display switch), two runs by Keith on Chrome:
+
+- **Menus PASS (log and video agree).** The right-click context menu and the menu-bar menus are separate windows on layer 101 owned by Google Chrome, and all of them are in the video for as long as they were open. With round 1's print dialog, every kind of app-owned popup tried is captured.
+- **Other apps' windows over the recorded window are correctly left out.** A Terminal window and a Terminal menu overlapped the Chrome window during the run and do not appear, same as today's capture.
+- **Drag within one display: 43 moves, 0 errors at 30 Hz**, but that run's video was overwritten by the next run, so the picture during the drag was not inspected. In the run whose video was inspected (616 frames, full length, no empty band anywhere) the window did not move.
+- **Drag across displays: still untested** (0 display switches in both runs).
+
+Decision (mine, within the standing condition): the approach's core risk, whether popups are captured, is retired, so the engine change is being built on `window-capture-popups`. It is NOT merged until Keith has dragged a window during a real recording in the installed build, within a display and across displays, and the result is clean. If dragging cannot be made clean, that goes back to Keith before any merge.
+
 ## 2026-11-15 — Window-capture popups: throwaway test result = popups PASS, window drag FAILS as first written (not shipped; one more test round)
 
 Test: `spikes/window-app-capture/appcapture` (display filter narrowed to one app, cropped to the window, crop re-aimed when the window moves), run by Keith on Chrome, 1920x991 window on a 1x display, with a second display below it.
