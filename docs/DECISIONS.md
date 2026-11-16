@@ -4,6 +4,21 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-15 — Zoom polish plan APPROVED (docs/ZOOM-POLISH-PLAN.md) with five owner decisions
+
+Keith approved the plan. His calls:
+
+1. **Default auto-zoom depth drops to 1.5x (interior) and 1.7x (edge-clamped)**, from 1.7x / 2.0x. Manual slider still goes to 2.5x.
+2. **Motion blur is export-only.** The preview shows the exact camera path but not the smear. Accepted gap, recorded in `docs/DEBT.md`.
+3. **Zooms within about 2.5s of each other are joined by a pan** instead of zooming out and back in.
+4. **Window capture switches to "everything the app draws, cropped to the window" with no on/off switch — CONDITIONAL on the throwaway capture test passing.** If the test fails: stop and report, do not ship.
+5. **Pause-with-no-click zooms: DEFERRED.** Decide only after Keith has seen reasons on his own clips.
+
+Process additions from Keith:
+- Check whether the preview can play a glide smoothly (video clock granularity) BEFORE building the preview side; report early.
+- **Checkpoint after the export plays the new camera path:** stop, hand over a rendered export of the `harness/reference/zeigen.mp4` recording plus tracker numbers against the Cap table. Keith judges feel before the preview work starts.
+- In the blur strength comparison, call out how the baked-in cursor looks when it smears.
+
 ## 2026-11-15 — Zoom polish kickoff: reference is Cap; motion blur reopened; cursor-follow stays closed; pan-between-zooms in scope; no typing signal
 
 Owner decisions (Keith) at the start of the zoom-polish / window-capture assignment (`docs/ZOOM-POLISH-AND-CAPTURE-BRIEF.md`, plan in `docs/ZOOM-POLISH-PLAN.md`):
