@@ -115,6 +115,22 @@ pub struct SidecarState {
     // is not in the video. Declared last.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<CursorStyle>,
+    // Scene segments (TIMELINE-PLAN step 5): stretches where the layout changes
+    // (no bubble, split, full webcam, full screen). Empty = the default layout
+    // throughout and serializes to ABSENT, like zoom and redactions. Only
+    // meaningful with a webcam. Declared last.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scenes: Vec<SceneSeg>,
+    // Bubble size while the screen is zoomed, 1.0 = unchanged. None = 1.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bubble_zoom_scale: Option<f64>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct SceneSeg {
+    pub start: f64,
+    pub end: f64,
+    pub layout: crate::scene::Layout,
 }
 
 // How the export draws the cursor. `size` multiplies the cursor's natural size.
@@ -1026,16 +1042,21 @@ fn v3_render(
     // None: no file, no env. A zero duration would yield a one-sample path, so the
     // duration is probed strictly here rather than defaulted.
     let segs = zoom_keyframes_to_segments(&sidecar.zoom);
-    let camera_json_path = if segs.is_empty() {
+    let camera = if segs.is_empty() {
         None
     } else {
         let zooms = camera_zooms(&sidecar.zoom);
         let dur = probe_duration_seconds(screen_path)?;
-        let path = crate::camera::path(&zooms, &camera_cursor(screen_path)?, w as f64, h as f64, dur);
-        let json = serde_json::to_string(&path).map_err(|e| format!("camera json: {e}"))?;
-        let p = temp_dir.join("camera.json");
-        std::fs::write(&p, json).map_err(|e| format!("write camera.json: {e}"))?;
-        Some(p)
+        Some(crate::camera::path(&zooms, &camera_cursor(screen_path)?, w as f64, h as f64, dur))
+    };
+    let camera_json_path = match &camera {
+        None => None,
+        Some(path) => {
+            let json = serde_json::to_string(path).map_err(|e| format!("camera json: {e}"))?;
+            let p = temp_dir.join("camera.json");
+            std::fs::write(&p, json).map_err(|e| format!("write camera.json: {e}"))?;
+            Some(p)
+        }
     };
 
     // Cursor -> CURSOR_PATH JSON: the smoothed path (cursor.rs) plus the shapes,
@@ -1107,6 +1128,19 @@ fn v3_render(
         sidecar.source_kind.as_deref() == Some("window"),
         cursor_json_path.as_deref(),
     );
+    // Scene -> SCENE_PATH JSON: the sampled layout path (scene.rs), the ONE
+    // definition of where the screen and the webcam sit. Only with a webcam, and
+    // only when there is a scene or a bubble shrink; otherwise no file, no env, and
+    // the compositor draws the bubble the way it always has.
+    if let Some(b) = &bubble {
+        let dur = probe_duration_seconds(screen_path)?;
+        if let Some(path) = scene_path_for(sidecar, w, h, b.diameter, b.zone, camera.as_ref(), dur) {
+            let json = serde_json::to_string(&path).map_err(|e| format!("scene json: {e}"))?;
+            let p = temp_dir.join("scene.json");
+            std::fs::write(&p, json).map_err(|e| format!("write scene.json: {e}"))?;
+            cmd.env("SCENE_PATH", p);
+        }
+    }
     let comp = cmd
         .output()
         .map_err(|e| format!("spawn cicompositor: {e}"))?;
@@ -1785,6 +1819,87 @@ pub fn camera_path(
     Ok(crate::camera::path(&camera_zooms(&zoom), &camera_cursor(&screen)?, width, height, duration))
 }
 
+// The bubble size preset every save uses (save_recording); the preview's layout
+// path must resolve the same diameter.
+const PREVIEW_WEBCAM_SIZE: crate::composite::WebcamSize = crate::composite::WebcamSize::Medium;
+
+// The default layout in output-picture fractions, worked out from the same numbers
+// the compositor places the recording and the bubble with (FRAME_PADDING inset,
+// BUBBLE_DIAMETER / BUBBLE_ZONE / BUBBLE_PADDING), then the layout path. The ONE
+// builder for both the export (v3_render) and the preview (scene_path).
+fn scene_path_for(
+    sidecar: &SidecarState,
+    w: u32,
+    h: u32,
+    diameter: u32,
+    zone: crate::composite::BubbleZone,
+    camera: Option<&crate::camera::CameraPath>,
+    duration: f64,
+) -> Option<crate::scene::ScenePath> {
+    use crate::scene::{Geometry, Rect, Scene};
+    let (wd, hd, d) = (w as f64, h as f64, diameter as f64);
+    let k = if has_background(sidecar) { 1.0 - sidecar.frame.map_or(0.0, |f| f.padding) } else { 1.0 };
+    let screen = Rect { x: (1.0 - k) / 2.0, y: (1.0 - k) / 2.0, w: k, h: k };
+    // Bubble top-left in recording px, as cicompositor places it.
+    let p = crate::composite::resolve_padding_px(w) as f64;
+    let code = zone.code().as_bytes();
+    let (ax, bx) = match code[1] {
+        b'l' => (0.0, p),
+        b'c' => (0.5, (wd - d) / 2.0),
+        _ => (1.0, wd - d - p),
+    };
+    let (ay, by) = match code[0] {
+        b't' => (0.0, p),
+        b'c' => (0.5, (hd - d) / 2.0),
+        _ => (1.0, hd - d - p),
+    };
+    let geometry = Geometry {
+        aspect: wd / hd,
+        screen,
+        bubble: Rect { x: screen.x + bx / wd * k, y: screen.y + by / hd * k, w: d / wd * k, h: d / hd * k },
+        bubble_radius: sidecar.bubble_roundness.map_or(0.5, |r| r.clamp(0.0, 1.0) / 2.0),
+        anchor: (ax, ay),
+        shrink: sidecar.bubble_zoom_scale.unwrap_or(1.0).clamp(0.1, 1.0),
+    };
+    let scenes: Vec<Scene> =
+        sidecar.scenes.iter().map(|s| Scene { start: s.start, end: s.end, layout: s.layout }).collect();
+    crate::scene::path(&scenes, camera, &geometry, duration)
+}
+
+// The preview's layout path: the same path the export writes to scene.json. None
+// for a recording with no webcam, or with nothing to lay out differently.
+#[tauri::command]
+pub fn scene_path(
+    source_path: String,
+    sidecar: SidecarState,
+    width: u32,
+    height: u32,
+    duration: f64,
+) -> Result<Option<crate::scene::ScenePath>, String> {
+    let (screen, webcams) = export_inputs_from_source(Path::new(&source_path));
+    if webcams.is_empty() {
+        return Ok(None);
+    }
+    let diameter = crate::composite::resolve_diameter_px(
+        &sidecar.bubble_position_log,
+        PREVIEW_WEBCAM_SIZE,
+        sidecar.bubble_scale.unwrap_or(1.0),
+        width,
+    );
+    let zone = crate::composite::resolve_zone(sidecar.bubble_zone, &sidecar.bubble_position_log);
+    let camera = (!zoom_keyframes_to_segments(&sidecar.zoom).is_empty()).then(|| {
+        Ok::<_, String>(crate::camera::path(
+            &camera_zooms(&sidecar.zoom),
+            &camera_cursor(&screen)?,
+            width as f64,
+            height as f64,
+            duration,
+        ))
+    });
+    let camera = camera.transpose()?;
+    Ok(scene_path_for(&sidecar, width, height, diameter, zone, camera.as_ref(), duration))
+}
+
 // The cursor positions the camera re-aims on: the recording's raw cursor log,
 // whether or not the cursor is baked into the video. No log = no re-aiming. The
 // ONE loader for both the export and the preview.
@@ -2155,7 +2270,7 @@ fn save_recording_impl(
     // position is no longer a corner here: composite resolves the zone from
     // sidecar.bubble_zone (V2 Step 2).
     let (screen_path, segments) = export_inputs_from_source(source);
-    let webcam_size = crate::composite::WebcamSize::Medium;
+    let webcam_size = PREVIEW_WEBCAM_SIZE;
 
     let (output, route_note) = match format.as_str() {
         "mp4" => {
@@ -2316,6 +2431,8 @@ mod tests {
             background: None,
             source_kind: None,
             cursor: None,
+            scenes: vec![],
+            bubble_zoom_scale: None,
         }
     }
 
@@ -3040,6 +3157,31 @@ WATERMARK_SCALE_FRAC=0.08";
         // No effective zoom -> no segments (stays on the copy path).
         assert!(zoom_keyframes_to_segments(&[]).is_empty());
         assert!(zoom_keyframes_to_segments(&[kf(0.0, 1.0, 0.0), kf(1.0, 1.0, 0.0)]).is_empty());
+    }
+
+    // The layout path's default layout must be where cicompositor already draws
+    // the recording and the bubble (main.swift: inset k = 1 - padding, centred;
+    // bubble at W - d - p from the left, H - d - p from the top for "br").
+    #[test]
+    fn scene_default_layout_matches_compositor_placement() {
+        use crate::composite::BubbleZone;
+        let mut sc = SidecarState { bubble_zoom_scale: Some(0.7), ..Default::default() };
+        let p = crate::composite::resolve_padding_px(1920) as f64;
+        let path = scene_path_for(&sc, 1920, 1080, 240, BubbleZone::BottomRight, None, 1.0).unwrap();
+        let s = path.samples[0];
+        let want = [0.0, 0.0, 1.0, 1.0, 1.0, (1920.0 - 240.0 - p) / 1920.0, (1080.0 - 240.0 - p) / 1080.0,
+            240.0 / 1920.0, 240.0 / 1080.0, 0.5, 1.0];
+        for (got, want) in s.iter().zip(want) {
+            assert!((*got as f64 - want).abs() < 1e-6, "{s:?}");
+        }
+        // With Frame padding the recording and the bubble inset together.
+        sc.frame = Some(FrameStyle { padding: 0.1, ..Default::default() });
+        sc.background = Some(Background::Solid { hex: "#101010".into() });
+        let s = scene_path_for(&sc, 1920, 1080, 240, BubbleZone::TopLeft, None, 1.0).unwrap().samples[0];
+        assert!((s[0] - 0.05).abs() < 1e-6 && (s[2] - 0.9).abs() < 1e-6);
+        assert!((s[5] as f64 - (0.05 + p / 1920.0 * 0.9)).abs() < 1e-6 && (s[7] as f64 - 240.0 / 1920.0 * 0.9).abs() < 1e-6);
+        // Nothing to lay out differently: no path, so the export is unchanged.
+        assert!(scene_path_for(&SidecarState::default(), 1920, 1080, 240, BubbleZone::BottomRight, None, 1.0).is_none());
     }
 
     // The preview's camera_path command must produce exactly the path the export

@@ -817,6 +817,7 @@ pub fn run() {
             edit::write_sidecar,
             edit::delete_sidecar,
             edit::camera_path,
+            edit::scene_path,
             edit::cursor_preview,
             edit::save_recording,
             zoom::suggest_zooms,

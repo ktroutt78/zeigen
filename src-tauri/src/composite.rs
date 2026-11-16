@@ -102,7 +102,7 @@ const BUBBLE_REF_WIDTH: f64 = 1512.0;
 
 // Resolve a logged diameter fraction (or the WebcamSize fallback) to pixels for a
 // given capture frame width. Shared by the V2 and V3 bubble builders.
-fn resolve_diameter_px(
+pub(crate) fn resolve_diameter_px(
     bubble_position_log: &[BubblePositionEntry],
     size: WebcamSize,
     scale: f64,
