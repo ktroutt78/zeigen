@@ -99,11 +99,11 @@ const POST_CLICK_WATCH_S: f64 = 0.6;
 const MERGE_GAP_S: f64 = 1.2;
 const CENTER_MERGE_PX: f64 = 300.0;
 
-// C.1 scroll: reading — hold the current zoom, never pan with the scroll. A
-// scroll run near a segment's end extends the hold; a scroll over a clickless
-// dwell vetoes it (the wide view is the view the reader is using).
-const SCROLL_NEAR_S: f64 = 1.2;
-const SCROLL_TAIL_S: f64 = 1.5;
+// Scroll (rule 3 from Keith's marked clips, 2026-11-15; reverses the earlier
+// "scrolling means reading, hold the zoom"). The page is moving, so the wide
+// view is the one the viewer needs: a zoom is back out by the time a scroll
+// inside it starts and is never held open by one. A scroll over a clickless
+// dwell still vetoes it.
 const SCROLL_VETO_PAD_S: f64 = 0.5;
 
 // A left_down/left_up pair whose endpoints are more than DRAG_MIN_PX apart is
@@ -606,19 +606,11 @@ pub fn detect(track: &CursorTrack) -> Vec<ZoomKeyframe> {
         // else: drop c (weaker of a conflicting pair).
     }
 
-    // Scroll holds: a scroll run at a segment's edge means reading — keep the
-    // zoom up through it (plus a tail), but never into the next segment's calm
-    // gap. Also the final guarantor of the MERGE_GAP between neighbors.
+    // Scroll releases: a segment ends at the first scroll inside it. Also the
+    // final guarantor of the MERGE_GAP between neighbors.
     for k in 0..merged.len() {
-        loop {
-            let end = merged[k].end;
-            let hit = scrolls
-                .iter()
-                .find(|s| s.t >= end - 0.2 && s.t <= end + SCROLL_NEAR_S);
-            match hit {
-                Some(s) => merged[k].end = end.max(s.t + SCROLL_TAIL_S),
-                None => break,
-            }
+        if let Some(s) = scrolls.iter().find(|s| s.t > merged[k].start && s.t < merged[k].end) {
+            merged[k].end = s.t;
         }
         merged[k].end = merged[k].end.min(track_end);
         if k + 1 < merged.len() {
@@ -882,7 +874,7 @@ mod tests {
         // fixtures (091633 @1470, 220817 @1512) are UNCHANGED by the scaling.
         assert_eq!(
             got,
-            "17.81-20.92s @(947,669) 1.5x; 29.77-42.17s @(565,318) 1.7x; 47.67-51.36s @(664,590) 1.4x; 61.52-65.49s @(684,604) 1.4x; 69.23-75.40s @(565,439) 1.7x; 80.34-83.64s @(565,413) 1.7x; 85.42-88.12s @(565,528) 1.7x; 89.32-93.52s @(952,686) 1.5x; 108.59-113.74s @(565,644) 1.7x; 117.85-120.96s @(1146,662) 1.5x; 122.18-126.95s @(662,360) 1.5x; 135.76-141.47s @(985,376) 1.5x; 143.91-148.76s @(1355,430) 1.7x; 149.96-152.22s @(565,530) 1.7x; 153.68-157.44s @(643,534) 1.5x"
+            "17.81-20.92s @(947,669) 1.5x; 29.77-42.17s @(565,318) 1.7x; 47.67-51.36s @(664,590) 1.4x; 61.52-65.49s @(684,604) 1.4x; 69.23-72.26s @(565,439) 1.7x; 80.34-83.64s @(565,413) 1.7x; 85.42-88.12s @(565,528) 1.7x; 89.32-93.52s @(952,686) 1.5x; 108.59-113.74s @(565,644) 1.7x; 117.85-120.96s @(1146,662) 1.5x; 122.18-126.95s @(662,360) 1.5x; 135.76-141.47s @(985,376) 1.5x; 143.91-148.57s @(1355,430) 1.7x; 149.96-152.22s @(565,530) 1.7x; 153.68-157.44s @(643,534) 1.5x"
         );
     }
 
@@ -914,7 +906,7 @@ mod tests {
         }
         assert_eq!(
             got,
-            "11.68-14.12s @(731,622) 1.5x; 15.36-20.65s @(445,303) 1.7x; 23.72-27.25s @(504,327) 1.5x; 30.41-33.85s @(445,477) 1.7x; 36.00-39.36s @(506,554) 1.5x; 40.56-43.43s @(797,693) 1.7x; 47.35-49.40s @(1067,662) 1.7x; 51.37-55.20s @(1067,693) 1.7x; 56.94-62.02s @(445,619) 1.7x; 67.56-72.29s @(489,542) 1.5x; 90.81-99.60s @(445,289) 1.7x"
+            "11.68-14.12s @(731,622) 1.5x; 15.36-20.65s @(445,303) 1.7x; 23.72-27.25s @(504,327) 1.5x; 30.41-33.85s @(445,477) 1.7x; 36.00-39.36s @(506,554) 1.5x; 40.56-43.43s @(797,693) 1.7x; 47.35-49.40s @(1067,662) 1.7x; 51.37-55.20s @(1067,693) 1.7x; 56.94-62.02s @(445,619) 1.7x; 90.81-99.60s @(445,289) 1.7x"
         );
     }
 
@@ -1103,28 +1095,19 @@ mod tests {
     }
 
     #[test]
-    fn scroll_extends_hold() {
-        // Click + local follow-through (so rule 1 holds it, not vetoes it),
-        // then a scroll run at the edge that should extend the hold.
-        let with_scroll = TrackBuilder::new()
-            .travel(700.0, 480.0, 1.0)
-            .click()
-            .travel(780.0, 520.0, 1.2)
-            .scroll_run(3.0)
-            .park(4.0)
-            .build();
-        let without = TrackBuilder::new()
-            .travel(700.0, 480.0, 1.0)
-            .click()
-            .travel(780.0, 520.0, 1.2)
-            .park(3.0)
-            .park(4.0)
-            .build();
-        let end_with = segments(&detect(&with_scroll))[0].1;
-        let end_without = segments(&detect(&without))[0].1;
+    fn scroll_releases_hold() {
+        // Click + local follow-through holds a zoom; a scroll starting inside
+        // it ends it there, and a scroll after it never extends it.
+        let click_then = |tb: TrackBuilder| tb.travel(700.0, 480.0, 1.0).click().travel(780.0, 520.0, 2.5);
+        let plain = click_then(TrackBuilder::new()).park(7.0).build();
+        let scrolled = click_then(TrackBuilder::new()).scroll_run(3.0).park(4.0).build();
+        let scroll_start = scrolled.events.iter().find(|e| e.kind == "scroll").unwrap().t;
+        let end_plain = segments(&detect(&plain))[0].1;
+        let end_scrolled = segments(&detect(&scrolled))[0].1;
+        assert!(end_plain > scroll_start, "{end_plain:.2}");
         assert!(
-            end_with > end_without + 1.0,
-            "scroll run must hold the zoom: {end_with:.2} vs {end_without:.2}"
+            end_scrolled <= scroll_start + 0.01,
+            "a scroll must release the zoom: {end_scrolled:.2}"
         );
     }
 
@@ -1422,12 +1405,13 @@ mod tests {
             // unwanted gone 0/2, too long fixed 0/2, new 0.
             // Rule 1 (resting cursor): unwanted 0 -> 1, too long 0 -> 1.
             // Rule 2 (stop click): unwanted 1 -> 2.
+            // Rule 3 (scroll releases): too long 1 -> 2.
             Score {
                 right_kept: 2,
                 right_total: 2,
                 unwanted_gone: 2,
                 unwanted_total: 2,
-                too_long_fixed: 1,
+                too_long_fixed: 2,
                 too_long_total: 2,
                 new_unjudged: 0,
             }
