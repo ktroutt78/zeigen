@@ -4,6 +4,19 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-15 — Window-capture popups: throwaway test result = popups PASS, window drag FAILS as first written (not shipped; one more test round)
+
+Test: `spikes/window-app-capture/appcapture` (display filter narrowed to one app, cropped to the window, crop re-aimed when the window moves), run by Keith on Chrome, 1920x991 window on a 1x display, with a second display below it.
+
+- **PASS: a separate window owned by the app is captured.** Chrome's print dialog is its own window (1309x864, layer 0, owner Google Chrome) and is in the video for its whole life. A Chrome status bubble (198x22) likewise.
+- **Proves nothing: the page's dropdowns.** On that page they are part of the web page, not windows.
+- **NOT TESTED: menus.** No menu-layer window appears in the test's log, so no right-click or native menu was opened. Whether macOS menus belong to the app's process (and so are included) is still unknown.
+- **FAIL as written: dragging the window.** With a 10 Hz poll the crop lagged: 11, 51 then 67 px of empty black band at the top over three consecutive frames. Then the window was dragged toward the display below and the video simply ENDED (17.2s of a 20s run, no error reported): the filter is tied to one display, and the crop left it. Today's single-window capture follows a dragged window perfectly, including across displays, so this would be a regression.
+- Corners: same black gaps at the window's rounded corners as today's capture, so the existing export handling applies.
+- Two earlier runs crashed on an uncaught error before recording (most likely Screen Recording permission not yet active in that terminal; not confirmed).
+
+Per the standing condition ("if it fails, stop and bring me what you found") nothing is built on `window-capture-popups`. The test now follows at 30 Hz and switches the filter to the new display when the window crosses over; that is unproven until Keith reruns it.
+
 ## 2026-11-15 — zoom-polish: owner test pass in the installed build, ALL GOOD; merged to main
 
 Keith's test pass on the signed install of branch `zoom-polish`, all fine:
