@@ -36,8 +36,10 @@ import Foundation
 // Coordinates are stored in video pixel space: display/area capture maps
 // through the fixed origin offset + points-to-pixels scale the session
 // computes at init; window capture maps through the window's current frame
-// (cached at 10 Hz — CGWindowListCopyWindowInfo is ~1ms, too costly per
-// 120 Hz tick) into the pixel size fixed at session start. If the window is
+// (cached at 30 Hz — CGWindowListCopyWindowInfo is ~1ms, too costly per
+// 120 Hz tick; 30 Hz matches the rate RecordingSession re-aims the video's
+// crop at while the window is dragged, so the logged cursor stays aligned
+// with the picture) into the pixel size fixed at session start. If the window is
 // resized mid-record SCK letterboxes the content, and this proportional
 // mapping tracks that only approximately — same limitation as the bubble
 // keyframe math.
@@ -218,7 +220,7 @@ final class CursorTracker: @unchecked Sendable {
         }
 
         tick += 1
-        if case .window(let wid, _, _) = mapping, tick % 12 == 1 {
+        if case .window(let wid, _, _) = mapping, tick % 4 == 1 {
             let f = Self.queryWindowFrame(wid)
             if let f { lock.withLock { cachedWindowFrame = f } }
         }
@@ -294,7 +296,7 @@ final class CursorTracker: @unchecked Sendable {
         }
     }
 
-    private static func queryWindowFrame(_ windowID: UInt32) -> CGRect? {
+    static func queryWindowFrame(_ windowID: UInt32) -> CGRect? {
         guard let raw = CGWindowListCopyWindowInfo([.optionIncludingWindow], windowID) as? [[String: Any]],
               let entry = raw.first,
               let boundsDict = entry[kCGWindowBounds as String] as? NSDictionary,
