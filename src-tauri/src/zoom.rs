@@ -56,12 +56,17 @@ const REF_VIDEO_WIDTH: f64 = 1512.0;
 const DWELL_RADIUS_PX: f64 = 150.0;
 const DWELL_MIN_S: f64 = 0.8;
 
-// Parked-cursor guard. A clickless dwell whose bounding box is essentially a
-// point is an abandoned mouse, not attention — no zoom. And after the last
-// sign of life (click or >JITTER_STEP_PX movement) a zoom holds only
-// PARK_TAIL_S before letting go, so a click followed by minutes of parked
-// cursor doesn't pin the zoom forever.
-const PARKED_BBOX_PX: f64 = 8.0;
+// Resting-cursor guard (rule 1 from Keith's marked clips, 2026-11-15). A
+// clickless dwell is attention only while the cursor is travelling along
+// something (reading a row). A cursor that arrived, sat, and left is a resting
+// hand: no zoom, and nothing for a neighbouring zoom to bridge into. Measured
+// as the share of 0.1s slices, between the dwell's first and last movement, in
+// which the cursor travelled more than JITTER_STEP_PX. On the marked clips the two unwanted pauses moved for
+// 9% of their length and the wanted reading pause for 65 to 89%.
+// And after the last sign of life (click or >JITTER_STEP_PX movement) a zoom
+// holds only PARK_TAIL_S before letting go, so a click followed by minutes of
+// parked cursor doesn't pin the zoom forever.
+const READING_MOVE_FRAC: f64 = 0.5;
 const JITTER_STEP_PX: f64 = 5.0;
 const PARK_TAIL_S: f64 = 2.0;
 
@@ -320,7 +325,6 @@ pub fn detect(track: &CursorTrack) -> Vec<ZoomKeyframe> {
     let res_scale = w / REF_VIDEO_WIDTH;
     let dwell_radius = DWELL_RADIUS_PX * res_scale;
     let drag_min = DRAG_MIN_PX * res_scale;
-    let parked_bbox = PARKED_BBOX_PX * res_scale;
     let post_click_still_px = POST_CLICK_STILL_PX * res_scale;
     let jitter_step = JITTER_STEP_PX * res_scale;
     let center_merge = CENTER_MERGE_PX * res_scale;
@@ -376,7 +380,7 @@ pub fn detect(track: &CursorTrack) -> Vec<ZoomKeyframe> {
     // under DWELL_RADIUS_PX. Travel never dwells (bbox overflows immediately),
     // so travel separates candidates by construction. A run overlapping a
     // gesture spawns no dwell (the gesture provides one). A clickless dwell is
-    // vetoed by an overlapping scroll (reading) or rejected as parked.
+    // vetoed by an overlapping scroll (reading) or rejected as resting.
     let mut i = 0;
     while i < samples.len() {
         let (mut minx, mut maxx) = (samples[i].x, samples[i].x);
@@ -403,11 +407,35 @@ pub fn detect(track: &CursorTrack) -> Vec<ZoomKeyframe> {
                 && scrolls.iter().any(|s| {
                     s.t >= t0 - SCROLL_VETO_PAD_S && s.t <= t1 + SCROLL_VETO_PAD_S
                 });
-            let parked =
-                in_dwell.is_empty() && dist(minx, miny, maxx, maxy) < parked_bbox;
+            let resting = in_dwell.is_empty() && {
+                let run = &samples[i..=j];
+                let mut slices: Vec<bool> = Vec::new();
+                let mut a = 0;
+                while a + 1 < run.len() {
+                    let mut b = a;
+                    let mut travel = 0.0;
+                    while b + 1 < run.len() && run[b + 1].t - run[a].t <= 0.1 {
+                        travel += dist(run[b].x, run[b].y, run[b + 1].x, run[b + 1].y);
+                        b += 1;
+                    }
+                    slices.push(travel > jitter_step);
+                    a = b.max(a + 1);
+                }
+                // Judged between the first and last moving slice, so a hand
+                // that reads and then lets go of the mouse still counts as
+                // reading (the hold is trimmed to the activity below).
+                match (slices.iter().position(|m| *m), slices.iter().rposition(|m| *m)) {
+                    (Some(first), Some(last)) => {
+                        let active = &slices[first..=last];
+                        let moving = active.iter().filter(|m| **m).count();
+                        (moving as f64) < READING_MOVE_FRAC * active.len() as f64
+                    }
+                    _ => true,
+                }
+            };
             // Rule 1: a clicked dwell whose whole post-click stretch stays
             // still is watching a consequence elsewhere — veto to wide. Third
-            // sibling of the parked/scroll vetoes; scoped to clicked dwells so
+            // sibling of the resting/scroll vetoes; scoped to clicked dwells so
             // clickless reading-in-place is untouched.
             let post_click_still = match in_dwell
                 .iter()
@@ -428,7 +456,7 @@ pub fn detect(track: &CursorTrack) -> Vec<ZoomKeyframe> {
                 }
                 _ => false,
             };
-            if !parked && !scroll_vetoed && !post_click_still {
+            if !resting && !scroll_vetoed && !post_click_still {
                 // Signs of life inside the dwell: clicks, or movement beyond
                 // jitter from the last resting position. The zoom window hugs
                 // [first, last] activity — a cursor parked for a stretch
@@ -841,7 +869,7 @@ mod tests {
         // fixtures (091633 @1470, 220817 @1512) are UNCHANGED by the scaling.
         assert_eq!(
             got,
-            "7.86-10.62s @(565,318) 1.7x; 14.42-20.92s @(869,638) 1.5x; 22.60-26.08s @(565,318) 1.7x; 29.77-42.17s @(565,318) 1.7x; 47.67-51.36s @(664,590) 1.4x; 61.52-65.49s @(684,604) 1.4x; 69.23-75.40s @(565,439) 1.7x; 80.34-83.64s @(565,413) 1.7x; 85.42-88.12s @(565,528) 1.7x; 89.32-93.52s @(952,686) 1.5x; 95.40-98.12s @(565,750) 1.7x; 108.59-113.74s @(565,644) 1.7x; 117.85-120.96s @(1146,662) 1.5x; 122.18-126.95s @(662,360) 1.5x; 135.76-141.47s @(985,376) 1.5x; 143.91-148.76s @(1355,430) 1.7x; 149.96-152.22s @(565,530) 1.7x; 153.68-157.44s @(643,534) 1.5x"
+            "17.81-20.92s @(947,669) 1.5x; 29.77-42.17s @(565,318) 1.7x; 47.67-51.36s @(664,590) 1.4x; 61.52-65.49s @(684,604) 1.4x; 69.23-75.40s @(565,439) 1.7x; 80.34-83.64s @(565,413) 1.7x; 85.42-88.12s @(565,528) 1.7x; 89.32-93.52s @(952,686) 1.5x; 95.40-98.12s @(565,750) 1.7x; 108.59-113.74s @(565,644) 1.7x; 117.85-120.96s @(1146,662) 1.5x; 122.18-126.95s @(662,360) 1.5x; 135.76-141.47s @(985,376) 1.5x; 143.91-148.76s @(1355,430) 1.7x; 149.96-152.22s @(565,530) 1.7x; 153.68-157.44s @(643,534) 1.5x"
         );
     }
 
@@ -873,7 +901,7 @@ mod tests {
         }
         assert_eq!(
             got,
-            "6.72-11.26s @(445,289) 1.7x; 14.39-20.65s @(445,303) 1.7x; 23.72-27.25s @(504,327) 1.5x; 30.41-33.85s @(445,477) 1.7x; 36.00-39.36s @(506,554) 1.5x; 40.56-43.43s @(797,693) 1.7x; 47.35-49.40s @(1067,662) 1.7x; 51.37-55.20s @(1067,693) 1.7x; 56.94-62.02s @(445,619) 1.7x; 67.56-72.29s @(489,542) 1.5x; 90.81-99.60s @(445,289) 1.7x; 103.11-105.30s @(1067,693) 1.7x"
+            "6.72-10.25s @(445,289) 1.7x; 11.68-14.12s @(731,622) 1.5x; 15.36-20.65s @(445,303) 1.7x; 23.72-27.25s @(504,327) 1.5x; 30.41-33.85s @(445,477) 1.7x; 36.00-39.36s @(506,554) 1.5x; 40.56-43.43s @(797,693) 1.7x; 47.35-49.40s @(1067,662) 1.7x; 51.37-55.20s @(1067,693) 1.7x; 56.94-62.02s @(445,619) 1.7x; 67.56-72.29s @(489,542) 1.5x; 90.81-99.60s @(445,289) 1.7x; 103.11-105.30s @(1067,693) 1.7x"
         );
     }
 
@@ -897,6 +925,20 @@ mod tests {
     fn parked_cursor_dwell_is_rejected() {
         let track = TrackBuilder::new().park(10.0).build();
         assert_eq!(detect(&track).len(), 0, "abandoned mouse must not zoom");
+    }
+
+    #[test]
+    fn resting_cursor_without_click_does_not_zoom() {
+        // Keith's clip 2: the cursor arrives, sits still for seconds, leaves.
+        // Arriving and leaving are not attention.
+        let track = TrackBuilder::new()
+            .park(2.0)
+            .travel(600.0, 300.0, 0.6)
+            .park(3.2)
+            .travel(1300.0, 800.0, 0.6)
+            .park(1.0)
+            .build();
+        assert_eq!(detect(&track).len(), 0, "a resting cursor must not zoom");
     }
 
     #[test]
@@ -1172,13 +1214,11 @@ mod tests {
         assert_eq!(
             got,
             [
-                "pause, no click",
                 "pause + 2 clicks",
                 "pause, no click",
                 "pause + 1 click",
                 "drag",
                 "drag",
-                "pause, no click",
                 "pause + 3 clicks",
                 "drag",
                 "drag",
@@ -1337,13 +1377,15 @@ mod tests {
     fn marked_clips_score() {
         assert_eq!(
             score_marked_clips(),
-            // Baseline 2026-11-15, detector untouched since Keith marked.
+            // Baseline 2026-11-15 (detector as Keith marked it): right 2/2,
+            // unwanted gone 0/2, too long fixed 0/2, new 0.
+            // Rule 1 (resting cursor): unwanted 0 -> 1, too long 0 -> 1.
             Score {
                 right_kept: 2,
                 right_total: 2,
-                unwanted_gone: 0,
+                unwanted_gone: 1,
                 unwanted_total: 2,
-                too_long_fixed: 0,
+                too_long_fixed: 1,
                 too_long_total: 2,
                 new_unjudged: 0,
             }

@@ -17,9 +17,10 @@
       "kind": "held_too_long",
       "note": "Right moment, held too long. Keith could not give a wanted end time: he made a note, resized and moved it, then closed it (last click, 29.9s) and was doing nothing after that, yet the zoom held to 38.3s. Log: cursor rested without clicks 32.6s to 38.2s inside the zoomed area. Ending near 30 to 32s counts as fixed.",
       "wanted_end_range": [
-        30.0,
+        29.0,
         32.0
-      ]
+      ],
+      "wanted_end_range_source": "Fable's reading, not a number Keith gave. First written as 30 to 32; widened to 29 when rule 1 ended the zoom at 29.5s, because the close click logged at 29.9s is up to 0.5s late (old half-second click timing), so 29.5s is the moment he closed the note."
     }
   ],
   "missing": [],
