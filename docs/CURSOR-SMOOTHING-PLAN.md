@@ -49,8 +49,9 @@ All three go through one function (`run_edit_pipeline`, `edit.rs`), and that fun
 **LinkedIn and R2 link do not exist in the code.** LinkedIn export was removed in July and hosted sharing was dropped in Phase 6; only CLAUDE.md's Scope line still mentions them. If either comes back it must go through the same function and inherits the rule.
 
 How "silently" is ruled out:
-- Each recording is marked at stop as "cursor not in the video". The export reads that mark, not the presence of the cursor log.
-- If a marked recording's cursor log is missing or unreadable, the export fails with a clear error instead of producing a cursorless file.
+- The cursor log itself carries the mark "cursor not in the video", written by the engine that hid the cursor. A recording with no log at all is an old-style recording with the cursor baked in.
+- The one way to end up with a hidden cursor and no log is the engine failing to write the log at stop. That becomes a loud recording error, not a quiet warning.
+- If a marked log is unreadable at export, the export fails with a clear error instead of producing a cursorless file.
 - One automated test per path (MP4, GIF, clipboard): export a marked recording with no other edits and check that cursor pixels are in the output where the log says the cursor was.
 
 ## Cursor style
