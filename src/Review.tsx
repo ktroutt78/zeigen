@@ -6,6 +6,7 @@ import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { Icon, I, P, RailIcon } from "./components/icons";
 import Timeline from "./timeline/Timeline";
+import { placeSegment } from "./timeline/place";
 import {
   sourceRectToOutputRect,
   redactCell,
@@ -226,6 +227,9 @@ export type ZoomEditor = {
   // Add a zoom starting at time t (clicked blank track); t inside an existing
   // zoom selects it instead. Add + select, never deselect-first.
   addAt: (t: number) => void;
+  // The span addAt(t) would give a new zoom, or null where none fits (the
+  // timeline's hover ghost).
+  place: (t: number) => { start: number; end: number } | null;
   // Neighbor-bounded window per segment so zooms can't overlap.
   bounds: (i: number) => { min: number; max: number };
   canAdd: boolean;
@@ -1174,6 +1178,16 @@ export default function Review() {
     setZoomSelectedIndex(null);
   }, []);
 
+  // Where a zoom added at `t` would go (placeSegment): the hover ghost and
+  // addZoomAt both read this, so the ghost is exactly what a click adds.
+  const placeZoom = useCallback(
+    (t: number) =>
+      duration == null
+        ? null
+        : placeSegment(t, zoomSegments, duration, ZOOM_DEFAULT_DURATION, ZOOM_MIN_DURATION),
+    [duration, zoomSegments],
+  );
+
   // Add a zoom starting at time `t` (clicked blank track). Fits it into the
   // free window around t — zoom segments never overlap. t already inside a
   // zoom selects that zoom instead of adding (so clicking a zoom's band
@@ -1181,25 +1195,17 @@ export default function Review() {
   const addZoomAt = useCallback(
     (t: number) => {
       if (duration == null || !videoDims) return;
-      let lo = 0;
-      let hi = duration;
-      for (let i = 0; i < zoomSegments.length; i++) {
-        const seg = zoomSegments[i];
-        if (seg.end <= t) {
-          lo = Math.max(lo, seg.end);
-        } else if (seg.start >= t) {
-          hi = Math.min(hi, seg.start);
-        } else {
-          selectZoom(i);
-          return;
-        }
+      const inside = zoomSegments.findIndex((s) => s.start < t && t < s.end);
+      if (inside >= 0) {
+        selectZoom(inside);
+        return;
       }
-      const start = Math.max(lo, Math.min(t, hi - ZOOM_MIN_DURATION));
-      const end = Math.min(hi, start + ZOOM_DEFAULT_DURATION);
-      if (end - start < ZOOM_MIN_DURATION) {
+      const span = placeZoom(t);
+      if (!span) {
         setNotice("No room for a zoom here");
         return;
       }
+      const { start, end } = span;
       const seg: ZoomSegment = {
         start,
         end,
@@ -1217,7 +1223,7 @@ export default function Review() {
         return next;
       });
     },
-    [duration, videoDims, zoomSegments, selectZoom],
+    [duration, videoDims, zoomSegments, selectZoom, placeZoom],
   );
 
   // Clear-all escape hatch. Wipes both auto and manual zooms and deselects.
@@ -2352,6 +2358,7 @@ export default function Review() {
     remove: deleteZoom,
     clearAll: clearAllZooms,
     addAt: addZoomAt,
+    place: placeZoom,
     bounds: zoomBounds,
     canAdd: duration != null && videoDims != null,
     suggest: suggestZooms,
