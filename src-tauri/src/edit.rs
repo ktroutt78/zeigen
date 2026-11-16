@@ -3513,6 +3513,7 @@ WATERMARK_SCALE_FRAC=0.08";
     //   ZEIGEN_REF_OUT = output mp4
     //   ZEIGEN_REF_REDETECT=1 re-runs zoom detection instead of the sidecar's zooms
     //   ZEIGEN_REF_CURSOR_SMOOTHING / ZEIGEN_REF_CURSOR_SIZE override the drawn cursor
+    //   ZEIGEN_REF_SCENES / ZEIGEN_REF_BUBBLE_ZOOM add scenes and the bubble shrink
     //   cargo test --lib render_reference_export -- --ignored --nocapture
     #[test]
     #[ignore]
@@ -3541,6 +3542,14 @@ WATERMARK_SCALE_FRAC=0.08";
             let mut style = sidecar.cursor.unwrap_or_default();
             style.size = v.parse().expect("ZEIGEN_REF_CURSOR_SIZE number");
             sidecar.cursor = Some(style);
+        }
+        // Scene checks: ZEIGEN_REF_SCENES = JSON list of {start, end, layout},
+        // ZEIGEN_REF_BUBBLE_ZOOM = bubble size while zoomed (e.g. 0.7).
+        if let Ok(v) = std::env::var("ZEIGEN_REF_SCENES") {
+            sidecar.scenes = serde_json::from_str(&v).expect("ZEIGEN_REF_SCENES json");
+        }
+        if let Ok(v) = std::env::var("ZEIGEN_REF_BUBBLE_ZOOM") {
+            sidecar.bubble_zoom_scale = Some(v.parse().expect("ZEIGEN_REF_BUBBLE_ZOOM number"));
         }
         let screen = dir.join("sources/screen.mp4");
         let cursor = cursor_overlay(&screen).expect("cursor log");

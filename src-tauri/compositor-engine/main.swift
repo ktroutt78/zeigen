@@ -66,6 +66,29 @@ if let cp = env["CAMERA_PATH"] {
     guard let p = try? JSONDecoder().decode(CameraPath.self, from: data) else { fail("bad CAMERA_PATH json") }
     camera = p
 }
+// --- Scene layout path (TIMELINE-PLAN step 5): where the screen recording and the
+// webcam sit in the output picture at every moment, computed ONCE in Rust (scene.rs);
+// this only looks it up, with the same linear rule as cameraAt. Sample fields, as
+// fractions of the picture with a top-left origin:
+// [screen x, y, w, h, frame, webcam x, y, w, h, radius, alpha]
+// (frame = how much of the Frame corner/shadow styling the screen keeps; radius = a
+// fraction of the webcam rect's short side; the webcam is cover-fitted into its rect).
+// Absent -> the bubble and the inset are drawn the way they always were, untouched.
+struct ScenePath: Decodable { let step: Double; let samples: [[Double]] }
+func sceneAt(_ p: ScenePath, _ t: Double) -> [Double] {
+    let x = max(t, 0) / p.step
+    let i = Int(x)
+    if i >= p.samples.count - 1 { return p.samples[p.samples.count - 1] }
+    let a = p.samples[i], b = p.samples[i + 1], u = x - Double(i)
+    return zip(a, b).map { $0 + ($1 - $0) * u }
+}
+var scene: ScenePath? = nil
+if let sp = env["SCENE_PATH"] {
+    guard let data = FileManager.default.contents(atPath: sp) else { fail("cannot read SCENE_PATH \(sp)") }
+    guard let p = try? JSONDecoder().decode(ScenePath.self, from: data), !p.samples.isEmpty,
+          p.samples.allSatisfy({ $0.count == 11 }) else { fail("bad SCENE_PATH json") }
+    scene = p
+}
 // --- Drawn cursor (CURSOR-SMOOTHING-PLAN): the smoothed path is computed ONCE in Rust
 // (cursor.rs); this only looks it up, with the same linear rule as cameraAt. The shape
 // in effect at t is the last shape event with event.t <= t. Any unreadable input fails
@@ -777,6 +800,118 @@ if bubbleWebcam != nil {
     }
 }
 var lastBubble: CIImage? = nil
+// Scene mode: the latest webcam frame (mirrored, origin at 0,0), placed per frame.
+var lastWebcam: CIImage? = nil
+
+// A filled rounded rectangle at `rect` (scene mode builds its masks and shadow
+// silhouettes per frame, because the rectangles move and change shape).
+func roundedRect(_ rect: CGRect, radius: CGFloat, color: CIColor) -> CIImage {
+    let f = CIFilter(name: "CIRoundedRectangleGenerator")!
+    f.setValue(CIVector(cgRect: rect), forKey: "inputExtent")
+    f.setValue(max(0, min(radius, min(rect.width, rect.height) / 2)), forKey: "inputRadius")
+    f.setValue(color, forKey: "inputColor")
+    return f.outputImage!.cropped(to: rect)
+}
+func masked(_ img: CIImage, _ rect: CGRect, radius: CGFloat) -> CIImage {
+    guard radius >= 0.5 else { return img }
+    return img.applyingFilter("CIBlendWithMask", parameters: [
+        "inputBackgroundImage": CIImage.empty(),
+        "inputMaskImage": roundedRect(rect, radius: radius, color: CIColor(red: 1, green: 1, blue: 1, alpha: 1)),
+    ])
+}
+func blurredShadow(_ rect: CGRect, radius: CGFloat, alpha: Double, blur: Double,
+                   dx: Double, dy: Double) -> CIImage {
+    roundedRect(rect, radius: radius, color: CIColor(red: 0, green: 0, blue: 0, alpha: CGFloat(alpha)))
+        .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: blur])
+        .transformed(by: CGAffineTransform(translationX: dx, y: -dy))
+        .cropped(to: CGRect(x: 0, y: 0, width: Wd, height: Hd))
+}
+
+// The Frame inset exactly as it has always been drawn: the finished frame scaled by
+// insetK, corner-masked, placed over the background that already carries its shadow.
+func insetOverBackground(_ frame: CIImage, zoom s: Double, base: CIImage) -> CIImage {
+    var content = frame.cropped(to: CGRect(x: 0, y: 0, width: Wd, height: Hd))
+        .applyingFilter("CILanczosScaleTransform",
+            parameters: [kCIInputScaleKey: insetK, kCIInputAspectRatioKey: 1.0])
+        .cropped(to: CGRect(x: 0, y: 0, width: Double(insetW), height: Double(insetH)))
+    // Window sources scale the corner radius with the zoom so the window's own
+    // (magnified) corner is matched at any zoom; display/area stay at cornerPx.
+    if let mask = cardMask(windowSource ? cornerPx * CGFloat(s) : cornerPx) {
+        content = content.applyingFilter("CIBlendWithMask",
+            parameters: ["inputBackgroundImage": CIImage.empty(), "inputMaskImage": mask])
+    }
+    var out = content.transformed(by: CGAffineTransform(translationX: insetOx, y: insetOy))
+        .composited(over: base)
+    if let border = borderLayer { out = border.composited(over: out) }
+    return out
+}
+
+// Scene mode: lay the finished recording frame and the webcam out on the output
+// picture as the layout sample L says. No layout or easing maths here.
+func composeScene(_ frame: CIImage, _ L: [Double], zoom s: Double) -> CIImage {
+    let canvas = CGRect(x: 0, y: 0, width: Wd, height: Hd)
+    // Screen rect in CI (bottom-left) px.
+    let sw = L[2] * Wd, sh = L[3] * Hd, sx = L[0] * Wd, sy = Hd - (L[1] + L[3]) * Hd
+    let keep = L[4]
+    var out: CIImage
+    let atInset = insetActive && keep > 0.999 && abs(sw - Double(insetW)) < 0.75
+        && abs(sx - insetOx) < 0.75 && abs(sy - insetOy) < 0.75
+    if atInset, let base = bgWithShadow {
+        out = insetOverBackground(frame, zoom: s, base: base)
+    } else {
+        var bg = (insetActive ? backgroundImage : nil)
+            ?? CIImage(color: CIColor(red: 0, green: 0, blue: 0, alpha: 1)).cropped(to: canvas)
+        let rect = CGRect(x: 0, y: 0, width: sw, height: sh)
+        var content = frame.cropped(to: canvas)
+        if abs(sw - Wd) > 0.5 {
+            content = content.applyingFilter("CILanczosScaleTransform",
+                parameters: [kCIInputScaleKey: sw / Wd, kCIInputAspectRatioKey: 1.0]).cropped(to: rect)
+        }
+        // The Frame's corner and shadow scale with the picture and fade with `keep`.
+        let grow = sw / Double(insetW)
+        let r = (windowSource ? cornerPx * CGFloat(s) : cornerPx) * CGFloat(keep * grow)
+        content = masked(content, rect, radius: r)
+        if insetActive, frameShadow > 0, keep > 0.01 {
+            let marginShort = framePadding * min(Wd, Hd) / 2 * grow
+            let shadow = blurredShadow(rect.offsetBy(dx: sx, dy: sy), radius: r,
+                alpha: min(1.0, shadowAlphaK * frameShadow) * keep,
+                blur: shadowBlurK * marginShort, dx: 0, dy: shadowDyK * marginShort)
+            bg = shadow.composited(over: bg)
+        }
+        out = content.transformed(by: CGAffineTransform(translationX: sx, y: sy)).composited(over: bg)
+    }
+    // Webcam: cover-fit into its rect, rounded, faded, with the bubble's shadow.
+    let alpha = L[10]
+    guard let wc = lastWebcam, alpha > 0.004 else { return out.cropped(to: canvas) }
+    let cw = L[7] * Wd, ch = L[8] * Hd, cx = L[5] * Wd, cy = Hd - (L[6] + L[8]) * Hd
+    let ww = Double(wc.extent.width), wh = Double(wc.extent.height)
+    let k = max(cw / ww, ch / wh)
+    let crop = CGRect(x: (ww - cw / k) / 2, y: (wh - ch / k) / 2, width: cw / k, height: ch / k)
+    let rect = CGRect(x: 0, y: 0, width: cw, height: ch)
+    var cam = wc.cropped(to: crop)
+        .transformed(by: CGAffineTransform(translationX: -crop.origin.x, y: -crop.origin.y))
+        .applyingFilter("CILanczosScaleTransform",
+            parameters: [kCIInputScaleKey: k, kCIInputAspectRatioKey: 1.0])
+        .cropped(to: rect)
+    let d = min(cw, ch)
+    let r = CGFloat(L[9] * d)
+    cam = masked(cam, rect, radius: r)
+    if alpha < 0.999 {
+        cam = cam.applyingFilter("CIColorMatrix",
+            parameters: ["inputAVector": CIVector(x: 0, y: 0, z: 0, w: alpha)])
+    }
+    // Same shadow numbers as the bubble's, from the rect's short side. Skipped once
+    // the webcam covers most of the picture, where the shadow is off the edge.
+    if cw * ch < 0.5 * Wd * Hd {
+        let (blur, a, dx, dy) = bubbleDepth == "elevated"
+            ? (elevBlurFrac * d, elevAlpha, elevOffsetXFrac * d, elevOffsetFrac * d)
+            : (bubbleShadowRadiusK * 0.075 * d, bubbleShadowAlpha, 0.0, d / 30.0)
+        out = blurredShadow(rect.offsetBy(dx: cx, dy: cy), radius: r, alpha: a * alpha,
+                            blur: blur, dx: dx, dy: dy).composited(over: out)
+    }
+    return cam.transformed(by: CGAffineTransform(translationX: cx, y: cy))
+        .composited(over: out).cropped(to: canvas)
+}
 
 // Per-region redaction sample: mean luminance (adaptive tint) + stroke width (cell
 // safety clamp), computed ONCE the first time a region is active and HELD for its
@@ -1049,6 +1184,7 @@ writerInput.requestMediaDataWhenReady(on: queue) {
                 let ww = wc.extent.width, wh = wc.extent.height
                 let side = min(ww, wh)
                 let flipped = wc.transformed(by: CGAffineTransform(a: -1, b: 0, c: 0, d: 1, tx: ww, ty: 0))
+                lastWebcam = flipped
                 let sq = CGRect(x: (ww - side) / 2, y: (wh - side) / 2, width: side, height: side)
                 let atOrigin = flipped.cropped(to: sq).transformed(
                     by: CGAffineTransform(translationX: -sq.origin.x, y: -sq.origin.y))
@@ -1058,8 +1194,11 @@ writerInput.requestMediaDataWhenReady(on: queue) {
                     parameters: ["inputBackgroundImage": CIImage.empty(), "inputMaskImage": mask])
                 lastBubble = masked.transformed(by: CGAffineTransform(translationX: bubbleTx, y: bubbleTy))
             }
-            for sh in bubbleShadowLayers { out = sh.composited(over: out) }
-            if let bub = lastBubble { out = bub.composited(over: out) }
+            // With a layout path the webcam is placed at the scene stage below.
+            if scene == nil {
+                for sh in bubbleShadowLayers { out = sh.composited(over: out) }
+                if let bub = lastBubble { out = bub.composited(over: out) }
+            }
         }
 
         // Screen-anchored watermark: on the FINAL frame, after motion blur (stays
@@ -1075,20 +1214,11 @@ writerInput.requestMediaDataWhenReady(on: queue) {
         // after every overlay, so bubble/watermark inset WITH the recording; runs before
         // downscale, so the canvas (= source dims) is what the terminal Lanczos caps to
         // output res. Integer origin keeps the content on the pixel grid (sharp edges).
-        if insetActive, let base = bgWithShadow {
-            var content = out.cropped(to: CGRect(x: 0, y: 0, width: Wd, height: Hd))
-                .applyingFilter("CILanczosScaleTransform",
-                    parameters: [kCIInputScaleKey: insetK, kCIInputAspectRatioKey: 1.0])
-                .cropped(to: CGRect(x: 0, y: 0, width: Double(insetW), height: Double(insetH)))
-            // Window sources scale the corner radius with the zoom so the window's own
-            // (magnified) corner is matched at any zoom; display/area stay at cornerPx.
-            if let mask = cardMask(windowSource ? cornerPx * CGFloat(s) : cornerPx) {
-                content = content.applyingFilter("CIBlendWithMask",
-                    parameters: ["inputBackgroundImage": CIImage.empty(), "inputMaskImage": mask])
-            }
-            out = content.transformed(by: CGAffineTransform(translationX: insetOx, y: insetOy))
-                .composited(over: base)
-            if let border = borderLayer { out = border.composited(over: out) }
+        // With a layout path, the scene stage does the inset and places the webcam.
+        if let sp = scene {
+            out = composeScene(out, sceneAt(sp, t), zoom: s)
+        } else if insetActive, let base = bgWithShadow {
+            out = insetOverBackground(out, zoom: s, base: base)
         }
 
         // Terminal downscale to the requested output dims — AFTER every overlay, so
