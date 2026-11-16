@@ -3,9 +3,24 @@
   "marked_by": "Keith",
   "marked_on": "2026-11-15",
   "zooms": [
-    { "start": 2.76, "end": 9.89, "reason": "pause + 7 clicks", "call": "right" },
-    { "start": 21.51, "end": 38.25, "reason": "drag", "call": "wrong", "kind": "held_too_long",
-      "note": "Right moment, held too long, could be shorter. Wanted end time not given yet." }
+    {
+      "start": 2.76,
+      "end": 9.89,
+      "reason": "pause + 7 clicks",
+      "call": "right"
+    },
+    {
+      "start": 21.51,
+      "end": 38.25,
+      "reason": "drag",
+      "call": "wrong",
+      "kind": "held_too_long",
+      "note": "Right moment, held too long. Keith could not give a wanted end time: he made a note, resized and moved it, then closed it (last click, 29.9s) and was doing nothing after that, yet the zoom held to 38.3s. Log: cursor rested without clicks 32.6s to 38.2s inside the zoomed area. Ending near 30 to 32s counts as fixed.",
+      "wanted_end_range": [
+        30.0,
+        32.0
+      ]
+    }
   ],
   "missing": [],
   "notes": "10s to 21s (7 clicks, one 506px drag at 14.9s) did not need a zoom."
