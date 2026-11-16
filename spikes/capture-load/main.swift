@@ -119,9 +119,15 @@ guard let wid = childWindowID() else { print("the test window did not open"); ch
 
 print("CPU as a percentage of ONE core, averaged over \(Int(phaseSeconds))s per line. Leave the machine alone while it runs.")
 await measure("no capture (the animated window alone)", frames: nil)
-await measure("cursor shape check, 20 per second", frames: nil, every: 1.0 / 20, cursorHashPoll)
-await measure("window position check, 30 per second", frames: nil, every: 1.0 / 30) { boundsPoll(wid) }
-if pollsOnly { child.terminate(); exit(0) }
+// The two polling loops are measured only in polls-only mode. The cursor check
+// goes through AppKit, and a process that has talked to the window server that
+// way appears to be refused the terminal's Screen Recording permission, so the
+// capture run must not touch it (the other test tool, appcapture, never does).
+if pollsOnly {
+    await measure("cursor shape check, 20 per second", frames: nil, every: 1.0 / 20, cursorHashPoll)
+    await measure("window position check, 30 per second", frames: nil, every: 1.0 / 30) { boundsPoll(wid) }
+    child.terminate(); exit(0)
+}
 
 let content: SCShareableContent
 do { content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) }
