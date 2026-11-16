@@ -62,14 +62,16 @@ const DWELL_MIN_S: f64 = 0.8;
 // hand: no zoom, and nothing for a neighbouring zoom to bridge into. Measured
 // as the share of 0.1s slices, between the dwell's first and last movement, in
 // which the cursor travelled more than JITTER_STEP_PX. On the marked clips the two unwanted pauses moved for
-// 9% of their length and the wanted reading pause for 65 to 89%. The movement
+// 9% of their length and the wanted reading pause for 65 to 89%; clip 4 added
+// a slower read that Keith also wanted at 40% (and an unjudged rest at 18%),
+// which moved the line from 0.5 to 0.3. The movement
 // must also add up to DWELL_MIN_S: a cursor that glides in and then sits to
 // the end of the dwell has only its arrival to show (0.4 to 0.6s on the marked
 // clips; the reading pauses had 1.1 to 1.8s).
 // And after the last sign of life (click or >JITTER_STEP_PX movement) a zoom
 // holds only PARK_TAIL_S before letting go, so a click followed by minutes of
 // parked cursor doesn't pin the zoom forever.
-const READING_MOVE_FRAC: f64 = 0.5;
+const READING_MOVE_FRAC: f64 = 0.3;
 const JITTER_STEP_PX: f64 = 5.0;
 const PARK_TAIL_S: f64 = 2.0;
 
@@ -1437,6 +1439,7 @@ mod tests {
             // Rule 3 (scroll releases): too long 1 -> 2.
             // Clip 4 added (marked against rules 1 to 3): right 2 -> 4 of 4,
             // and three zooms Keith wanted that are missing, 0 of 3 found.
+            // Reading line 50% -> 30%: missing found 0 -> 1.
             Score {
                 right_kept: 4,
                 right_total: 4,
@@ -1444,7 +1447,7 @@ mod tests {
                 unwanted_total: 2,
                 too_long_fixed: 2,
                 too_long_total: 2,
-                missing_found: 0,
+                missing_found: 1,
                 missing_total: 3,
                 new_unjudged: 0,
             }
