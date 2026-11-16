@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { emit, listen } from "@tauri-apps/api/event";
@@ -26,6 +26,7 @@ import {
   ZOOM_RAMP_S,
   SCENE_DEFAULT_DURATION,
   SCENE_MIN_DURATION,
+  sceneAt,
   type CameraPath,
   type SceneLayout,
   type ScenePath,
@@ -3185,6 +3186,7 @@ function VideoStage(props: VideoStageProps) {
   // preview (zoom.looping) — it un-suppresses the transform while selected
   // so the motion is visible, time-multiplexing edit vs. watch.
   const camera = props.zoom.camera;
+  const scenePath = props.scenePath;
   const zoomEditing = props.zoom.selectedIndex != null;
   const zoomLooping = props.zoom.looping;
   const videoRefForZoom = props.videoRef;
@@ -3267,8 +3269,12 @@ function VideoStage(props: VideoStageProps) {
       // so the zoom crop is relative to THAT box (origin 0,0, shrunk by padding),
       // not the stage. insetFrac 0 => the full stage-relative content box as before.
       const full = contentBox({ width: rect.width, height: rect.height }, videoDims);
-      const b =
-        insetFrac > 0
+      // With a layout path the zoom layer fills the screen card, whose size the
+      // path gives at this moment (the same lookup the scene loop below uses).
+      const L = scenePath && sceneAt(scenePath, video.currentTime);
+      const b = L
+        ? contentBox({ width: L[2] * full.w, height: L[3] * full.h }, videoDims)
+        : insetFrac > 0
           ? { x: 0, y: 0, w: full.w * (1 - insetFrac), h: full.h * (1 - insetFrac) }
           : full;
       const s = z.scale;
@@ -3284,7 +3290,75 @@ function VideoStage(props: VideoStageProps) {
       cancelAnimationFrame(raf);
       reset();
     };
-  }, [camera, zoomEditing, zoomLooping, redactFlat, videoDims, videoRefForZoom, insetFrac]);
+  }, [camera, zoomEditing, zoomLooping, redactFlat, videoDims, videoRefForZoom, insetFrac, scenePath]);
+
+  // Layout path (TIMELINE-PLAN step 5): each frame, look up where the screen
+  // card and the webcam sit and write them as CSS variables on those elements
+  // (their path-mode styles read the variables, so React never fights these
+  // writes). Lookup and fraction-to-pixel conversion only; the corner and
+  // shadow numbers are the Frame preview's above, scaled exactly as
+  // composeScene (main.swift) scales them. Runs only with a path; without one
+  // the stage is today's, untouched.
+  const cardRef = useRef<HTMLDivElement | null>(null);
+  const webcamRef = props.webcamVideoRef;
+  const cornerFrac = props.frame?.corner_radius ?? 0;
+  const shadowK = props.frame?.shadow ?? 0;
+  useLayoutEffect(() => {
+    const video = videoRefForZoom.current;
+    const card = cardRef.current;
+    if (!scenePath || !video || !card || !videoDims) return;
+    let raf = 0;
+    const px = (v: number) => `${v.toFixed(2)}px`;
+    const tick = () => {
+      raf = requestAnimationFrame(tick);
+      const stage = stageRef.current;
+      if (!stage) return;
+      const rect = stage.getBoundingClientRect();
+      const full = contentBox({ width: rect.width, height: rect.height }, videoDims);
+      const L = sceneAt(scenePath, video.currentTime);
+      // Screen card. grow = card width / default inset width (composeScene's
+      // `grow`); keep = how much Frame styling it keeps.
+      const sw = L[2] * full.w;
+      const keep = L[4];
+      const grow = sw / (full.w * (1 - insetFrac));
+      const corner = bgActive ? cornerFrac * Math.min(full.w, full.h) * (1 - insetFrac) * keep * grow : 0;
+      const margin = ((insetFrac * Math.min(full.w, full.h)) / 2) * grow;
+      const cs = card.style;
+      cs.setProperty("--sx", px(full.x + L[0] * full.w));
+      cs.setProperty("--sy", px(full.y + L[1] * full.h));
+      cs.setProperty("--sw", px(sw));
+      cs.setProperty("--sh", px(L[3] * full.h));
+      cs.setProperty("--sr", px(corner));
+      cs.setProperty(
+        "--ss",
+        bgActive && shadowK > 0 && keep > 0.01
+          ? `0 ${px(0.45 * margin)} ${px(0.85 * margin)} rgba(0,0,0,${(Math.min(1, 0.5 * shadowK) * keep).toFixed(3)})`
+          : "none",
+      );
+      // Webcam: cover-fitted (object-fit), mirrored, rounded by a fraction of
+      // its short side, faded by alpha. Shadow: today's bubble proportions from
+      // the short side, x negated because scaleX(-1) mirrors the shadow too
+      // (so it falls down-right as in the export); dropped once the webcam
+      // covers more than half the picture, as composeScene does.
+      const cam = webcamRef.current;
+      if (!cam) return;
+      const cw = L[7] * full.w;
+      const ch = L[8] * full.h;
+      const d = Math.min(cw, ch);
+      const ws = cam.style;
+      ws.setProperty("--cw", px(cw));
+      ws.setProperty("--ch", px(ch));
+      ws.setProperty("--ct", `translate(${px(full.x + L[5] * full.w)}, ${px(full.y + L[6] * full.h)}) scaleX(-1)`);
+      ws.setProperty("--cr", px(L[9] * d));
+      ws.setProperty("--ca", L[10].toFixed(3));
+      ws.setProperty(
+        "--cs",
+        L[7] * L[8] < 0.5 ? `${px(-0.05 * d)} ${px(0.05 * d)} ${px(0.08 * d)} rgba(0,0,0,0.48)` : "none",
+      );
+    };
+    tick();
+    return () => cancelAnimationFrame(raf);
+  }, [scenePath, videoDims, videoRefForZoom, webcamRef, bgActive, insetFrac, cornerFrac, shadowK]);
 
   const onStageClick = (e: React.MouseEvent) => {
     // Click on the empty stage background = deselect any zoom, which leaves
@@ -3335,13 +3409,28 @@ function VideoStage(props: VideoStageProps) {
             the video; the frame wrapper insets + rounds + shadows the video (and
             carries the zoom layer). Both collapse to no-ops when bgActive is false
             (no canvas; wrapper is inset:0), so a plain recording is unchanged. */}
-        {bgActive && (
+        {bgActive && !scenePath && (
           <div
             data-stage-bg="1"
             style={{ position: "absolute", inset: 0, background: bgCss }}
           />
         )}
-        <div style={frameWrapStyle}>
+        {/* Path mode: the output picture (the export's canvas) behind the
+            screen card, the Frame background or black as in the export. */}
+        {scenePath && (
+          <div
+            data-stage-bg="1"
+            style={{
+              position: "absolute",
+              left: fullBox.x,
+              top: fullBox.y,
+              width: fullBox.w,
+              height: fullBox.h,
+              background: bgActive ? bgCss : "#000",
+            }}
+          />
+        )}
+        <div ref={cardRef} style={scenePath ? SCENE_CARD_STYLE : frameWrapStyle}>
         <div ref={zoomLayerRef} data-stage-bg="1" style={{ position: "absolute", inset: 0 }}>
           {props.assetUrl ? (
             <video
@@ -3382,8 +3471,46 @@ function VideoStage(props: VideoStageProps) {
               redaction). */}
           <CursorLayer overlay={props.cursorOverlay} videoRef={props.videoRef} videoDims={videoDims} />
         </div>
+        {/* Path mode: the zoom edit, redaction and watermark layers ride the
+            screen card (its box is their stage), as the export draws them on the
+            recording before laying it out. */}
+        {scenePath && (
+          <>
+            {props.zoom.selectedIndex != null &&
+              !props.zoom.looping &&
+              props.zoom.segments[props.zoom.selectedIndex] && (
+                <ZoomEditLayer
+                  stageRef={cardRef}
+                  videoDims={videoDims}
+                  seg={props.zoom.segments[props.zoom.selectedIndex]}
+                  onCenter={(cx, cy) => {
+                    const i = props.zoom.selectedIndex;
+                    if (i != null) props.zoom.update(i, { center_x: cx, center_y: cy });
+                  }}
+                  insetFrac={0}
+                />
+              )}
+            <RedactionLayer
+              stageRef={cardRef}
+              videoDims={videoDims}
+              editor={props.redact}
+              camera={props.zoom.camera}
+              videoRef={props.videoRef}
+              flat={redactFlat}
+              insetFrac={0}
+            />
+            <WatermarkPreviewLayer stageRef={cardRef} preview={props.watermarkPreview} insetFrac={0} />
+          </>
+        )}
         </div>
-        <div style={{ position: "absolute", inset: 0, pointerEvents: "none", clipPath: bubbleClipPath }}>
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            pointerEvents: "none",
+            clipPath: scenePath ? undefined : bubbleClipPath,
+          }}
+        >
           <BubbleLayer
             stageRef={stageRef}
             screenVideoRef={props.videoRef}
@@ -3397,9 +3524,11 @@ function VideoStage(props: VideoStageProps) {
             scrubbingRef={props.scrubbingRef}
             videoDims={props.watermarkPreview.videoDims}
             insetFrac={insetFrac}
+            inScene={scenePath != null}
           />
         </div>
-        {props.zoom.selectedIndex != null &&
+        {!scenePath &&
+          props.zoom.selectedIndex != null &&
           !props.zoom.looping &&
           props.zoom.segments[props.zoom.selectedIndex] && (
             <ZoomEditLayer
@@ -3413,15 +3542,17 @@ function VideoStage(props: VideoStageProps) {
               insetFrac={insetFrac}
             />
           )}
-        <RedactionLayer
-          stageRef={stageRef}
-          videoDims={videoDims}
-          editor={props.redact}
-          camera={props.zoom.camera}
-          videoRef={props.videoRef}
-          flat={redactFlat}
-          insetFrac={insetFrac}
-        />
+        {!scenePath && (
+          <RedactionLayer
+            stageRef={stageRef}
+            videoDims={videoDims}
+            editor={props.redact}
+            camera={props.zoom.camera}
+            videoRef={props.videoRef}
+            flat={redactFlat}
+            insetFrac={insetFrac}
+          />
+        )}
         <PlayerOverlay
           playing={props.playing}
           duration={props.duration}
@@ -3429,15 +3560,45 @@ function VideoStage(props: VideoStageProps) {
           togglePlay={props.togglePlay}
           playbackRate={props.playbackRate}
         />
-        <WatermarkPreviewLayer
-          stageRef={stageRef}
-          preview={props.watermarkPreview}
-          insetFrac={insetFrac}
-        />
+        {!scenePath && (
+          <WatermarkPreviewLayer
+            stageRef={stageRef}
+            preview={props.watermarkPreview}
+            insetFrac={insetFrac}
+          />
+        )}
       </div>
     </div>
   );
 }
+
+// Path-mode styles: the per-frame values are CSS variables the scene loop in
+// VideoStage writes, so React's style diff never touches them.
+const SCENE_CARD_STYLE: React.CSSProperties = {
+  position: "absolute",
+  left: "var(--sx)",
+  top: "var(--sy)",
+  width: "var(--sw)",
+  height: "var(--sh)",
+  borderRadius: "var(--sr)",
+  boxShadow: "var(--ss)",
+  overflow: "hidden",
+};
+const SCENE_WEBCAM_STYLE: React.CSSProperties = {
+  position: "absolute",
+  left: 0,
+  top: 0,
+  width: "var(--cw)",
+  height: "var(--ch)",
+  transform: "var(--ct)",
+  borderRadius: "var(--cr)",
+  boxShadow: "var(--cs)",
+  opacity: "var(--ca)",
+  visibility: "visible",
+  objectFit: "cover",
+  pointerEvents: "none",
+  background: "#000",
+};
 
 // The preview's drawn cursor, the same overlay the export draws (cursor_preview).
 // Lives in the zoom layer, whose own (untransformed) box is what the <video>
@@ -3538,6 +3699,7 @@ function BubbleLayer({
   scrubbingRef,
   videoDims,
   insetFrac,
+  inScene,
 }: {
   stageRef: React.MutableRefObject<HTMLDivElement | null>;
   screenVideoRef: React.MutableRefObject<HTMLVideoElement | null>;
@@ -3565,6 +3727,9 @@ function BubbleLayer({
   videoDims: { w: number; h: number } | null;
   // Background/padding preview inset (Slice 4): the bubble insets WITH the video.
   insetFrac: number;
+  // A layout path is active: VideoStage's scene loop places the webcam and the
+  // parked-bubble placement below stands down.
+  inScene: boolean;
 }) {
   const stage = useStageSize(stageRef);
 
@@ -3666,11 +3831,13 @@ function BubbleLayer({
   // effect and the ref callback below. They MUST NOT appear in the JSX
   // style prop — React would diff them against the JSX values and
   // overwrite the mutations on every re-render. Stable properties only
-  // go in JSX style.
-  useEffect(() => {
+  // go in JSX style. (In path mode SCENE_WEBCAM_STYLE does carry them, as
+  // var() reads, and this effect stands down. A layout effect, so handing back
+  // from path mode never paints a frame with the bubble unpositioned.)
+  useLayoutEffect(() => {
     const s = screenVideoRef.current;
     const w = webcamVideoRef.current;
-    if (!s || !w) return;
+    if (!s || !w || inScene) return;
     if (
       !videoDims ||
       stage.width === 0 ||
@@ -3741,6 +3908,7 @@ function BubbleLayer({
     insetFrac,
     stage.width,
     stage.height,
+    inScene,
   ]);
 
   // Ref callback: assign to the parent's webcam ref AND set initial
@@ -3767,7 +3935,7 @@ function BubbleLayer({
       muted
       playsInline
       preload="auto"
-      style={{
+      style={inScene ? SCENE_WEBCAM_STYLE : {
         // Stable properties only. width, height, transform, visibility are
         // mutated by the rAF effect / ref callback — see RIGOR note above.
         // (borderRadius is prop-driven, not rAF-mutated, so it's fine here.)
