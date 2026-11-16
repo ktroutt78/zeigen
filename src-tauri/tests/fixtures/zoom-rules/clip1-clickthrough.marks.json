@@ -1,0 +1,12 @@
+{
+  "clip": "clip1-clickthrough",
+  "marked_by": "Keith",
+  "marked_on": "2026-11-15",
+  "zooms": [
+    { "start": 2.76, "end": 9.89, "reason": "pause + 7 clicks", "call": "right" },
+    { "start": 21.51, "end": 38.25, "reason": "drag", "call": "wrong", "kind": "held_too_long",
+      "note": "Right moment, held too long, could be shorter. Wanted end time not given yet." }
+  ],
+  "missing": [],
+  "notes": "10s to 21s (7 clicks, one 506px drag at 14.9s) did not need a zoom."
+}
