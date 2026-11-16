@@ -1187,6 +1187,169 @@ mod tests {
         );
     }
 
+    // ---- Keith's marked reference clips (docs/ZOOM-POLISH-PLAN.md, Problem 2) ----
+    // Three recordings Keith marked by timestamp on 2026-11-15: each auto zoom
+    // right or wrong, and anything missing. Fixtures in
+    // tests/fixtures/zoom-rules/: <clip>.cursor.json (the log), <clip>.marks.json
+    // (his calls), <clip>.detected.json (what the app showed him).
+    //
+    // The score is the tuning loop for rule changes: one rule per commit, and
+    // the pinned score line below changes in that commit's diff (before/after).
+    // Run `cargo test --lib marked_clips -- --nocapture` for the per-zoom table.
+    //
+    // How each marked zoom is judged against the current detector output:
+    //   right            kept if a zoom covers at least half of its span
+    //   should_not_zoom  fixed if no zoom overlaps it by more than 0.5s
+    //   held_too_long    fixed if a zoom still starts within 1.5s of its start
+    //                    and ends inside the wanted range; lost if nothing
+    //                    starts there any more (the moment itself was right)
+    //   new              a zoom overlapping no marked zoom: nobody has judged
+    //                    it, so Keith has to before the rule is accepted
+    const MARKED_CLIPS: [(&str, &str, &str, &str); 3] = [
+        (
+            "clip1-clickthrough",
+            include_str!("../tests/fixtures/zoom-rules/clip1-clickthrough.cursor.json"),
+            include_str!("../tests/fixtures/zoom-rules/clip1-clickthrough.marks.json"),
+            include_str!("../tests/fixtures/zoom-rules/clip1-clickthrough.detected.json"),
+        ),
+        (
+            "clip2-talking",
+            include_str!("../tests/fixtures/zoom-rules/clip2-talking.cursor.json"),
+            include_str!("../tests/fixtures/zoom-rules/clip2-talking.marks.json"),
+            include_str!("../tests/fixtures/zoom-rules/clip2-talking.detected.json"),
+        ),
+        (
+            "clip3-scroll",
+            include_str!("../tests/fixtures/zoom-rules/clip3-scroll.cursor.json"),
+            include_str!("../tests/fixtures/zoom-rules/clip3-scroll.marks.json"),
+            include_str!("../tests/fixtures/zoom-rules/clip3-scroll.detected.json"),
+        ),
+    ];
+
+    #[derive(Default, Debug, PartialEq)]
+    struct Score {
+        right_kept: u32,
+        right_total: u32,
+        unwanted_gone: u32,
+        unwanted_total: u32,
+        too_long_fixed: u32,
+        too_long_total: u32,
+        new_unjudged: u32,
+    }
+
+    fn overlap(a: (f64, f64), b: (f64, f64)) -> f64 {
+        (a.1.min(b.1) - a.0.max(b.0)).max(0.0)
+    }
+
+    fn score_marked_clips() -> Score {
+        let mut score = Score::default();
+        for (name, log, marks, _) in MARKED_CLIPS {
+            let track: CursorTrack = serde_json::from_str(log).unwrap();
+            let marks: serde_json::Value = serde_json::from_str(marks).unwrap();
+            let kfs = detect(&track);
+            let got: Vec<(f64, f64)> = segments(&kfs).iter().map(|s| (s.0, s.1)).collect();
+            println!("{name}: now {}", fmt_segments(&kfs));
+            let mut judged = vec![false; got.len()];
+            for m in marks["zooms"].as_array().unwrap() {
+                let span = (m["start"].as_f64().unwrap(), m["end"].as_f64().unwrap());
+                for (k, g) in got.iter().enumerate() {
+                    if overlap(*g, span) > 0.0 {
+                        judged[k] = true;
+                    }
+                }
+                let call = m["call"].as_str().unwrap();
+                let kind = m["kind"].as_str().unwrap_or("");
+                let verdict = match (call, kind) {
+                    ("right", _) => {
+                        score.right_total += 1;
+                        let covered: f64 = got.iter().map(|g| overlap(*g, span)).sum();
+                        if covered >= (span.1 - span.0) / 2.0 {
+                            score.right_kept += 1;
+                            "kept"
+                        } else {
+                            "LOST"
+                        }
+                    }
+                    ("wrong", "should_not_zoom") => {
+                        score.unwanted_total += 1;
+                        if got.iter().all(|g| overlap(*g, span) <= 0.5) {
+                            score.unwanted_gone += 1;
+                            "gone"
+                        } else {
+                            "still there"
+                        }
+                    }
+                    ("wrong", "held_too_long") => {
+                        score.too_long_total += 1;
+                        let want = m["wanted_end_range"].as_array().unwrap();
+                        let (lo, hi) = (want[0].as_f64().unwrap(), want[1].as_f64().unwrap());
+                        match got.iter().find(|g| (g.0 - span.0).abs() <= 1.5) {
+                            Some(g) if g.1 >= lo && g.1 <= hi => {
+                                score.too_long_fixed += 1;
+                                "fixed"
+                            }
+                            Some(_) => "still too long (or now too short)",
+                            None => "LOST (no zoom starts here any more)",
+                        }
+                    }
+                    other => panic!("{name}: unhandled mark {other:?}"),
+                };
+                println!(
+                    "  {:5.1}-{:5.1}s  {:18} Keith: {:16} -> {verdict}",
+                    span.0,
+                    span.1,
+                    m["reason"].as_str().unwrap(),
+                    if kind.is_empty() { call } else { kind },
+                );
+            }
+            for (k, g) in got.iter().enumerate() {
+                if !judged[k] {
+                    score.new_unjudged += 1;
+                    println!("  {:5.1}-{:5.1}s  NEW zoom nobody has judged", g.0, g.1);
+                }
+            }
+            assert!(marks["missing"].as_array().unwrap().is_empty(), "missing zooms are not scored yet");
+        }
+        println!("{score:?}");
+        score
+    }
+
+    // The frozen detector on the marked logs must reproduce what the app showed
+    // Keith when he marked them; otherwise his calls are about different zooms.
+    // Fixed history: this never changes with the rules.
+    #[test]
+    fn marked_clips_marks_match_what_keith_saw() {
+        for (name, _, marks, detected) in MARKED_CLIPS {
+            let detected: serde_json::Value = serde_json::from_str(detected).unwrap();
+            let shown: Vec<ZoomKeyframe> = serde_json::from_value(detected["zoom"].clone()).unwrap();
+            let marks: serde_json::Value = serde_json::from_str(marks).unwrap();
+            let marked = marks["zooms"].as_array().unwrap();
+            let shown = segments(&shown);
+            assert_eq!(shown.len(), marked.len(), "{name}: every zoom shown has a call");
+            for (s, m) in shown.iter().zip(marked) {
+                assert!((s.0 - m["start"].as_f64().unwrap()).abs() < 0.01, "{name}");
+                assert!((s.1 - m["end"].as_f64().unwrap()).abs() < 0.01, "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn marked_clips_score() {
+        assert_eq!(
+            score_marked_clips(),
+            // Baseline 2026-11-15, detector untouched since Keith marked.
+            Score {
+                right_kept: 2,
+                right_total: 2,
+                unwanted_gone: 0,
+                unwanted_total: 2,
+                too_long_fixed: 0,
+                too_long_total: 2,
+                new_unjudged: 0,
+            }
+        );
+    }
+
     #[test]
     fn cursor_track_path_resolves_both_layouts() {
         let dir = std::env::temp_dir().join(format!("zeigen-zoom-path-{}", std::process::id()));
