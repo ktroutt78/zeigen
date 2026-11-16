@@ -1,0 +1,17 @@
+{
+  "clip": "clip3-scroll",
+  "marked_by": "Keith",
+  "marked_on": "2026-11-15",
+  "zooms": [
+    { "start": 0.82, "end": 14.61, "reason": "pause + 2 clicks", "call": "wrong", "kind": "held_too_long",
+      "note": "Zooming on the first click was fine (the click opened a snowbook). It should have zoomed back out earlier after the click; instead it held through the whole first scroll (9.2s to 14.7s).",
+      "wanted_end_range": [3.0, 9.0],
+      "wanted_end_range_source": "Fable's reading of 'earlier': after the clicks at 1.7s/2.2s and before the scroll starts at 9.2s. Not a number Keith gave." },
+    { "start": 15.81, "end": 21.72, "reason": "pause, no click", "call": "unmarked",
+      "note": "Keith has not given a call on this one yet." },
+    { "start": 35.37, "end": 39.28, "reason": "pause + 1 click", "call": "wrong", "kind": "should_not_zoom",
+      "note": "Unnecessary. The click (39.2s) was the stop-recording button in the lower part of the screen." }
+  ],
+  "missing": [],
+  "notes": "Scrolled with the wheel. Second scroll (25.7s to 31.7s) got no zoom; Keith reported nothing missing but was not asked directly yet."
+}
