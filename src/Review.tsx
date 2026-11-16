@@ -16,7 +16,15 @@ import {
   type RedactionRegion,
   type RedactionTint,
 } from "./redaction";
-import { fmt, parseStampFromPath, TRIM_EPS, ZOOM_MIN_DURATION, ZOOM_RAMP_S } from "./reviewShared";
+import {
+  cameraAt,
+  fmt,
+  parseStampFromPath,
+  TRIM_EPS,
+  ZOOM_MIN_DURATION,
+  ZOOM_RAMP_S,
+  type CameraPath,
+} from "./reviewShared";
 
 // Review window. Left column is player + timeline; right column is an
 // accordion panel (Trim / Bubble / Zoom / Watermark / Export sections plus a
@@ -156,34 +164,6 @@ function zoomKeyframesToSegments(kfs: ZoomKeyframe[]): ZoomSegment[] {
     i = j;
   }
   return segments;
-}
-
-// The camera path from Rust (camera.rs via the camera_path command): the ONE
-// definition of zoom motion, the same path the export plays. samples[i] =
-// [scale, cx, cy] at t = i * step; (cx, cy) is the crop window's centre as a
-// fraction of the frame, top-left origin, always inside the frame.
-type CameraPath = { step: number; samples: [number, number, number][] };
-
-// Camera at playhead time t: linear interpolation between neighbouring samples,
-// held at the last sample past the end. A lookup, not motion maths; it must
-// behave exactly like cameraAt in compositor-engine/main.swift.
-function cameraAt(
-  path: CameraPath | null,
-  t: number,
-): { scale: number; cx: number; cy: number } | null {
-  if (!path || path.samples.length === 0) return null;
-  const x = Math.max(t, 0) / path.step;
-  const i = Math.floor(x);
-  if (i >= path.samples.length - 1) {
-    const [scale, cx, cy] = path.samples[path.samples.length - 1];
-    return { scale, cx, cy };
-  }
-  const a = path.samples[i], b = path.samples[i + 1], u = x - i;
-  return {
-    scale: a[0] + (b[0] - a[0]) * u,
-    cx: a[1] + (b[1] - a[1]) * u,
-    cy: a[2] + (b[2] - a[2]) * u,
-  };
 }
 
 // The drawn cursor (cursor_preview command): the SAME overlay data the export
