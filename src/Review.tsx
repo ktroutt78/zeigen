@@ -81,13 +81,14 @@ type ZoomSegment = {
 
 const ZOOM_DEFAULT_DURATION = 3;
 const ZOOM_MIN_DURATION = 0.5;
-// V3-PLAN C.1 calm rules: 600ms ease-in-out ramps, 2.5x scale cap.
+// Ramp length of the stored keyframe shape (sidecar format) and the lane's ramp
+// shading. The motion itself comes from the camera path (camera.rs). 2.5x cap.
 const ZOOM_RAMP_S = 0.6;
 const ZOOM_MIN_SCALE = 1.1;
 const ZOOM_MAX_SCALE = 2.5;
 const ZOOM_DEFAULT_SCALE = 2.0;
 // Looped slow preview of the selected zoom (Slice 1.5). Half speed so the
-// 600ms ramps read as motion; a short pre-roll to see the ramp-in enter and
+// zoom-in and zoom-out read as motion; a short pre-roll to see the ramp-in enter and
 // a longer tail to see it settle. The window is clamped inside the trim
 // range so the loop's own wrap never collides with the trim-out wrap.
 const ZOOM_PREVIEW_RATE = 0.5;
@@ -154,36 +155,32 @@ function zoomKeyframesToSegments(kfs: ZoomKeyframe[]): ZoomSegment[] {
   return segments;
 }
 
-function easeInOutCubic(u: number): number {
-  return u < 0.5 ? 4 * u * u * u : 1 - Math.pow(-2 * u + 2, 3) / 2;
-}
+// The camera path from Rust (camera.rs via the camera_path command): the ONE
+// definition of zoom motion, the same path the export plays. samples[i] =
+// [scale, cx, cy] at t = i * step; (cx, cy) is the crop window's centre as a
+// fraction of the frame, top-left origin, always inside the frame.
+type CameraPath = { step: number; samples: [number, number, number][] };
 
-// Zoom state at playhead time t — the reference implementation of the
-// sidecar keyframe semantics (600ms in_out_cubic ramps at the segment
-// edges, full scale between) expressed over the canonical segment shape.
-// The step-4 export renderer must reproduce exactly this curve for
-// preview/export parity; do not change one without the other.
-function zoomAt(
-  segments: ZoomSegment[],
+// Camera at playhead time t: linear interpolation between neighbouring samples,
+// held at the last sample past the end. A lookup, not motion maths; it must
+// behave exactly like cameraAt in compositor-engine/main.swift.
+function cameraAt(
+  path: CameraPath | null,
   t: number,
-): { scale: number; center_x: number; center_y: number } | null {
-  for (const seg of segments) {
-    if (t < seg.start || t > seg.end) continue;
-    const dur = seg.end - seg.start;
-    const ramp = Math.min(ZOOM_RAMP_S, dur / 2);
-    let scale: number;
-    if (ramp <= 0) {
-      scale = seg.scale;
-    } else if (t < seg.start + ramp) {
-      scale = 1 + (seg.scale - 1) * easeInOutCubic((t - seg.start) / ramp);
-    } else if (t > seg.end - ramp) {
-      scale = 1 + (seg.scale - 1) * easeInOutCubic((seg.end - t) / ramp);
-    } else {
-      scale = seg.scale;
-    }
-    return { scale, center_x: seg.center_x, center_y: seg.center_y };
+): { scale: number; cx: number; cy: number } | null {
+  if (!path || path.samples.length === 0) return null;
+  const x = Math.max(t, 0) / path.step;
+  const i = Math.floor(x);
+  if (i >= path.samples.length - 1) {
+    const [scale, cx, cy] = path.samples[path.samples.length - 1];
+    return { scale, cx, cy };
   }
-  return null;
+  const a = path.samples[i], b = path.samples[i + 1], u = x - i;
+  return {
+    scale: a[0] + (b[0] - a[0]) * u,
+    cx: a[1] + (b[1] - a[1]) * u,
+    cy: a[2] + (b[2] - a[2]) * u,
+  };
 }
 
 // Timeline + stage + right-panel Zoom section share this.
@@ -210,6 +207,9 @@ type ZoomEditor = {
   // the stage: un-suppresses the live zoom transform (so the motion is
   // visible) and hides the crop-box edit layer for the duration.
   looping: boolean;
+  // The camera path for the current segments (null = no zooms), looked up with
+  // cameraAt by the stage and the redaction layer.
+  camera: CameraPath | null;
 };
 
 // Stage overlay + right-panel Redact section share this.
@@ -894,6 +894,31 @@ export default function Review() {
   // step-2 keyframe schema — converted on read and in currentState below.
   const [zoomSegments, setZoomSegments] = useState<ZoomSegment[]>([]);
   const [zoomSelectedIndex, setZoomSelectedIndex] = useState<number | null>(null);
+  // The camera path Rust computes from the segments — the same one the export
+  // plays. Debounced (segment drags fire per pointer move and a long path is a
+  // lot of JSON); a stale response never overwrites a newer one.
+  const [cameraPath, setCameraPath] = useState<CameraPath | null>(null);
+  const cameraReqRef = useRef(0);
+  useEffect(() => {
+    const req = ++cameraReqRef.current;
+    if (zoomSegments.length === 0 || !videoDims || duration == null) {
+      setCameraPath(null);
+      return;
+    }
+    const timer = setTimeout(() => {
+      invoke<CameraPath>("camera_path", {
+        zoom: zoomSegmentsToKeyframes(zoomSegments),
+        width: videoDims.w,
+        height: videoDims.h,
+        duration,
+      })
+        .then((p) => {
+          if (req === cameraReqRef.current) setCameraPath(p);
+        })
+        .catch((e) => console.error("camera_path failed", e));
+    }, 100);
+    return () => clearTimeout(timer);
+  }, [zoomSegments, videoDims, duration]);
 
   // Redaction panels (REDACTION-PLAN). Stored source-space; drawn on the flat
   // frame, previewed through the active zoom via the shared ./redaction transform.
@@ -2214,6 +2239,7 @@ export default function Review() {
     suggest: suggestZooms,
     suggesting,
     looping: loopingZoom,
+    camera: cameraPath,
   };
 
   const redactionEditor: RedactionEditor = {
@@ -2843,7 +2869,7 @@ function VideoStage(props: VideoStageProps) {
   const videoDims = props.watermarkPreview.videoDims;
 
   // Live zoom preview (step 3) — CSS scale+translate on the <video> only,
-  // driven per-frame by the playhead against the interpolated zoom curve
+  // driven per-frame by the playhead against the camera path (cameraAt)
   // (same rAF-outside-React pattern as BubbleLayer; React never writes
   // `transform` in the video's style object, so these imperative writes
   // survive re-renders). The webcam bubble is screen-anchored and must not
@@ -2852,7 +2878,7 @@ function VideoStage(props: VideoStageProps) {
   // deselect to watch the applied zoom. The exception is the looped slow
   // preview (zoom.looping) — it un-suppresses the transform while selected
   // so the motion is visible, time-multiplexing edit vs. watch.
-  const zoomSegs = props.zoom.segments;
+  const camera = props.zoom.camera;
   const zoomEditing = props.zoom.selectedIndex != null;
   const zoomLooping = props.zoom.looping;
   const videoRefForZoom = props.videoRef;
@@ -2913,7 +2939,7 @@ function VideoStage(props: VideoStageProps) {
       layer.style.transform = "";
       layer.style.transformOrigin = "";
     };
-    if (zoomSegs.length === 0 || (zoomEditing && !zoomLooping) || redactFlat || !videoDims) {
+    if (!camera || (zoomEditing && !zoomLooping) || redactFlat || !videoDims) {
       reset();
       return;
     }
@@ -2922,15 +2948,14 @@ function VideoStage(props: VideoStageProps) {
       raf = requestAnimationFrame(tick);
       const stage = stageRef.current;
       if (!stage) return;
-      const z = zoomAt(zoomSegs, video.currentTime);
+      const z = cameraAt(camera, video.currentTime);
       if (!z || z.scale <= 1.001) {
         layer.style.transform = "";
         return;
       }
-      // Framing: a crop rect of size content/s centered on the zoom
-      // center, clamped inside the frame, scaled up to fill the content
-      // box. The export renderer (edit.rs zoom_filter_fragment) mirrors this
-      // math for preview/export parity — change one, change the other.
+      // Framing: the camera path's crop window (size content/s, centre
+      // already inside the frame) scaled up to fill the content box. The
+      // export plays the same path, so the framing matches.
       const rect = stage.getBoundingClientRect();
       // When a background is active the video lives inside the inset frame wrapper,
       // so the zoom crop is relative to THAT box (origin 0,0, shrunk by padding),
@@ -2941,10 +2966,8 @@ function VideoStage(props: VideoStageProps) {
           ? { x: 0, y: 0, w: full.w * (1 - insetFrac), h: full.h * (1 - insetFrac) }
           : full;
       const s = z.scale;
-      const px = b.x + (z.center_x / videoDims.w) * b.w;
-      const py = b.y + (z.center_y / videoDims.h) * b.h;
-      const qx = Math.min(Math.max(px, b.x + b.w / (2 * s)), b.x + b.w - b.w / (2 * s));
-      const qy = Math.min(Math.max(py, b.y + b.h / (2 * s)), b.y + b.h - b.h / (2 * s));
+      const qx = b.x + z.cx * b.w;
+      const qy = b.y + z.cy * b.h;
       layer.style.transformOrigin = "0 0";
       layer.style.transform = `translate(${b.x + b.w / 2 - s * qx}px, ${
         b.y + b.h / 2 - s * qy
@@ -2955,7 +2978,7 @@ function VideoStage(props: VideoStageProps) {
       cancelAnimationFrame(raf);
       reset();
     };
-  }, [zoomSegs, zoomEditing, zoomLooping, redactFlat, videoDims, videoRefForZoom, insetFrac]);
+  }, [camera, zoomEditing, zoomLooping, redactFlat, videoDims, videoRefForZoom, insetFrac]);
 
   const onStageClick = (e: React.MouseEvent) => {
     // Click on the empty stage background = deselect any zoom, which leaves
@@ -3083,7 +3106,7 @@ function VideoStage(props: VideoStageProps) {
           stageRef={stageRef}
           videoDims={videoDims}
           editor={props.redact}
-          zoomSegs={props.zoom.segments}
+          camera={props.zoom.camera}
           videoRef={props.videoRef}
           flat={redactFlat}
           insetFrac={insetFrac}
@@ -3546,7 +3569,7 @@ function RedactionLayer({
   stageRef,
   videoDims,
   editor,
-  zoomSegs,
+  camera,
   videoRef,
   flat,
   insetFrac,
@@ -3554,7 +3577,7 @@ function RedactionLayer({
   stageRef: React.MutableRefObject<HTMLDivElement | null>;
   videoDims: { w: number; h: number } | null;
   editor: RedactionEditor;
-  zoomSegs: ZoomSegment[];
+  camera: CameraPath | null;
   videoRef: React.MutableRefObject<HTMLVideoElement | null>;
   flat: boolean;
   // Background/padding preview inset (Slice 4): redaction rects render on — and
@@ -3615,7 +3638,12 @@ function RedactionLayer({
       editor.regions.forEach((region, i) => {
         const node = boxRefs.current[i];
         const active = t >= region.start && t <= region.end;
-        const zoom = flat ? null : zoomAt(zoomSegs, t);
+        const cam = flat ? null : cameraAt(camera, t);
+        const zoom = cam && {
+          scale: cam.scale,
+          center_x: cam.cx * videoDims.w,
+          center_y: cam.cy * videoDims.h,
+        };
         const out = active ? sourceRectToOutputRect(region, zoom, videoDims.w, videoDims.h) : null;
         if (!out) {
           if (node) node.style.display = "none";
@@ -3682,7 +3710,7 @@ function RedactionLayer({
     };
     tick();
     return () => cancelAnimationFrame(raf);
-  }, [editor.regions, zoomSegs, videoDims, videoRef, stageRef, flat, size, insetFrac]);
+  }, [editor.regions, camera, videoDims, videoRef, stageRef, flat, size, insetFrac]);
 
   if (!videoDims) return null;
   const b = contentBox({ width: size.width, height: size.height }, videoDims, insetFrac);

@@ -900,10 +900,7 @@ fn v3_render(
     let camera_json_path = if segs.is_empty() {
         None
     } else {
-        let zooms: Vec<crate::camera::Zoom> = segs
-            .iter()
-            .map(|s| crate::camera::Zoom { start: s.start, end: s.end, scale: s.scale, cx: s.cx, cy: s.cy })
-            .collect();
+        let zooms = camera_zooms(&sidecar.zoom);
         let dur = probe_duration_seconds(screen_path)?;
         let path = crate::camera::path(&zooms, w as f64, h as f64, dur);
         let json = serde_json::to_string(&path).map_err(|e| format!("camera json: {e}"))?;
@@ -1577,6 +1574,21 @@ fn zoom_keyframes_to_segments(kfs: &[ZoomKeyframe]) -> Vec<ZoomSeg> {
         i = j;
     }
     segs
+}
+
+// The ONE keyframes -> camera zooms conversion, shared by the export (v3_render)
+// and the preview (camera_path) so they cannot convert differently.
+fn camera_zooms(kfs: &[ZoomKeyframe]) -> Vec<crate::camera::Zoom> {
+    zoom_keyframes_to_segments(kfs)
+        .iter()
+        .map(|s| crate::camera::Zoom { start: s.start, end: s.end, scale: s.scale, cx: s.cx, cy: s.cy })
+        .collect()
+}
+
+// The preview's camera path: the same path the export writes to camera.json.
+#[tauri::command]
+pub fn camera_path(zoom: Vec<ZoomKeyframe>, width: f64, height: f64, duration: f64) -> crate::camera::CameraPath {
+    crate::camera::path(&camera_zooms(&zoom), width, height, duration)
 }
 
 // Resolve the next available per-format slot in ~/Movies/Zeigen for a
@@ -2791,6 +2803,40 @@ WATERMARK_SCALE_FRAC=0.08";
         // No effective zoom -> no segments (stays on the copy path).
         assert!(zoom_keyframes_to_segments(&[]).is_empty());
         assert!(zoom_keyframes_to_segments(&[kf(0.0, 1.0, 0.0), kf(1.0, 1.0, 0.0)]).is_empty());
+    }
+
+    // The preview's camera_path command must produce exactly the path the export
+    // computes from the equivalent camera zooms.
+    #[test]
+    fn camera_path_command_matches_camera_module() {
+        let kf = |t: f64, scale: f64, cx: f64, cy: f64| ZoomKeyframe {
+            t,
+            scale,
+            center_x: cx,
+            center_y: cy,
+            ease: Ease::InOutCubic,
+            auto_generated: true,
+        };
+        let track = [
+            kf(1.0, 1.0, 960.0, 540.0),
+            kf(1.6, 1.7, 400.0, 300.0),
+            kf(3.4, 1.7, 400.0, 300.0),
+            kf(4.0, 1.0, 960.0, 540.0),
+            kf(5.0, 1.0, 960.0, 540.0),
+            kf(5.6, 2.0, 1500.0, 800.0),
+            kf(7.4, 2.0, 1500.0, 800.0),
+            kf(8.0, 1.0, 960.0, 540.0),
+        ];
+        let expected = crate::camera::path(
+            &[
+                crate::camera::Zoom { start: 1.0, end: 4.0, scale: 1.7, cx: 400.0, cy: 300.0 },
+                crate::camera::Zoom { start: 5.0, end: 8.0, scale: 2.0, cx: 1500.0, cy: 800.0 },
+            ],
+            1920.0,
+            1080.0,
+            10.0,
+        );
+        assert_eq!(camera_path(track.to_vec(), 1920.0, 1080.0, 10.0), expected);
     }
 
     // The OnceLock set in lib.rs::run setup doesn't fire under cargo test,
