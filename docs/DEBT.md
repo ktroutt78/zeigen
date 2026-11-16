@@ -29,7 +29,3 @@ While recording, the engine reads and hashes the system cursor image about 20 ti
 ## Motion blur is export-only (2026-11-15)
 
 The exported video smears moving camera frames; the Review preview does not. The camera path itself (timing, framing) is identical in both. Reason: the preview is a CSS transform on a `<video>` element and cannot do a directional or radial smear cheaply; matching it would mean rebuilding the preview on a different drawing technology for a ~0.7s effect. Accepted by Keith 2026-11-15 (`docs/DECISIONS.md`). Violates the standing rule "preview and export must match" for this one effect.
-
-## Overlays hidden from capture do not show on USB-driven displays (2026-11-16)
-
-The countdown, marquee, window picker, timer chip, area indicator and floating webcam bubble are all marked hidden from screen capture (`make_capture_invisible`), which also keeps them off DisplayLink and InstantView displays (cause in `docs/DECISIONS.md` 2026-11-16). Only the identify overlays are fixed. Proposed fix, not approved or built: stop marking them, and have the recording engine leave Zeigen's own windows out of display and area recordings instead (`RecordingSession.swift:159, 219`). The countdown, marquee and window picker are only up before a recording starts and may need nothing more than dropping the mark.

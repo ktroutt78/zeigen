@@ -112,7 +112,6 @@ async function openBubble(deviceName: string, anchor: BubbleAnchor) {
         height: BUBBLE_H,
         primaryCocoaHeight,
       });
-      await invoke("make_capture_invisible", { label: BUBBLE_LABEL });
     } catch (e) {
       console.error("bubble setup failed", e);
     }
@@ -187,7 +186,6 @@ async function openCountdown(
         height: displayFrame.h,
         primaryCocoaHeight,
       });
-      await invoke("make_capture_invisible", { label: COUNTDOWN_LABEL });
     } catch (e) {
       console.error("countdown setup failed", e);
     }
@@ -254,9 +252,6 @@ async function openIdentifyOverlays(displays: DisplayShape[]) {
               height: display.height,
               primaryCocoaHeight,
             });
-            // Not hidden from capture: a window with sharingType none never
-            // reaches USB-driven displays (DisplayLink, InstantView), and this
-            // overlay is never up during a recording.
           } catch (e) {
             console.error(`[identify] ${label} setup failed`, e);
           }
@@ -321,7 +316,6 @@ async function openIdentifyWindowOverlay(window: WindowSource) {
             height: window.height,
             primaryCocoaHeight,
           });
-          // Not hidden from capture, same reason as the display identify overlay.
         } catch (e) {
           console.error(`[identify-window] ${label} setup failed`, e);
         }
@@ -368,9 +362,6 @@ async function openTimerChip(anchor: BubbleAnchor | null = null) {
   });
 
   win.once("tauri://created", async () => {
-    invoke("make_capture_invisible", { label: TIMER_CHIP_LABEL }).catch((e) => {
-      console.error("make_capture_invisible(timer-chip) failed", e);
-    });
     try {
       // Position via set_window_frame_cg (CG points, top-left origin).
       // Tauri's PhysicalPosition setPosition path mis-routes across
@@ -528,7 +519,6 @@ async function openAreaIndicator(rect: {
             height: rect.h,
             primaryCocoaHeight,
           });
-          await invoke("make_capture_invisible", { label: AREA_INDICATOR_LABEL });
           await win.setIgnoreCursorEvents(true);
         } catch (e) {
           console.error("[area-indicator] setup failed", e);
@@ -630,7 +620,6 @@ async function openMarqueeOverlays(
               height: d.height,
               primaryCocoaHeight,
             });
-            await invoke("make_capture_invisible", { label });
           } catch (e) {
             console.error(`[marquee] ${label} setup failed`, e);
           }
@@ -798,7 +787,6 @@ async function openWindowPickerOverlays(
               height: d.height,
               primaryCocoaHeight,
             });
-            await invoke("make_capture_invisible", { label });
             // No setFocus: hover is poller-driven and keying an overlay only
             // re-triggers the key-steal (DECISIONS 2026-07-28). Slice 2.
           } catch (e) {

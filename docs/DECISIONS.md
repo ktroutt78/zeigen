@@ -4,6 +4,29 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-16 — Timeline rework + Scene track: plan approved, Keith's decisions
+
+`docs/TIMELINE-PLAN.md` approved as written, steps 0 to 5 in that order. Keith's answers to its seven decisions:
+
+1. Hover while playing: the hover line shows, playback continues, a click jumps.
+2. Full webcam softness: accept the 720p webcam for now; he judges on a real full-webcam scene.
+3. Split screen: 62/38 as a starting point, judged by eye.
+4. "No bubble" keeps the Frame padding; "Full screen recording" fills the picture.
+5. Transitions: about 0.5s, animated, no hard-cut option.
+6. Bubble size during zoom: slider starts at 100% (no shrink); he picks a default after seeing it.
+7. The thumbnail popup is removed.
+
+Also settled by the plan: no Add track control (fixed rows: Video, Zoom, Scene with a webcam, Blur with redactions); auto-zoom detection still runs when Review opens, with a Generate button on the Zoom row.
+
+## 2026-11-16 — Overlays are kept out of recordings by the engine, not by hiding the windows
+
+Keith approved. Follows the USB-display entry below.
+
+- No Zeigen window is marked hidden from capture any more; the `make_capture_invisible` command is deleted.
+- The recording engine excludes Zeigen's own app from display and area recordings (`RecordingSession.swift`, `ownApps`: the engine's parent process, or the app's bundle id). Window recordings already capture only the picked app.
+- Keith's calls: Review and the capture window are not exempted (he does not record Zeigen with Zeigen), and overlays appearing in another app's screen share is fine.
+- Keith confirmed the identify number on BenQ (1). Not yet verified by anyone: that the countdown, timer chip, area indicator and bubble show on BenQ (1), and that none of them appear in a display or area recording.
+
 ## 2026-11-16 — USB-driven displays: the real cause is "hidden from capture", not window placement
 
 Replaces the conclusion of the 2026-04-26 entry "DisplayLink-driven displays don't get overlay UI".

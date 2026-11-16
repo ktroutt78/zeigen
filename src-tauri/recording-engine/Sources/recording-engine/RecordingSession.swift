@@ -136,6 +136,15 @@ final class RecordingSession: NSObject,
 
         let shareable = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
 
+        // Zeigen's own windows (timer chip, area indicator, floating bubble,
+        // countdown) are left out of display and area recordings here, not by
+        // NSWindow.sharingType = .none: a window hidden that way never reaches
+        // USB-driven displays (DisplayLink, InstantView). Zeigen is this
+        // process's parent; the bundle id covers the installed app.
+        let ownApps = shareable.applications.filter {
+            $0.processID == getppid()
+                || (Bundle.main.bundleIdentifier != nil && $0.bundleIdentifier == Bundle.main.bundleIdentifier)
+        }
         let filter: SCContentFilter
         let width: Int
         let height: Int
@@ -156,7 +165,7 @@ final class RecordingSession: NSObject,
             guard let display = shareable.displays.first(where: { $0.displayID == displayID }) else {
                 throw EngineError(code: "DISPLAY_NOT_FOUND", message: "display_id \(displayID) not present")
             }
-            filter = SCContentFilter(display: display, excludingWindows: [])
+            filter = SCContentFilter(display: display, excludingApplications: ownApps, exceptingWindows: [])
             // Capture at the display's BACKING resolution (2x on Retina), not
             // the logical point size SCDisplay.width reports on macOS 26. Cursor
             // scale comes from the SAME geometry so telemetry and video stay
@@ -216,7 +225,7 @@ final class RecordingSession: NSObject,
             guard let display = shareable.displays.first(where: { $0.displayID == displayID }) else {
                 throw EngineError(code: "DISPLAY_NOT_FOUND", message: "display_id \(displayID) not present")
             }
-            filter = SCContentFilter(display: display, excludingWindows: [])
+            filter = SCContentFilter(display: display, excludingApplications: ownApps, exceptingWindows: [])
             let geo = Self.captureGeometry(
                 pointWidth: Double(pointRect.width),
                 pointHeight: Double(pointRect.height),

@@ -2,10 +2,10 @@
 //
 // One transparent always-on-top window sized to the selected region's
 // screen-space rect. Renders a dashed border around its inside edge so
-// the user can always see what's being captured. The window is invisible
-// to SCK (make_capture_invisible) and click-through
-// (setIgnoreCursorEvents) so it never bleeds into the recording or
-// blocks interaction with whatever's underneath.
+// the user can always see what's being captured. The recording engine
+// leaves Zeigen's own windows out of the capture, and the window is
+// click-through (setIgnoreCursorEvents) so it never blocks whatever's
+// underneath.
 
 export default function AreaIndicator() {
   return (

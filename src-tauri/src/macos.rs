@@ -51,23 +51,6 @@ unsafe impl RefEncode for NSRect {
     const ENCODING_REF: Encoding = Encoding::Pointer(&Self::ENCODING);
 }
 
-#[tauri::command]
-pub fn make_capture_invisible(app: AppHandle, label: String) -> Result<(), String> {
-    let window = app
-        .get_webview_window(&label)
-        .ok_or_else(|| format!("window not found: {label}"))?;
-    let ns_window = window
-        .ns_window()
-        .map_err(|e| format!("ns_window: {e}"))? as *mut AnyObject;
-    if ns_window.is_null() {
-        return Err("ns_window is null".into());
-    }
-    unsafe {
-        let _: () = msg_send![ns_window, setSharingType: 0usize];
-    }
-    Ok(())
-}
-
 // Plant a window with CG-coords frame, given the primary screen's Cocoa
 // height (passed from TS via Tauri's monitors API). Tauri's own
 // set_position drops negative x on macOS for screens left of primary, so

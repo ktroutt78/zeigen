@@ -31,5 +31,5 @@ From Keith after rules 1 to 3 (`docs/DECISIONS.md`). Not planned.
 
 From Keith, comparing Cap. Not planned.
 
-- **Identify every display, including USB-driven ones.** DONE 2026-11-16 for the identify overlays (awaiting Keith's check on the installed build). Cause and proof in `docs/DECISIONS.md`: BenQ (1) is driven by Silicon Motion InstantView, and a window hidden from screen capture never reaches such a display. The other overlays still have the problem, see `docs/DEBT.md`.
+- **Identify every display, including USB-driven ones.** DONE 2026-11-16. Keith confirmed the identify number on BenQ (1); the other overlays were changed the same day and await his check. Cause and proof in `docs/DECISIONS.md`: BenQ (1) is driven by Silicon Motion InstantView, and a window hidden from screen capture never reaches such a display.
 - **Richer identify overlay, like Cap's.** Cap shows, centered on each display, a display icon, the display's name ("Built-in Retina Display", "BenQ GL2780 (1)"), its resolution and refresh rate ("3024x1964 · 120FPS"), and the recording controls on the display that's selected. Keith likes it better than a bare number.

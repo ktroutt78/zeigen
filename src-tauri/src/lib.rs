@@ -808,7 +808,6 @@ pub fn run() {
             update_tray_elapsed,
             set_hotkey,
             quit_app,
-            macos::make_capture_invisible,
             macos::set_window_frame_cg,
             macos::picker_cursor_start,
             macos::picker_cursor_stop,
