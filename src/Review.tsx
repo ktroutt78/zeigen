@@ -221,16 +221,20 @@ function cursorShapeAt(o: CursorOverlay, t: number): number {
   return o.shape_events[0].shape;
 }
 
-// Mirror of Rust CursorStyle. The defaults (smooth, 1.0) are never written to
+// Mirror of Rust CursorStyle. The defaults (smooth, 1.7) are never written to
 // the sidecar, so an untouched recording's sidecar stays byte-identical.
 type CursorSmoothing = "off" | "light" | "smooth";
 type CursorStyle = { smoothing: CursorSmoothing; size: number };
-const DEFAULT_CURSOR_STYLE: CursorStyle = { smoothing: "smooth", size: 1 };
+const DEFAULT_CURSOR_STYLE: CursorStyle = { smoothing: "smooth", size: 1.7 };
 const CURSOR_MIN_SIZE = 0.75;
 const CURSOR_MAX_SIZE = 2.5;
 
 function cursorIsDefault(c: CursorStyle | null | undefined): boolean {
-  return !c || (c.smoothing === "smooth" && Math.abs(c.size - 1) < 1e-6);
+  return (
+    !c ||
+    (c.smoothing === DEFAULT_CURSOR_STYLE.smoothing &&
+      Math.abs(c.size - DEFAULT_CURSOR_STYLE.size) < 1e-6)
+  );
 }
 
 // Timeline + stage + right-panel Zoom section share this.

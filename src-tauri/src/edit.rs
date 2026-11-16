@@ -110,7 +110,7 @@ pub struct SidecarState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_kind: Option<String>,
     // Drawn-cursor style (CURSOR-SMOOTHING-PLAN). None = the defaults (Smooth,
-    // size 1.0) and is skipped when serialized, so existing sidecars stay
+    // size 1.7) and is skipped when serialized, so existing sidecars stay
     // byte-identical. Only read when the recording's cursor log says the cursor
     // is not in the video. Declared last.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -127,7 +127,7 @@ pub struct CursorStyle {
 
 impl Default for CursorStyle {
     fn default() -> Self {
-        CursorStyle { smoothing: CursorSmoothing::Smooth, size: 1.0 }
+        CursorStyle { smoothing: CursorSmoothing::Smooth, size: 1.7 }
     }
 }
 
@@ -771,7 +771,7 @@ fn build_compositor_command(
             .env("OUTPUT_HEIGHT", out_h.to_string());
     }
     if let Some(cj) = camera_json {
-        cmd.env("CAMERA_PATH", cj);
+        cmd.env("CAMERA_PATH", cj).env("MOTION_BLUR", MOTION_BLUR.to_string());
     }
     // Trim window (original-timeline seconds). Compositor renders only this span and
     // rebases output PTS to 0; the audio mux trims the screen audio to match.
@@ -1758,6 +1758,11 @@ fn zoom_keyframes_to_segments(kfs: &[ZoomKeyframe]) -> Vec<ZoomSeg> {
     segs
 }
 
+// Motion blur strength for camera moves: the fraction of the frame interval the
+// "shutter" is open. Owner's pick 2026-11-15 from 0 / 0.25 / 0.5 renders: 0 looked
+// jagged, 0.5 made the camera feel rushed. Export-only (docs/DEBT.md).
+const MOTION_BLUR: f64 = 0.25;
+
 // The ONE keyframes -> camera zooms conversion, shared by the export (v3_render)
 // and the preview (camera_path) so they cannot convert differently.
 fn camera_zooms(kfs: &[ZoomKeyframe]) -> Vec<crate::camera::Zoom> {
@@ -2741,6 +2746,7 @@ BUBBLE_SHADOW_PNG=/S/shadow.png
 BUBBLE_WEBCAM=/S/webcam.mp4
 BUBBLE_ZONE=br
 CAMERA_PATH=/S/camera.json
+MOTION_BLUR=0.25
 OUTPUT_HEIGHT=1246
 OUTPUT_WIDTH=1920
 WATERMARK_CORNER=tr
@@ -4011,6 +4017,15 @@ WATERMARK_SCALE_FRAC=0.08";
     // writes to the user's real pasteboard, so a test can't call it. It exports through
     // run_edit_pipeline with an MP4 mode (asserted structurally below), which is
     // exactly the call exercised here.
+    // The pixel checks below measure the cursor at its logged size, so they pin the
+    // size to 1.0 instead of the app default (1.7). No other edits.
+    fn unit_size_cursor_sidecar() -> SidecarState {
+        SidecarState {
+            cursor: Some(CursorStyle { smoothing: CursorSmoothing::Smooth, size: 1.0 }),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn cursor_drawn_on_mp4_and_clipboard_exports() {
         ensure_audio_model_for_tests();
@@ -4020,7 +4035,7 @@ WATERMARK_SCALE_FRAC=0.08";
         let screen = synth_cursorless_recording(&dir, 2.0, true);
         let out = dir.join("out-cursor.mp4");
         run_edit_pipeline(
-            &screen, &[], &out, &SidecarState::default(),
+            &screen, &[], &out, &unit_size_cursor_sidecar(),
             PipelineMode::Mp4 { resolution: Mp4Resolution::Source },
             crate::composite::WebcamSize::Medium, None, |_| {},
         )
@@ -4044,7 +4059,7 @@ WATERMARK_SCALE_FRAC=0.08";
         let screen = synth_cursorless_recording(&dir, 2.0, true);
         let out = dir.join("out-cursor.gif");
         run_edit_pipeline(
-            &screen, &[], &out, &SidecarState::default(),
+            &screen, &[], &out, &unit_size_cursor_sidecar(),
             PipelineMode::Gif { resolution: GifResolution::Source, fps: 15 },
             crate::composite::WebcamSize::Medium, None, |_| {},
         )
@@ -4210,7 +4225,7 @@ WATERMARK_SCALE_FRAC=0.08";
         };
         let sidecar = SidecarState {
             zoom: vec![kf(0.0, 1.0), kf(0.6, 2.0), kf(3.4, 2.0), kf(4.0, 1.0)],
-            ..Default::default()
+            ..unit_size_cursor_sidecar()
         };
         let out = dir.join("out-zoom.mp4");
         run_edit_pipeline(

@@ -4,6 +4,16 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-15 — Motion blur default 0.25; cursor defaults Smooth at size 1.7
+
+Keith judged three renders of his own cursorless test recording (`harness/reference/blur-0.mp4`, `blur-0.25.mp4`, `blur-0.5.mp4`):
+
+- **Motion blur = 0.25, on by default.** "0 looks jagged and 0.5 makes the camera feel like it's rushing; 0.25 smooths it without being noticeable." (0.5 is roughly Cap's amount, so Zeigen deliberately blurs less than Cap.) The value is the fraction of the frame interval the shutter is open; it is one constant in `edit.rs` (`MOTION_BLUR`), passed whenever there is a camera path. Export-only, per `docs/DEBT.md`. Supersedes the 2026-07-15 "blur is out of the value case" finding: that test was a radial blur on the hard 0.6s ramp; this is a blur along the camera's real motion on the spring glide, with a drawn cursor that stays sharp.
+- **Cursor defaults for new recordings: Smooth, size 1.7.** The style is stored in the sidecar only when it differs from the default, so a recording saved earlier at the old default size (1.0) with no stored style now reads as 1.7. Only tonight's test recordings are affected.
+- Blur cost, measured on that 70s clip: export took 10 to 13s at all three strengths; no measurable increase.
+
+Re-aim (previous entry) is built but NOT yet judged by Keith in the app.
+
 ## 2026-11-15 — Camera RE-AIM while zoomed: reopened and approved as a one-glide rule (NOT continuous follow)
 
 Supersedes, for this one case, "continuous cursor-follow stays CLOSED" (2026-11-15 kickoff) and the 2026-07-15 "do not revisit follow-the-cursor" entry. Those still stand for CONTINUOUS follow.
