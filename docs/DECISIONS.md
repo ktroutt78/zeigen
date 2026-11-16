@@ -4,6 +4,14 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-16 — iPhone camera: why the zoom is lost on record, and why one recording was unplayable (diagnosis only)
+
+Two reports from Keith with the iPhone as the camera. Nothing is fixed yet; both fixes are proposed to him.
+
+**Zoom lost on record.** Not per-app Video Effects. The phone stream restarts whenever a process asks for a different camera mode, and the restart drops the menu-bar zoom. The preview uses the 1280x720 mode that tops out at 30 fps; ffmpeg's avfoundation input always picks the 1280x720 mode that goes to 60 fps and offers no way to choose. Reproduced with `spikes/webcam-identity/camframe.swift`: a second capture in the same mode joins without a restart and both stay zoomed; ffmpeg joining turns both wide; ContinuityCaptureAgent logs the StopStream/StartStream from FR:30 to FR:60 each time. Background blur did carry into the ffmpeg recording, so the settings themselves reach it. The prewarm ffmpeg triggers the same restart.
+
+**Unplayable first recording (12:52).** Control Center logged "User clicked module header button to stop all shared streams" three seconds into the recording, and macOS stopped Zeigen's screen stream. The engine creates its `SCStream` with no delegate, so it never noticed; at Stop, `stopCapture` threw -3808 ("already stopped") and `stop()` returned before finalizing the writer, leaving `screen.mp4` without its index. Not a camera handoff problem.
+
 ## 2026-11-16 — Timeline rework + Scene track: plan approved, Keith's decisions
 
 `docs/TIMELINE-PLAN.md` approved as written, steps 0 to 5 in that order. Keith's answers to its seven decisions:
