@@ -16,6 +16,8 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 6. Bubble size during zoom: slider starts at 100% (no shrink); he picks a default after seeing it.
 7. The thumbnail popup is removed.
 
+Progress: steps 0 to 2 (own files, labelled rows, hover preview with a parked playhead) verified by Keith on the installed build 2026-11-16: park and sweep, Space from the playhead, block drag and resize, trim, I/O, arrows, Set to playhead, and the look all pass.
+
 Also settled by the plan: no Add track control (fixed rows: Video, Zoom, Scene with a webcam, Blur with redactions); auto-zoom detection still runs when Review opens, with a Generate button on the Zoom row.
 
 ## 2026-11-16 — Overlays are kept out of recordings by the engine, not by hiding the windows

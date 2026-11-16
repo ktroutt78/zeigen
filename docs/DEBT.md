@@ -2,9 +2,9 @@
 
 Things left worse than we'd like, with why. Newest at top. Remove an entry when it is paid.
 
-## Timeline steps 0 to 2 have never been driven by me (2026-11-16)
+## Timeline: bubble during hover, and the waveform at high zoom (2026-11-16)
 
-The timeline rework (own files, labelled rows, hover preview) passes the type check and build, and the formulas were read line by line, but I cannot operate the Review window, so drag, resize, hover and click behaviour were first exercised by Keith on the installed build. Known soft spots to watch: while the preview shows a hovered moment the webcam bubble stays on the playhead's moment (aligning it on every hover seek was the cost the scrub bracket exists to avoid); `Waveform.tsx` still maps time across its canvas itself, which timeline zoom (step 3) has to bring under the scale.
+While the preview shows a hovered moment the webcam bubble stays on the playhead's moment (aligning it on every hover seek was the cost the scrub bracket exists to avoid). The waveform keeps 4096 peak buckets and a canvas capped at 8192px, so on a long recording zoomed far in it looks blocky. I cannot operate the Review window, so each timeline step is first exercised by Keith on the installed build.
 
 ## Resting-cursor rule misjudges "read, then rest a long time, then leave" (2026-11-15)
 
