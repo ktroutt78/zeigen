@@ -4,6 +4,16 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-15 — Click times in the cursor log were up to half a second late; fixed in the engine
+
+Found while marking the reference clips: every click in every cursor log sat on a half-second grid. Cause, measured with `spikes/click-timing/clicktiming` (run by Keith, polling 1000 times a second): macOS refreshes the permission-free event counters the engine reads only every 0.5s, and its "seconds since last event" reading is no better. The live "is the button down" reading (`CGEventSource.buttonState`) is prompt: it saw presses and releases 20 to 440 ms before the counter moved.
+
+Fix (`CursorTracker.swift`): presses and releases are logged on the tick the live reading changes (about 8 ms); the counters remain as a backstop for a press too short for any tick to see. No new permission.
+
+Verified in the installed build on a real recording (18.8s, 18 clicks): click times are spread across the half-second, every press has its release 76 to 217 ms later, nothing logged twice. Not exercised in that recording: a long hold, a drag, a right-click, and the backstop path (a press shorter than 8 ms).
+
+Left as is: scroll times stay on the half-second grid (no live reading exists without a permission; the detector only needs to know scrolling is happening). The three marked reference clips and the older pinned logs keep their late click times; the three approved rules do not depend on fine click timing.
+
 ## 2026-11-15 — Auto-zoom rules: three reference clips marked by Keith; baseline score pinned
 
 Keith recorded and marked three window recordings in the installed build (v0.1.9). Logs, what the app showed him, and his calls are in `src-tauri/tests/fixtures/zoom-rules/`; videos in `harness/reference/zoom-rules/` (not in git). Six auto zooms in total:

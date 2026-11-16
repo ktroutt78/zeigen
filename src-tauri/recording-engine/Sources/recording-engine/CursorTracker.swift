@@ -16,10 +16,18 @@ import Foundation
 // plan's hard constraint was "no new permission prompts"; the monitor
 // can't honor it, so it's gone. CGEventSource counters and
 // CGEvent(source: nil) are the same permission-free session-state family,
-// and counter deltas catch even clicks shorter than one tick. Cost: click
-// timestamps quantize to the 120 Hz tick (±8.3 ms, well inside the A.5
-// one-frame/33 ms gate) and scroll events carry no dy magnitude — Phase C
-// only needs "scrolling is happening here" to hold zoom, not the delta.
+// and counter deltas catch every click and scroll.
+//
+// Counters are NOT prompt, though: macOS refreshes them only every 0.5s
+// (measured 2026-11-15 with spikes/click-timing: polled at 1 kHz, changes
+// arrive on a 0.5s grid, and secondsSinceLastEventType is no better). So
+// left/right button presses are timed from CGEventSource.buttonState, which
+// is live (same spike: transitions seen 20 to 440 ms before the counter
+// moved), giving click times good to the 120 Hz tick (about 8 ms). The
+// counters stay as the backstop: a press too short for any tick to see is
+// still logged when its counter moves, up to 0.5s late. Scroll has no live
+// reading and stays on the 0.5s grid; Phase C only needs "scrolling is
+// happening here" to hold zoom, and scroll events carry no dy magnitude.
 // A CGEventTap remains off the table (Accessibility permission).
 //
 // Timing (V3-PLAN A.2): every sample and event is stamped with
@@ -93,12 +101,14 @@ final class CursorTracker: @unchecked Sendable {
 
     static let sampleRateHz = 120
 
-    // Event kinds detected per tick, via session counter deltas.
-    private static let counterKinds: [(CGEventType, String)] = [
-        (.leftMouseDown, "left_down"),
-        (.leftMouseUp, "left_up"),
-        (.rightMouseDown, "right_down"),
-        (.scrollWheel, "scroll"),
+    // Event kinds detected per tick, via session counter deltas. Kinds with a
+    // button are timed from the live button state (isDown = which edge) and
+    // the counter only backstops them; scroll is counter-only.
+    private static let counterKinds: [(type: CGEventType, name: String, button: CGMouseButton?, isDown: Bool)] = [
+        (.leftMouseDown, "left_down", .left, true),
+        (.leftMouseUp, "left_up", .left, false),
+        (.rightMouseDown, "right_down", .right, true),
+        (.scrollWheel, "scroll", nil, false),
     ]
 
     private let mapping: Mapping
@@ -125,6 +135,11 @@ final class CursorTracker: @unchecked Sendable {
     // Sampler-queue-only state.
     private var tick = 0
     private var lastCounts: [UInt32]
+    // Per counter kind: was its button down on the previous tick, and how many
+    // of its events the live state has already logged since the counter last
+    // moved (so the counter only adds the ones the state never saw).
+    private var buttonWasDown: [Bool]
+    private var seenLive: [Int]
     private var shapeIndexByHash: [SHA256Digest: Int] = [:]
     // Shape seen by the latest poll, and the shape the last logged event
     // carries. Kept apart so a change while paused is logged on resume.
@@ -151,8 +166,12 @@ final class CursorTracker: @unchecked Sendable {
         self.pointsToPixels = pointsToPixels
         self.cursorInVideo = cursorInVideo
         self.lastCounts = Self.counterKinds.map {
-            CGEventSource.counterForEventType(.combinedSessionState, eventType: $0.0)
+            CGEventSource.counterForEventType(.combinedSessionState, eventType: $0.type)
         }
+        self.buttonWasDown = Self.counterKinds.map {
+            $0.button.map { CGEventSource.buttonState(.combinedSessionState, button: $0) } ?? false
+        }
+        self.seenLive = Self.counterKinds.map { _ in 0 }
         if case .window(let wid, _, _) = mapping {
             cachedWindowFrame = Self.queryWindowFrame(wid)
         }
@@ -207,15 +226,30 @@ final class CursorTracker: @unchecked Sendable {
         guard let loc = CGEvent(source: nil)?.location else { return }
         let now = mach_absolute_time()
 
-        // Counter deltas since the previous tick. Read before the
-        // paused/stopped check so pauses don't replay clicks accumulated
-        // while paused on the first tick after resume.
+        // Button edges (live) and counter deltas since the previous tick.
+        // Read before the paused/stopped check so pauses don't replay clicks
+        // accumulated while paused on the first tick after resume.
         var fired: [String] = []
         for (i, kind) in Self.counterKinds.enumerated() {
-            let count = CGEventSource.counterForEventType(.combinedSessionState, eventType: kind.0)
+            if let button = kind.button {
+                let down = CGEventSource.buttonState(.combinedSessionState, button: button)
+                if down != buttonWasDown[i] {
+                    buttonWasDown[i] = down
+                    if down == kind.isDown {
+                        seenLive[i] += 1
+                        fired.append(kind.name)
+                    }
+                }
+            }
+            let count = CGEventSource.counterForEventType(.combinedSessionState, eventType: kind.type)
             if count != lastCounts[i] {
+                // One event per tick, as before, and only if the live state
+                // did not already log everything this counter step reports.
+                if Int(count &- lastCounts[i]) > seenLive[i] {
+                    fired.append(kind.name)
+                }
                 lastCounts[i] = count
-                fired.append(kind.1)
+                seenLive[i] = 0
             }
         }
 
