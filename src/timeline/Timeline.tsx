@@ -1,15 +1,15 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import Waveform from "../Waveform";
 import { I } from "../components/icons";
-import type { RedactionEditor, Trim, ZoomEditor } from "../Review";
-import { fmt, TRIM_EPS, ZOOM_MIN_DURATION } from "../reviewShared";
+import type { RedactionEditor, SceneEditor, Trim, ZoomEditor } from "../Review";
+import { fmt, SCENE_LAYOUTS, SCENE_MIN_DURATION, TRIM_EPS, ZOOM_MIN_DURATION } from "../reviewShared";
 import SegmentRow, { MOVE_THRESHOLD_PX } from "./SegmentRow";
 import CameraShade from "./CameraShade";
 import { tickLabel, timeScale } from "./scale";
 
 // The Review window's timeline: a header, then a fixed label column beside ONE
-// tracks column holding the ruler and the rows (Video, Zoom, and Blur when the
-// recording has redactions), with one playhead through all of them. Hovering
+// tracks column holding the ruler and the rows (Video, Zoom, Scene when the
+// recording has a webcam, and Blur when it has redactions), with one playhead through all of them. Hovering
 // shows that moment in the preview and leaves the playhead alone; a click sets
 // the playhead; a drag scrubs it. Every
 // time<->position conversion goes through ./scale against the tracks column's
@@ -35,6 +35,8 @@ type TimelineProps = {
   audioStart: number | null;
   zoom: ZoomEditor;
   redact: RedactionEditor;
+  // null = no webcam: no Scene row.
+  scene: SceneEditor | null;
   thumbnailTime: number | null;
 };
 
@@ -79,6 +81,8 @@ const zoomButton: React.CSSProperties = {
 
 // "1.7x", "2x": one decimal, no trailing ".0".
 const fmtScale = (s: number) => `${Number(s.toFixed(1))}x`;
+
+const sceneLabel = (layout: string) => SCENE_LAYOUTS.find((l) => l.id === layout)?.label ?? layout;
 
 export default function Timeline(props: TimelineProps) {
   const tracksRef = useRef<HTMLDivElement | null>(null);
@@ -345,11 +349,38 @@ export default function Timeline(props: TimelineProps) {
   );
 
   const hasBlur = props.redact.regions.length > 0;
+  const scene = props.scene;
   const rows: { name: string; icon: React.ReactNode; controls?: React.ReactNode; onHover?: (h: boolean) => void }[] = [
     { name: "Video", icon: I.video },
     { name: "Zoom", icon: I.zoomIn, controls: zoomControls, onHover: setZoomLabelHover },
+    ...(scene ? [{ name: "Scene", icon: I.webcam }] : []),
     ...(hasBlur ? [{ name: "Blur", icon: I.blur }] : []),
   ];
+
+  // The selected scene's layout chooser, shown in the header line.
+  const selectedScene = scene && scene.selectedIndex != null ? scene.segments[scene.selectedIndex] : null;
+  const sceneChooser = scene && selectedScene && scene.selectedIndex != null && (() => {
+    const i = scene.selectedIndex;
+    return (
+      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+        <div className="segmented">
+          {SCENE_LAYOUTS.map((l) => (
+            <button
+              key={l.id}
+              className={selectedScene.layout === l.id ? "on" : ""}
+              style={{ padding: "1px 8px", fontSize: 11 }}
+              onClick={() => scene.setLayout(i, l.id)}
+            >
+              {l.label}
+            </button>
+          ))}
+        </div>
+        <button className="btn-ghost" style={zoomButton} title="Remove this scene" onClick={() => scene.remove(i)}>
+          {I.trash}
+        </button>
+      </div>
+    );
+  })();
 
   return (
     <div
@@ -368,7 +399,10 @@ export default function Timeline(props: TimelineProps) {
           marginBottom: 6,
         }}
       >
-        <span style={labelStyle}>Timeline</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <span style={labelStyle}>Timeline</span>
+          {sceneChooser}
+        </div>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 4, opacity: canZoom ? 1 : 0.4 }}>
             <button
@@ -645,7 +679,53 @@ export default function Timeline(props: TimelineProps) {
                   colorSoft="var(--zoom-soft)"
                 />
               )}
+              {/* Under a full-webcam scene the screen is out of sight, so a zoom
+                  there has no visible effect: dim those spans. */}
+              {scale &&
+                scene?.segments.map(
+                  (s, i) =>
+                    s.layout === "full_webcam" && (
+                      <div
+                        key={i}
+                        style={{
+                          position: "absolute",
+                          left: `${scale.pct(s.start)}%`,
+                          width: `${scale.widthPct(s.start, s.end)}%`,
+                          top: 0,
+                          bottom: 0,
+                          background: "rgba(12,13,16,0.6)",
+                          pointerEvents: "none",
+                        }}
+                      />
+                    ),
+                )}
             </div>
+
+            {/* Scene row: layouts for stretches of the video, never overlapping;
+                hovering empty space shows the scene a click would add. */}
+            {scene && (
+              <div style={{ position: "relative", height: ROW_H, marginTop: ROW_GAP }}>
+                <div style={rowBg} />
+                {scale && (
+                  <SegmentRow
+                    segments={scene.segments}
+                    scale={scale}
+                    getRect={getRect}
+                    trackWidth={trackWidth}
+                    selectedIndex={scene.selectedIndex}
+                    onSelect={scene.select}
+                    ghost={{ place: scene.place, add: scene.addAt }}
+                    onChange={(i, p) => scene.update(i, p)}
+                    onDragHover={onDragHover}
+                    label={(i) => sceneLabel(scene.segments[i].layout)}
+                    bounds={scene.bounds}
+                    minGap={SCENE_MIN_DURATION}
+                    color="var(--scene)"
+                    colorSoft="var(--scene-soft)"
+                  />
+                )}
+              </div>
+            )}
 
             {/* Blur row: every redaction region, free to overlap (no bounds). */}
             {hasBlur && (

@@ -51,3 +51,31 @@ export function cameraAt(
     cy: a[2] + (b[2] - a[2]) * u,
   };
 }
+
+// Scene segments (TIMELINE-PLAN step 5): stretches of the video with one layout.
+// Wire values are scene.rs Layout's snake_case serde names.
+export type SceneLayout = "no_bubble" | "split" | "full_webcam" | "full_screen";
+export const SCENE_LAYOUTS: { id: SceneLayout; label: string }[] = [
+  { id: "no_bubble", label: "No bubble" },
+  { id: "split", label: "Split screen" },
+  { id: "full_webcam", label: "Full webcam" },
+  { id: "full_screen", label: "Full screen" },
+];
+export const SCENE_DEFAULT_DURATION = 3;
+export const SCENE_MIN_DURATION = 1;
+
+// The layout path from Rust (scene.rs via the scene_path command): the ONE
+// definition of where the screen and the webcam sit, the same path the export
+// plays. samples[i] at t = i * step, fractions of the output picture, top-left
+// origin: [screen x, y, w, h, frame, webcam x, y, w, h, radius, alpha].
+export type ScenePath = { step: number; samples: number[][] };
+
+// Layout at playhead time t: the same lookup as cameraAt (and sceneAt in
+// compositor-engine/main.swift).
+export function sceneAt(path: ScenePath, t: number): number[] {
+  const x = Math.max(t, 0) / path.step;
+  const i = Math.floor(x);
+  if (i >= path.samples.length - 1) return path.samples[path.samples.length - 1];
+  const a = path.samples[i], b = path.samples[i + 1], u = x - i;
+  return a.map((v, k) => v + (b[k] - v) * u);
+}

@@ -24,7 +24,11 @@ import {
   TRIM_EPS,
   ZOOM_MIN_DURATION,
   ZOOM_RAMP_S,
+  SCENE_DEFAULT_DURATION,
+  SCENE_MIN_DURATION,
   type CameraPath,
+  type SceneLayout,
+  type ScenePath,
 } from "./reviewShared";
 
 // Review window. Left column is player + timeline; right column is an
@@ -246,6 +250,24 @@ export type ZoomEditor = {
   camera: CameraPath | null;
 };
 
+// Mirror of edit.rs SceneSeg. Scenes never overlap each other.
+export type SceneSegment = { start: number; end: number; layout: SceneLayout };
+
+// Timeline Scene row + its layout chooser share this.
+export type SceneEditor = {
+  segments: SceneSegment[];
+  selectedIndex: number | null;
+  select: (i: number | null) => void;
+  update: (i: number, patch: Partial<SceneSegment>) => void;
+  // Add a scene at t (inside an existing scene selects it instead).
+  addAt: (t: number) => void;
+  // The span addAt(t) would give, or null where none fits (the hover ghost).
+  place: (t: number) => { start: number; end: number } | null;
+  remove: (i: number) => void;
+  setLayout: (i: number, layout: SceneLayout) => void;
+  bounds: (i: number) => { min: number; max: number };
+};
+
 // Stage overlay + right-panel Redact section share this.
 export type RedactionEditor = {
   regions: RedactionRegion[];
@@ -377,6 +399,12 @@ type SidecarState = {
   // (smooth, 1.0); only written when changed, same convention as bubble_zone.
   // Declared last, matching Rust's field order.
   cursor?: CursorStyle | null;
+  // Scene segments (TIMELINE-PLAN step 5). Undefined/empty = default layout
+  // throughout; written only when non-empty, like zoom and redactions.
+  scenes?: SceneSegment[];
+  // Bubble size while the screen is zoomed, 1 = unchanged. null/undefined = 1;
+  // written only when set.
+  bubble_zoom_scale?: number | null;
 };
 
 // Mirror of Rust FrameStyle. Every knob is the no-op at 0. padding is the
@@ -738,6 +766,8 @@ function statesEqual(a: SidecarState, b: SidecarState, duration: number | null):
   const ca = a.cursor ?? DEFAULT_CURSOR_STYLE;
   const cb = b.cursor ?? DEFAULT_CURSOR_STYLE;
   if (ca.smoothing !== cb.smoothing || Math.abs(ca.size - cb.size) > 1e-6) return false;
+  if (JSON.stringify(a.scenes ?? []) !== JSON.stringify(b.scenes ?? [])) return false;
+  if (Math.abs((a.bubble_zoom_scale ?? 1) - (b.bubble_zoom_scale ?? 1)) > 0.001) return false;
   return true;
 }
 
@@ -759,6 +789,7 @@ function isLogicallyEmpty(s: SidecarState, duration: number | null): boolean {
   const noZoom = !s.zoom || s.zoom.length === 0;
   const noRedactions = !s.redactions || s.redactions.length === 0;
   const noCursor = cursorIsDefault(s.cursor);
+  const noScenes = (!s.scenes || s.scenes.length === 0) && s.bubble_zoom_scale == null;
   // A background, frame margin or bubble size is an edit the export reads from
   // the sidecar: without these checks a recording whose ONLY edit was one of
   // them had its sidecar deleted and exported without it.
@@ -772,7 +803,8 @@ function isLogicallyEmpty(s: SidecarState, duration: number | null): boolean {
     noZone &&
     noZoom &&
     noRedactions &&
-    noCursor
+    noCursor &&
+    noScenes
   );
 }
 
@@ -797,6 +829,8 @@ function sidecarWritePayload(s: SidecarState, duration: number): SidecarState {
     cursor: cursorIsDefault(s.cursor)
       ? undefined
       : { smoothing: s.cursor!.smoothing, size: s.cursor!.size },
+    scenes: s.scenes && s.scenes.length > 0 ? s.scenes : undefined,
+    bubble_zoom_scale: s.bubble_zoom_scale ?? undefined,
   };
 }
 
@@ -954,6 +988,16 @@ export default function Review() {
     }, 100);
     return () => clearTimeout(timer);
   }, [zoomSegments, videoDims, duration, sourcePath]);
+
+  // Scene segments (TIMELINE-PLAN step 5) and the bubble size during zooms.
+  // The layout path is fetched from Rust below (after currentState), like the
+  // camera path.
+  const [scenes, setScenes] = useState<SceneSegment[]>([]);
+  const [sceneSelectedIndex, setSceneSelectedIndex] = useState<number | null>(null);
+  const [bubbleZoomScale, setBubbleZoomScale] = useState(1);
+  const [scenePath, setScenePath] = useState<ScenePath | null>(null);
+  const sceneReqRef = useRef(0);
+  const hasWebcam = webcamPath != null;
 
   // Redaction panels (REDACTION-PLAN). Stored source-space; drawn on the flat
   // frame, previewed through the active zoom via the shared ./redaction transform.
@@ -1163,6 +1207,7 @@ export default function Review() {
 
   const selectZoom = useCallback((i: number | null) => {
     setZoomSelectedIndex(i);
+    if (i != null) setSceneSelectedIndex(null);
   }, []);
 
   // Any edit marks the segment manual — step-5 regeneration must never
@@ -1240,10 +1285,12 @@ export default function Review() {
   // Plain click: primary = i, collapse the set to just it (single-select behavior).
   const selectRedaction = useCallback((i: number | null) => {
     setRedactSel(i == null ? { primary: null, set: [] } : { primary: i, set: [i] });
+    if (i != null) setSceneSelectedIndex(null);
   }, []);
   // Shift-click: toggle i in the batch set. Adding focuses it (new primary);
   // removing the primary re-focuses the last remaining member.
   const shiftSelectRedaction = useCallback((i: number) => {
+    setSceneSelectedIndex(null);
     setRedactSel((prev) => {
       const has = prev.set.includes(i);
       const set = has ? prev.set.filter((x) => x !== i) : [...prev.set, i];
@@ -1322,11 +1369,65 @@ export default function Review() {
       setRedactions((prev) => {
         const next = [...prev, region];
         const idx = next.length - 1;
-        Promise.resolve().then(() => setRedactSel({ primary: idx, set: [idx] }));
+        Promise.resolve().then(() => selectRedaction(idx));
         return next;
       });
     },
-    [duration],
+    [duration, selectRedaction],
+  );
+
+  // --- Scene editing (mirrors the zoom callbacks). Selecting a scene clears
+  // the zoom and redaction selections; selecting either of those clears it.
+  const selectScene = useCallback((i: number | null) => {
+    setSceneSelectedIndex(i);
+    if (i != null) {
+      setZoomSelectedIndex(null);
+      setRedactSel({ primary: null, set: [] });
+    }
+  }, []);
+  const updateScene = useCallback((i: number, patch: Partial<SceneSegment>) => {
+    setScenes((prev) => prev.map((s, k) => (k === i ? { ...s, ...patch } : s)));
+  }, []);
+  const setSceneLayout = useCallback(
+    (i: number, layout: SceneLayout) => updateScene(i, { layout }),
+    [updateScene],
+  );
+  const deleteScene = useCallback((i: number) => {
+    setScenes((prev) => prev.filter((_, k) => k !== i));
+    setSceneSelectedIndex(null);
+  }, []);
+  const placeScene = useCallback(
+    (t: number) =>
+      duration == null
+        ? null
+        : placeSegment(t, scenes, duration, SCENE_DEFAULT_DURATION, SCENE_MIN_DURATION),
+    [duration, scenes],
+  );
+  const addSceneAt = useCallback(
+    (t: number) => {
+      const inside = scenes.findIndex((s) => s.start < t && t < s.end);
+      if (inside >= 0) {
+        selectScene(inside);
+        return;
+      }
+      const span = placeScene(t);
+      if (!span) return;
+      const seg: SceneSegment = { ...span, layout: "full_webcam" };
+      setScenes((prev) => {
+        const next = [...prev, seg].sort((a, b) => a.start - b.start);
+        const idx = next.indexOf(seg);
+        Promise.resolve().then(() => selectScene(idx));
+        return next;
+      });
+    },
+    [scenes, placeScene, selectScene],
+  );
+  const sceneBounds = useCallback(
+    (i: number) => ({
+      min: i > 0 ? scenes[i - 1].end : 0,
+      max: i < scenes.length - 1 ? scenes[i + 1].start : (duration ?? Number.MAX_VALUE),
+    }),
+    [scenes, duration],
   );
 
   // Step 5 suggestion detection — the manual "Re-suggest" button. Runs the
@@ -1458,6 +1559,8 @@ export default function Review() {
             background: state.background ?? null,
             source_kind: state.source_kind ?? null,
             cursor: state.cursor ?? null,
+            scenes: state.scenes ?? [],
+            bubble_zoom_scale: state.bubble_zoom_scale ?? null,
           });
           if (state.trim) setTrim(state.trim);
           if (state.bubble_position_log) setBubblePositionLog(state.bubble_position_log);
@@ -1479,6 +1582,8 @@ export default function Review() {
           // Reopened recording: the persisted source wins over the (absent) param.
           if (state.source_kind) setSourceKind(state.source_kind);
           if (state.cursor) setCursorStyle({ ...DEFAULT_CURSOR_STYLE, ...state.cursor });
+          if (state.scenes && state.scenes.length > 0) setScenes(state.scenes);
+          if (state.bubble_zoom_scale != null) setBubbleZoomScale(state.bubble_zoom_scale);
         } else {
           setSnapshot(EMPTY_STATE);
         }
@@ -1588,14 +1693,42 @@ export default function Review() {
       background,
       source_kind: sourceKind,
       cursor: cursorIsDefault(cursorStyle) ? null : cursorStyle,
+      scenes,
+      bubble_zoom_scale: bubbleZoomScale === 1 ? null : bubbleZoomScale,
     }),
-    [trim, bubblePositionLog, thumbnailTime, bubbleRoundness, bubbleZone, bubbleScale, zoomSegments, redactions, frame, background, sourceKind, cursorStyle],
+    [trim, bubblePositionLog, thumbnailTime, bubbleRoundness, bubbleZone, bubbleScale, zoomSegments, redactions, frame, background, sourceKind, cursorStyle, scenes, bubbleZoomScale],
   );
 
   const dirty = useMemo(
     () => !statesEqual(currentState, snapshot, duration),
     [currentState, snapshot, duration],
   );
+
+  // The layout path Rust computes from the current edit state (scene.rs via
+  // scene_path) — the same path the export plays. Same debounce and stale-
+  // response rule as the camera path. null = nothing laid out differently, and
+  // the stage then draws exactly as it always has.
+  useEffect(() => {
+    const req = ++sceneReqRef.current;
+    if (!hasWebcam || !videoDims || duration == null || !sourcePath || !sidecarLoaded) {
+      setScenePath(null);
+      return;
+    }
+    const timer = setTimeout(() => {
+      invoke<ScenePath | null>("scene_path", {
+        sourcePath,
+        sidecar: sidecarWritePayload(currentState, duration),
+        width: videoDims.w,
+        height: videoDims.h,
+        duration,
+      })
+        .then((p) => {
+          if (req === sceneReqRef.current) setScenePath(p);
+        })
+        .catch((e) => setError(`scene: ${e}`));
+    }, 100);
+    return () => clearTimeout(timer);
+  }, [hasWebcam, currentState, videoDims, duration, sourcePath, sidecarLoaded]);
 
   // Background/framing handlers (Slice 4). Picking a background installs a frame
   // (keeping any existing margin/corner choice); picking None clears both, back to
@@ -2328,11 +2461,16 @@ export default function Review() {
           videoRef.current?.pause();
         } else if (zoomSelectedIndex != null) {
           setZoomSelectedIndex(null);
+        } else if (sceneSelectedIndex != null) {
+          setSceneSelectedIndex(null);
         }
       } else if (e.key === "Backspace" || e.key === "Delete") {
         if (zoomSelectedIndex != null) {
           e.preventDefault();
           deleteZoom(zoomSelectedIndex);
+        } else if (sceneSelectedIndex != null) {
+          e.preventDefault();
+          deleteScene(sceneSelectedIndex);
         }
       }
     };
@@ -2342,6 +2480,8 @@ export default function Review() {
     showCloseModal,
     zoomSelectedIndex,
     deleteZoom,
+    sceneSelectedIndex,
+    deleteScene,
     togglePlay,
     toggleZoomLoop,
     setLoopPreviewRate,
@@ -2380,6 +2520,18 @@ export default function Review() {
     clearAll: clearAllRedactions,
     add: addRedaction,
     active: redactMode,
+  };
+
+  const sceneEditor: SceneEditor = {
+    segments: scenes,
+    selectedIndex: sceneSelectedIndex,
+    select: selectScene,
+    update: updateScene,
+    addAt: addSceneAt,
+    place: placeScene,
+    remove: deleteScene,
+    setLayout: setSceneLayout,
+    bounds: sceneBounds,
   };
 
   const thumbnailControls: ThumbnailControls = {
@@ -2487,6 +2639,8 @@ export default function Review() {
           solidHex={solidHex}
           thumbBySource={thumbBySource}
           cursorOverlay={cursorOverlay}
+          scene={hasWebcam ? sceneEditor : null}
+          scenePath={scenePath}
         />
         <ExportPanel
           sourcePath={sourcePath}
@@ -2498,6 +2652,8 @@ export default function Review() {
           onBubbleZone={setBubbleZone}
           bubbleScale={bubbleScale}
           onBubbleScale={setBubbleScale}
+          bubbleZoomScale={bubbleZoomScale}
+          onBubbleZoomScale={setBubbleZoomScale}
           hasBubble={hasBubble}
           lastSavedPath={lastSavedPath}
           lastSavedAt={lastSavedAt}
@@ -2705,6 +2861,9 @@ type LeftColumnProps = {
   thumbBySource: ThumbMap;
   // Drawn cursor overlay (null = cursor baked into the video).
   cursorOverlay: CursorOverlay | null;
+  // Scene row editor (null = no webcam, no Scene row) and the layout path.
+  scene: SceneEditor | null;
+  scenePath: ScenePath | null;
 };
 
 function LeftColumn(props: LeftColumnProps) {
@@ -2746,6 +2905,7 @@ function LeftColumn(props: LeftColumnProps) {
         solidHex={props.solidHex}
         thumbBySource={props.thumbBySource}
         cursorOverlay={props.cursorOverlay}
+        scenePath={props.scenePath}
       />
       <Timeline
         assetUrl={props.assetUrl}
@@ -2761,6 +2921,7 @@ function LeftColumn(props: LeftColumnProps) {
         audioStart={props.audioStart}
         zoom={props.zoom}
         redact={props.redact}
+        scene={props.scene}
         thumbnailTime={props.thumbnailTime}
       />
     </div>
@@ -2998,6 +3159,8 @@ type VideoStageProps = {
   thumbBySource: ThumbMap;
   // Drawn cursor overlay (null = cursor baked into the video).
   cursorOverlay: CursorOverlay | null;
+  // The layout path (scene.rs). null = today's stage, untouched.
+  scenePath: ScenePath | null;
 };
 
 function VideoStage(props: VideoStageProps) {
@@ -4616,6 +4779,8 @@ function ExportPanel({
   onBubbleZone,
   bubbleScale,
   onBubbleScale,
+  bubbleZoomScale,
+  onBubbleZoomScale,
   hasBubble,
   lastSavedPath,
   lastSavedAt,
@@ -4655,6 +4820,9 @@ function ExportPanel({
   onBubbleZone: (z: BubbleZone) => void;
   bubbleScale: number;
   onBubbleScale: (s: number) => void;
+  // Bubble size while the screen is zoomed (1 = unchanged), 0.5..1.
+  bubbleZoomScale: number;
+  onBubbleZoomScale: (s: number) => void;
   hasBubble: boolean;
   lastSavedPath: string | null;
   lastSavedAt: number;
@@ -5005,6 +5173,18 @@ function ExportPanel({
                         Small
                       </button>
                     </div>
+                  </Field>
+                  <Field label={`Size during zoom — ${Math.round(bubbleZoomScale * 100)}%`}>
+                    <input
+                      type="range"
+                      className="slider"
+                      min={50}
+                      max={100}
+                      step={5}
+                      value={Math.round(bubbleZoomScale * 100)}
+                      onChange={(e) => onBubbleZoomScale(Number(e.target.value) / 100)}
+                      style={{ width: "100%" }}
+                    />
                   </Field>
                   <Field label="Position">
                     <ZonePicker value={bubbleZone} onChange={onBubbleZone} />

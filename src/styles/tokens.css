@@ -82,6 +82,10 @@
   --redact:           oklch(0.68 0.12 195);
   --redact-soft:      oklch(0.68 0.12 195 / 0.20);
 
+  /* Scene — warm amber, distinct from zoom violet / redaction teal on the timeline */
+  --scene:            oklch(0.76 0.14 70);
+  --scene-soft:       oklch(0.76 0.14 70 / 0.20);
+
   /* Success — iPhone connected, etc. Retuned into the refreshed palette
      (the wireframe dropped it by omission; the connected state still needs it). */
   --success:          oklch(0.66 0.15 155);
