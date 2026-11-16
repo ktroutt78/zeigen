@@ -44,4 +44,4 @@ harness/v2-drift/__pycache__/
 harness/v2-drift/acceptance/*.mp4
 
 # Reference clips for zoom comparison (local only)
-harness/reference/*.mp4
+harness/reference/**/*.mp4
