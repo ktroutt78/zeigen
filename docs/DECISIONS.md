@@ -4,6 +4,18 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-15 — Clip 4 (mixed, recorded with rules 1 to 3): reading line lowered; quick zooms on single clicks left open
+
+Keith recorded a fourth clip with rules 1 to 3 installed and marked it. Fixtures as `clip4-mixed` in `src-tauri/tests/fixtures/zoom-rules/`.
+
+- The two zooms it produced (two drags) were right.
+- Rule 1 had removed a zoom he wanted: reading along a row at 35.5 to 41.9s, cursor moving 40% of the time. The "moving" line was 50%, set from clip 3 alone. Lowered to 30% (`c63f184`); unwanted pauses measure 8 to 18%. That zoom is back and nothing else changed on any clip or older recording.
+- He wanted quick zooms on three single clicks that never zoomed, before or after the rules: a toolbar item at 49.0s, the model toggle at 56.7s, and "going back to analyze" at 68.3s. He did not want one on the two clicks at 5.6s and 6.2s.
+
+**Score now:** right kept 4/4, unwanted gone 2/2, over-long fixed 2/2, wanted-but-missing found 1/4, new unjudged 0.
+
+**Why the three clicks are missing, and why it is not fixed yet.** Each sits in a pause shorter than the 2-second minimum zoom (1.5 to 1.9s). A trial that let clicked pauses zoom from 1.2s found all three, but also added five zooms: clip 1 at 11.5s and 14.5s (inside the stretch Keith said needed none), clip 4 at 5.1s (which he said needed none), and clip 4 at 59.0s and 67.9s (59.0s unjudged; 67.9s is the one he wanted). Nothing in the cursor log separates the wanted clicks from the unwanted ones: stillness before and after the click and the cursor shape all overlap. The only difference is position: the three wanted clicks are in the top fifth of the window (toolbar and navigation), the unwanted ones lower down. That is three examples in one app, so no rule was built on it. Trial discarded; decision is Keith's.
+
 ## 2026-11-15 — Auto-zoom rules 1 to 3 approved by Keith and built; marked clips now score 6 of 6
 
 Keith approved three rules after seeing the baseline. Each is one commit with its before/after score on his marked clips (`cargo test --lib marked_clips -- --nocapture`):
