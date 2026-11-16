@@ -4,6 +4,24 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-15 — zoom-polish: owner test pass in the installed build, ALL GOOD; merged to main
+
+Keith's test pass on the signed install of branch `zoom-polish`, all fine:
+- Re-aim works in a real save (the one item not yet judged when the previous entries were written).
+- Cursor tile is good.
+- Blur in a real save looks right.
+- Drawn cursor in WINDOW and AREA recordings, after PAUSE/RESUME, with TRIM and a REDACTION box, and in a GIF export. "GIF is a bit choppy, but that's GIF frame rate, same as before."
+
+That closes the capture-side unknowns recorded earlier (the system cursor really is left out of the video in display, window and area modes, and the cursor log stays aligned across a pause).
+
+Merged to main. What the merge contains: one Rust camera path played by export and preview (spring glide, zooms within 2.5s joined by a pan, one-glide re-aim), auto-zoom depth 1.5x/1.7x, a reason on every auto zoom, cursor captured out of the video and drawn smoothed at export and preview (defaults Smooth, size 1.7; Cursor tile), motion blur 0.25 at export.
+
+NOT in the merge, by decision:
+- **Window-capture popups** (problem 3 of `docs/ZOOM-POLISH-PLAN.md`): its own branch, still gated on the throwaway `appcapture` test passing.
+- **Auto-zoom rule changes** (pause-with-no-click, no zoom in the first second): wait for Keith's three marked-up reference clips.
+- **Wider zoom-segment handles:** moved onto the backlog item "Zoom gets its own timeline row".
+- `docs/DEBT.md` items stay as written.
+
 ## 2026-11-15 — Motion blur default 0.25; cursor defaults Smooth at size 1.7
 
 Keith judged three renders of his own cursorless test recording (`harness/reference/blur-0.mp4`, `blur-0.25.mp4`, `blur-0.5.mp4`):
