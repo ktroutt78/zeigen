@@ -4,6 +4,30 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-15 — Auto-zoom rules 1 to 3 approved by Keith and built; marked clips now score 6 of 6
+
+Keith approved three rules after seeing the baseline. Each is one commit with its before/after score on his marked clips (`cargo test --lib marked_clips -- --nocapture`):
+
+| | right kept | unwanted gone | over-long fixed | new unjudged |
+|---|---|---|---|---|
+| Baseline | 2/2 | 0/2 | 0/2 | 0 |
+| Rule 1: a resting cursor with no click never starts or extends a zoom (`059f068`, follow-up `40a9dc4`) | 2/2 | 1/2 | 1/2 | 0 |
+| Rule 2: the stop click never causes a zoom (`228c76f`) | 2/2 | 2/2 | 1/2 | 0 |
+| Rule 3: scrolling releases a zoom (`7c27e90`) | 2/2 | 2/2 | 2/2 | 0 |
+
+How each rule is defined:
+- **Rule 1.** A pause with no click counts only while the cursor is travelling: moving in at least half of the tenth-of-a-second slices between its first and last movement, and for at least 0.8s in total. On the marked clips the unwanted pauses moved 9% of the time and the reading pause 65 to 89%. The follow-up (the 0.8s minimum) closed a gap found while building rule 2: a cursor that glides in and then sits passed on its glide alone.
+- **Rule 2.** A click in the last second of the recording is the stop click and no longer backs up a pause. The wait at the stop button is then a plain no-click pause, which rule 1 rejects.
+- **Rule 3.** A zoom ends at the first scroll inside it and is never held open by one. This reverses the earlier "scrolling means reading, hold the zoom". A scroll over a no-click pause still cancels it.
+
+**Judgement calls of mine inside the score, for Keith to overrule:**
+- Clip 1's "held too long" counts as fixed when the zoom ends between 29 and 32s. It now ends at 29.5s. I first wrote 30 to 32s and widened it; the close click logged at 29.9s is up to half a second late (old click timing), so 29.5s is about when he closed the note.
+- Clip 3's "zoom back out earlier" counts as fixed when the zoom ends between 3 and 9s (before the scroll). It now ends at 8.7s, about 6.5s after the click. Keith's reply left open whether he meant that or "within a second or two of the click"; if the latter, this one is NOT fixed and needs a fourth rule about how long a zoom holds after a click.
+
+**Effect on the older pinned recordings, which Keith never marked** (so these are changes, not verdicts): the zoom-polish reference recording goes from 11 zooms to 8 (three of its four no-click pauses gone, including the opening one at 0.0s and the last one at the stop button; the fourth starts later); recording 2 from 18 to 15 with two ending earlier; recording 3 from 12 to 10 (one new short zoom at 11.7s, three gone).
+
+**Not verified:** Keith has not yet watched these in the app. The score says the six marked zooms come out as he asked; it cannot say the result feels right, and it rests on six zooms.
+
 ## 2026-11-15 — Click times in the cursor log were up to half a second late; fixed in the engine
 
 Found while marking the reference clips: every click in every cursor log sat on a half-second grid. Cause, measured with `spikes/click-timing/clicktiming` (run by Keith, polling 1000 times a second): macOS refreshes the permission-free event counters the engine reads only every 0.5s, and its "seconds since last event" reading is no better. The live "is the button down" reading (`CGEventSource.buttonState`) is prompt: it saw presses and releases 20 to 440 ms before the counter moved.
