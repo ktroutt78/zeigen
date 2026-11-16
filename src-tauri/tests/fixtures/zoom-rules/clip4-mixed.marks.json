@@ -34,7 +34,12 @@
       "start": 56.25,
       "end": 57.71,
       "note": "Keith: 'same at 56...i was clicking the model toggle'. Click at 56.66s (64,165). Never zoomed, before or after the rules: its pause lasts 1.46s, under the 2s minimum. Span is that pause."
+    },
+    {
+      "start": 67.94,
+      "end": 69.81,
+      "note": "Keith: 'same at 1:07, going back to analyze'. Click at 68.30s (121,172). Never zoomed, before or after the rules: its pause lasts 1.87s, under the 2s minimum. Span is that pause. (A 243px drag at 66.5 to 67.3s sits just before it; taken as the click because he said 'same' as the two toolbar clicks.)"
     }
   ],
-  "notes": "Keith: no zoom was needed for the two clicks at 5.6s and 6.2s (the old detector covered them inside one long zoom from 3.4s; rule 1 removed that part). Clicks at 59.5s and 68.3s got no zoom and he raised nothing."
+  "notes": "Keith: no zoom was needed for the two clicks at 5.6s and 6.2s (the old detector covered them inside one long zoom from 3.4s; rule 1 removed that part). The click at 59.5s got no zoom and he raised nothing."
 }
