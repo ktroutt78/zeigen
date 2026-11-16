@@ -968,12 +968,13 @@ export default function Review() {
   const cameraReqRef = useRef(0);
   useEffect(() => {
     const req = ++cameraReqRef.current;
-    if (zoomSegments.length === 0 || !videoDims || duration == null) {
+    if (zoomSegments.length === 0 || !videoDims || duration == null || !sourcePath) {
       setCameraPath(null);
       return;
     }
     const timer = setTimeout(() => {
       invoke<CameraPath>("camera_path", {
+        sourcePath,
         zoom: zoomSegmentsToKeyframes(zoomSegments),
         width: videoDims.w,
         height: videoDims.h,
@@ -982,10 +983,10 @@ export default function Review() {
         .then((p) => {
           if (req === cameraReqRef.current) setCameraPath(p);
         })
-        .catch((e) => console.error("camera_path failed", e));
+        .catch((e) => setError(`camera: ${e}`));
     }, 100);
     return () => clearTimeout(timer);
-  }, [zoomSegments, videoDims, duration]);
+  }, [zoomSegments, videoDims, duration, sourcePath]);
 
   // Redaction panels (REDACTION-PLAN). Stored source-space; drawn on the flat
   // frame, previewed through the active zoom via the shared ./redaction transform.

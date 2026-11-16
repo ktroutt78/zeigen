@@ -1031,7 +1031,7 @@ fn v3_render(
     } else {
         let zooms = camera_zooms(&sidecar.zoom);
         let dur = probe_duration_seconds(screen_path)?;
-        let path = crate::camera::path(&zooms, w as f64, h as f64, dur);
+        let path = crate::camera::path(&zooms, &camera_cursor(screen_path)?, w as f64, h as f64, dur);
         let json = serde_json::to_string(&path).map_err(|e| format!("camera json: {e}"))?;
         let p = temp_dir.join("camera.json");
         std::fs::write(&p, json).map_err(|e| format!("write camera.json: {e}"))?;
@@ -1769,8 +1769,30 @@ fn camera_zooms(kfs: &[ZoomKeyframe]) -> Vec<crate::camera::Zoom> {
 
 // The preview's camera path: the same path the export writes to camera.json.
 #[tauri::command]
-pub fn camera_path(zoom: Vec<ZoomKeyframe>, width: f64, height: f64, duration: f64) -> crate::camera::CameraPath {
-    crate::camera::path(&camera_zooms(&zoom), width, height, duration)
+pub fn camera_path(
+    source_path: String,
+    zoom: Vec<ZoomKeyframe>,
+    width: f64,
+    height: f64,
+    duration: f64,
+) -> Result<crate::camera::CameraPath, String> {
+    let (screen, _) = export_inputs_from_source(Path::new(&source_path));
+    Ok(crate::camera::path(&camera_zooms(&zoom), &camera_cursor(&screen)?, width, height, duration))
+}
+
+// The cursor positions the camera re-aims on: the recording's raw cursor log,
+// whether or not the cursor is baked into the video. No log = no re-aiming. The
+// ONE loader for both the export and the preview.
+fn camera_cursor(screen_path: &Path) -> Result<Vec<(f64, f64, f64)>, String> {
+    let p = crate::zoom::cursor_track_path(screen_path);
+    if !p.exists() {
+        return Ok(Vec::new());
+    }
+    let data = std::fs::read_to_string(&p)
+        .map_err(|e| format!("couldn't read the cursor log {}: {e}", p.display()))?;
+    let track: CursorTrack = serde_json::from_str(&data)
+        .map_err(|e| format!("the cursor log {} is damaged: {e}", p.display()))?;
+    Ok(track.samples.iter().map(|s| (s.t, s.x, s.y)).collect())
 }
 
 // The preview's drawn cursor: the same overlay data the export writes to
@@ -3037,16 +3059,40 @@ WATERMARK_SCALE_FRAC=0.08";
             kf(7.4, 2.0, 1500.0, 800.0),
             kf(8.0, 1.0, 960.0, 540.0),
         ];
-        let expected = crate::camera::path(
-            &[
-                crate::camera::Zoom { start: 1.0, end: 4.0, scale: 1.7, cx: 400.0, cy: 300.0 },
-                crate::camera::Zoom { start: 5.0, end: 8.0, scale: 2.0, cx: 1500.0, cy: 800.0 },
-            ],
-            1920.0,
-            1080.0,
-            10.0,
+        let zooms = [
+            crate::camera::Zoom { start: 1.0, end: 4.0, scale: 1.7, cx: 400.0, cy: 300.0 },
+            crate::camera::Zoom { start: 5.0, end: 8.0, scale: 2.0, cx: 1500.0, cy: 800.0 },
+        ];
+        let dir = std::env::temp_dir().join(format!("zeigen-camera-cmd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("recording-x.mp4");
+        std::fs::write(&source, b"").unwrap();
+        let src = source.to_string_lossy().into_owned();
+
+        // No cursor log: no re-aiming.
+        assert_eq!(
+            camera_path(src.clone(), track.to_vec(), 1920.0, 1080.0, 10.0).unwrap(),
+            crate::camera::path(&zooms, &[], 1920.0, 1080.0, 10.0)
         );
-        assert_eq!(camera_path(track.to_vec(), 1920.0, 1080.0, 10.0), expected);
+
+        // With a cursor log the command re-aims on exactly those positions: the
+        // cursor walks out of the first zoom's view at 2.5s.
+        let samples: Vec<(f64, f64, f64)> = (0..1200)
+            .map(|i| {
+                let t = i as f64 / 120.0;
+                (t, if t < 2.5 { 400.0 } else { 1100.0 }, 300.0)
+            })
+            .collect();
+        let json = format!(
+            r#"{{"video_size":{{"width":1920,"height":1080}},"samples":[{}]}}"#,
+            samples.iter().map(|(t, x, y)| format!(r#"{{"t":{t},"x":{x},"y":{y}}}"#)).collect::<Vec<_>>().join(",")
+        );
+        std::fs::write(crate::zoom::cursor_track_path(&source), json).unwrap();
+        let with_cursor = camera_path(src, track.to_vec(), 1920.0, 1080.0, 10.0).unwrap();
+        assert_eq!(with_cursor, crate::camera::path(&zooms, &samples, 1920.0, 1080.0, 10.0));
+        assert_ne!(with_cursor, crate::camera::path(&zooms, &[], 1920.0, 1080.0, 10.0), "the cursor log must re-aim");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // The OnceLock set in lib.rs::run setup doesn't fire under cargo test,

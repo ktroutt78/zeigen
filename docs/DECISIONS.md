@@ -4,6 +4,24 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-15 — Camera RE-AIM while zoomed: reopened and approved as a one-glide rule (NOT continuous follow)
+
+Supersedes, for this one case, "continuous cursor-follow stays CLOSED" (2026-11-15 kickoff) and the 2026-07-15 "do not revisit follow-the-cursor" entry. Those still stand for CONTINUOUS follow.
+
+Keith, after testing the installed build: "The camera doesn't follow the mouse after zooming. Several times the cursor left the zoomed view and stayed out." Decision: **when the cursor leaves a box inside the zoomed view, glide the camera once to bring it back, the way Cap does.** It lives in the camera path module (`src-tauri/src/camera.rs`) so preview and export stay identical.
+
+As built (my tuning, Keith judges by eye):
+- The box is the middle 70% of the zoomed view. Inside it the cursor moves nothing.
+- On leaving it, the camera aims at the time-average of where the cursor goes next (for as long as those positions fit in one box), so one glide lands where the cursor comes to rest, not on the point where it crossed the edge.
+- The glide starts 0.2s before the crossing (the recording is finished, so the future is known).
+- A cursor that leaves the recorded frame is not chased. Pinned against a frame edge, the camera does not move.
+- Active from a zoom's start until it releases, including the gap before a joined next zoom.
+- Uses the raw cursor log, so it also works on old recordings with a baked-in cursor.
+
+Measured on Keith's first cursorless test recording (`harness/reference/cursorless-src/`, 70s, 7 zooms): 9 re-aims; time the in-frame cursor is outside the zoomed view drops from 7.6s to 0.0s. On the earlier reference (`zeigen-src`, 104s, 11 zooms): 13 re-aims; 5.1s to 0.1s.
+
+Also from that test: the drawn cursor "works and looks good." Cursor controls move from the bottom of the Zoom panel to their own Cursor tile in the tool rail ("I couldn't find them at the bottom of Zoom, and they aren't zoom settings").
+
 ## 2026-11-15 — Cursor smoothing APPROVED and moved ahead of motion blur; cursor-shape test PASSED
 
 Keith, after the camera checkpoint: "What looks crazy is the cursor, not the camera." Cursor smoothing moved up from the backlog to the next priority. Plan: `docs/CURSOR-SMOOTHING-PLAN.md`. His calls:
