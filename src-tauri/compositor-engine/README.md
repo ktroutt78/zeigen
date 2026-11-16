@@ -21,6 +21,11 @@ env `CAMERA_PATH=<json>`, `{"step": s, "samples": [[scale, cx, cy], ...]}`, samp
 `i` at `t = i*step`, centre as top-left frame fractions. The compositor only looks
 it up; it has no easing maths of its own.
 
+A recording captured without its cursor comes with env `CURSOR_PATH=<json>`
+(`src-tauri/src/edit.rs` `write_cursor_json`): the smoothed cursor path from
+`src-tauri/src/cursor.rs` plus the cursor shapes in source pixels. The compositor
+draws it after the zoom and motion blur, before redaction.
+
 ## Phase 1 — identity re-encode (DONE, color proved)
 
 Goal: prove the color round-trip is correct on the simplest possible pipeline

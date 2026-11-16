@@ -19,7 +19,14 @@
 // Run:   ./cicompositor <in.mp4> <out.mp4>
 //   env CAMERA_PATH=<json> {"step": s, "samples": [[scale, cx, cy], ...]} where
 //     sample i is at t = i*step, cx/cy the window centre as top-left fractions.
+//   env CURSOR_PATH=<json> {"step", "samples": [[x, y], ...], "shapes": [{"png", "width",
+//     "height", "hot_x", "hot_y"}], "shape_events": [{"t", "shape"}]} draws the cursor for a
+//     recording captured without it. Path from cursor.rs (top-left frame fractions at
+//     t = i*step); shape sizes and hotspots in SOURCE px, hotspot from the image's top-left.
 //   env VELLOG=<path> writes a per-frame velocity CSV for validation.
+//
+// Layer order per frame: zoom resample -> motion blur (off) -> cursor -> redaction ->
+// webcam bubble -> watermark -> background inset -> output downscale.
 import Foundation
 import AVFoundation
 import CoreImage
@@ -58,6 +65,46 @@ if let cp = env["CAMERA_PATH"] {
     guard let p = try? JSONDecoder().decode(CameraPath.self, from: data) else { fail("bad CAMERA_PATH json") }
     camera = p
 }
+// --- Drawn cursor (CURSOR-SMOOTHING-PLAN): the smoothed path is computed ONCE in Rust
+// (cursor.rs); this only looks it up, with the same linear rule as cameraAt. The shape
+// in effect at t is the last shape event with event.t <= t. Any unreadable input fails
+// the export: a recording captured without its cursor must never export without one.
+struct CursorFile: Decodable {
+    struct Shape: Decodable { let png: String; let width, height, hot_x, hot_y: Double }
+    struct Event: Decodable { let t: Double; let shape: Int }
+    let step: Double
+    let samples: [[Double]]
+    let shapes: [Shape]
+    let shape_events: [Event]
+}
+struct CursorShape { let image: CIImage; let width, hotX, hotY: Double }  // source px
+var cursorFile: CursorFile? = nil
+var cursorShapes: [CursorShape] = []
+if let cp = env["CURSOR_PATH"] {
+    guard let data = FileManager.default.contents(atPath: cp) else { fail("cannot read CURSOR_PATH \(cp)") }
+    guard let f = try? JSONDecoder().decode(CursorFile.self, from: data),
+          !f.samples.isEmpty, !f.shapes.isEmpty, !f.shape_events.isEmpty
+    else { fail("bad CURSOR_PATH json") }
+    guard f.shape_events.allSatisfy({ $0.shape >= 0 && $0.shape < f.shapes.count })
+    else { fail("CURSOR_PATH shape index out of range") }
+    cursorShapes = f.shapes.map { s in
+        guard let img = CIImage(contentsOf: URL(fileURLWithPath: s.png)), img.extent.width > 0
+        else { fail("cannot load cursor shape \(s.png)") }
+        return CursorShape(image: img, width: s.width, hotX: s.hot_x, hotY: s.hot_y)
+    }
+    cursorFile = f
+}
+func cursorAt(_ p: CursorFile, _ t: Double) -> (Double, Double) {
+    let x = max(t, 0) / p.step
+    let i = Int(x)
+    if i >= p.samples.count - 1 { let l = p.samples[p.samples.count - 1]; return (l[0], l[1]) }
+    let a = p.samples[i], b = p.samples[i + 1], u = x - Double(i)
+    return (a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u)
+}
+func cursorShapeAt(_ p: CursorFile, _ t: Double) -> Int {
+    (p.shape_events.last(where: { $0.t <= t }) ?? p.shape_events[0]).shape
+}
+
 let velLogPath = env["VELLOG"]
 var velLog = "t,scale,dscale,blur_vel,blur_amount,content_speed\n"
 
@@ -873,6 +920,29 @@ writerInput.requestMediaDataWhenReady(on: queue) {
                     "inputCenter": CIVector(x: Wd / 2, y: Hd / 2),
                     "inputAmount": blurAmount])
                 .cropped(to: CGRect(x: 0, y: 0, width: W, height: H))
+        }
+
+        // --- Drawn cursor: on the content plane AFTER the zoom and the motion blur (so it
+        // stays sharp) and BEFORE redaction (so a panel still covers it). The hotspot maps
+        // to output with the SAME transform as the redaction rects, (src - winOrigin) * s,
+        // and the image grows with the zoom. Plain affine scale (it moves every frame, so
+        // no Lanczos) and no integer snapping, so a moving cursor moves smoothly.
+        if let cf = cursorFile {
+            let (fx, fy) = cursorAt(cf, t)
+            let shape = cursorShapes[cursorShapeAt(cf, t)]
+            let hx = (fx * Wd - (qx - hw)) * s           // hotspot, output px
+            let hy = (Hd - fy * Hd - (qy - hh)) * s      // (CI bottom-left)
+            let k = shape.width * s / shape.image.extent.width
+            let w = shape.image.extent.width * k, h = shape.image.extent.height * k
+            // Image top-left sits hotX left of / hotY above the hotspot.
+            let x0 = hx - shape.hotX * s, y0 = hy + shape.hotY * s - h
+            let frameRect = CGRect(x: 0, y: 0, width: Wd, height: Hd)
+            if CGRect(x: x0, y: y0, width: w, height: h).intersects(frameRect) {
+                out = shape.image
+                    .transformed(by: CGAffineTransform(a: k, b: 0, c: 0, d: k, tx: x0, ty: y0))
+                    .composited(over: out)
+                    .cropped(to: frameRect)
+            }
         }
 
         // --- Frosted-glass redaction. Each active region: transform its source-space
