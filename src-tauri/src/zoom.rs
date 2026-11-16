@@ -73,6 +73,13 @@ const READING_MOVE_FRAC: f64 = 0.5;
 const JITTER_STEP_PX: f64 = 5.0;
 const PARK_TAIL_S: f64 = 2.0;
 
+// Stop-click guard (rule 2 from Keith's marked clips, 2026-11-15). A recording
+// stopped by button ends with the cursor walking to the stop button, waiting,
+// and clicking it. A click in the final STOP_TAIL_S is that stop click and
+// corroborates nothing; the wait before it is then an ordinary clickless
+// pause, which the resting-cursor guard judges.
+const STOP_TAIL_S: f64 = 1.0;
+
 // The zoom-in ramp opens CLICK_LEAD_S before the first sign of activity so
 // the 600ms ramp is done by the moment the user acts.
 const CLICK_LEAD_S: f64 = 1.0;
@@ -404,8 +411,10 @@ pub fn detect(track: &CursorTrack) -> Vec<ZoomKeyframe> {
         let (t0, t1) = (samples[i].t, samples[j].t);
         let over_gesture = gestures.iter().any(|g| g.t0 <= t1 && g.t1 >= t0);
         if t1 - t0 >= DWELL_MIN_S && !over_gesture {
-            let in_dwell: Vec<&&CursorEvent> =
-                clicks.iter().filter(|c| c.t >= t0 && c.t <= t1).collect();
+            let in_dwell: Vec<&&CursorEvent> = clicks
+                .iter()
+                .filter(|c| c.t >= t0 && c.t <= t1 && c.t < track_end - STOP_TAIL_S)
+                .collect();
             let scroll_vetoed = in_dwell.is_empty()
                 && scrolls.iter().any(|s| {
                     s.t >= t0 - SCROLL_VETO_PAD_S && s.t <= t1 + SCROLL_VETO_PAD_S
@@ -905,7 +914,7 @@ mod tests {
         }
         assert_eq!(
             got,
-            "11.68-14.12s @(731,622) 1.5x; 15.36-20.65s @(445,303) 1.7x; 23.72-27.25s @(504,327) 1.5x; 30.41-33.85s @(445,477) 1.7x; 36.00-39.36s @(506,554) 1.5x; 40.56-43.43s @(797,693) 1.7x; 47.35-49.40s @(1067,662) 1.7x; 51.37-55.20s @(1067,693) 1.7x; 56.94-62.02s @(445,619) 1.7x; 67.56-72.29s @(489,542) 1.5x; 90.81-99.60s @(445,289) 1.7x; 103.11-105.30s @(1067,693) 1.7x"
+            "11.68-14.12s @(731,622) 1.5x; 15.36-20.65s @(445,303) 1.7x; 23.72-27.25s @(504,327) 1.5x; 30.41-33.85s @(445,477) 1.7x; 36.00-39.36s @(506,554) 1.5x; 40.56-43.43s @(797,693) 1.7x; 47.35-49.40s @(1067,662) 1.7x; 51.37-55.20s @(1067,693) 1.7x; 56.94-62.02s @(445,619) 1.7x; 67.56-72.29s @(489,542) 1.5x; 90.81-99.60s @(445,289) 1.7x"
         );
     }
 
@@ -955,6 +964,20 @@ mod tests {
             .park(4.0)
             .build();
         assert_eq!(detect(&track).len(), 0);
+    }
+
+    #[test]
+    fn stop_click_does_not_zoom() {
+        // Keith's clip 3: the cursor goes to the stop button, waits, and the
+        // recording ends on the click.
+        let track = TrackBuilder::new()
+            .park(3.0)
+            .travel(1300.0, 850.0, 0.6)
+            .park(3.0)
+            .click()
+            .park(0.1)
+            .build();
+        assert_eq!(detect(&track).len(), 0, "the stop click must not zoom");
     }
 
     #[test]
@@ -1185,6 +1208,9 @@ mod tests {
             .travel(470.0, 430.0, 0.3)
             .dwell(2.0)
             .click()
+            // Local follow-through, which also keeps the second click out of
+            // the final second (stop-click guard).
+            .travel(540.0, 480.0, 1.2)
             .park(0.5)
             .build();
         assert_eq!(reasons(&detect(&two)), ["pause + 2 clicks"]);
@@ -1395,10 +1421,11 @@ mod tests {
             // Baseline 2026-11-15 (detector as Keith marked it): right 2/2,
             // unwanted gone 0/2, too long fixed 0/2, new 0.
             // Rule 1 (resting cursor): unwanted 0 -> 1, too long 0 -> 1.
+            // Rule 2 (stop click): unwanted 1 -> 2.
             Score {
                 right_kept: 2,
                 right_total: 2,
-                unwanted_gone: 1,
+                unwanted_gone: 2,
                 unwanted_total: 2,
                 too_long_fixed: 1,
                 too_long_total: 2,
