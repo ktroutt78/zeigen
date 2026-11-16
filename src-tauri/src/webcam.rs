@@ -1,25 +1,60 @@
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 
-const FFMPEG_PATH: &str = "/opt/homebrew/bin/ffmpeg";
+// The webcam is recorded by our own helper (webcam-recorder/main.swift), not
+// ffmpeg: ffmpeg's avfoundation input always picks the camera's highest-rate
+// 1280x720 mode, and an iPhone camera restarts its stream (losing its zoom)
+// when a second client asks for a different mode than the preview's.
+pub fn recorder_binary_path() -> PathBuf {
+    // Release: bundled next to the app binary (Contents/MacOS/webcam-recorder).
+    // Debug/dev: the copy build.rs compiles into target/.
+    #[cfg(not(debug_assertions))]
+    {
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join("webcam-recorder")))
+            .unwrap_or_else(|| PathBuf::from("webcam-recorder"))
+    }
+    #[cfg(debug_assertions)]
+    {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/recording-engine-build/webcam-recorder")
+    }
+}
+
+// Starts the helper writing `out`. It stops on "q" or on stdin EOF, so it
+// also finishes its file and exits when this process dies.
+pub fn spawn_recorder(camera_name: &str, out: &Path) -> Result<Child, String> {
+    Command::new(recorder_binary_path())
+        .arg(camera_name)
+        .arg(out)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|e| format!("failed to spawn webcam-recorder: {e}"))
+}
 
 pub struct WebcamSegmenter {
-    camera_index: u32,
+    camera_name: String,
     sources_dir: PathBuf,
     segments: Vec<PathBuf>,
     current: Option<Child>,
-    watchdog: Option<Child>,
+    // Host-clock seconds of the first segment's frame 0, from the helper's
+    // first_frame line. Later segments are not measured.
+    first_host_s: Arc<Mutex<Option<f64>>>,
 }
 
 impl WebcamSegmenter {
-    pub fn new(camera_index: u32, sources_dir: PathBuf) -> Self {
+    pub fn new(camera_name: String, sources_dir: PathBuf) -> Self {
         Self {
-            camera_index,
+            camera_name,
             sources_dir,
             segments: Vec::new(),
             current: None,
-            watchdog: None,
+            first_host_s: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -32,94 +67,41 @@ impl WebcamSegmenter {
             .sources_dir
             .join(format!("webcam-{segment_index:02}.mp4"));
 
-        // Pin video_size so the browser-side getUserMedia preview keeps the
-        // same camera mode when ffmpeg attaches as a second consumer.
-        // Without this, macOS renegotiates to a different default mode and
-        // the preview visibly "zooms" mid-recording.
-        let child = Command::new(FFMPEG_PATH)
-            .args([
-                "-y",
-                "-hide_banner",
-                "-f",
-                "avfoundation",
-                "-framerate",
-                "30",
-                "-video_size",
-                "1280x720",
-                "-i",
-                &self.camera_index.to_string(),
-                "-c:v",
-                "h264_videotoolbox",
-                "-b:v",
-                "4M",
-                "-pix_fmt",
-                "nv12",
-                "-an",
-            ])
-            .arg(&segment_path)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("failed to spawn webcam ffmpeg: {e}"))?;
-
-        // D-04: detached parent-death watchdog. The webcam ffmpeg is a direct
-        // child of this Tauri process; Drop and stop_segment kill it on
-        // graceful teardown but NOT on crash/force-quit/SIGKILL — macOS has no
-        // PR_SET_PDEATHSIG, and a Rust supervisor thread dies with the process.
-        // A sibling /bin/sh polls BOTH pids and kills ffmpeg if Tauri dies
-        // first. Both pids are baked in as literals at spawn time: a watchdog
-        // that resolved the parent pid after launch would, by the time the
-        // parent is dead, watch nothing. On Tauri death the watchdog reparents
-        // to launchd, fires the kill, then self-exits; on graceful stop it is
-        // reaped directly (see stop_segment/Drop) before it can fire.
-        let ff_pid = child.id();
-        let tauri_pid = std::process::id();
-        let watchdog = Command::new("/bin/sh")
-            .arg("-c")
-            .arg(format!(
-                "while kill -0 {ff} 2>/dev/null && kill -0 {tauri} 2>/dev/null; \
-                 do sleep 1; done; kill -9 {ff} 2>/dev/null",
-                ff = ff_pid,
-                tauri = tauri_pid,
-            ))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok(); // best-effort; absence must not block recording
+        let mut child = spawn_recorder(&self.camera_name, &segment_path)?;
+        let stdout = child.stdout.take().ok_or("webcam-recorder: no stdout")?;
+        let first_host_s = (segment_index == 0).then(|| self.first_host_s.clone());
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+                if v.get("event").and_then(|e| e.as_str()) == Some("first_frame") {
+                    if let (Some(slot), Some(h)) = (&first_host_s, v.get("host_s").and_then(|h| h.as_f64())) {
+                        if let Ok(mut g) = slot.lock() {
+                            *g = Some(h);
+                        }
+                    }
+                }
+            }
+        });
 
         self.current = Some(child);
-        self.watchdog = watchdog;
         self.segments.push(segment_path);
         Ok(())
     }
 
     pub fn stop_segment(&mut self) -> Result<(), String> {
-        let result = if let Some(mut child) = self.current.take() {
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(b"q\n");
-                let _ = stdin.flush();
-            }
-            child
-                .wait()
-                .map(|_| ())
-                .map_err(|e| format!("webcam ffmpeg wait: {e}"))
-        } else {
-            Ok(())
-        };
-        // Reap directly once ffmpeg is gone: avoids a zombie on the normal
-        // path and preempts the watchdog's poll from firing kill -9 on a
-        // pid the OS may already have reused.
-        self.reap_watchdog();
-        result
+        let Some(mut child) = self.current.take() else { return Ok(()) };
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(b"q\n");
+            let _ = stdin.flush();
+        }
+        child
+            .wait()
+            .map(|_| ())
+            .map_err(|e| format!("webcam-recorder wait: {e}"))
     }
 
-    fn reap_watchdog(&mut self) {
-        if let Some(mut wd) = self.watchdog.take() {
-            let _ = wd.kill();
-            let _ = wd.wait();
-        }
+    pub fn first_host_s(&self) -> Option<f64> {
+        self.first_host_s.lock().ok().and_then(|g| *g)
     }
 
     pub fn segments(&self) -> &[PathBuf] {
@@ -137,6 +119,5 @@ impl Drop for WebcamSegmenter {
             let _ = child.kill();
             let _ = child.wait();
         }
-        self.reap_watchdog();
     }
 }

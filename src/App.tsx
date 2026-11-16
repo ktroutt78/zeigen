@@ -840,8 +840,8 @@ type ReviewOpenArgs = {
   // Phase 15 c3 dual-stream inputs. screenPath is the raw screen capture
   // (sources/screen.mp4 for webcam recordings; scratchPath for screen-
   // only). webcamPath is the c1 concat'd webcam.mp4 — null if no webcam.
-  // webcamLeadMs is the calibrated camera-start delay the player applies
-  // via currentTime offset.
+  // webcamLeadMs is the webcam's start offset (measured per recording,
+  // may be negative) the player applies via currentTime offset.
   screenPath: string;
   webcamPath: string | null;
   webcamLeadMs: number;
@@ -950,9 +950,8 @@ type FinalizedRecording = {
   scratch_mp4_path: string;
   // Phase 15 c3 dual-stream player inputs. screen_path always present;
   // webcam_path present iff a webcam was used (concat'd by c1 from
-  // segments). webcam_lead_ms mirrors composite::WEBCAM_LEAD_MS so the
-  // dual-stream player offsets webcam.currentTime to match composite's
-  // tpad behavior at export time.
+  // segments). webcam_lead_ms is the measured lead also written to the
+  // sidecar for the export (composite::WEBCAM_LEAD_MS when unmeasured).
   screen_path: string;
   webcam_path: string | null;
   webcam_lead_ms: number;
@@ -1481,6 +1480,13 @@ function App() {
           ? { ...recordedRect, scale: fullDisplayFrame.scale }
           : fullDisplayFrame;
 
+      // The webcam recorder opens the camera by name (the picker's indices
+      // are ffmpeg's and only identify it here).
+      const recordCamera =
+        selectedCamera == null
+          ? null
+          : cameras.find((c) => c.index === selectedCamera)?.name ?? null;
+
       if (countdownDuration > 0) {
         setState("countdown");
         // Per-recording pre-warm runs concurrently with the countdown
@@ -1505,7 +1511,7 @@ function App() {
               : null,
           windowId: sourceKind === "window" ? selectedWindow : null,
           microphoneUid: selectedMic,
-          cameraIndex: selectedCamera,
+          cameraName: recordCamera,
           maxFps: 30,
           areaX: sourceKind === "area" ? selectedArea?.x ?? null : null,
           areaY: sourceKind === "area" ? selectedArea?.y ?? null : null,
@@ -1569,7 +1575,7 @@ function App() {
             : null,
         windowId: sourceKind === "window" ? selectedWindow : null,
         microphoneUid: selectedMic,
-        cameraIndex: selectedCamera,
+        cameraName: recordCamera,
         maxFps: 30,
         recordedDisplayX: recordedRect?.x ?? null,
         recordedDisplayY: recordedRect?.y ?? null,

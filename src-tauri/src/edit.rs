@@ -124,6 +124,12 @@ pub struct SidecarState {
     // Bubble size while the screen is zoomed, 1.0 = unchanged. None = 1.0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bubble_zoom_scale: Option<f64>,
+    // Measured webcam lead for this recording (ms after screen.mp4's time zero
+    // that webcam frame 0 was captured; negative = webcam first). Written at
+    // finalize; None = not measured, the export uses composite::WEBCAM_LEAD_MS.
+    // Declared last.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webcam_lead_ms: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
@@ -770,6 +776,7 @@ fn build_compositor_command(
     webcam: Option<&Path>,
     bubble: Option<&crate::composite::V3BubbleAssets>,
     fps: f64,
+    webcam_lead_ms: f64,
     watermark: Option<&Watermark>,
     redact_json: Option<&Path>,
     frame_bg: Option<(FrameStyle, &Background)>,
@@ -803,7 +810,9 @@ fn build_compositor_command(
         // lead; wc_skip=(trim_in-lead).max(0) drops the webcam front, so at output
         // t=0 the bubble shows content from (trim_in-lead) — the same 105ms lead as
         // the untrimmed start. Shadow alpha/radius-k stay at cicompositor defaults.
-        let lead_secs = crate::composite::WEBCAM_LEAD_MS / 1000.0;
+        // A negative lead (webcam started first) gives lead_frames=0 and skips
+        // the webcam's extra front: skip = trim_in + |lead|.
+        let lead_secs = webcam_lead_ms / 1000.0;
         let trim_in = trim.map(|(a, _)| a).unwrap_or(0.0);
         let lead_frames = ((lead_secs - trim_in).max(0.0) * fps).round().max(0.0) as i64;
         let skip_frames = ((trim_in - lead_secs).max(0.0) * fps).round().max(0.0) as i64;
@@ -1122,6 +1131,7 @@ fn v3_render(
         webcam.as_deref(),
         bubble.as_ref(),
         fps,
+        sidecar.webcam_lead_ms.unwrap_or(crate::composite::WEBCAM_LEAD_MS),
         watermark,
         redact_json_path.as_deref(),
         frame_bg,
@@ -2433,6 +2443,7 @@ mod tests {
             cursor: None,
             scenes: vec![],
             bubble_zoom_scale: None,
+            webcam_lead_ms: None,
         }
     }
 
@@ -2794,6 +2805,35 @@ mod tests {
         );
     }
 
+    // Measured lead, either sign: positive holds webcam frame 0 for the lead;
+    // negative (webcam started first) skips the webcam's extra front, on top of
+    // any trim.
+    #[test]
+    fn webcam_lead_frames_and_skip_for_both_signs() {
+        let bubble = crate::composite::V3BubbleAssets {
+            mask_path: PathBuf::from("/S/mask.png"),
+            shadow_path: PathBuf::from("/S/shadow.png"),
+            diameter: 240,
+            zone: crate::composite::BubbleZone::BottomRight,
+        };
+        let env = |lead_ms: f64, trim: Option<(f64, f64)>, key: &str| -> Option<String> {
+            let cmd = build_compositor_command(
+                Path::new("/S/cicompositor"), Path::new("/S/in.mp4"), Path::new("/S/v.mp4"),
+                (1920, 1080), (1920, 1080), trim, None, Some(Path::new("/S/webcam.mp4")),
+                Some(&bubble), 30.0, lead_ms, None, None, None, false, None,
+            );
+            cmd.get_envs()
+                .find(|(k, _)| *k == key)
+                .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+        };
+        assert_eq!(env(100.0, None, "BUBBLE_LEAD_FRAMES").as_deref(), Some("3"));
+        assert_eq!(env(100.0, None, "BUBBLE_WEBCAM_SKIP_FRAMES"), None);
+        assert_eq!(env(-100.0, None, "BUBBLE_LEAD_FRAMES").as_deref(), Some("0"));
+        assert_eq!(env(-100.0, None, "BUBBLE_WEBCAM_SKIP_FRAMES").as_deref(), Some("3"));
+        assert_eq!(env(-100.0, Some((0.5, 2.0)), "BUBBLE_LEAD_FRAMES").as_deref(), Some("0"));
+        assert_eq!(env(-100.0, Some((0.5, 2.0)), "BUBBLE_WEBCAM_SKIP_FRAMES").as_deref(), Some("18"));
+    }
+
     // Arg-vector + env PIN (REDACTION-PLAN commit 3) — the key gate. An empty
     // redaction list must produce a cicompositor command byte-identical to the
     // pre-redaction one; a non-empty list adds EXACTLY the REDACT_REGIONS env and
@@ -2848,7 +2888,7 @@ mod tests {
         let mk = |rj: Option<&Path>, cj: Option<&Path>| {
             build_compositor_command(
                 bin, screen, video_only, (3024, 1964), (1920, 1246), None,
-                Some(camera), Some(webcam), Some(&bubble), 30.0, Some(&wm), rj, None, false, cj,
+                Some(camera), Some(webcam), Some(&bubble), 30.0, crate::composite::WEBCAM_LEAD_MS, Some(&wm), rj, None, false, cj,
             )
         };
         let base = mk(None, None);
@@ -2940,7 +2980,7 @@ WATERMARK_SCALE_FRAC=0.08";
         let mk = |fb: Option<(FrameStyle, &Background)>| {
             build_compositor_command(
                 bin, Path::new("/S/in.mp4"), Path::new("/S/v3.mp4"), (1920, 1080), (1920, 1080),
-                None, None, None, None, 0.0, None, None, fb, false, None,
+                None, None, None, None, 0.0, 0.0, None, None, fb, false, None,
             )
         };
         let bg = Background::Gradient { preset: "indigo".into() };
@@ -2986,7 +3026,7 @@ WATERMARK_SCALE_FRAC=0.08";
         let mk = |fb: Option<(FrameStyle, &Background)>| {
             build_compositor_command(
                 bin, Path::new("/S/in.mp4"), Path::new("/S/v3.mp4"), (1920, 1080), (1920, 1080),
-                None, None, None, None, 0.0, None, None, fb, false, None,
+                None, None, None, None, 0.0, 0.0, None, None, fb, false, None,
             )
         };
         let bg = Background::Image { path: "/tmp/wall.heic".into() };
@@ -3020,7 +3060,7 @@ WATERMARK_SCALE_FRAC=0.08";
         let mk = |win: bool| {
             build_compositor_command(
                 bin, Path::new("/S/in.mp4"), Path::new("/S/v3.mp4"), (1920, 1080), (1920, 1080),
-                None, None, None, None, 0.0, None, None, Some((frame, &bg)), win, None,
+                None, None, None, None, 0.0, 0.0, None, None, Some((frame, &bg)), win, None,
             )
         };
         assert!(envs(&mk(true)).iter().any(|e| e == "WINDOW_CORNER=1"),
@@ -3058,7 +3098,7 @@ WATERMARK_SCALE_FRAC=0.08";
         let mk = |fb: Option<(FrameStyle, &Background)>| {
             build_compositor_command(
                 bin, screen, video_only, (1920, 1080), (1920, 1080), None,
-                None, None, None, 0.0, None, None, fb, false, None,
+                None, None, None, 0.0, 0.0, None, None, fb, false, None,
             )
         };
         let base = mk(None);

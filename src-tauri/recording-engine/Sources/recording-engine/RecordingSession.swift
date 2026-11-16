@@ -34,12 +34,6 @@ final class RecordingSession: NSObject,
     private let lock = NSLock()
     private var started = false
     private var paused = false
-    // Phase 15 #4 fix: one-shot guard for the first_frame event Rust
-    // uses to anchor bubble keyframes to screen.mp4 PTS=0. Set inside
-    // the SCK output callback the first time a valid .screen sample
-    // arrives. Emit happens outside the lock so standardOutput.write
-    // doesn't block other threads.
-    private var screenFirstFrameEmitted = false
     private var firstVideoPTS: CMTime = .invalid
     private var firstAudioPTS: CMTime = .invalid
     private var cutoffPTS: CMTime?
@@ -870,23 +864,9 @@ final class RecordingSession: NSObject,
               let status = attachments.first?[.status] as? Int,
               status == SCFrameStatus.complete.rawValue
         else { return }
-        // Phase 15 #4 fix: emit first_frame on the first valid .screen
-        // sample. Rust uses receipt time as the anchor for shifting
-        // bubble keyframes so their t corresponds to screen.mp4 PTS=0
-        // (this frame's position in the writer) instead of started_at.
-        // Flag flipped inside the lock; emit() called outside to keep
-        // standardOutput.write off the lock-held path.
-        var shouldEmitFirstFrame = false
         lock.withLock {
-            if !screenFirstFrameEmitted {
-                screenFirstFrameEmitted = true
-                shouldEmitFirstFrame = true
-            }
             lastVideoBuffer = sampleBuffer
             lastVideoArrivalHost = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        }
-        if shouldEmitFirstFrame {
-            emit(.first_frame(stream: "screen"))
         }
         append(sampleBuffer, to: videoInput, isVideo: true)
     }
@@ -918,6 +898,16 @@ final class RecordingSession: NSObject,
         // the writer to .failed on macOS 26. input.append is microseconds
         // (enqueues to AVAssetWriter's internal serial queue) so the
         // added contention is negligible.
+        // first_frame is emitted when the writer session starts: that
+        // moment is screen.mp4's time zero. Rust anchors bubble keyframes on
+        // its receipt and measures the webcam lead against host_s. Declared
+        // before the lock's defer so it runs after the unlock.
+        var sessionStartedAt: CMTime?
+        defer {
+            if let t = sessionStartedAt {
+                emit(.first_frame(stream: "screen", host_s: CMTimeGetSeconds(t)))
+            }
+        }
         lock.lock()
         defer { lock.unlock() }
 
@@ -972,6 +962,7 @@ final class RecordingSession: NSObject,
                 writer.startSession(atSourceTime: origin)
                 sessionStartPTS = origin
                 started = true
+                sessionStartedAt = origin
             } else {
                 // Earlier pipeline produced before the other warmed up — drop.
                 return

@@ -47,10 +47,26 @@ fn main() {
     std::fs::copy(&compositor_out, binaries_dir.join(format!("cicompositor-{target}")))
         .expect("stage compositor sidecar");
 
+    // Webcam recorder (single-file swiftc, like the compositor), staged as a
+    // third sidecar at Contents/MacOS/webcam-recorder.
+    let webcam_src = manifest_dir.join("webcam-recorder/main.swift");
+    let webcam_out = scratch_path.join("webcam-recorder");
+    let status = Command::new("swiftc")
+        .arg("-O")
+        .arg(&webcam_src)
+        .arg("-o")
+        .arg(&webcam_out)
+        .status()
+        .expect("swiftc: failed to invoke for webcam-recorder");
+    assert!(status.success(), "swiftc failed for webcam-recorder");
+    std::fs::copy(&webcam_out, binaries_dir.join(format!("webcam-recorder-{target}")))
+        .expect("stage webcam-recorder sidecar");
+
     tauri_build::build();
 
     println!("cargo:rerun-if-changed=recording-engine/Sources");
     println!("cargo:rerun-if-changed=recording-engine/Package.swift");
     println!("cargo:rerun-if-changed=recording-engine/Info.plist");
     println!("cargo:rerun-if-changed=compositor-engine/main.swift");
+    println!("cargo:rerun-if-changed=webcam-recorder/main.swift");
 }

@@ -71,6 +71,11 @@ pub(crate) const FFPROBE_PATH: &str = "/opt/homebrew/bin/ffprobe";
 // fix stays: measure per recording (engine timestamps each pipeline's
 // first real sample; both clocks are already mach-domain) instead of
 // hoping a constant holds still.
+//
+// Since the native webcam recorder (2026-11-16) the lead is measured per
+// recording (sidecar webcam_lead_ms, lib.rs recording_finalize). This
+// constant is only the fallback when either side did not report its
+// first-frame host time (recordings made before the change).
 pub(crate) const WEBCAM_LEAD_MS: f64 = 105.0;
 
 #[derive(Clone, Copy)]

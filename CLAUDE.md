@@ -13,7 +13,8 @@ Out of scope: real-time annotation, Windows/Linux, transcription, team features.
 - Tauri + React + Vite
 - Swift helper binary (`src-tauri/recording-engine/`) for screen + mic capture via ScreenCaptureKit + AVCaptureSession, muxed by AVAssetWriter. Protocol in `docs/IPC-SPEC.md`.
 - Swift compositor binary (`src-tauri/compositor-engine/`, `cicompositor`) is the **single canonical render/composite path**: Core Image renders every zoom / webcam bubble / watermark at export. The old ffmpeg `filter_complex` oversample-composite path (V2) was eliminated 2026-07-19 (`v0.1.0-engine-v2-removed`); there is no fallback — a compositor failure fails the export loudly.
-- ffmpeg remains only for webcam capture (Phase 3), GIF palettegen, and H.264 transcoding (`h264_videotoolbox`). It no longer composites edits. ffmpeg `-f avfoundation` is **not** used for screen capture — `AVCaptureScreenInput` was removed on macOS 26.
+- Swift webcam recorder (`src-tauri/webcam-recorder/`, `webcam-recorder`) captures the webcam with AVCaptureSession (session preset only, never `activeFormat`, so it joins the preview's camera mode) and writes it on a fixed 30 fps grid. It reports its first frame's host time; with the engine's `first_frame` `host_s` that gives the per-recording webcam lead (sidecar `webcam_lead_ms`).
+- ffmpeg remains only for device enumeration (the camera/mic picker), GIF palettegen, H.264 transcoding (`h264_videotoolbox`) and concatenating webcam segments. It no longer captures or composites. ffmpeg `-f avfoundation` is **not** used for screen capture — `AVCaptureScreenInput` was removed on macOS 26.
 - Cloudflare R2 for storage, Cloudflare Pages for the `/v/[id]` viewer
 
 **Portability note:** collapsing to one compositor path means a future Windows port reimplements a single render pipeline (cicompositor's Core Image logic), not two — the dual ffmpeg-vs-Core-Image split is gone.
@@ -21,9 +22,9 @@ Out of scope: real-time annotation, Windows/Linux, transcription, team features.
 ## Known gotchas
 
 - Continuity Camera drops when iPhone sleeps. Re-enumerate on failure.
-- iPhone Continuity routes camera + mic from the same iPhone over a single channel. If the webcam ffmpeg process claims the iPhone camera, SCK cannot also claim the iPhone mic — fails with `SCStreamErrorDomain Code=-3820 "Stream failed to start microphone"`. Don't combine iPhone camera with iPhone mic; future UI slice should disable that combination in the picker.
-- `avfoundation` device indices are not stable. Enumerate before every recording.
-- Resolution and framerate must be set explicitly per device.
+- iPhone Continuity routes camera + mic from the same iPhone over a single channel. If the webcam recorder claims the iPhone camera, SCK cannot also claim the iPhone mic — fails with `SCStreamErrorDomain Code=-3820 "Stream failed to start microphone"`. Don't combine iPhone camera with iPhone mic; future UI slice should disable that combination in the picker.
+- `avfoundation` device indices are not stable. Enumerate before every recording. The recorder opens the camera by name, which the frontend looks up from the picker's index at Record.
+- Never set a camera's resolution or frame rate directly (`activeFormat`, frame durations, ffmpeg `-video_size`/`-framerate`). A second client asking for a different mode than the preview's restarts an iPhone camera stream and drops its menu-bar zoom (DECISIONS 2026-11-16). The webcam recorder uses a session preset and makes the 30 fps grid in the writer.
 - macOS requires Screen Recording, Camera, and Mic permissions.
 - Use a single audio source to avoid sync drift.
 - LinkedIn has no direct upload API for personal profiles. Export path opens composer and relies on manual drag-in.

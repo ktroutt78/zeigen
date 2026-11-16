@@ -80,6 +80,8 @@ codesign --force -s "Zeigen Dev Signing" \
     "$INSTALL_DIR/Zeigen.app/Contents/MacOS/recording-engine"
 codesign --force -s "Zeigen Dev Signing" \
     "$INSTALL_DIR/Zeigen.app/Contents/MacOS/cicompositor"
+codesign --force -s "Zeigen Dev Signing" \
+    "$INSTALL_DIR/Zeigen.app/Contents/MacOS/webcam-recorder"
 codesign --force -s "Zeigen Dev Signing" "$INSTALL_DIR/Zeigen.app"
 codesign --verify --deep --strict "$INSTALL_DIR/Zeigen.app"
 

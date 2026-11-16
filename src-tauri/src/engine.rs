@@ -85,7 +85,10 @@ impl EngineClient {
                 if value.get("event").and_then(|v| v.as_str()) == Some("first_frame")
                     && value.get("stream").and_then(|v| v.as_str()) == Some("screen")
                 {
-                    crate::note_screen_first_frame(&app_for_stdout);
+                    crate::note_screen_first_frame(
+                        &app_for_stdout,
+                        value.get("host_s").and_then(|v| v.as_f64()),
+                    );
                 }
                 // The frontend maps most EngineError codes to a friendly,
                 // detail-free toast string. eprintln! only reaches a

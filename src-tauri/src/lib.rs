@@ -56,6 +56,10 @@ struct ActiveRecording {
     // didn't emit (old binary / event lost) — finalize falls back to
     // no shift, preserving pre-fix behavior.
     first_frame_at: Option<Instant>,
+    // Host-clock seconds of screen.mp4's time zero (engine first_frame
+    // host_s). With the webcam's own first-frame host time it gives the
+    // measured webcam lead at finalize.
+    screen_host_s: Option<f64>,
     mode: CaptureMode,
     bubble_position_log: Vec<BubblePositionEntry>,
     // Bubble roundness preference captured at recording start (None =
@@ -103,7 +107,7 @@ fn engine_start(
     display_id: Option<u32>,
     window_id: Option<u32>,
     microphone_uid: Option<String>,
-    camera_index: Option<u32>,
+    camera_name: Option<String>,
     max_fps: Option<u32>,
     webcam_size: Option<String>,
     webcam_corner: Option<String>,
@@ -164,11 +168,11 @@ fn engine_start(
         .map_err(|e| format!("create {}: {}", scratch_dir.display(), e))?;
     let scratch_mp4_path = scratch_dir.join(format!("recording-{stamp}.mp4"));
 
-    let (screen_output, webcam) = if let Some(idx) = camera_index {
+    let (screen_output, webcam) = if let Some(name) = camera_name {
         let sources_dir = scratch_dir.join("sources");
         std::fs::create_dir_all(&sources_dir)
             .map_err(|e| format!("create {}: {}", sources_dir.display(), e))?;
-        let mut segmenter = WebcamSegmenter::new(idx, sources_dir.clone());
+        let mut segmenter = WebcamSegmenter::new(name, sources_dir.clone());
         segmenter.start_segment()?;
         (sources_dir.join("screen.mp4"), Some(segmenter))
     } else {
@@ -209,6 +213,7 @@ fn engine_start(
         webcam_corner: parse_corner(webcam_corner.as_deref()),
         started_at: Instant::now(),
         first_frame_at: None,
+        screen_host_s: None,
         mode,
         bubble_position_log: Vec::new(),
         bubble_roundness: settings::bubble_roundness(),
@@ -224,7 +229,7 @@ fn engine_start(
 // over the line-buffered pipe is ~1-5ms, negligible vs the 225-360ms
 // SCK init lag measured during verification. Idempotent: only writes
 // the first time.
-pub(crate) fn note_screen_first_frame(app: &AppHandle) {
+pub(crate) fn note_screen_first_frame(app: &AppHandle, host_s: Option<f64>) {
     let now = Instant::now();
     let state = app.state::<Mutex<Option<ActiveRecording>>>();
     let mutex = state.inner();
@@ -232,6 +237,7 @@ pub(crate) fn note_screen_first_frame(app: &AppHandle) {
         if let Some(rec) = guard.as_mut() {
             if rec.first_frame_at.is_none() {
                 rec.first_frame_at = Some(now);
+                rec.screen_host_s = host_s;
             }
         }
     }
@@ -321,7 +327,7 @@ fn recording_reset(
 // engine has already reported an error (and so already self-reset to idle)
 // — sending Stop to an idle engine produces a follow-on INVALID_STATE error
 // that overwrites the original. This path only cleans up Rust-side state
-// (the active recording handle, the webcam ffmpeg child).
+// (the active recording handle, the webcam recorder child).
 #[tauri::command]
 fn recording_cleanup_local(recording: RecordingState<'_>) -> Result<(), String> {
     if let Some(mut rec) = recording.lock().map_err(|e| e.to_string())?.take() {
@@ -407,6 +413,7 @@ fn recording_finalize(
     let webcam_opt = rec.webcam;
     let started_at = rec.started_at;
     let first_frame_at = rec.first_frame_at;
+    let screen_host_s = rec.screen_host_s;
     let bubble_position_log = rec.bubble_position_log;
     let bubble_roundness = rec.bubble_roundness;
     // webcam_size / webcam_corner used to feed composite at finalize.
@@ -419,6 +426,10 @@ fn recording_finalize(
     // scratch_mp4_path itself IS the screen capture). Populated below.
     let mut screen_for_dual: Option<PathBuf> = None;
     let mut webcam_for_dual: Option<PathBuf> = None;
+    // Measured webcam lead (ms): how long after screen.mp4's time zero the
+    // webcam file's frame 0 was captured. Negative = the webcam started first.
+    // None when either side did not report its host time; the constant stands in.
+    let mut measured_lead_ms: Option<f64> = None;
 
     let (sources_dir, segments) = if let Some(mut webcam) = webcam_opt {
         // Idempotently finalize the live webcam segment before reading it.
@@ -427,6 +438,9 @@ fn recording_finalize(
         // received Stop, so this is where the partial last segment's mp4 is
         // finalized — making recording_finalize self-sufficient either way.
         let _ = webcam.stop_segment();
+        if let (Some(w), Some(s)) = (webcam.first_host_s(), screen_host_s) {
+            measured_lead_ms = Some((w - s) * 1000.0);
+        }
         let segments = webcam.segments().to_vec();
         let sources_dir = webcam.sources_dir().to_path_buf();
         let screen_path = sources_dir.join("screen.mp4");
@@ -441,7 +455,7 @@ fn recording_finalize(
         // exists. Returning Ok with a non-existent screen_path opens a
         // dead review window — the friendly "saved up to that point"
         // banner is a lie. Bail BEFORE concat so we don't leave an orphan
-        // webcam.mp4 in scratch; webcam ffmpeg child is reaped via
+        // webcam.mp4 in scratch; webcam recorder child is reaped via
         // WebcamSegmenter::Drop when `rec` goes out of scope on Err
         // return, scratch dir collected by the 24h launch sweeper.
         if !screen_path.is_file() {
@@ -550,9 +564,10 @@ fn recording_finalize(
     // identity — Phase 5.5 lifecycle key). Frontend's read_sidecar still
     // takes sourcePath = scratch_mp4_path; backend resolves the adjacent
     // .annotations.json without needing scratch_mp4_path itself on disk.
-    if !bubble_position_log.is_empty() {
+    if !bubble_position_log.is_empty() || measured_lead_ms.is_some() {
         let mut state = edit::read_sidecar_path(&scratch_mp4_path)?.unwrap_or_default();
         state.bubble_position_log = bubble_position_log;
+        state.webcam_lead_ms = measured_lead_ms;
         // Roundness captured at recording start (already normalized: None =
         // circle). Stamped here so the recording keeps the shape it was made
         // with; the export side reads only the sidecar, never the setting.
@@ -575,7 +590,7 @@ fn recording_finalize(
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|| scratch_mp4_path.to_string_lossy().into_owned()),
         webcam_path: webcam_for_dual.map(|p| p.to_string_lossy().into_owned()),
-        webcam_lead_ms: composite::WEBCAM_LEAD_MS,
+        webcam_lead_ms: measured_lead_ms.unwrap_or(composite::WEBCAM_LEAD_MS),
         sources_dir: sources_dir.map(|p| p.to_string_lossy().into_owned()),
         webcam_segments: segments
             .into_iter()
