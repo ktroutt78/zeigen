@@ -118,14 +118,16 @@ const MENU_WINDOW_S: f64 = 4.0;
 const BRIDGE_GAP_S: f64 = 3.0;
 const MERGE_MIN_SCALE: f64 = 1.7;
 
-// Shape of the output. Interior-aware scale: unclamped mid-frame centers zoom
+// Shape of the output. Depths lowered 2026-11-15 (owner decision: 1.5x interior,
+// 1.7x edge-clamped, matching the Cap reference). Same segments and timings as
+// before — only depth and the clamped centres moved. Interior-aware scale: unclamped mid-frame centers zoom
 // shallower (INTERIOR_SCALE) since they show less surrounding context, while
 // edge-clamped centers keep the deeper SUGGESTED_SCALE (clamping already
 // reveals extra context for free). Same 600ms in_out_cubic ramps as manual
 // zooms; segments shorter than MIN_ZOOM_S after trimming are too twitchy.
 const MIN_ZOOM_S: f64 = 2.0;
-const SUGGESTED_SCALE: f64 = 2.0;
-const INTERIOR_SCALE: f64 = 1.7;
+const SUGGESTED_SCALE: f64 = 1.7;
+const INTERIOR_SCALE: f64 = 1.5;
 const RAMP_S: f64 = 0.6;
 
 // ---- Telemetry parsing -------------------------------------------------
@@ -728,7 +730,7 @@ mod tests {
         }
         // Rule 1 vetoes the 1.30-4.26 post-click-still dwell; only the drag
         // survives (down from 2 pre-rule-1, 4 at the committed baseline).
-        assert_eq!(got, "13.67-15.73s @(1102,717) 2.0x");
+        assert_eq!(got, "13.67-15.73s @(1038,675) 1.7x");
     }
 
     // Fixture #2: the ~162s demo recording from the 2026-07-13 owner judging
@@ -762,7 +764,7 @@ mod tests {
         // fixtures (091633 @1470, 220817 @1512) are UNCHANGED by the scaling.
         assert_eq!(
             got,
-            "7.86-10.62s @(480,270) 2.0x; 14.42-20.92s @(869,638) 1.7x; 22.60-26.08s @(480,270) 2.0x; 29.77-42.17s @(497,314) 1.9x; 47.67-51.36s @(664,590) 1.4x; 61.52-65.49s @(684,604) 1.4x; 69.23-75.40s @(480,439) 2.0x; 80.34-83.64s @(480,413) 2.0x; 85.42-88.12s @(480,528) 2.0x; 89.32-93.52s @(952,686) 1.7x; 95.40-98.12s @(480,750) 2.0x; 108.59-113.74s @(480,644) 2.0x; 117.85-120.96s @(1146,662) 1.7x; 122.18-126.95s @(662,353) 1.7x; 135.76-141.47s @(985,376) 1.7x; 143.91-148.76s @(1355,430) 1.7x; 149.96-152.22s @(565,530) 1.7x; 153.68-157.44s @(643,534) 1.5x"
+            "7.86-10.62s @(565,318) 1.7x; 14.42-20.92s @(869,638) 1.5x; 22.60-26.08s @(565,318) 1.7x; 29.77-42.17s @(565,318) 1.7x; 47.67-51.36s @(664,590) 1.4x; 61.52-65.49s @(684,604) 1.4x; 69.23-75.40s @(565,439) 1.7x; 80.34-83.64s @(565,413) 1.7x; 85.42-88.12s @(565,528) 1.7x; 89.32-93.52s @(952,686) 1.5x; 95.40-98.12s @(565,750) 1.7x; 108.59-113.74s @(565,644) 1.7x; 117.85-120.96s @(1146,662) 1.5x; 122.18-126.95s @(662,360) 1.5x; 135.76-141.47s @(985,376) 1.5x; 143.91-148.76s @(1355,430) 1.7x; 149.96-152.22s @(565,530) 1.7x; 153.68-157.44s @(643,534) 1.5x"
         );
     }
 
@@ -794,7 +796,7 @@ mod tests {
         }
         assert_eq!(
             got,
-            "6.72-11.26s @(434,246) 2.0x; 14.39-20.65s @(378,303) 2.0x; 23.72-27.25s @(472,315) 1.6x; 30.41-33.85s @(378,477) 2.0x; 36.00-39.36s @(506,554) 1.7x; 40.56-43.43s @(797,693) 1.7x; 47.35-49.40s @(1134,662) 2.0x; 51.37-55.20s @(1134,707) 2.0x; 56.94-62.02s @(378,619) 2.0x; 67.56-72.29s @(489,542) 1.5x; 90.81-99.60s @(378,246) 2.0x; 103.11-105.30s @(1134,736) 2.0x"
+            "6.72-11.26s @(445,289) 1.7x; 14.39-20.65s @(445,303) 1.7x; 23.72-27.25s @(504,327) 1.5x; 30.41-33.85s @(445,477) 1.7x; 36.00-39.36s @(506,554) 1.5x; 40.56-43.43s @(797,693) 1.7x; 47.35-49.40s @(1067,662) 1.7x; 51.37-55.20s @(1067,693) 1.7x; 56.94-62.02s @(445,619) 1.7x; 67.56-72.29s @(489,542) 1.5x; 90.81-99.60s @(445,289) 1.7x; 103.11-105.30s @(1067,693) 1.7x"
         );
     }
 
