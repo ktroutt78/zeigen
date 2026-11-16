@@ -792,7 +792,12 @@ function isLogicallyEmpty(s: SidecarState, duration: number | null): boolean {
   const noZoom = !s.zoom || s.zoom.length === 0;
   const noRedactions = !s.redactions || s.redactions.length === 0;
   const noCursor = cursorIsDefault(s.cursor);
+  // A background, frame margin or bubble size is an edit the export reads from
+  // the sidecar: without these checks a recording whose ONLY edit was one of
+  // them had its sidecar deleted and exported without it.
+  const noFrame = frameIsNoop(s.frame) && s.background == null && s.bubble_scale == null;
   return (
+    noFrame &&
     normalizeTrim(s.trim, duration) == null &&
     noBubble &&
     noThumb &&
