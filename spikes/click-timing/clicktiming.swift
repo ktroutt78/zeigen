@@ -6,6 +6,7 @@
 // moments. No permission needed; it only reads counters.
 //
 //   swiftc -O spikes/click-timing/clicktiming.swift -o spikes/click-timing/clicktiming && spikes/click-timing/clicktiming
+import AppKit
 import CoreGraphics
 import Foundation
 
@@ -14,11 +15,26 @@ let kinds: [(CGEventType, String)] = [
 ]
 var last = kinds.map { CGEventSource.counterForEventType(.combinedSessionState, eventType: $0.0) }
 var moveChanges: [Double] = []
+// Round 2: two polled "is the left button down right now" readings, to see
+// whether either is live (unlike the counters, which round 1 showed macOS
+// refreshes only every 0.5s).
+var cgDown = CGEventSource.buttonState(.combinedSessionState, button: .left)
+var nsDown = NSEvent.pressedMouseButtons & 1 == 1
 let t0 = Date()
-print("Click and scroll at irregular moments for 15 seconds, and keep the mouse moving.")
+print("Click about ten times at irregular moments for 15 seconds: some quick clicks, a couple held for a second.")
 while true {
     let t = Date().timeIntervalSince(t0)
     if t > 15 { break }
+    let cg = CGEventSource.buttonState(.combinedSessionState, button: .left)
+    if cg != cgDown {
+        cgDown = cg
+        print(String(format: "%7.3f  CGEventSource.buttonState  %@", t, cg ? "DOWN" : "up"))
+    }
+    let ns = NSEvent.pressedMouseButtons & 1 == 1
+    if ns != nsDown {
+        nsDown = ns
+        print(String(format: "%7.3f  NSEvent.pressedMouseButtons %@", t, ns ? "DOWN" : "up"))
+    }
     for (i, k) in kinds.enumerated() {
         let c = CGEventSource.counterForEventType(.combinedSessionState, eventType: k.0)
         guard c != last[i] else { continue }
