@@ -3055,6 +3055,43 @@ WATERMARK_SCALE_FRAC=0.08";
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // Renders a real recording through the real export path, for judging zoom feel
+    // against the Cap reference (harness/zoom-measure). Not a regression test.
+    //   ZEIGEN_REF_DIR = folder holding sidecar.json + sources/{screen,webcam}.mp4
+    //                    + sources/.screen.cursor.json
+    //   ZEIGEN_REF_OUT = output mp4
+    //   ZEIGEN_REF_REDETECT=1 re-runs zoom detection instead of the sidecar's zooms
+    //   cargo test --lib render_reference_export -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn render_reference_export() {
+        ensure_audio_model_for_tests();
+        let dir = PathBuf::from(std::env::var("ZEIGEN_REF_DIR").expect("ZEIGEN_REF_DIR"));
+        let out = PathBuf::from(std::env::var("ZEIGEN_REF_OUT").expect("ZEIGEN_REF_OUT"));
+        let mut sidecar: SidecarState =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("sidecar.json")).unwrap()).unwrap();
+        if std::env::var("ZEIGEN_REF_REDETECT").is_ok() {
+            let track: crate::zoom::CursorTrack = serde_json::from_str(
+                &std::fs::read_to_string(dir.join("sources/.screen.cursor.json")).unwrap(),
+            )
+            .unwrap();
+            sidecar.zoom = crate::zoom::detect(&track);
+        }
+        let started = std::time::Instant::now();
+        run_v3_export(
+            &dir.join("sources/screen.mp4"),
+            &[dir.join("sources/webcam.mp4")],
+            &out,
+            &sidecar,
+            crate::composite::WebcamSize::Medium,
+            None,
+            Mp4Resolution::Source,
+            |_| {},
+        )
+        .expect("reference export");
+        println!("rendered {} in {:.1}s", out.display(), started.elapsed().as_secs_f64());
+    }
+
     // Downscale and webcam-without-zoom are V3 paths now (reclaimed from V2).
     // Downscale: run_v3_export renders at source res then Lanczos-downscales to the
     // target dims — assert the output lands at the requested height with an even,
