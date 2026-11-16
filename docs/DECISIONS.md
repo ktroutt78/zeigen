@@ -25,7 +25,7 @@ Keith approved. Follows the USB-display entry below.
 - No Zeigen window is marked hidden from capture any more; the `make_capture_invisible` command is deleted.
 - The recording engine excludes Zeigen's own app from display and area recordings (`RecordingSession.swift`, `ownApps`: the engine's parent process, or the app's bundle id). Window recordings already capture only the picked app.
 - Keith's calls: Review and the capture window are not exempted (he does not record Zeigen with Zeigen), and overlays appearing in another app's screen share is fine.
-- Keith confirmed the identify number on BenQ (1). Not yet verified by anyone: that the countdown, timer chip, area indicator and bubble show on BenQ (1), and that none of them appear in a display or area recording.
+- Verified by Keith 2026-11-16 on the installed build, InstantView-driven BenQ (1): identify number, countdown, timer chip, floating bubble, window picker and area marquee all show on that display; a display recording contains only the screen and the composited bubble; an area recording shows the dashed border on the monitor and not in the recording.
 
 ## 2026-11-16 — USB-driven displays: the real cause is "hidden from capture", not window placement
 
