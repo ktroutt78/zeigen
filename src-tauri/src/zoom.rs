@@ -33,7 +33,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::edit::{Ease, ZoomKeyframe};
 
@@ -138,6 +138,42 @@ pub struct CursorTrack {
     pub samples: Vec<CursorSample>,
     #[serde(default)]
     pub events: Vec<CursorEvent>,
+    // Version 2 (CURSOR-SMOOTHING-PLAN, docs/IPC-SPEC.md). A version-1 log has
+    // none of these: its video has the cursor burned in, so a missing
+    // cursor_in_video means true.
+    #[serde(default = "default_true")]
+    pub cursor_in_video: bool,
+    #[serde(default = "default_one")]
+    pub points_to_pixels: f64,
+    #[serde(default)]
+    pub shapes: Vec<CursorShape>,
+    #[serde(default)]
+    pub shape_events: Vec<ShapeEvent>,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_one() -> f64 {
+    1.0
+}
+
+// One cursor image: base64 PNG plus its size and hotspot in screen points
+// (hotspot from the image's top-left).
+#[derive(Deserialize)]
+pub struct CursorShape {
+    pub png: String,
+    pub width: f64,
+    pub height: f64,
+    pub hot_x: f64,
+    pub hot_y: f64,
+}
+
+// The shape in effect from `t` until the next event.
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq)]
+pub struct ShapeEvent {
+    pub t: f64,
+    pub shape: usize,
 }
 
 #[derive(Deserialize)]
@@ -630,6 +666,10 @@ mod tests {
                     video_size: VideoSize { width: 1470.0, height: 956.0 },
                     samples: Vec::new(),
                     events: Vec::new(),
+                    cursor_in_video: true,
+                    points_to_pixels: 1.0,
+                    shapes: Vec::new(),
+                    shape_events: Vec::new(),
                 },
                 t: 0.0,
                 x: 700.0,

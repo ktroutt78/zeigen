@@ -112,6 +112,10 @@ mod tests {
                 })
                 .collect(),
             events: Vec::new(),
+            cursor_in_video: true,
+            points_to_pixels: 1.0,
+            shapes: Vec::new(),
+            shape_events: Vec::new(),
         }
     }
     fn at(p: &CursorPath, t: f64) -> (f64, f64) {
@@ -187,7 +191,8 @@ mod tests {
 
     #[test]
     fn empty_track_is_centred() {
-        let tr = CursorTrack { video_size: VideoSize { width: W, height: H }, samples: vec![], events: vec![] };
+        let tr = CursorTrack { video_size: VideoSize { width: W, height: H }, samples: vec![], events: vec![],
+            cursor_in_video: true, points_to_pixels: 1.0, shapes: vec![], shape_events: vec![] };
         assert_eq!(path(&tr, 0.1, 1.0).samples.len(), 61);
     }
 }
