@@ -2,6 +2,14 @@
 
 Things left worse than we'd like, with why. Newest at top. Remove an entry when it is paid.
 
+## Scene layouts: what is approximate or untested (2026-11-16)
+
+- Preview and export take every position, size, corner and fade from the same layout path, but the shadows are drawn by different engines (CSS box-shadow against a Core Image blur), so their softness is close, not identical. The default bubble's shadow also falls to the other side in the preview when a recording has no scenes (the mirror flips it); with scenes it matches the export.
+- The watermark is drawn on the screen picture, so it disappears with the screen during a full-webcam scene.
+- Lip-sync in a full-webcam export: the export shows webcam frame N on output frame N. Both are 30 frames a second with the same frame count in the four recordings checked, so it holds, but two of the four had one 0.1s gap in the webcam file, after which the export's webcam runs about two frames (0.07s) early. Matching by time instead of by count would remove that. Not judged by eye yet.
+- For window recordings the export scales the screen's corner with the zoom and the preview does not (older than the scene work).
+- Nobody has compared preview and export side by side for a scene yet; the export was checked by frames from a real recording, the preview only by type check and reading.
+
 ## Timeline: bubble during hover, and the waveform at high zoom (2026-11-16)
 
 While the preview shows a hovered moment the webcam bubble stays on the playhead's moment (aligning it on every hover seek was the cost the scrub bracket exists to avoid). The waveform keeps 4096 peak buckets and a canvas capped at 8192px, so on a long recording zoomed far in it looks blocky. I cannot operate the Review window, so each timeline step is first exercised by Keith on the installed build.
