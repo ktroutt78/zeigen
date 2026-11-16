@@ -55,14 +55,11 @@ export default function Timeline(props: TimelineProps) {
   const skimmingRef = useRef(false);
   const stamp = props.sourcePath ? parseStampFromPath(props.sourcePath) : null;
 
-  const inPct =
-    props.duration != null && props.trim != null ? (props.trim.in / props.duration) * 100 : 0;
-  const outPct =
-    props.duration != null && props.trim != null
-      ? (props.trim.out / props.duration) * 100
-      : 100;
-  const playPct =
-    props.duration != null ? (props.currentTime / props.duration) * 100 : 0;
+  const scale = props.duration != null ? timeScale(props.duration) : null;
+
+  const inPct = scale && props.trim != null ? scale.pct(props.trim.in) : 0;
+  const outPct = scale && props.trim != null ? scale.pct(props.trim.out) : 100;
+  const playPct = scale ? scale.pct(props.currentTime) : 0;
 
   // Trim with your eyes: the video seeks to follow the handle during drag
   // so the user sees the exact frame they're cutting on. The bound NOT
@@ -75,8 +72,8 @@ export default function Timeline(props: TimelineProps) {
       e.preventDefault();
       e.stopPropagation();
       const track = trackRef.current;
-      if (!track || props.duration == null || !props.trim) return;
-      const duration = props.duration;
+      if (!track || !scale || !props.trim) return;
+      const duration = scale.duration;
       const rect = track.getBoundingClientRect();
       const fixedIn = props.trim.in;
       const fixedOut = props.trim.out;
@@ -85,7 +82,7 @@ export default function Timeline(props: TimelineProps) {
       video?.pause();
       props.onScrubStart();
       const move = (clientX: number) => {
-        const t = ((clientX - rect.left) / rect.width) * duration;
+        const t = scale.rawTimeAtClientX(clientX, rect);
         if (side === "in") {
           const next = Math.max(0, Math.min(fixedOut - 0.1, t));
           props.setTrim({ in: next, out: fixedOut });
@@ -106,25 +103,19 @@ export default function Timeline(props: TimelineProps) {
       window.addEventListener("pointermove", onMove);
       window.addEventListener("pointerup", onUp);
     },
-    [props],
+    [props, scale],
   );
 
-  const timeAt = (clientX: number, rect: DOMRect, duration: number) => {
-    const frac = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-    return frac * duration;
-  };
-
   const onTrackPointerDown = (e: React.PointerEvent) => {
-    if (props.duration == null) return;
+    if (!scale) return;
     const track = trackRef.current;
     if (!track) return;
     const rect = track.getBoundingClientRect();
     const startX = e.clientX;
-    const duration = props.duration;
     const wasPlaying = !props.videoRef.current?.paused;
     let movedPastThreshold = false;
     const seekAt = (clientX: number) => {
-      props.seek(timeAt(clientX, rect, duration));
+      props.seek(scale.timeAtClientX(clientX, rect));
     };
     const onMove = (ev: PointerEvent) => {
       if (!movedPastThreshold && Math.abs(ev.clientX - startX) > 3) {
@@ -133,7 +124,7 @@ export default function Timeline(props: TimelineProps) {
         props.onScrubStart();
       }
       if (movedPastThreshold) seekAt(ev.clientX);
-      setHover({ time: timeAt(ev.clientX, rect, duration), rect });
+      setHover({ time: scale.timeAtClientX(ev.clientX, rect), rect });
     };
     const onUp = (ev: PointerEvent) => {
       window.removeEventListener("pointermove", onMove);
@@ -165,7 +156,7 @@ export default function Timeline(props: TimelineProps) {
   // webcam decoder. Shared by the main track and the zoom lane (same x->time).
   const skimSeek = (clientX: number) => {
     const track = trackRef.current;
-    if (props.duration == null || !track) return;
+    if (!scale || !track) return;
     if (!props.videoRef.current?.paused) {
       // Playing (e.g. Space pressed while hovering): don't scrub over playback,
       // and end any active skim so scrubbingRef doesn't stay set during play.
@@ -174,9 +165,10 @@ export default function Timeline(props: TimelineProps) {
     }
     const rect = track.getBoundingClientRect();
     // HOLD when the pointer is outside the track horizontally. The panel is to the
-    // RIGHT, so mousing toward it used to sweep the playhead to the clip end (timeAt
-    // clamps to [0,1]). Freezing on horizontal exit keeps the frame you left — the one
-    // "Set to playhead" reads — instead of dragging it to the end as you leave.
+    // RIGHT, so mousing toward it used to sweep the playhead to the clip end
+    // (scale.timeAtClientX clamps to [0, duration]). Freezing on horizontal exit
+    // keeps the frame you left — the one "Set to playhead" reads — instead of
+    // dragging it to the end as you leave.
     if (clientX < rect.left - 1 || clientX > rect.right + 1) {
       endSkim();
       return;
@@ -185,7 +177,7 @@ export default function Timeline(props: TimelineProps) {
       skimmingRef.current = true;
       props.onScrubStart();
     }
-    props.seek(timeAt(clientX, rect, props.duration));
+    props.seek(scale.timeAtClientX(clientX, rect));
   };
   const endSkim = () => {
     if (skimmingRef.current) {
@@ -195,11 +187,11 @@ export default function Timeline(props: TimelineProps) {
   };
 
   const onTrackPointerMove = (e: React.PointerEvent) => {
-    if (props.duration == null) return;
+    if (!scale) return;
     const track = trackRef.current;
     if (!track) return;
     const rect = track.getBoundingClientRect();
-    setHover({ time: timeAt(e.clientX, rect, props.duration), rect });
+    setHover({ time: scale.timeAtClientX(e.clientX, rect), rect });
     if (e.buttons === 0) skimSeek(e.clientX); // hover, not a drag
   };
 
@@ -313,9 +305,9 @@ export default function Timeline(props: TimelineProps) {
             playhead/trim handles visually. Click jumps the scrubber to the
             picked frame so the user can verify. Muted color + tooltip when
             the picked time falls outside the active trim range. */}
-        {props.thumbnailTime != null && props.duration != null && (() => {
+        {props.thumbnailTime != null && scale && (() => {
           const t = props.thumbnailTime;
-          const pct = (t / props.duration) * 100;
+          const pct = scale.pct(t);
           const outOfRange =
             props.trim != null &&
             (t < props.trim.in - TRIM_EPS || t > props.trim.out + TRIM_EPS);
@@ -402,7 +394,7 @@ export default function Timeline(props: TimelineProps) {
           to click and no other way in. marginTop clears the thumbnail tick
           that hangs below the track. Bands stay visible unselected
           (alwaysBand): a zoom is a range the user reasons about, not a point. */}
-      {props.duration != null && (
+      {scale && (
         <div
           style={{ position: "relative", height: 44, marginTop: 16 }}
           onPointerMove={(e) => {
@@ -445,7 +437,7 @@ export default function Timeline(props: TimelineProps) {
           )}
           <SegmentTrack
             segments={props.zoom.segments}
-            scale={timeScale(props.duration)}
+            scale={scale}
             selectedIndex={props.zoom.selectedIndex}
             onSelect={props.zoom.select}
             onAddAt={props.zoom.addAt}
@@ -479,7 +471,7 @@ export default function Timeline(props: TimelineProps) {
           region — the "overview + focus" model. No bounds (redactions overlap
           freely) and no ramp. Regions are drawn on the video; this lane trims
           timing. */}
-      {props.redact.regions.length > 0 && props.duration != null && (
+      {props.redact.regions.length > 0 && scale && (
         <div style={{ position: "relative", marginTop: 16 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 6, height: 14, marginBottom: 2 }}>
             <button
@@ -507,8 +499,8 @@ export default function Timeline(props: TimelineProps) {
                 key={k}
                 style={{
                   position: "absolute",
-                  left: `${(iv.start / props.duration!) * 100}%`,
-                  width: `${((iv.end - iv.start) / props.duration!) * 100}%`,
+                  left: `${scale.pct(iv.start)}%`,
+                  width: `${scale.widthPct(iv.start, iv.end)}%`,
                   top: 0, height: 10,
                   background: "var(--redact-soft)",
                   border: "1px solid var(--redact)",
@@ -528,7 +520,7 @@ export default function Timeline(props: TimelineProps) {
               {props.redact.selectedIndex != null && props.redact.regions[props.redact.selectedIndex] ? (
                 <SegmentTrack
                   segments={[props.redact.regions[props.redact.selectedIndex]]}
-                  scale={timeScale(props.duration)}
+                  scale={scale}
                   selectedIndex={0}
                   onSelect={(i) => { if (i == null) props.redact.select(null); }}
                   onChange={(_i, p) => {
