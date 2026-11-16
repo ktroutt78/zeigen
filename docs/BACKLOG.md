@@ -33,3 +33,9 @@ From Keith, comparing Cap. Not planned.
 
 - **Identify every display, including USB-driven ones.** DONE 2026-11-16. Keith confirmed every overlay on BenQ (1) and that none appear in recordings. Cause and proof in `docs/DECISIONS.md`: BenQ (1) is driven by Silicon Motion InstantView, and a window hidden from screen capture never reaches such a display.
 - **Richer identify overlay, like Cap's.** Cap shows, centered on each display, a display icon, the display's name ("Built-in Retina Display", "BenQ GL2780 (1)"), its resolution and refresh rate ("3024x1964 · 120FPS"), and the recording controls on the display that's selected. Keith likes it better than a bare number.
+
+## Library (2026-11-16)
+
+From Keith. Not planned.
+
+- **Open past recordings in Review.** Today Review only opens straight after a recording stops; there's no way back into an earlier one. Keith wants to browse the Zeigen save location and reopen a past recording to re-edit it (zooms, scenes, cursor, trim) and export again. First establish what's kept after Save or Discard: the raw screen and webcam sources, the cursor log and the sidecar. If Save deletes the sources, re-editing needs them kept, which costs disk space. Decide how long to keep them.
