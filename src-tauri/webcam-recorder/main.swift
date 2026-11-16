@@ -13,6 +13,12 @@
 // repeating the previous frame; a frame landing on an already written slot is
 // dropped.
 //
+// Pause: a line "pause" on stdin stops writing (the camera keeps running, so
+// an iPhone stream is never reopened). "resume <seconds>" continues, where
+// <seconds> is the total time the screen recording has cut for pauses so far;
+// the same time is cut here, so a frame captured at one moment sits at the
+// same place in both files after any number of pauses.
+//
 // stdout: one line {"event":"first_frame","host_s":<seconds>} when frame 0 is
 // written (its capture time on the host clock), for the A/V lead measurement.
 // Stop: a line "q" on stdin, or stdin EOF (parent gone). Exit 0 once the file
@@ -47,16 +53,19 @@ final class Recorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
     var previous: CVPixelBuffer?
     var duplicated = 0
     var dropped = 0
+    var paused = false
+    var cutSeconds = 0.0
 
     init(session: AVCaptureSession) { self.session = session }
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sb: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard let pb = CMSampleBufferGetImageBuffer(sb) else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sb)
+        if paused { return }
         if writer == nil { startWriter(pb, pts) }
         guard let input, let adaptor, input.isReadyForMoreMediaData else { return }
 
-        let slot = Int64((CMTimeGetSeconds(pts - firstPTS) * Double(fps)).rounded())
+        let slot = Int64(((CMTimeGetSeconds(pts - firstPTS) - cutSeconds) * Double(fps)).rounded())
         if slot < nextSlot { dropped += 1; return }
         // Fill a camera gap with the previous frame so the count stays on time.
         if let previous {
@@ -157,10 +166,16 @@ NotificationCenter.default.addObserver(forName: AVCaptureSession.runtimeErrorNot
 
 session.startRunning()
 
-// stdin: "q" or EOF stops. Runs off the main thread so the run loop keeps serving.
+// stdin: "q" or EOF stops; "pause" and "resume <seconds>" as in the header.
+// Runs off the main thread so the run loop keeps serving.
 Thread.detachNewThread {
     while let line = readLine() {
-        if line.trimmingCharacters(in: .whitespaces) == "q" { break }
+        let words = line.split(separator: " ")
+        if words.first == "q" { break }
+        if words.first == "pause" { frames.async { recorder.paused = true } }
+        if words.first == "resume", words.count == 2, let cut = Double(words[1]) {
+            frames.async { recorder.cutSeconds = cut; recorder.paused = false }
+        }
     }
     stopAndExit(code: 0)
 }

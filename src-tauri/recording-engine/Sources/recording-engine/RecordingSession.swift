@@ -112,6 +112,12 @@ final class RecordingSession: NSObject,
         }
     }
 
+    // Host-clock time cut out of the file by pauses so far. The webcam
+    // recorder cuts the same amount so both files stay in step.
+    var pausedTotalSeconds: Double {
+        lock.withLock { CMTimeGetSeconds(totalPausedDuration) }
+    }
+
     enum Source {
         case display(UInt32)
         case window(UInt32)

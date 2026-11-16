@@ -243,6 +243,20 @@ pub(crate) fn note_screen_first_frame(app: &AppHandle, host_s: Option<f64>) {
     }
 }
 
+// Called by engine.rs when the engine emits `resumed`: the webcam recorder
+// resumes with the engine's total paused time, so it cuts exactly what the
+// screen file cut.
+pub(crate) fn note_engine_resumed(app: &AppHandle, paused_total_s: f64) {
+    let state = app.state::<Mutex<Option<ActiveRecording>>>();
+    if let Ok(mut guard) = state.inner().lock() {
+        if let Some(webcam) = guard.as_mut().and_then(|rec| rec.webcam.as_mut()) {
+            if let Err(e) = webcam.resume(paused_total_s) {
+                eprintln!("{e}");
+            }
+        }
+    }
+}
+
 fn parse_size(s: Option<&str>) -> WebcamSize {
     match s {
         Some("small") => WebcamSize::Small,
@@ -266,27 +280,20 @@ fn engine_pause(
         .send(&EngineCommand::Pause)?;
     if let Some(rec) = recording.lock().map_err(|e| e.to_string())?.as_mut() {
         if let Some(webcam) = rec.webcam.as_mut() {
-            webcam.stop_segment()?;
+            webcam.pause()?;
         }
     }
     Ok(())
 }
 
 #[tauri::command]
-fn engine_resume(
-    engine: EngineState<'_>,
-    recording: RecordingState<'_>,
-) -> Result<(), String> {
+fn engine_resume(engine: EngineState<'_>) -> Result<(), String> {
+    // The webcam resumes in note_engine_resumed, once the engine has said
+    // how much time its pauses have cut.
     engine
         .lock()
         .map_err(|e| e.to_string())?
-        .send(&EngineCommand::Resume)?;
-    if let Some(rec) = recording.lock().map_err(|e| e.to_string())?.as_mut() {
-        if let Some(webcam) = rec.webcam.as_mut() {
-            webcam.start_segment()?;
-        }
-    }
-    Ok(())
+        .send(&EngineCommand::Resume)
 }
 
 #[tauri::command]

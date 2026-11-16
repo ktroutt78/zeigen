@@ -4,8 +4,6 @@ Things left worse than we'd like, with why. Newest at top. Remove an entry when 
 
 ## Native webcam recorder: what is rough (2026-11-16)
 
-- Only the first webcam segment's lead is measured. After a pause, each resumed segment starts when its camera delivers a frame, and that startup delay is not accounted for, so the webcam can slip a little later per pause (as it did with ffmpeg).
-- The MacBook Pro Camera now records 1920x1080: under the 720p session preset macOS picks the camera's 1080p mode. ffmpeg recorded it at 1280x720. Whether that changes the camera mode under the preview while recording (a visible jump in the floating bubble) is not checked; the iPhone case is the one the change was made for.
 - The recorder's stderr (errors and its frames/duplicated/dropped line) goes to the app's stderr, which is nowhere for a Dock launch.
 - The engine's `first_frame` now fires when the writer starts (screen.mp4's time zero) rather than on the first screen frame, which can be earlier when the mic is slow to start. The bubble position log is anchored on it, so that anchor moved too, in the direction of screen.mp4's time zero.
 

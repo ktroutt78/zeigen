@@ -76,7 +76,7 @@ enum Event {
     case started(started_at: String)
     case progress(frames: Int, dropped: Int, elapsed_s: Double)
     case paused(elapsed_s: Double)
-    case resumed(elapsed_s: Double)
+    case resumed(elapsed_s: Double, paused_total_s: Double)
     case stopped(output_path: String, duration_s: Double, bytes: Int64, frames: Int, dropped: Int)
     case window_frame(x: Int, y: Int, width: Int, height: Int, on_screen: Bool)
     // Emitted exactly once per recording, when the writer session starts
@@ -127,8 +127,8 @@ func emit(_ event: Event) {
         json = ["event": "progress", "frames": frames, "dropped": dropped, "elapsed_s": elapsed_s]
     case .paused(let elapsed_s):
         json = ["event": "paused", "elapsed_s": elapsed_s]
-    case .resumed(let elapsed_s):
-        json = ["event": "resumed", "elapsed_s": elapsed_s]
+    case .resumed(let elapsed_s, let paused_total_s):
+        json = ["event": "resumed", "elapsed_s": elapsed_s, "paused_total_s": paused_total_s]
     case .stopped(let output_path, let duration_s, let bytes, let frames, let dropped):
         json = [
             "event": "stopped", "output_path": output_path, "duration_s": duration_s,

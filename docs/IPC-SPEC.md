@@ -152,8 +152,9 @@ Emitted every 1 second while recording. Not emitted while paused. `elapsed_s` is
 
 ### `resumed`
 ```json
-{"event": "resumed", "elapsed_s": 42.3}
+{"event": "resumed", "elapsed_s": 42.3, "paused_total_s": 7.25}
 ```
+`paused_total_s` is the host-clock time all pauses so far have cut from the file. Rust passes it to the webcam recorder, which cuts the same amount.
 
 ### `stopped`
 Emitted after `stop` completes.

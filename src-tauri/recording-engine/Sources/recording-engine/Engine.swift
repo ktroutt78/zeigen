@@ -235,7 +235,7 @@ actor Engine {
         }
         s.resume()
         state = .recording
-        emit(.resumed(elapsed_s: s.elapsedSeconds))
+        emit(.resumed(elapsed_s: s.elapsedSeconds, paused_total_s: s.pausedTotalSeconds))
     }
 
     private func handleStop() async {

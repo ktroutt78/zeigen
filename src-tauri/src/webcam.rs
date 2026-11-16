@@ -42,8 +42,7 @@ pub struct WebcamSegmenter {
     sources_dir: PathBuf,
     segments: Vec<PathBuf>,
     current: Option<Child>,
-    // Host-clock seconds of the first segment's frame 0, from the helper's
-    // first_frame line. Later segments are not measured.
+    // Host-clock seconds of the file's frame 0, from the helper's first_frame line.
     first_host_s: Arc<Mutex<Option<f64>>>,
 }
 
@@ -98,6 +97,25 @@ impl WebcamSegmenter {
             .wait()
             .map(|_| ())
             .map_err(|e| format!("webcam-recorder wait: {e}"))
+    }
+
+    // Pause and resume keep the one helper running: it stops writing on
+    // "pause" and, on resume, cuts the same total paused time the screen
+    // engine reports, so the two files stay in step across pauses.
+    pub fn pause(&mut self) -> Result<(), String> {
+        self.send("pause\n")
+    }
+
+    pub fn resume(&mut self, paused_total_s: f64) -> Result<(), String> {
+        self.send(&format!("resume {paused_total_s:.6}\n"))
+    }
+
+    fn send(&mut self, line: &str) -> Result<(), String> {
+        let Some(stdin) = self.current.as_mut().and_then(|c| c.stdin.as_mut()) else { return Ok(()) };
+        stdin
+            .write_all(line.as_bytes())
+            .and_then(|_| stdin.flush())
+            .map_err(|e| format!("webcam-recorder stdin: {e}"))
     }
 
     pub fn first_host_s(&self) -> Option<f64> {

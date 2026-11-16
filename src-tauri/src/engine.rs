@@ -90,6 +90,11 @@ impl EngineClient {
                         value.get("host_s").and_then(|v| v.as_f64()),
                     );
                 }
+                if value.get("event").and_then(|v| v.as_str()) == Some("resumed") {
+                    if let Some(t) = value.get("paused_total_s").and_then(|v| v.as_f64()) {
+                        crate::note_engine_resumed(&app_for_stdout, t);
+                    }
+                }
                 // The frontend maps most EngineError codes to a friendly,
                 // detail-free toast string. eprintln! only reaches a
                 // terminal when this app happens to be launched from one —

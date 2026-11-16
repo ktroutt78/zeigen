@@ -4,6 +4,17 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-16 — Webcam stays in step across pauses
+
+Keith's check of the new webcam recorder: zoom kept and lip-sync at the start pass; after a pause and resume the lips ran ahead of the voice. He asked for it fixed now.
+
+- **Cause, from his recording (17:03):** each resume started a new webcam file, and that file's first frame arrived about 0.4 s after the screen resumed (the helper has to start and the camera has to deliver). The pieces were joined end to end, so everything after the pause sat about 0.4 s early. screen.mp4 was 28.80 s, the two webcam pieces 16.60 + 11.83 = 28.43 s.
+- **Fix:** one webcam recorder runs for the whole recording. On pause it stops writing; on resume the engine reports the total time its pauses have cut (`resumed.paused_total_s`) and the recorder cuts the same amount from its own timeline. A frame captured at one moment lands at the same place in both files after any number of pauses. The camera is no longer reopened at resume, so an iPhone stream is not touched either.
+- **At the seam:** a frame or so either side of the cut can be a repeat (the pause command reaches the two processes a few milliseconds apart). Not visible as sync error.
+- **Checked:** helper alone, 3 s pause: file exactly 3 s shorter, 3 repeated frames, steady 30 fps. Not checked by me: lip-sync after a pause in a real recording.
+
+---
+
 ## 2026-11-16 — Webcam recorded by our own Swift helper; stop fixes
 
 Keith approved all three after the diagnosis below.
