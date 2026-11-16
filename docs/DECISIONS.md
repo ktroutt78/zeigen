@@ -4,6 +4,21 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-15 — Cursor smoothing APPROVED and moved ahead of motion blur; cursor-shape test PASSED
+
+Keith, after the camera checkpoint: "What looks crazy is the cursor, not the camera." Cursor smoothing moved up from the backlog to the next priority. Plan: `docs/CURSOR-SMOOTHING-PLAN.md`. His calls:
+
+1. **Cursor smoothing comes BEFORE motion blur.** A drawn cursor is composited after the blur and stays sharp, so blur is judged on strength only.
+2. **Every save renders, including recordings with no edits** (~13s per ~100s is fine). New recordings have no cursor in the raw video, so the untouched-copy fast path is gone for them.
+3. **Size slider in; custom cursor icon stays on the backlog.**
+4. **Every export path must draw the cursor, confirmed one by one**, so none can silently produce a cursorless video.
+
+Also confirmed by Keith in the installed app: the preview glides like the export and the reason labels are readable. "The zoom lane doesn't feel like a real track yet" -> backlog item "Zoom gets its own timeline row", not planned.
+
+**Cursor-shape throwaway test: PASSED** (`spikes/cursor-shape/`). A plain helper process with no app bundle and no window read `NSCursor.currentSystem` with no permission prompt: 143 polls over 8s, none empty, three distinct shapes captured as the owner moved the mouse (arrow, pointing hand, one more), each with a hotspot and multiple pixel sizes, ~2ms per poll. So the engine can log real shapes; the all-arrows fallback is not needed. Not yet proven inside the engine's own process/threading; that is part of the capture step.
+
+**Export paths that actually exist** (checked in code 2026-11-15): Save MP4 and Save GIF (`save_recording`) and Copy to clipboard (`clipboard.rs`). All three go through `edit::run_edit_pipeline`. There is NO LinkedIn or R2 code in the tree (LinkedIn was removed 2026-07, hosted sharing was dropped in Phase 6), although CLAUDE.md's Scope line still lists them.
+
 ## 2026-11-15 — Camera-path checkpoint APPROVED; long pans stay (join by time only)
 
 Keith watched `harness/reference/zeigen-new.mp4` (new camera path + 1.5x/1.7x depth, no blur) side by side with the old export: "the new motion looks better than the old." Approved to continue to the preview.

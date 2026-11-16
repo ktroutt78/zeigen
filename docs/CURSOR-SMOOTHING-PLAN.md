@@ -1,6 +1,6 @@
 # Cursor smoothing: short plan
 
-Status: awaiting Keith's yes/no. No code has been changed for this.
+Status: APPROVED 2026-11-15 (smoothing before blur; every save renders; size slider in, custom icon out). Cursor-shape test passed.
 
 ## Should it come before blur?
 
@@ -31,6 +31,27 @@ Yes. Do cursor smoothing first, then motion blur.
 - **Old recordings keep their baked-in cursor** and cannot be smoothed. Only recordings made after this ships.
 - **Every save goes through the renderer.** Today a recording with no zoom, no webcam, no watermark and no background is saved by copying the video untouched, which is nearly instant. Without a baked-in cursor that copy would have no cursor in it, so those saves would render instead. On the reference recording a render took about 13 seconds for 104 seconds of video. Recordings that already use zoom or the webcam bubble are unaffected, since they render today.
 - **The raw recording on disk has no cursor.** Anything that reads it directly (the scrub thumbnails, the poster frame) will show no cursor unless I draw it there too. I would leave thumbnails without one.
+
+## Every export path draws the cursor
+
+Added at Keith's request: no path may silently produce a video with no cursor.
+
+The export paths that exist in the code today, and how each gets its video:
+
+| Path | Where | Today |
+|---|---|---|
+| Save as MP4 | `save_recording` in `edit.rs` | renderer if zoom / webcam / watermark / background, otherwise an untouched copy or plain re-encode |
+| Save as GIF | `save_recording` in `edit.rs` | renderer under the same conditions, otherwise straight to the GIF encoder |
+| Copy to clipboard | `clipboard.rs` | same as Save as MP4 |
+
+All three go through one function (`run_edit_pipeline`, `edit.rs`), and that function has exactly two branches that skip the renderer (plain MP4, plain GIF). So the rule goes in that one place: a recording made without a baked-in cursor always takes the renderer, for MP4, GIF and clipboard alike.
+
+**LinkedIn and R2 link do not exist in the code.** LinkedIn export was removed in July and hosted sharing was dropped in Phase 6; only CLAUDE.md's Scope line still mentions them. If either comes back it must go through the same function and inherits the rule.
+
+How "silently" is ruled out:
+- Each recording is marked at stop as "cursor not in the video". The export reads that mark, not the presence of the cursor log.
+- If a marked recording's cursor log is missing or unreadable, the export fails with a clear error instead of producing a cursorless file.
+- One automated test per path (MP4, GIF, clipboard): export a marked recording with no other edits and check that cursor pixels are in the output where the log says the cursor was.
 
 ## Cursor style
 
