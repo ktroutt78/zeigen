@@ -1,0 +1,11 @@
+{
+  "clip": "clip2-talking",
+  "marked_by": "Keith",
+  "marked_on": "2026-11-15",
+  "zooms": [
+    { "start": 43.58, "end": 48.02, "reason": "pause, no click", "call": "wrong", "kind": "should_not_zoom",
+      "note": "Talking, started moving the mouse, no clicks." }
+  ],
+  "missing": [],
+  "notes": "No clicks or scrolls in the whole clip. The right result is no zooms."
+}
