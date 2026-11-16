@@ -4,6 +4,12 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-15 — Camera-path checkpoint APPROVED; long pans stay (join by time only)
+
+Keith watched `harness/reference/zeigen-new.mp4` (new camera path + 1.5x/1.7x depth, no blur) side by side with the old export: "the new motion looks better than the old." Approved to continue to the preview.
+
+**Long pans are fine.** Two joined zooms in that clip pan ~42% of the frame width at 1.7x (5.9s, 100.8s; peak ~105 px/frame at 1280 wide vs ~57 for Cap's longest pan). Offered the alternative of joining only when targets are also close on screen; Keith chose to keep joining by TIME ONLY (any two zooms within ~2.5s pan into each other). Do not add a distance rule without a new complaint.
+
 ## 2026-11-15 — Zoom polish plan APPROVED (docs/ZOOM-POLISH-PLAN.md) with five owner decisions
 
 Keith approved the plan. His calls:
