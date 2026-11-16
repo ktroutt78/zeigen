@@ -5,7 +5,7 @@ import { emit, listen } from "@tauri-apps/api/event";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { Icon, I, P, RailIcon } from "./components/icons";
-import SegmentTrack from "./components/SegmentTrack";
+import SegmentTrack from "./timeline/SegmentTrack";
 import Waveform from "./Waveform";
 import ScrubPreview from "./ScrubPreview";
 import {
