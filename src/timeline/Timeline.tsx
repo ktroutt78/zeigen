@@ -38,7 +38,9 @@ type TimelineProps = {
   thumbnailTime: number | null;
 };
 
-const LABEL_COL_W = 84;
+// Wide enough for "ZOOM" plus its Generate and trash buttons, clear of the
+// EDGE_PAD the scroll viewport reaches into this column.
+const LABEL_COL_W = 120;
 const RULER_H = 18;
 const ROW_H = 36;
 const ROW_GAP = 6;
@@ -84,6 +86,7 @@ export default function Timeline(props: TimelineProps) {
   const [trackWidth, setTrackWidth] = useState(0);
   const [viewportWidth, setViewportWidth] = useState(0);
   const [hover, setHover] = useState<number | null>(null);
+  const [zoomLabelHover, setZoomLabelHover] = useState(false);
   const playheadRef = useRef<HTMLDivElement | null>(null);
   // Zoom factor: the tracks column is zoom x the viewport's width (1 = fit).
   // zoomRef is the latest requested value, ahead of the render, so a burst of
@@ -315,10 +318,36 @@ export default function Timeline(props: TimelineProps) {
   const trimLen =
     props.trim && props.duration != null ? Math.max(0, props.trim.out - props.trim.in) : null;
 
+  // Zoom row label controls: Generate re-runs detection (the panel's
+  // Re-suggest: replaces only untouched automatic zooms), trash clears the
+  // row (the panel's Clear all). Trash shows while the label is hovered.
+  const zoomControls = (
+    <>
+      <button
+        className="btn-ghost"
+        style={zoomButton}
+        disabled={!props.zoom.canAdd || props.zoom.suggesting}
+        title={props.zoom.suggesting ? "Generating zooms…" : "Generate zooms from the recording"}
+        onClick={props.zoom.suggest}
+      >
+        {I.sparkle}
+      </button>
+      <button
+        className="btn-ghost"
+        style={{ ...zoomButton, visibility: zoomLabelHover ? "visible" : "hidden" }}
+        disabled={props.zoom.segments.length === 0}
+        title="Remove all zooms"
+        onClick={props.zoom.clearAll}
+      >
+        {I.trash}
+      </button>
+    </>
+  );
+
   const hasBlur = props.redact.regions.length > 0;
-  const rows: { name: string; icon: React.ReactNode }[] = [
+  const rows: { name: string; icon: React.ReactNode; controls?: React.ReactNode; onHover?: (h: boolean) => void }[] = [
     { name: "Video", icon: I.video },
-    { name: "Zoom", icon: I.zoomIn },
+    { name: "Zoom", icon: I.zoomIn, controls: zoomControls, onHover: setZoomLabelHover },
     ...(hasBlur ? [{ name: "Blur", icon: I.blur }] : []),
   ];
 
@@ -413,6 +442,8 @@ export default function Timeline(props: TimelineProps) {
           {rows.map((r) => (
             <div
               key={r.name}
+              onPointerEnter={() => r.onHover?.(true)}
+              onPointerLeave={() => r.onHover?.(false)}
               style={{
                 ...labelStyle,
                 height: ROW_H,
@@ -424,6 +455,12 @@ export default function Timeline(props: TimelineProps) {
             >
               {r.icon}
               {r.name}
+              {r.controls && (
+                // Clear of the scroll viewport, which reaches EDGE_PAD into this column.
+                <span style={{ marginLeft: "auto", marginRight: EDGE_PAD + 2, display: "flex" }}>
+                  {r.controls}
+                </span>
+              )}
             </div>
           ))}
         </div>

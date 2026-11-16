@@ -172,6 +172,7 @@ export const I = {
   edit: <Icon d={P.edit}/>,
   download: <Icon d={<><path d="M8 2v8M4.5 7L8 10.5 11.5 7"/><path d="M3 13h10"/></>}/>,
   plus: <Icon d={P.plus}/>,
+  sparkle: <Icon d="M6.5 2.5l1.2 3.3L11 7l-3.3 1.2L6.5 11.5 5.3 8.2 2 7l3.3-1.2zM12 10l.6 1.4L14 12l-1.4.6L12 14l-.6-1.4L10 12l1.4-.6z"/>,
   search: <Icon d={<><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></>}/>,
   zoomIn: <Icon d={<><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14M7 5v4M5 7h4"/></>}/>,
   zoomOut: <Icon d={<><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14M5 7h4"/></>}/>,
