@@ -20,9 +20,9 @@ How each rule is defined:
 - **Rule 2.** A click in the last second of the recording is the stop click and no longer backs up a pause. The wait at the stop button is then a plain no-click pause, which rule 1 rejects.
 - **Rule 3.** A zoom ends at the first scroll inside it and is never held open by one. This reverses the earlier "scrolling means reading, hold the zoom". A scroll over a no-click pause still cancels it.
 
-**Judgement calls of mine inside the score, for Keith to overrule:**
-- Clip 1's "held too long" counts as fixed when the zoom ends between 29 and 32s. It now ends at 29.5s. I first wrote 30 to 32s and widened it; the close click logged at 29.9s is up to half a second late (old click timing), so 29.5s is about when he closed the note.
-- Clip 3's "zoom back out earlier" counts as fixed when the zoom ends between 3 and 9s (before the scroll). It now ends at 8.7s, about 6.5s after the click. Keith's reply left open whether he meant that or "within a second or two of the click"; if the latter, this one is NOT fixed and needs a fourth rule about how long a zoom holds after a click.
+**Two scoring ranges were my reading, since confirmed by Keith (2026-11-15):**
+- Clip 1's over-long zoom now ends at 29.5s, as he closed the note. Keith: fine. (I had first written 30 to 32s and widened it to 29.)
+- Clip 3's first zoom now ends at 8.7s, as the scroll starts. Keith: "(b) is fine. Zooming out when the scroll starts works." The ideal he named, zooming out when the new page loads after the click, is on `docs/BACKLOG.md` with a second idea (zoom out after a click that closes something).
 
 **Effect on the older pinned recordings, which Keith never marked** (so these are changes, not verdicts): the zoom-polish reference recording goes from 11 zooms to 8 (three of its four no-click pauses gone, including the opening one at 0.0s and the last one at the stop button; the fourth starts later); recording 2 from 18 to 15 with two ending earlier; recording 3 from 12 to 10 (one new short zoom at 11.7s, three gone).
 

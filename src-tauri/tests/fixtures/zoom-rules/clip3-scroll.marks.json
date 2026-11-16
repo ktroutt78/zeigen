@@ -14,7 +14,7 @@
         3.0,
         9.0
       ],
-      "wanted_end_range_source": "Fable's reading of 'earlier': after the clicks at 1.7s/2.2s and before the scroll starts at 9.2s. Not a number Keith gave."
+      "wanted_end_range_source": "Confirmed by Keith 2026-11-15: 'zooming out when the scroll starts works' (scroll starts 9.2s). The ideal he named is zooming out when the new page loads after the click; that is a backlog idea, not scored here."
     },
     {
       "start": 15.81,
