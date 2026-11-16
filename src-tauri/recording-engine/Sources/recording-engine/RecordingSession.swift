@@ -71,9 +71,9 @@ final class RecordingSession: NSObject,
     private let audioQueue: DispatchQueue?
 
     // V3 Phase A cursor telemetry. Non-nil iff capture_cursor is on, in
-    // which case a telemetry sidecar is written at stop. Telemetry never
-    // touches the pixels — showsCursor stays true either way (zoom-layer
-    // step 1 decoupled them). cursorAnchorSet guards the one-shot anchor
+    // which case a telemetry sidecar is written at stop and the system
+    // cursor is left out of the pixels (the export draws it from the
+    // sidecar, CURSOR-SMOOTHING-PLAN). cursorAnchorSet guards the one-shot anchor
     // handoff (first video frame accepted by the writer) without locking
     // the tracker on every frame.
     private let cursorTracker: CursorTracker?
@@ -128,6 +128,9 @@ final class RecordingSession: NSObject,
         // (V3-PLAN A.2): same origin offset and scale factor each capture
         // mode already uses for its output dimensions.
         let cursorMapping: CursorTracker.Mapping
+        // Screen points → video pixels, recorded in the sidecar so the export
+        // can size the cursor it draws.
+        let pointsToPixels: Double
         switch source {
         case .display(let displayID):
             guard let display = shareable.displays.first(where: { $0.displayID == displayID }) else {
@@ -151,6 +154,7 @@ final class RecordingSession: NSObject,
                 originY: Double(display.frame.origin.y),
                 scale: geo.scale
             )
+            pointsToPixels = geo.scale
         case .window(let windowID):
             guard let window = shareable.windows.first(where: { $0.windowID == windowID }) else {
                 throw EngineError(code: "WINDOW_NOT_FOUND", message: "window_id \(windowID) not present")
@@ -173,6 +177,7 @@ final class RecordingSession: NSObject,
             // .window maps the cursor through the live window frame to
             // pixelWidth/Height, so it tracks geo.width/height directly.
             cursorMapping = .window(windowID: windowID, pixelWidth: width, pixelHeight: height)
+            pointsToPixels = Double(width) / Double(window.frame.width)
         case .area(let displayID, let pointRect):
             guard let display = shareable.displays.first(where: { $0.displayID == displayID }) else {
                 throw EngineError(code: "DISPLAY_NOT_FOUND", message: "display_id \(displayID) not present")
@@ -194,10 +199,17 @@ final class RecordingSession: NSObject,
                 originY: Double(display.frame.origin.y + pointRect.origin.y),
                 scale: geo.scale
             )
+            pointsToPixels = geo.scale
         }
         self.capturedWindowID = resolvedWindowID
+        // With telemetry on, the cursor is left out of the pixels: the export
+        // draws its own (smoothed) cursor from the sidecar. With telemetry off
+        // there is nothing to draw it from, so it stays burned in.
+        let showsCursor = !captureCursor
         self.cursorTracker = captureCursor
-            ? CursorTracker(mapping: cursorMapping, videoWidth: width, videoHeight: height)
+            ? CursorTracker(
+                mapping: cursorMapping, videoWidth: width, videoHeight: height,
+                pointsToPixels: pointsToPixels, cursorInVideo: showsCursor)
             : nil
 
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
@@ -289,11 +301,9 @@ final class RecordingSession: NSObject,
         config.sourceRect = sourceRect
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(maxFPS))
         config.queueDepth = 6
-        // The cursor is always burned into the pixels. Telemetry
-        // (captureCursor) is position/click data only — the zoom layer
-        // (ZOOM-LAYER-PLAN.md) reads it but never alters the raw video,
-        // so capture output is identical with the flag on or off.
-        config.showsCursor = true
+        // Burned in only when telemetry is off (see showsCursor above). The
+        // sidecar's "cursor_in_video" mark records which case this is.
+        config.showsCursor = showsCursor
         config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         // Exclude the window's own drop shadow from single-window captures.
         // Default (false) INCLUDES the shadow, which frames the window inside the
@@ -577,8 +587,15 @@ final class RecordingSession: NSObject,
         // the same hidden-dotfile convention as edit.rs:sidecar_path().
         // Telemetry is capture-owned and immutable; the annotations sidecar
         // is user-edited state — separate files, separate lifecycles.
+        //
+        // The cursor is not in the video when the tracker exists, so a missing
+        // sidecar means a recording with no cursor at all. That is reported as
+        // cursorTrackError (Engine emits it as an error after `stopped`)
+        // rather than only logged. No sidecar is expected when no file was
+        // written (didStart false).
         var cursorTrackPath: String?
         var cursorSampleCount: Int?
+        var cursorTrackError: String?
         if let tracker = cursorTracker {
             let stem = outputURL.deletingPathExtension().lastPathComponent
             let trackURL = outputURL.deletingLastPathComponent()
@@ -587,10 +604,13 @@ final class RecordingSession: NSObject,
                 if let count = try tracker.writeTrack(to: trackURL) {
                     cursorTrackPath = trackURL.path
                     cursorSampleCount = count
+                } else if didStart {
+                    cursorTrackError = "no video frame was written, so the cursor log has nothing to align to"
                 }
             } catch {
-                logStderr("cursor track write failed: \(error)")
+                cursorTrackError = "\(error)"
             }
+            if let cursorTrackError { logStderr("cursor track write failed: \(cursorTrackError)") }
         }
 
         return RecordingResult(
@@ -600,7 +620,8 @@ final class RecordingSession: NSObject,
             frames: frameCount,
             dropped: droppedCount,
             cursorTrackPath: cursorTrackPath,
-            cursorSampleCount: cursorSampleCount
+            cursorSampleCount: cursorSampleCount,
+            cursorTrackError: cursorTrackError
         )
     }
 
