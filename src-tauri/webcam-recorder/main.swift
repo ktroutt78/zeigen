@@ -129,7 +129,10 @@ session.addInput(camInput)
 // than the preview's restarts an iPhone camera stream and loses its zoom.
 session.sessionPreset = session.canSetSessionPreset(.hd1280x720) ? .hd1280x720 : .high
 let videoOutput = AVCaptureVideoDataOutput()
-videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange]
+// No videoSettings: asking for a pixel format makes the session pick the camera's
+// 1920x1080 mode instead of the preset's 1280x720 one, which restarts an iPhone
+// stream the preview already has open (measured 2026-11-16: with the setting,
+// 1080p frames and a StopStream/StartStream; without it, 720p and no restart).
 let frames = DispatchQueue(label: "webcam.frames")
 let recorder = Recorder(session: session)
 videoOutput.setSampleBufferDelegate(recorder, queue: frames)
