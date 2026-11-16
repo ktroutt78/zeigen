@@ -6,6 +6,7 @@ import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { Icon, I, P, RailIcon } from "./components/icons";
 import SegmentTrack from "./timeline/SegmentTrack";
+import { timeScale } from "./timeline/scale";
 import Waveform from "./Waveform";
 import ScrubPreview from "./ScrubPreview";
 import {
@@ -4585,7 +4586,7 @@ function Timeline(props: TimelineProps) {
           )}
           <SegmentTrack
             segments={props.zoom.segments}
-            duration={props.duration}
+            scale={timeScale(props.duration)}
             selectedIndex={props.zoom.selectedIndex}
             onSelect={props.zoom.select}
             onAddAt={props.zoom.addAt}
@@ -4668,7 +4669,7 @@ function Timeline(props: TimelineProps) {
               {props.redact.selectedIndex != null && props.redact.regions[props.redact.selectedIndex] ? (
                 <SegmentTrack
                   segments={[props.redact.regions[props.redact.selectedIndex]]}
-                  duration={props.duration}
+                  scale={timeScale(props.duration)}
                   selectedIndex={0}
                   onSelect={(i) => { if (i == null) props.redact.select(null); }}
                   onChange={(_i, p) => {
