@@ -1436,7 +1436,7 @@ mod tests {
             // Rule 2 (stop click): unwanted 1 -> 2.
             // Rule 3 (scroll releases): too long 1 -> 2.
             // Clip 4 added (marked against rules 1 to 3): right 2 -> 4 of 4,
-            // and two zooms Keith wanted that are missing, 0 of 2 found.
+            // and three zooms Keith wanted that are missing, 0 of 3 found.
             Score {
                 right_kept: 4,
                 right_total: 4,
@@ -1445,7 +1445,7 @@ mod tests {
                 too_long_fixed: 2,
                 too_long_total: 2,
                 missing_found: 0,
-                missing_total: 2,
+                missing_total: 3,
                 new_unjudged: 0,
             }
         );

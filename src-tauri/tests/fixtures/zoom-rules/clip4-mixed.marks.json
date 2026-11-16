@@ -4,14 +4,37 @@
   "marked_on": "2026-11-15",
   "recorded_with": "rules 1 to 3 (7c27e90) and the new click timing",
   "zooms": [
-    { "start": 14.28, "end": 19.45, "reason": "drag", "call": "right", "note": "Keith: 'the first zoom was good'." },
-    { "start": 61.6, "end": 63.69, "reason": "drag", "call": "right", "note": "Keith: 'the second zoom was ok'." }
+    {
+      "start": 14.28,
+      "end": 19.45,
+      "reason": "drag",
+      "call": "right",
+      "note": "Keith: 'the first zoom was good'."
+    },
+    {
+      "start": 61.6,
+      "end": 63.69,
+      "reason": "drag",
+      "call": "right",
+      "note": "Keith: 'the second zoom was ok'."
+    }
   ],
   "missing": [
-    { "start": 35.49, "end": 41.91,
-      "note": "Keith: 'i would have been fine with the zoom at 35-41'. Cursor traced along a row after the first scroll. The detector before rule 1 zoomed here (pause, no click); rule 1 rejected it as resting because the cursor was moving 40% of the time, under the 50% line. Span is that old zoom's." },
-    { "start": 48.17, "end": 50.0,
-      "note": "Keith: 'at 48 seconds or so i clicked a toolbar item, that would have been a good quick zoom'. Click at 48.98s (711,216). Never zoomed, before or after the rules: its pause lasts 1.83s, under the 2s minimum. Span is that pause." }
+    {
+      "start": 35.49,
+      "end": 41.91,
+      "note": "Keith: 'i would have been fine with the zoom at 35-41'. Cursor traced along a row after the first scroll. The detector before rule 1 zoomed here (pause, no click); rule 1 rejected it as resting because the cursor was moving 40% of the time, under the 50% line. Span is that old zoom's."
+    },
+    {
+      "start": 48.17,
+      "end": 50.0,
+      "note": "Keith: 'at 48 seconds or so i clicked a toolbar item, that would have been a good quick zoom'. Click at 48.98s (711,216). Never zoomed, before or after the rules: its pause lasts 1.83s, under the 2s minimum. Span is that pause."
+    },
+    {
+      "start": 56.25,
+      "end": 57.71,
+      "note": "Keith: 'same at 56...i was clicking the model toggle'. Click at 56.66s (64,165). Never zoomed, before or after the rules: its pause lasts 1.46s, under the 2s minimum. Span is that pause."
+    }
   ],
-  "notes": "Keith: no zoom was needed for the two clicks at 5.6s and 6.2s (the old detector covered them inside one long zoom from 3.4s; rule 1 removed that part). Clicks at 56.7s, 59.5s and 68.3s got no zoom and he raised nothing."
+  "notes": "Keith: no zoom was needed for the two clicks at 5.6s and 6.2s (the old detector covered them inside one long zoom from 3.4s; rule 1 removed that part). Clicks at 59.5s and 68.3s got no zoom and he raised nothing."
 }
