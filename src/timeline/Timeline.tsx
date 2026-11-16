@@ -173,12 +173,14 @@ export default function Timeline(props: TimelineProps) {
     viewportRef.current!.scrollLeft = a.origin + scale.xAt(a.t, getRect().width) - a.clientX;
   }, [zoom]);
 
-  // Pinch (wheel + ctrlKey in WebKit) or Cmd+scroll zooms around the pointer;
+  // Cmd+scroll (or ctrl+wheel) and pinch zoom around the pointer;
   // plain scrolling is left to the viewport, which pans. React's onWheel is
   // passive, so this listener is attached by hand to be able to preventDefault.
   const zoomByWheel = useRef<(e: WheelEvent) => void>(() => {});
   zoomByWheel.current = (e) =>
     zoomTo(Math.min(zoomRef.current, maxZoom) * Math.exp(-e.deltaY * 0.01), e.clientX);
+  const zoomByGesture = useRef<(z: number, clientX: number) => void>(() => {});
+  zoomByGesture.current = zoomTo;
   useEffect(() => {
     const vp = viewportRef.current!;
     const onWheel = (e: WheelEvent) => {
@@ -186,8 +188,26 @@ export default function Timeline(props: TimelineProps) {
       e.preventDefault();
       zoomByWheel.current(e);
     };
+    // WKWebView reports a trackpad pinch as gesture events carrying a scale
+    // relative to the gesture's start, not as ctrl+wheel.
+    let base = 1;
+    const onGestureStart = (e: Event) => {
+      e.preventDefault();
+      base = zoomRef.current;
+    };
+    const onGestureChange = (e: Event) => {
+      e.preventDefault();
+      const g = e as Event & { scale: number; clientX: number };
+      zoomByGesture.current(base * g.scale, g.clientX);
+    };
     vp.addEventListener("wheel", onWheel, { passive: false });
-    return () => vp.removeEventListener("wheel", onWheel);
+    vp.addEventListener("gesturestart", onGestureStart);
+    vp.addEventListener("gesturechange", onGestureChange);
+    return () => {
+      vp.removeEventListener("wheel", onWheel);
+      vp.removeEventListener("gesturestart", onGestureStart);
+      vp.removeEventListener("gesturechange", onGestureChange);
+    };
   }, []);
 
   // Slider and buttons zoom around the playhead when it is in view, otherwise
