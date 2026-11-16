@@ -975,6 +975,7 @@ type EngineEvent =
       frames: number;
       dropped: number;
     }
+  | { event: "stream_stopped" }
   | { event: "error"; code: string; message: string };
 
 const NO_CAMERA = "__none__";
@@ -1164,6 +1165,12 @@ function App() {
             break;
           case "resumed":
             setState("recording");
+            break;
+          case "stream_stopped":
+            // macOS ended the screen capture (the stop button in the menu-bar
+            // screen-sharing menu). Same as pressing Stop: Review opens with
+            // what was captured.
+            invoke("engine_stop").catch((e) => setError(String(e)));
             break;
           case "stopped":
             // Pre-warm's Stop emits a stopped event with output_path

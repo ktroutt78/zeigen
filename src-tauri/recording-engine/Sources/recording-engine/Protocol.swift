@@ -90,6 +90,8 @@ enum Event {
     // V3 Phase A: emitted after `stopped` when capture_cursor was on and
     // at least one video frame was written.
     case cursor_track_written(path: String, sample_count: Int)
+    // macOS stopped the screen stream mid-recording. The app answers with Stop.
+    case stream_stopped
     case error(code: String, message: String)
 }
 
@@ -139,6 +141,8 @@ func emit(_ event: Event) {
         json = ["event": "first_frame", "stream": stream]
     case .cursor_track_written(let path, let sample_count):
         json = ["event": "cursor_track_written", "path": path, "sample_count": sample_count]
+    case .stream_stopped:
+        json = ["event": "stream_stopped"]
     case .error(let code, let message):
         json = ["event": "error", "code": code, "message": message]
     }

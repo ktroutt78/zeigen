@@ -180,6 +180,12 @@ Only emitted while a `window`-mode recording is active. 5Hz cadence (200ms). Rep
 {"event": "window_frame", "x": 240, "y": 120, "width": 1440, "height": 900, "on_screen": true}
 ```
 
+### `stream_stopped`
+macOS stopped the screen stream during a recording (the stop button in the menu-bar screen-sharing menu, or a capture failure). The engine clamps the recording at that moment and stays in its current state; the consumer answers with `stop`, which finalizes the file and emits `stopped` as usual.
+```json
+{"event": "stream_stopped"}
+```
+
 ### `error`
 ```json
 {"event": "error", "code": "PERMISSION_DENIED", "message": "Screen Recording permission not granted"}

@@ -10,6 +10,13 @@ import ScreenCaptureKit
 // writer-start max-origin alignment (D-02) and stop-time PTS cutoff
 // clamp (D-03) so the muxed MP4's audio/video durations match within
 // the V2.1-predicted envelope (D-11 acceptance: abs_drift_ms < 100ms).
+// SCStream takes its delegate at init, before RecordingSession exists, so the
+// delegate is this small object and the session hooks in afterwards.
+final class StreamStopWatcher: NSObject, SCStreamDelegate, @unchecked Sendable {
+    var onStop: ((any Error) -> Void)?
+    func stream(_ stream: SCStream, didStopWithError error: any Error) { onStop?(error) }
+}
+
 final class RecordingSession: NSObject,
     SCStreamOutput,
     AVCaptureAudioDataOutputSampleBufferDelegate,
@@ -17,6 +24,7 @@ final class RecordingSession: NSObject,
 {
     private let outputURL: URL
     private let stream: SCStream
+    private let stopWatcher: StreamStopWatcher
     private let captureSession: AVCaptureSession?
     private let writer: AVAssetWriter
     private let videoInput: AVAssetWriterInput
@@ -350,7 +358,9 @@ final class RecordingSession: NSObject,
             self.windowFollow = nil
         }
 
-        let stream = SCStream(filter: filter, configuration: config, delegate: nil)
+        let stopWatcher = StreamStopWatcher()
+        self.stopWatcher = stopWatcher
+        let stream = SCStream(filter: filter, configuration: config, delegate: stopWatcher)
 
         self.stream = stream
         self.captureSession = captureSession
@@ -361,6 +371,7 @@ final class RecordingSession: NSObject,
         self.audioQueue = audioQ
         super.init()
 
+        stopWatcher.onStop = { [weak self] error in self?.streamStoppedBySystem(error) }
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: DispatchQueue(label: "engine.video"))
         if let ao = audioOutputToWire, let aq = audioQ {
             ao.setSampleBufferDelegate(self, queue: aq)
@@ -619,7 +630,10 @@ final class RecordingSession: NSObject,
             }
         }
 
-        try await stream.stopCapture()
+        // macOS may already have stopped the stream (the stop button in the
+        // menu-bar screen-sharing menu); stopCapture then throws -3808. That
+        // must not skip finalizing the file below.
+        do { try await stream.stopCapture() } catch { logStderr("stopCapture: \(error)") }
         captureSession?.stopRunning()
         // Symmetric drain for AVCaptureSession: stream.stopCapture()
         // awaits SCK in-flight callbacks, but captureSession.stopRunning()
@@ -828,6 +842,24 @@ final class RecordingSession: NSObject,
                 }
             }
         }
+    }
+
+    // MARK: Stream stopped by macOS
+
+    // macOS stopped the stream on its own: the user pressed the stop button in
+    // the menu-bar screen-sharing menu, or the capture failed. The recording
+    // ends here: clamp the timeline now so no frozen frames or audio pile up
+    // after the last real frame, and tell the app, which runs its normal Stop.
+    // Our own stop sets cutoffPTS first, so this ignores it.
+    private func streamStoppedBySystem(_ error: any Error) {
+        let ours = lock.withLock { () -> Bool in
+            if cutoffPTS != nil { return true }
+            cutoffPTS = CMClockGetTime(CMClockGetHostTimeClock())
+            return false
+        }
+        if ours { return }
+        logStderr("screen stream stopped by the system: \(error)")
+        emit(.stream_stopped)
     }
 
     // MARK: SCStreamOutput
