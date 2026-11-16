@@ -1,4 +1,5 @@
 import { useRef } from "react";
+import type { TimeScale } from "./scale";
 
 // Generic timeline track row — time-bounded segments rendered as a mid-point
 // pip that drags the whole window (duration preserved) plus, when selected, a
@@ -12,7 +13,7 @@ export type TrackSegment = { start: number; end: number };
 
 type SegmentTrackProps = {
   segments: TrackSegment[];
-  duration: number;
+  scale: TimeScale;
   selectedIndex: number | null;
   // null deselects — a click (no drag) on the already-selected pip toggles off.
   onSelect: (i: number | null) => void;
@@ -52,7 +53,7 @@ type SegmentTrackProps = {
 
 export default function SegmentTrack({
   segments,
-  duration,
+  scale,
   selectedIndex,
   onSelect,
   onChange,
@@ -102,8 +103,7 @@ export default function SegmentTrack({
               window.removeEventListener("pointermove", onMove);
               window.removeEventListener("pointerup", onUp);
               if (moved) return;
-              const t = ((ev.clientX - rect.left) / rect.width) * duration;
-              onAddAt(Math.max(0, Math.min(duration, t)));
+              onAddAt(scale.timeAtClientX(ev.clientX, rect));
             };
             window.addEventListener("pointermove", onMove);
             window.addEventListener("pointerup", onUp);
@@ -118,9 +118,9 @@ export default function SegmentTrack({
       )}
       {segments.map((seg, idx) => {
         const mid = (seg.start + seg.end) / 2;
-        const pct = (mid / duration) * 100;
-        const startPct = (seg.start / duration) * 100;
-        const endPct = (seg.end / duration) * 100;
+        const pct = scale.pct(mid);
+        const startPct = scale.pct(seg.start);
+        const endPct = scale.pct(seg.end);
         const selected = selectedIndex === idx;
         // Ramp reality (zoom lane only): the eased ramps eat `r` off each end,
         // so the window actually held at full scale is `dur - 2*r`. `r` halves
@@ -128,9 +128,9 @@ export default function SegmentTrack({
         const dur = seg.end - seg.start;
         const r = ramp != null ? Math.min(ramp, dur / 2) : 0;
         const held = Math.max(0, dur - 2 * r);
-        const heldStartPct = ((seg.start + r) / duration) * 100;
-        const heldEndPct = ((seg.end - r) / duration) * 100;
-        const segBounds = () => (bounds ? bounds(idx) : { min: 0, max: duration });
+        const heldStartPct = scale.pct(seg.start + r);
+        const heldEndPct = scale.pct(seg.end - r);
+        const segBounds = () => (bounds ? bounds(idx) : { min: 0, max: scale.duration });
         const onPipDown = (e: React.PointerEvent) => {
           e.stopPropagation();
           e.preventDefault();
@@ -149,7 +149,7 @@ export default function SegmentTrack({
           const b = segBounds();
           const onMove = (ev: PointerEvent) => {
             if (Math.abs(ev.clientX - startX) > 3) moved = true;
-            const dx = ((ev.clientX - startX) / rect.width) * duration;
+            const dx = scale.secondsForPx(ev.clientX - startX, rect);
             const dur = startEnd - startStart;
             let nextStart = Math.max(b.min, startStart + dx);
             let nextEnd = nextStart + dur;
@@ -182,7 +182,7 @@ export default function SegmentTrack({
           const fixedEnd = seg.end;
           const b = segBounds();
           const onMove = (ev: PointerEvent) => {
-            const t = ((ev.clientX - rect.left) / rect.width) * duration;
+            const t = scale.rawTimeAtClientX(ev.clientX, rect);
             if (side === "start") {
               const ns = Math.max(b.min, Math.min(fixedEnd - minGap, t));
               onChange(idx, { start: ns });
