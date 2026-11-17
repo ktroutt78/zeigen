@@ -1,3 +1,4 @@
+import AppKit
 import AVFoundation
 import CoreGraphics
 import CoreMedia
@@ -26,10 +27,17 @@ actor Engine {
     private func handleEnumerate() async {
         do {
             let shareable = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+            // The names macOS shows in System Settings ("Built-in Retina Display").
+            var screenNames: [CGDirectDisplayID: String] = [:]
+            for screen in NSScreen.screens {
+                if let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID {
+                    screenNames[id] = screen.localizedName
+                }
+            }
             let displays = shareable.displays.map {
                 DisplayInfo(
                     id: $0.displayID,
-                    name: "Display \($0.displayID)",
+                    name: screenNames[$0.displayID] ?? "Display \($0.displayID)",
                     x: Int($0.frame.origin.x),
                     y: Int($0.frame.origin.y),
                     width: Int($0.width),

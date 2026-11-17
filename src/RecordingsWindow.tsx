@@ -171,8 +171,7 @@ export default function RecordingsWindow() {
                   </span>
                   {" · "}
                   {size(r.size_bytes)}
-                  {" · "}
-                  {SOURCE_LABEL[r.source_kind] ?? r.source_kind}
+                  {!r.name && ` · ${SOURCE_LABEL[r.source_kind] ?? r.source_kind}`}
                   {" · "}
                   {r.webcam_path ? "Webcam" : "No webcam"}
                 </div>

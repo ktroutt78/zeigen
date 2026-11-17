@@ -1127,12 +1127,14 @@ function App() {
           case "ready":
             break;
           case "enumerated": {
-            // CGDirectDisplayID values (e.g. id=27) leak through as "Display 27"
-            // from the engine. Rename to user-friendly Display 1..N matching
-            // dropdown position so the Identify overlay numbers line up.
-            const displays = [...ev.displays]
-              .sort((a, b) => a.name.localeCompare(b.name))
-              .map((d, i) => ({ ...d, name: `Display ${i + 1}` }));
+            // Main display first, then left to right. The Identify overlay's
+            // numbers follow this order, as does the picker.
+            const displays = [...ev.displays].sort(
+              (a, b) =>
+                Number(b.x === 0 && b.y === 0) - Number(a.x === 0 && a.y === 0) ||
+                a.x - b.x ||
+                a.y - b.y,
+            );
             const mics = [...ev.microphones].sort((a, b) =>
               a.name.localeCompare(b.name),
             );
@@ -1518,7 +1520,11 @@ function App() {
       let recordingName: string | null = null;
       if (sourceKind === "window") {
         const w = windows.find((x) => x.id === selectedWindow);
-        if (w) recordingName = `${w.title ? `${w.app} - ${w.title}` : w.app} (Window)`;
+        // Many apps already put their name in the window title.
+        if (w) {
+          const hasApp = w.title.toLowerCase().includes(w.app.toLowerCase());
+          recordingName = `${!w.title ? w.app : hasApp ? w.title : `${w.app} - ${w.title}`} (Window)`;
+        }
       } else if (countdownDisplay) {
         recordingName = `${countdownDisplay.name} (${sourceKind === "area" ? "Area" : "Display"})`;
       }
@@ -2358,9 +2364,9 @@ function App() {
                 disabled={recording}
                 style={{ flex: 1, fontSize: 12.5 }}
               >
-                {displays.map((d) => (
+                {displays.map((d, i) => (
                   <option key={d.id} value={d.id}>
-                    {d.name} — {d.width}×{d.height}
+                    {displays.length > 1 && `${i + 1} · `}{d.name} — {d.width}×{d.height}
                   </option>
                 ))}
               </select>

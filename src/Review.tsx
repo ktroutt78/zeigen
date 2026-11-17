@@ -1493,11 +1493,8 @@ export default function Review() {
         [...manual, ...suggested].sort((a, b) => a.start - b.start),
       );
       setZoomSelectedIndex(null);
-      setNotice(
-        suggested.length === 0
-          ? "No zoom-worthy moments detected"
-          : `${suggested.length} zoom${suggested.length === 1 ? "" : "s"} suggested — drag, resize, or delete on the lane`,
-      );
+      // The zooms appearing on the row is the feedback; only say so when none did.
+      if (suggested.length === 0) setNotice("No zoom-worthy moments detected");
     } catch (err) {
       setError(`suggest zooms: ${err}`);
     } finally {
@@ -2614,6 +2611,7 @@ export default function Review() {
     >
       <Header
         sourceName={sourceName}
+        name={recordingName}
         dirty={dirty}
         length={trimmedLen}
         previewFailed={previewState.status === "failed"}
@@ -2779,11 +2777,13 @@ export default function Review() {
 
 function Header({
   sourceName,
+  name,
   dirty,
   length,
   previewFailed,
 }: {
   sourceName: string;
+  name: string | null;
   dirty: boolean;
   // Post-trim clip length. Lived in the old toolbar's info strip; the
   // header is the only remaining info strip.
@@ -2821,10 +2821,14 @@ function Header({
           fontSize: 13,
           letterSpacing: "-0.01em",
           color: "var(--fg-primary)",
+          minWidth: 0,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
         }}
-        title={sourceName}
+        title={name ?? sourceName}
       >
-        Screen Recording{dirty ? " — edited" : ""}
+        {name ?? "Screen Recording"}{dirty ? " — edited" : ""}
       </span>
       <span style={{ color: "var(--fg-tertiary)", fontSize: 12 }}>·</span>
       <span
