@@ -7,9 +7,10 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { ask, message } from "@tauri-apps/plugin-dialog";
+import { message } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import "./styles/recordings.css";
+import { useConfirm } from "./components/ConfirmDialog";
 import { recordingLength, recordingName } from "./recordingLabel";
 
 export type LibraryRecording = {
@@ -97,6 +98,7 @@ export default function RecordingsWindow() {
   const [query, setQuery] = useState("");
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
+  const [confirmDialog, confirm] = useConfirm();
 
   const load = useCallback(
     () =>
@@ -156,17 +158,18 @@ export default function RecordingsWindow() {
   const onDelete = useCallback(
     async (r: LibraryRecording) => {
       if (await openInReview(r, "delete")) return;
-      const ok = await ask(
-        `Delete the recording from ${stampDate(r.stamp)}? Files you exported from it stay.`,
-        { title: "Delete recording?", kind: "warning", okLabel: "Delete", cancelLabel: "Cancel" },
-      );
+      const ok = await confirm({
+        title: "Delete recording?",
+        message: `Delete the recording from ${stampDate(r.stamp)}? Files you exported from it stay.`,
+        confirmLabel: "Delete",
+      });
       if (!ok) return;
       await invoke("discard_recording", { scratchMp4Path: r.scratch_mp4_path }).catch((e) =>
         setError(String(e)),
       );
       load();
     },
-    [load],
+    [load, confirm],
   );
 
   const onStartRename = useCallback(async (r: LibraryRecording) => {
@@ -321,6 +324,7 @@ export default function RecordingsWindow() {
           </section>
         ))}
       </div>
+      {confirmDialog}
     </main>
   );
 }
