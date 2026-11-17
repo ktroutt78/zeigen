@@ -64,6 +64,13 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Saved or copied at least once: quieter than the length, top-left. */
+.rec-exported {
+  bottom: auto;
+  top: 8px;
+  font: 500 var(--text-caption) var(--font-system);
+}
+
 .rec-more {
   position: absolute;
   z-index: 2;

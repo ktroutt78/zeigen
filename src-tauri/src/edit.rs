@@ -2056,11 +2056,7 @@ pub fn window_corner(source_path: String) -> Option<f64> {
 // exists); one without a name keeps the dated name (`recording-<stamp>.<ext>`,
 // then `-2`, `-3`). Formats do not collide because the extension differs.
 fn export_slot(movies: &Path, stamp: &str, name: Option<&str>, ext: &str) -> PathBuf {
-    // "/" and ":" cannot be in a macOS file name; a leading dot would hide the file.
-    let named = name
-        .map(|n| n.replace(['/', ':'], "-").trim().trim_start_matches('.').to_string())
-        .filter(|n| !n.is_empty());
-    let (base, sep) = match named {
+    let (base, sep) = match export_name(name) {
         Some(n) => (n, " "),
         None => (format!("recording-{stamp}"), "-"),
     };
@@ -2076,6 +2072,13 @@ fn export_slot(movies: &Path, stamp: &str, name: Option<&str>, ext: &str) -> Pat
         }
         n += 1;
     }
+}
+
+// The file name a recording's name exports under, None when it has no usable
+// name. "/" and ":" cannot be in a macOS file name; a leading dot would hide the file.
+pub(crate) fn export_name(name: Option<&str>) -> Option<String> {
+    name.map(|n| n.replace(['/', ':'], "-").trim().trim_start_matches('.').to_string())
+        .filter(|n| !n.is_empty())
 }
 
 // Rename a recording: the name lives in its sidecar. Written at once, apart from
@@ -2464,6 +2467,9 @@ fn save_recording_impl(
     // reflects whether the user's pick was within the trim range.
     let is_mp4 = format.as_str() == "mp4";
     try_embed_poster(&output, &sidecar, is_mp4);
+    if let Some(dir) = source.parent() {
+        crate::library::mark_exported(dir, Some(&output));
+    }
 
     // The Save to folder was unavailable: the file is in ~/Movies/Zeigen and the
     // note says so (Review shows route_note as a notice).
@@ -3951,6 +3957,9 @@ WATERMARK_SCALE_FRAC=0.08";
         assert_eq!(Path::new(&r.output_path), chosen.join("Chosen Folder Demo.mp4"));
         assert!(Path::new(&r.output_path).is_file());
         assert!(r.route_note.is_none());
+        let rec = crate::library::scan(&crate::storage::library(&chosen)).remove(0);
+        assert!(rec.exported, "a Save marks the recording exported");
+        assert_eq!(rec.exported_path.as_deref(), Some(r.output_path.as_str()));
 
         let fallback_root = t.join("Movies/Zeigen");
         std::fs::create_dir_all(&fallback_root).unwrap();

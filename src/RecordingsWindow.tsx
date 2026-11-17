@@ -25,9 +25,20 @@ export type LibraryRecording = {
   thumb_path: string | null;
   // Still on this Mac, waiting to move to the Save to folder's drive.
   pending_move: boolean;
+  // Saved or copied to the clipboard at least once; kept longer.
+  exported: boolean;
+  // The last file it was saved to, when that file is still there.
+  exported_path: string | null;
 };
 
-type Library = { keep_days: number; recordings: LibraryRecording[] };
+type Library = {
+  keep_days_exported: number;
+  keep_days_unexported: number;
+  recordings: LibraryRecording[];
+};
+
+const keepLine = (l: Library) =>
+  `unsaved takes kept ${l.keep_days_unexported} days, exported ${l.keep_days_exported}`;
 
 // Stamp is YYYY-MM-DD-HHMMSS, local time.
 function stampTime(stamp: string): Date | null {
@@ -228,8 +239,8 @@ export default function RecordingsWindow() {
           </h1>
           {lib && all.length > 0 && (
             <span className="faint" style={{ fontSize: "var(--text-small)", whiteSpace: "nowrap" }}>
-              {all.length === 1 ? "1 recording" : `${all.length} recordings`} · {size(total)} · kept
-              for {lib.keep_days} days
+              {all.length === 1 ? "1 recording" : `${all.length} recordings`} · {size(total)} ·{" "}
+              {keepLine(lib)}
             </span>
           )}
         </div>
@@ -265,7 +276,8 @@ export default function RecordingsWindow() {
         )}
         {lib && all.length === 0 && (
           <Empty title="No recordings yet">
-            Recordings are kept here for {lib.keep_days} days.
+            Recordings are kept here for {lib.keep_days_unexported} days, or{" "}
+            {lib.keep_days_exported} once exported.
           </Empty>
         )}
         {all.length > 0 && groups.length === 0 && (
@@ -393,6 +405,7 @@ function Card({
       />
       <div className="rec-thumb">
         {r.thumb_path && <img src={convertFileSrc(r.thumb_path)} alt="" draggable={false} />}
+        {r.exported && <span className="rec-badge rec-exported">Exported</span>}
         {r.duration_s != null && <span className="rec-badge">{recordingLength(r.duration_s)}</span>}
       </div>
       <button

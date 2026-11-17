@@ -12,6 +12,12 @@
 // The Recordings window's cache, also in the folder root and rebuilt from the
 // recording when missing:
 //   .probe.json         the screen file's duration and the length it was probed at
+//
+// Not a cache, kept for good:
+//   .exported.json      written once a Save or Copy to clipboard succeeded: the
+//                       last exported file (null when only copied) and when.
+//                       Exported recordings are kept longer (sweep_expired).
+//                       Not in the sidecar, which Review rewrites from its state.
 //   thumb-<ms>-<edit>.jpg  the card's thumbnail: the finished picture (the
 //                       export's render) <ms> into the recording, for the edit
 //                       whose sidecar hashes to <edit>
@@ -45,11 +51,16 @@ pub struct LibraryRecording {
     // Made while the Save to folder was on a drive and not moved there yet; it
     // is still in ~/Movies/Zeigen/.recordings (storage.rs).
     pub pending_move: bool,
+    // Saved or copied to the clipboard at least once.
+    pub exported: bool,
+    // The last file it was saved to, when that file is still there.
+    pub exported_path: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
 pub struct Library {
-    pub keep_days: i64,
+    pub keep_days_exported: i64,
+    pub keep_days_unexported: i64,
     pub recordings: Vec<LibraryRecording>,
 }
 
@@ -69,6 +80,7 @@ pub async fn list_recordings(app: AppHandle) -> Result<Library, String> {
         storage::clear_pending(&default_lib);
     }
     let current_lib = storage::library(&storage::active()?.root);
+    record_legacy_exports(&current_lib, &export_files(&save_roots()?));
     let recordings = list_for(&default_lib, &current_lib);
     std::thread::spawn(move || {
         let _one_at_a_time = REFRESH.lock();
@@ -88,7 +100,7 @@ pub async fn list_recordings(app: AppHandle) -> Result<Library, String> {
             }
         }
     });
-    Ok(Library { keep_days: KEEP_DAYS, recordings })
+    Ok(Library { keep_days_exported: KEEP_DAYS_EXPORTED, keep_days_unexported: KEEP_DAYS_UNEXPORTED, recordings })
 }
 
 // The current library, plus the default library's recordings still waiting to
@@ -177,6 +189,7 @@ pub(crate) fn read_folder(dir: &Path) -> Option<LibraryRecording> {
     let thumb = thumb_time(f.sidecar.thumbnail_time, duration_s)
         .map(|t| thumb_path(dir, t, &f.edit_key))
         .filter(|p| p.is_file());
+    let record = read_record(dir);
     Some(LibraryRecording {
         stamp: f.stamp,
         scratch_mp4_path: f.scratch_mp4.to_string_lossy().into_owned(),
@@ -189,6 +202,8 @@ pub(crate) fn read_folder(dir: &Path) -> Option<LibraryRecording> {
         size_bytes: dir_size(dir),
         thumb_path: thumb.map(|p| p.to_string_lossy().into_owned()),
         pending_move: storage::is_pending(dir),
+        exported: record.is_some(),
+        exported_path: record.and_then(|r| r.path).filter(|p| Path::new(p).is_file()),
     })
 }
 
@@ -296,24 +311,130 @@ fn extract_frame(screen: &Path, t: f64, out: &Path) -> Result<(), String> {
     Ok(())
 }
 
-// Recordings are kept this long after they were made, then removed at launch
-// (Keith, 2026-11-16). Age is the recording time in the folder's name, not the
+// Recordings are kept this long after they were made, then removed at launch:
+// one saved or copied at least once for 30 days, one never exported for 7
+// (Keith, 2026-11-17). Age is the recording time in the folder's name, not the
 // folder's modification time, which every reopen and edit would refresh.
-const KEEP_DAYS: i64 = 30;
+const KEEP_DAYS_EXPORTED: i64 = 30;
+const KEEP_DAYS_UNEXPORTED: i64 = 7;
 
-pub(crate) fn sweep_expired(root: &Path, now: chrono::NaiveDateTime) {
+pub(crate) fn sweep_expired(root: &Path, exports: &[PathBuf], now: chrono::NaiveDateTime) {
     let Ok(entries) = std::fs::read_dir(root) else { return };
     for dir in entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
-        let made = dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .and_then(|n| n.strip_prefix("recording-"))
-            .and_then(|s| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d-%H%M%S").ok());
-        if made.is_some_and(|m| now - m > chrono::Duration::days(KEEP_DAYS)) {
-            eprintln!("[library] removing {} (older than {KEEP_DAYS} days)", dir.display());
+        let Some(stamp) = dir.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_prefix("recording-")) else {
+            continue;
+        };
+        let Ok(made) = chrono::NaiveDateTime::parse_from_str(stamp, "%Y-%m-%d-%H%M%S") else { continue };
+        let age = now - made;
+        if age <= chrono::Duration::days(KEEP_DAYS_UNEXPORTED) {
+            continue;
+        }
+        // Looks for an export made before records were kept, so that one is
+        // found before its recording counts as never exported.
+        let expired = age > chrono::Duration::days(KEEP_DAYS_EXPORTED)
+            || exported(&dir, stamp, exports).is_none();
+        if expired {
+            eprintln!("[library] removing {} (past its keep time)", dir.display());
             let _ = std::fs::remove_dir_all(&dir);
         }
     }
+}
+
+const EXPORTED: &str = ".exported.json";
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+struct ExportRecord {
+    // The last exported file; None when it only ever went to the clipboard.
+    path: Option<String>,
+    // When, local time.
+    at: String,
+}
+
+fn read_record(dir: &Path) -> Option<ExportRecord> {
+    serde_json::from_slice(&std::fs::read(dir.join(EXPORTED)).ok()?).ok()
+}
+
+fn write_record(dir: &Path, r: &ExportRecord) {
+    if let Err(e) = std::fs::write(dir.join(EXPORTED), serde_json::to_vec(r).unwrap()) {
+        eprintln!("[library] could not record the export of {}: {e}", dir.display());
+    }
+}
+
+fn local_time(t: std::time::SystemTime) -> String {
+    chrono::DateTime::<chrono::Local>::from(t).format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+// A Save (`file`) or a Copy to clipboard (None) of the recording in `dir`
+// succeeded. A copy keeps the last saved file.
+pub(crate) fn mark_exported(dir: &Path, file: Option<&Path>) {
+    let path = match file {
+        Some(f) => Some(f.to_string_lossy().into_owned()),
+        None => read_record(dir).and_then(|r| r.path),
+    };
+    write_record(dir, &ExportRecord { path, at: local_time(std::time::SystemTime::now()) });
+}
+
+// The folders exports go to: the active root and the default root.
+fn save_roots() -> Result<Vec<PathBuf>, String> {
+    let default = storage::default_root()?;
+    let active = storage::active()?.root;
+    Ok(if active == default { vec![default] } else { vec![active, default] })
+}
+
+// The mp4 and GIF files directly in `roots`.
+pub(crate) fn export_files(roots: &[PathBuf]) -> Vec<PathBuf> {
+    roots
+        .iter()
+        .flat_map(|r| std::fs::read_dir(r).into_iter().flatten().flatten().map(|e| e.path()))
+        .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "mp4" || x == "gif"))
+        .collect()
+}
+
+// A file name export_slot could have given an export of this recording:
+// "<name>.mp4", "<name> 2.mp4", "recording-<stamp>.gif", "recording-<stamp>-2.gif".
+fn is_export_of(file: &str, stamp: &str, name: Option<&str>) -> bool {
+    let Some(stem) = file.strip_suffix(".mp4").or_else(|| file.strip_suffix(".gif")) else { return false };
+    let numbered = |base: &str, sep: &str| {
+        stem == base
+            || stem
+                .strip_prefix(base)
+                .and_then(|r| r.strip_prefix(sep))
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    };
+    numbered(&format!("recording-{stamp}"), "-")
+        || edit::export_name(name).is_some_and(|n| numbered(&n, " "))
+}
+
+// The recording's export record. One exported before records were kept has
+// none: an export file named for it in `exports` (the save folders) counts,
+// and the newest such file is recorded so the search is not repeated.
+fn exported(dir: &Path, stamp: &str, exports: &[PathBuf]) -> Option<ExportRecord> {
+    if let Some(r) = read_record(dir) {
+        return Some(r);
+    }
+    let name = edit::read_sidecar_path(&dir.join(format!("recording-{stamp}.mp4"))).ok().flatten().and_then(|s| s.name);
+    let (file, modified) = exports
+        .iter()
+        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| is_export_of(n, stamp, name.as_deref())))
+        .filter_map(|p| Some((p, std::fs::metadata(p).ok()?.modified().ok()?)))
+        .max_by_key(|(_, m)| *m)?;
+    let r = ExportRecord { path: Some(file.to_string_lossy().into_owned()), at: local_time(modified) };
+    write_record(dir, &r);
+    Some(r)
+}
+
+fn record_legacy_exports(lib: &Path, exports: &[PathBuf]) {
+    for dir in std::fs::read_dir(lib).into_iter().flatten().flatten().map(|e| e.path()) {
+        if let Some(stamp) = dir.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_prefix("recording-")) {
+            exported(&dir, stamp, exports);
+        }
+    }
+}
+
+// Launch clean-up of the current library (lib.rs).
+pub(crate) fn sweep_current_library() {
+    let (Ok(a), Ok(roots)) = (storage::active(), save_roots()) else { return };
+    sweep_expired(&storage::library(&a.root), &export_files(&roots), chrono::Local::now().naive_local());
 }
 
 // Review is done with a recording but it stays in the library: drop what is
@@ -416,21 +537,101 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    fn at(s: &str) -> chrono::NaiveDateTime {
+        chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d-%H%M%S").unwrap()
+    }
+
+    // Unexported takes go after 7 days, exported ones (Save or clipboard) after 30.
     #[test]
-    fn sweep_removes_only_recordings_older_than_thirty_days() {
-        let root = std::env::temp_dir().join(format!("zeigen-sweep-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let old = root.join("recording-2026-01-01-100000");
-        let fresh = root.join("recording-2026-01-20-100000");
+    fn sweep_keeps_exported_recordings_longer() {
+        let root = temp_root("sweep");
+        let saved = root.join("recording-2026-01-01-100000");
+        let copied = root.join("recording-2026-01-01-110000");
+        let unexported = root.join("recording-2026-01-01-120000");
         let other = root.join(".prewarm");
-        for d in [&old, &fresh, &other] {
+        for d in [&saved, &copied, &unexported, &other] {
             write(&d.join("x"), "x");
         }
-        let now = chrono::NaiveDateTime::parse_from_str("2026-02-01-100001", "%Y-%m-%d-%H%M%S").unwrap();
-        sweep_expired(&root, now);
-        assert!(!old.exists(), "31 days old: removed");
-        assert!(fresh.exists(), "12 days old: kept");
+        mark_exported(&saved, Some(Path::new("/elsewhere/Demo.mp4")));
+        mark_exported(&copied, None);
+
+        sweep_expired(&root, &[], at("2026-01-08-100000"));
+        assert!(saved.exists() && copied.exists() && unexported.exists(), "7 days: all kept");
+
+        sweep_expired(&root, &[], at("2026-01-09-130000"));
+        assert!(!unexported.exists(), "8 days, never exported: removed");
+        assert!(saved.exists(), "8 days, saved: kept");
+        assert!(copied.exists(), "8 days, copied to the clipboard: kept");
+
+        sweep_expired(&root, &[], at("2026-02-01-130000"));
+        assert!(!saved.exists() && !copied.exists(), "31 days: removed");
         assert!(other.exists(), "not a recording folder: never touched");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // A clipboard copy after a save keeps the saved file as the last export.
+    #[test]
+    fn clipboard_copy_counts_as_exported() {
+        let root = temp_root("clip");
+        let dir = recording(&root, "{}");
+        assert!(!scan(&root)[0].exported);
+        mark_exported(&dir, None);
+        let r = &scan(&root)[0];
+        assert!(r.exported && r.exported_path.is_none());
+        let file = root.join("Demo.mp4");
+        write(&file, "mp4");
+        mark_exported(&dir, Some(&file));
+        mark_exported(&dir, None);
+        let r = &scan(&root)[0];
+        assert!(r.exported);
+        assert_eq!(r.exported_path.as_deref(), Some(&*file.to_string_lossy()));
+        std::fs::remove_file(&file).unwrap();
+        assert!(scan(&root)[0].exported_path.is_none(), "a file that is gone is not offered");
+        assert!(scan(&root)[0].exported);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Exports made before records were kept are found by their file names, in
+    // either form export_slot gives, before the 7-day removal; the find is
+    // recorded.
+    #[test]
+    fn legacy_exports_are_found_by_name() {
+        assert!(is_export_of("recording-2026-01-01-100000.mp4", "2026-01-01-100000", None));
+        assert!(is_export_of("recording-2026-01-01-100000-3.gif", "2026-01-01-100000", None));
+        assert!(is_export_of("Q3 Demo.gif", "2026-01-01-100000", Some("Q3 Demo")));
+        assert!(is_export_of("Q3 Demo 2.mp4", "2026-01-01-100000", Some("Q3 Demo")));
+        assert!(is_export_of("a-b- c.mp4", "2026-01-01-100000", Some("a/b: c")));
+        assert!(is_export_of("recording-2026-01-01-100000.mp4", "2026-01-01-100000", Some("Q3 Demo")), "exported before it was named");
+        assert!(!is_export_of("Q3 Demo 2.mov", "2026-01-01-100000", Some("Q3 Demo")));
+        assert!(!is_export_of("Q3 Demo extra.mp4", "2026-01-01-100000", Some("Q3 Demo")));
+        assert!(!is_export_of("recording-2026-01-01-100001.mp4", "2026-01-01-100000", None));
+        assert!(!is_export_of("recording-2026-01-01-100000-.mp4", "2026-01-01-100000", None));
+
+        let root = temp_root("legacy");
+        let lib = root.join("Zeigen/.recordings");
+        let named = lib.join("recording-2026-01-01-100000");
+        write(&named.join("recording-2026-01-01-100000.mp4"), "screen");
+        write(&named.join(".recording-2026-01-01-100000.annotations.json"), r#"{"name": "Q3 Demo"}"#);
+        let dated = lib.join("recording-2026-01-02-100000");
+        write(&dated.join("recording-2026-01-02-100000.mp4"), "screen");
+        write(&dated.join(".recording-2026-01-02-100000.annotations.json"), "{}");
+        let never = lib.join("recording-2026-01-03-100000");
+        write(&never.join("recording-2026-01-03-100000.mp4"), "screen");
+        write(&never.join(".recording-2026-01-03-100000.annotations.json"), r#"{"name": "Other"}"#);
+        write(&root.join("Zeigen/Q3 Demo 2.mp4"), "mp4");
+        write(&root.join("Default/recording-2026-01-02-100000-2.gif"), "gif");
+        let exports = export_files(&[root.join("Zeigen"), root.join("Default")]);
+        assert_eq!(exports.len(), 2);
+
+        sweep_expired(&lib, &exports, at("2026-01-12-100000"));
+        assert!(named.exists() && dated.exists(), "exported before records: kept");
+        assert!(!never.exists(), "no export file: removed");
+        let list = scan(&lib);
+        assert!(list.iter().all(|r| r.exported));
+        assert_eq!(list[1].exported_path.as_deref(), Some(&*root.join("Zeigen/Q3 Demo 2.mp4").to_string_lossy()));
+        assert!(list[0].exported_path.as_deref().unwrap().ends_with("Default/recording-2026-01-02-100000-2.gif"));
+        // Recorded: found again with no export files to search.
+        assert!(exported(&named, "2026-01-01-100000", &[]).is_some());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -481,8 +682,7 @@ mod tests {
             write(&d.join("x"), "x");
         }
         write(&old_default.join(storage::PENDING_MOVE), "");
-        let now = chrono::NaiveDateTime::parse_from_str("2026-03-01-100000", "%Y-%m-%d-%H%M%S").unwrap();
-        sweep_expired(&current, now);
+        sweep_expired(&current, &[], at("2026-03-01-100000"));
         assert!(!old_current.exists());
         assert!(old_default.exists(), "not in the current library: not swept");
         let _ = std::fs::remove_dir_all(&root);

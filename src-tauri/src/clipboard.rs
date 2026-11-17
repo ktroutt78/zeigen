@@ -103,5 +103,9 @@ pub fn clipboard_copy_recording(
         Watermark::from_args(watermark_logo, watermark_corner, watermark_scale, watermark_opacity),
         |_| {},
     )?;
-    write_url_to_pasteboard(&temp_file)
+    write_url_to_pasteboard(&temp_file)?;
+    if let Some(dir) = source.parent() {
+        crate::library::mark_exported(dir, None);
+    }
+    Ok(())
 }
