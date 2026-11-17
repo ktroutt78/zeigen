@@ -2,6 +2,15 @@
 
 Things left worse than we'd like, with why. Newest at top. Remove an entry when it is paid.
 
+## Review polish: names, play bar, empty-row hints (2026-11-16)
+
+- Nothing here has been looked at in the app; checked by type check, build, and the sidecar and folder-scan tests.
+- Names are built once, at Record. A window whose title changes during the recording keeps its starting title. Recordings made before this have no name and show the date and "Screen Recording" as before.
+- With a name the Recordings list's second line still ends in the source ("Window"), which the name already says.
+- Every named recording now gets a sidecar at finalize, and Review no longer treats a sidecar holding only a name as empty. That should keep no-edit screen-only recordings in the list (the first item of the entry below), but it has not been tried.
+- The empty-row hint sits in the middle of the lane, and the hover ghost's "+" draws under it when the pointer is near the middle.
+- The play bar's strip takes about 40px from the picture. At 1280x860 the picture may now be height-limited and slightly smaller than before; not measured.
+
 ## Recordings window: rough edges (2026-11-16)
 
 - A recording whose edit state is "logically empty" has no sidecar (Review deletes it), and the list skips folders without one. A screen-only display recording with no edits would vanish from the list. None of the nine kept recordings is affected today; it matters once step 2 puts every new recording in the library. Fix: list folders by their screen file and treat a missing sidecar as defaults, or stop Review deleting an empty sidecar for kept recordings.

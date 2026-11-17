@@ -679,6 +679,14 @@ export default function Timeline(props: TimelineProps) {
                   colorSoft="var(--zoom-soft)"
                 />
               )}
+              {props.zoom.segments.length === 0 && (
+                <EmptyRowHint
+                  text="Add zooms automatically"
+                  action="Generate"
+                  disabled={!props.zoom.canAdd || props.zoom.suggesting}
+                  onAction={props.zoom.suggest}
+                />
+              )}
               {/* Under a full-webcam scene the screen is out of sight, so a zoom
                   there has no visible effect: dim those spans. */}
               {scale &&
@@ -722,6 +730,13 @@ export default function Timeline(props: TimelineProps) {
                     minGap={SCENE_MIN_DURATION}
                     color="var(--scene)"
                     colorSoft="var(--scene-soft)"
+                  />
+                )}
+                {scene.segments.length === 0 && (
+                  <EmptyRowHint
+                    text="Switch layouts between your screen and camera"
+                    action="Add scene"
+                    onAction={() => scene.addAt(getPlayhead())}
                   />
                 )}
               </div>
@@ -797,6 +812,58 @@ export default function Timeline(props: TimelineProps) {
         </div>
       </div>
 
+    </div>
+  );
+}
+
+// Centred hint in an empty row's lane. Only the action link takes the pointer
+// (and keeps its press from the tracks column); the rest lets the row's
+// hover-to-add and click-to-seek work underneath.
+function EmptyRowHint({
+  text,
+  action,
+  disabled,
+  onAction,
+}: {
+  text: string;
+  action: string;
+  disabled?: boolean;
+  onAction: () => void;
+}) {
+  return (
+    <div
+      style={{
+        position: "absolute",
+        inset: 0,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 4,
+        fontSize: 11,
+        color: "var(--fg-tertiary)",
+        whiteSpace: "nowrap",
+        overflow: "hidden",
+        pointerEvents: "none",
+      }}
+    >
+      {text} ·
+      <button
+        disabled={disabled}
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={onAction}
+        style={{
+          background: "none",
+          border: "none",
+          padding: 0,
+          font: "inherit",
+          color: "var(--accent)",
+          cursor: disabled ? "default" : "pointer",
+          pointerEvents: "auto",
+          opacity: disabled ? 0.5 : 1,
+        }}
+      >
+        {action}
+      </button>
     </div>
   );
 }

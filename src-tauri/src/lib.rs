@@ -68,6 +68,9 @@ struct ActiveRecording {
     // log so the recording keeps the shape it was made with even if the
     // preference changes later.
     bubble_roundness: Option<f64>,
+    // What was recorded ("<app> - <title> (Window)" etc.), built by the main
+    // window at Record. Stamped into the sidecar at finalize.
+    name: Option<String>,
     last_logged: Option<(Instant, f64, f64)>,
 }
 
@@ -124,6 +127,7 @@ fn engine_start(
     area_y: Option<f64>,
     area_width: Option<f64>,
     area_height: Option<f64>,
+    name: Option<String>,
 ) -> Result<String, String> {
     let area = match (area_x, area_y, area_width, area_height) {
         (Some(x), Some(y), Some(w), Some(h)) => Some((x, y, w, h)),
@@ -217,6 +221,7 @@ fn engine_start(
         mode,
         bubble_position_log: Vec::new(),
         bubble_roundness: settings::bubble_roundness(),
+        name,
         last_logged: None,
     });
 
@@ -423,6 +428,7 @@ fn recording_finalize(
     let screen_host_s = rec.screen_host_s;
     let bubble_position_log = rec.bubble_position_log;
     let bubble_roundness = rec.bubble_roundness;
+    let name = rec.name;
     // webcam_size / webcam_corner used to feed composite at finalize.
     // Phase 15 c3 defers composite to export; export defaults to Medium/
     // BottomRight (engine_start parses these from None → defaults today,
@@ -530,7 +536,7 @@ fn recording_finalize(
     // identity — Phase 5.5 lifecycle key). Frontend's read_sidecar still
     // takes sourcePath = scratch_mp4_path; backend resolves the adjacent
     // .annotations.json without needing scratch_mp4_path itself on disk.
-    if !bubble_position_log.is_empty() || measured_lead_ms.is_some() {
+    if !bubble_position_log.is_empty() || measured_lead_ms.is_some() || name.is_some() {
         let mut state = edit::read_sidecar_path(&scratch_mp4_path)?.unwrap_or_default();
         state.bubble_position_log = bubble_position_log;
         state.webcam_lead_ms = measured_lead_ms;
@@ -538,6 +544,7 @@ fn recording_finalize(
         // circle). Stamped here so the recording keeps the shape it was made
         // with; the export side reads only the sidecar, never the setting.
         state.bubble_roundness = bubble_roundness;
+        state.name = name.clone();
         edit::write_sidecar_path(&scratch_mp4_path, &state)?;
     }
 
@@ -558,6 +565,7 @@ fn recording_finalize(
         webcam_path: webcam_for_dual.map(|p| p.to_string_lossy().into_owned()),
         webcam_lead_ms: measured_lead_ms.unwrap_or(composite::WEBCAM_LEAD_MS),
         sources_dir: sources_dir.map(|p| p.to_string_lossy().into_owned()),
+        name,
     })
 }
 
@@ -571,6 +579,7 @@ struct FinalizedRecording {
     webcam_path: Option<String>,
     webcam_lead_ms: f64,
     sources_dir: Option<String>,
+    name: Option<String>,
 }
 
 fn movies_dir() -> Result<PathBuf, String> {

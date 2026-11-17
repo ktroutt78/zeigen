@@ -14,6 +14,7 @@ export type LibraryRecording = {
   webcam_path: string | null;
   webcam_lead_ms: number;
   source_kind: string;
+  name: string | null;
   duration_s: number | null;
   size_bytes: number;
 };
@@ -143,13 +144,28 @@ export default function RecordingsWindow() {
               }}
             >
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: "var(--text-body)", fontWeight: 500 }}>
-                  {stampDate(r.stamp)}
+                <div
+                  title={r.name ?? undefined}
+                  style={{
+                    fontSize: "var(--text-body)",
+                    fontWeight: 500,
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                  }}
+                >
+                  {r.name ?? stampDate(r.stamp)}
                 </div>
                 <div
                   className="faint"
-                  style={{ fontSize: "var(--text-caption)", marginTop: 2 }}
+                  style={{
+                    fontSize: "var(--text-caption)",
+                    marginTop: 2,
+                    // The date joins this line when a name takes the main one.
+                    ...(r.name ? { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } : {}),
+                  }}
                 >
+                  {r.name && `${stampDate(r.stamp)} · `}
                   <span style={{ fontFamily: "var(--font-mono)", fontVariantNumeric: "tabular-nums" }}>
                     {length(r.duration_s)}
                   </span>

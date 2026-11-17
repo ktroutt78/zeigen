@@ -130,6 +130,11 @@ pub struct SidecarState {
     // Declared last.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub webcam_lead_ms: Option<f64>,
+    // What was recorded, e.g. "Safari - Docs (Window)": Review's window title
+    // and the Recordings list's main line. Written at finalize; metadata only,
+    // the export never reads it. Declared last.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
@@ -2453,6 +2458,7 @@ mod tests {
             scenes: vec![],
             bubble_zoom_scale: None,
             webcam_lead_ms: None,
+            name: None,
         }
     }
 
@@ -2720,6 +2726,17 @@ mod tests {
 
         let plain = pre_zoom_populated_state(); // source_kind: None
         assert!(!serde_json::to_string(&plain).unwrap().contains("source_kind"));
+    }
+
+    // The recording's name rides the sidecar through read/write; absent when unset.
+    #[test]
+    fn name_round_trips_and_skips_when_absent() {
+        let mut s = pre_zoom_populated_state();
+        s.name = Some("Safari - Docs (Window)".into());
+        let json = serde_json::to_string(&s).unwrap();
+        let back: SidecarState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name.as_deref(), Some("Safari - Docs (Window)"));
+        assert!(!serde_json::to_string(&pre_zoom_populated_state()).unwrap().contains("\"name\""));
     }
 
     // GATE 1 (teardown) — the plain-MP4 tail (run_plain_mp4) survives the removal
