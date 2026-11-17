@@ -4,6 +4,17 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-17 — Review polish verified; fixes from Keith's test
+
+Keith passed the three polish items (names, play bar under the picture, row hints). Fixes from his test, built the same day:
+
+- **Names:** the app name is added only when the window title does not already contain it ("Tableau - Book1 (Window)", not "Tableau - Tableau - Book1"). Displays use the name macOS shows ("Built-in Retina Display"), read from `NSScreen.localizedName` in the engine; the picker numbers them only when there is more than one, matching Identify. Review's in-window title shows the name. The list's second line no longer repeats Window/Display/Area when there is a name.
+- **Black first frame, root cause:** when the microphone's first sample arrives after the screen's, the recorder dropped the screen frames before it, so the screen file's video started 0.02 to 0.04 s after time zero (12 of the 13 kept recordings). Apple's reader fills such a gap with a black frame at time zero, and the export drew it (first exported frame luma 16 to 29 against about 212 for the second). Fix at both ends: the recorder now writes the latest screen frame at time zero, and the compositor skips the filler in recordings already made (it also measures window corners from the first real frame). Test `late_starting_video_does_not_export_a_black_first_frame` fails without the compositor fix. The recorder half cannot be run from the terminal (no Screen Recording permission) and is unverified until Keith records.
+- **Window corners in the preview:** the preview now asks the compositor for the radius it will clip to (`cicompositor --window-corner`, via the `window_corner` command) and draws with that, in place of the fixed 5.5%. On the 17 Nov Tableau recording the measured value is 3.1%. Still open (DEBT): during a zoom the export scales the corner with the zoom and the preview does not.
+- **"N zooms suggested" note removed.** The zooms appearing on the row is the feedback. "No zoom-worthy moments detected" stays, since otherwise Generate would appear to do nothing.
+
+---
+
 ## 2026-11-16 — Past recordings steps 1 and 2 verified by Keith
 
 All pass on the installed build (a33ac50):

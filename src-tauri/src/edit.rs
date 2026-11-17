@@ -1953,6 +1953,21 @@ pub fn cursor_preview(
     Ok(cursor_overlay(&screen)?.map(|track| cursor_overlay_data(&track, style, duration)))
 }
 
+// The corner radius the export will clip a window recording to, as a fraction of
+// the picture's short side: the compositor's own measurement, so the preview
+// rounds by the same amount. None = nothing measured (the compositor then falls
+// back to the sidecar's fraction, and so does the preview).
+#[tauri::command]
+pub fn window_corner(source_path: String) -> Option<f64> {
+    let (screen, _) = export_inputs_from_source(Path::new(&source_path));
+    let out = Command::new(cicompositor_binary_path())
+        .arg("--window-corner")
+        .arg(&screen)
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
 // Resolve the next available per-format slot in ~/Movies/Zeigen for a
 // given stamp + extension. First call returns `recording-<stamp>.<ext>`;
 // subsequent calls with the same stamp+ext return `-2`, `-3`, ... per

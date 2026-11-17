@@ -1089,6 +1089,20 @@ export default function Review() {
   // the PREVIEW's rounding (and the compositor fallback). Applied as the frame's
   // corner_radius for window sources; the Corners control is hidden for them.
   const windowClipCorner = WINDOW_CLIP_PREVIEW_FRAC;
+  // What the export will actually clip to: the compositor's measurement of this
+  // recording's corners. The preview draws with it; the saved fraction above stays
+  // as the fallback for both when nothing can be measured.
+  const [measuredCorner, setMeasuredCorner] = useState<number | null>(null);
+  useEffect(() => {
+    if (!isWindowSource || !sourcePath) return;
+    invoke<number | null>("window_corner", { sourcePath })
+      .then(setMeasuredCorner)
+      .catch(() => {});
+  }, [isWindowSource, sourcePath]);
+  const previewFrame = useMemo(
+    () => (frame && isWindowSource && measuredCorner != null ? { ...frame, corner_radius: measuredCorner } : frame),
+    [frame, isWindowSource, measuredCorner],
+  );
   // Selection = a PRIMARY (the focus: drives the timeline edit row, the strong
   // highlight, single-region edits) plus a SET for batch timing (shift-click). The
   // primary is always in the set; a plain click collapses the set to just it.
@@ -2686,7 +2700,7 @@ export default function Review() {
           bubbleRoundness={bubbleRoundness}
           bubbleZone={effectiveZone}
           bubbleScale={bubbleScale}
-          frame={frame}
+          frame={previewFrame}
           background={background}
           solidHex={solidHex}
           thumbBySource={thumbBySource}

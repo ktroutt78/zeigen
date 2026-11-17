@@ -54,10 +54,14 @@ func cameraAt(_ p: CameraPath?, _ t: Double) -> (Double, Double, Double) {
 
 let args = CommandLine.arguments
 guard args.count == 3 else {
-    fail("usage: cicompositor <in.mp4> <out.mp4>")
+    fail("usage: cicompositor <in.mp4> <out.mp4> | cicompositor --window-corner <in.mp4>")
 }
-let inURL = URL(fileURLWithPath: args[1])
-let outURL = URL(fileURLWithPath: args[2])
+// `--window-corner <in.mp4>` prints the window clip radius as a fraction of the
+// picture's short side and exits, so the Review preview rounds a window recording
+// by the same measured amount the export does.
+let measureOnly = args[1] == "--window-corner"
+let inURL = URL(fileURLWithPath: measureOnly ? args[2] : args[1])
+let outURL = URL(fileURLWithPath: measureOnly ? NSTemporaryDirectory() + "cicompositor-unused.mp4" : args[2])
 let env = ProcessInfo.processInfo.environment
 
 var camera: CameraPath? = nil
@@ -414,6 +418,14 @@ Task {
 sizeSem.wait()
 let W = Int(naturalSize.width), H = Int(naturalSize.height)
 guard W > 0, H > 0 else { fail("bad dimensions \(W)x\(H)") }
+// Margin added to the measured corner reach (see measureBlackCornerReach's caller).
+let windowClipMargin = Double(env["WINDOW_CLIP_MARGIN"] ?? "") ?? 18.0
+if measureOnly {
+    if let reach = measureBlackCornerReach(inURL) {
+        print((reach + windowClipMargin) / Double(min(W, H)))
+    }
+    exit(0)
+}
 // CFR output rate. nominalFrameRate UNDER-reports on an idle-skipped VFR capture
 // (it's the average incl. static stretches — e.g. 24 on a 30fps-target recording),
 // and a grid below the active-content peak would subsample real motion frames. The
@@ -683,7 +695,6 @@ func measureBlackCornerReach(_ url: URL) -> Double? {
 // Clip radius (source px): measured reach + margin (covers residual AA + the sliver a
 // CIRCULAR arc leaves against the window's SQUIRCLE). Fallback to the passed fraction of
 // the source short side if measurement fails.
-let windowClipMargin = Double(env["WINDOW_CLIP_MARGIN"] ?? "") ?? 18.0
 let windowCornerR: Double = windowSource
     ? ((measureBlackCornerReach(inURL).map { $0 + windowClipMargin }) ?? (frameCornerFrac * min(Wd, Hd)))
     : 0

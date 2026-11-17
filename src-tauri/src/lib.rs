@@ -820,6 +820,7 @@ pub fn run() {
             edit::camera_path,
             edit::scene_path,
             edit::cursor_preview,
+            edit::window_corner,
             edit::save_recording,
             zoom::suggest_zooms,
             edit::probe_audio_track,

@@ -6,7 +6,6 @@ Things left worse than we'd like, with why. Newest at top. Remove an entry when 
 
 - Nothing here has been looked at in the app; checked by type check, build, and the sidecar and folder-scan tests.
 - Names are built once, at Record. A window whose title changes during the recording keeps its starting title. Recordings made before this have no name and show the date and "Screen Recording" as before.
-- With a name the Recordings list's second line still ends in the source ("Window"), which the name already says.
 - Every named recording now gets a sidecar at finalize, and Review no longer treats a sidecar holding only a name as empty. That should keep no-edit screen-only recordings in the list (the first item of the entry below), but it has not been tried.
 - The empty-row hint sits in the middle of the lane, and the hover ghost's "+" draws under it when the pointer is near the middle.
 - The play bar's strip takes about 40px from the picture. At 1280x860 the picture may now be height-limited and slightly smaller than before; not measured.
@@ -18,10 +17,6 @@ Things left worse than we'd like, with why. Newest at top. Remove an entry when 
 - The window learns "recording in progress" from engine `started` / `stopped` / `error` events. A pre-warm's start and stop briefly disable Open; if the window opens mid-recording it shows Open enabled (the main window still refuses the request unless idle).
 - The list probes every recording with ffprobe on each load and on every focus; fine for nine, slow once there are hundreds.
 - Nobody has opened a recording through the window yet; it was checked by type check, the folder-scan test, and a read-only listing of the real library.
-
-## Window corners: preview and export differ (2026-11-16)
-
-The export rounds a window recording's corners by what it measures in the picture (about 3% of the short side on current macOS windows). The preview rounds by a fixed 5.5% (`WINDOW_CLIP_PREVIEW_FRAC` in `Review.tsx`), so the preview's corners are rounder than the export's. Breaks the preview-equals-export rule. Fix: measure once at finalize, store it in the edit state, and have both use it.
 
 ## Native webcam recorder: what is rough (2026-11-16)
 
