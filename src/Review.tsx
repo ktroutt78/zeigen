@@ -800,7 +800,7 @@ function sidecarWritePayload(s: SidecarState, duration: number): SidecarState {
 // surfaces a pip (D-10). Saved files unchanged (D-01).
 type PreviewState =
   | { status: "rendering" }
-  | { status: "ready"; url: string }
+  | { status: "ready"; url: string; path: string }
   | { status: "failed" };
 
 export default function Review() {
@@ -1614,7 +1614,7 @@ export default function Review() {
           swapRestoreTimeRef.current = v.currentTime;
           v.pause();
         }
-        setPreviewState({ status: "ready", url: convertFileSrc(previewPath) });
+        setPreviewState({ status: "ready", url: convertFileSrc(previewPath), path: previewPath });
       })
       .catch((err) => {
         console.warn("preview render failed", err);
@@ -1633,6 +1633,27 @@ export default function Review() {
     if (previewState.status === "ready") return previewState.url;
     return assetUrl;
   }, [previewState, assetUrl]);
+  const playbackPath = previewState.status === "ready" ? previewState.path : screenPath;
+
+  // Where the played file's first picture starts. Recordings made before
+  // 2026-11-17 have a screen track that starts 0.02 to 0.04s after time zero,
+  // and the video shows black before it; the export skips that gap
+  // (firstPictureTime in compositor-engine/main.swift), so the preview never
+  // rests there either. The NR preview file keeps the gap (video is copied), so
+  // each played file is asked separately.
+  const [pictureStart, setPictureStart] = useState(0);
+  useEffect(() => {
+    if (!playbackPath) return;
+    let live = true;
+    invoke<number>("video_start_time", { path: playbackPath })
+      .then((t) => {
+        if (live) setPictureStart(t);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [playbackPath]);
 
   // Initialize trim once duration is known and no sidecar trim was present.
   useEffect(() => {
@@ -2288,6 +2309,28 @@ export default function Review() {
     v.addEventListener("seeked", onSeeked);
     return () => v.removeEventListener("seeked", onSeeked);
   }, [playbackUrl]);
+
+  // The one clamp: any seek that lands before the first picture (play from a
+  // trim-in of 0, the trim loop, a scrub or hover at the very start, the zoom
+  // loop) is redirected to it while still seeking, so the black gap is never
+  // painted. Also applied when the file loads and when the start time arrives.
+  // Setting currentTime fires another 'seeking' at pictureStart, which passes
+  // the check, so it cannot loop. The gated-seek chase sees its own issued
+  // target on 'seeked' and settles; the webcam follows the screen as usual.
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v || pictureStart <= 0) return;
+    const clamp = () => {
+      if (v.readyState > 0 && v.currentTime < pictureStart - 0.001) v.currentTime = pictureStart;
+    };
+    clamp();
+    v.addEventListener("seeking", clamp);
+    v.addEventListener("loadedmetadata", clamp);
+    return () => {
+      v.removeEventListener("seeking", clamp);
+      v.removeEventListener("loadedmetadata", clamp);
+    };
+  }, [playbackUrl, pictureStart]);
 
   // True while a timeline scrub or trim-handle drag is in flight. Read by
   // BubbleLayer's sync layer to skip per-seek webcam aligns during the
