@@ -182,6 +182,9 @@ fn engine_start(
             .map_err(|e| format!("mark {}: {e}", scratch_dir.display()))?;
     }
     let scratch_mp4_path = scratch_dir.join(format!("recording-{stamp}.mp4"));
+    // Declared before the webcam recorder so that, on an early return, the
+    // recorder is dropped (stopped) first and the folder removed after.
+    let mut failed_start = DiscardTake(Some(scratch_dir.clone()));
 
     let (screen_output, webcam) = if let Some(name) = camera_name {
         let sources_dir = scratch_dir.join("sources");
@@ -218,6 +221,7 @@ fn engine_start(
             capture_cursor: true,
         })?;
 
+    failed_start.0 = None;
     *active = Some(ActiveRecording {
         stamp: stamp.clone(),
         scratch_dir: scratch_dir.clone(),
@@ -354,6 +358,19 @@ fn recording_reset(
 // — sending Stop to an idle engine produces a follow-on INVALID_STATE error
 // that overwrites the original. This path only cleans up Rust-side state
 // (the active recording handle, the webcam recorder child).
+// A take that fails before it starts leaves nothing behind: the folder made
+// for it (a webcam clip, the pending-move marker) is removed when this drops
+// while still holding the path.
+struct DiscardTake(Option<PathBuf>);
+
+impl Drop for DiscardTake {
+    fn drop(&mut self) {
+        if let Some(dir) = self.0.take() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
 #[tauri::command]
 fn recording_cleanup_local(recording: RecordingState<'_>) -> Result<(), String> {
     if let Some(mut rec) = recording.lock().map_err(|e| e.to_string())?.take() {
@@ -485,8 +502,9 @@ async fn recording_finalize(
         // banner is a lie. Bail BEFORE concat so we don't leave an orphan
         // webcam.mp4 in scratch; webcam recorder child is reaped via
         // WebcamRecorder::Drop when `rec` goes out of scope on Err
-        // return, scratch dir collected by the 24h launch sweeper.
+        // return, and the take's folder is removed here (DiscardTake).
         if !screen_path.is_file() {
+            drop(DiscardTake(Some(scratch_dir)));
             return Err("RECORDING_FAILED_BEFORE_START".into());
         }
 
@@ -512,6 +530,7 @@ async fn recording_finalize(
         // writing to scratch_mp4_path, so the same missing-file signal
         // means the engine never reached startWriting().
         if !scratch_mp4_path.is_file() {
+            drop(DiscardTake(Some(scratch_dir)));
             return Err("RECORDING_FAILED_BEFORE_START".into());
         }
         None
@@ -1019,6 +1038,25 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_take_that_fails_before_it_starts_leaves_nothing_behind() {
+        let lib = std::env::temp_dir().join(format!("zeigen-discard-{}", std::process::id()));
+        let take = lib.join("recording-2026-11-17-121050");
+        std::fs::create_dir_all(take.join("sources")).unwrap();
+        std::fs::write(take.join(".pending-move"), b"").unwrap();
+        std::fs::write(take.join("sources/webcam.mp4"), b"x").unwrap();
+
+        let mut started = super::DiscardTake(Some(take.clone()));
+        started.0 = None;
+        drop(started);
+        assert!(take.is_dir(), "a take that started is kept");
+
+        drop(super::DiscardTake(Some(take.clone())));
+        assert!(!take.exists());
+        assert!(lib.is_dir(), "only the take's own folder goes");
+        std::fs::remove_dir_all(lib).unwrap();
+    }
+
     use super::*;
 
     // The runtime grant reaches files in the chosen folder's dot-named library,

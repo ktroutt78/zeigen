@@ -2,9 +2,9 @@
 
 Things left worse than we'd like, with why. Newest at top. Remove an entry when it is paid.
 
-## Failed starts leave a folder behind (2026-11-17)
-- A take that fails before it starts (for example no mic audio) leaves `recording-<stamp>/sources/webcam.mp4` and a `.pending-move` marker in `~/Movies/Zeigen/.recordings` when a save folder is chosen. It would then be moved to the chosen folder and show as a broken card. Five such folders exist from 12:10-12:14 on 2026-11-17. Fix: remove the folder when a take fails before start.
-- The 2 s mic wait is untried in the app (the terminal has no Screen Recording permission).
+## Mic start wait and failed-start clean-up: untried in the app (2026-11-17)
+- The 2 s mic wait and the removal of a failed take's folder are covered by tests and the system log only (the terminal has no Screen Recording permission).
+- A take that fails before it starts is removed whole, including its short webcam clip. `recording_cleanup_local` is no longer called by the app and could be deleted.
 
 ## Capture feedback: untried and rough (2026-11-17)
 
