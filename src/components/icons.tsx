@@ -112,6 +112,15 @@ export const RailIcon = {
   ),
 };
 
+// Copy: two overlapping rounded rectangles (Lucide "copy"), at the rail icons'
+// size so the stroke weight matches theirs.
+export const CopyIcon = lucide(
+  <>
+    <rect x="8" y="8" width="14" height="14" rx="2" ry="2" />
+    <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+  </>,
+);
+
 // Path strings (canonical) — use I.<name> for raw paths or Glyph.<name> for prebuilt icons.
 export const P = {
   chevronRight: "M6 3l4 5-4 5",

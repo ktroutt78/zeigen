@@ -377,3 +377,26 @@
 .scroll::-webkit-scrollbar { width: 8px; height: 8px; }
 .scroll::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 999px; }
 .scroll::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.14); }
+
+/* Secondary button: small icon + label on a faint fill. Below a primary
+   button in weight, but plainly pressable. */
+.btn-quiet {
+  height: 28px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--r-md);
+  background: var(--bg-control);
+  color: var(--fg-secondary);
+  font: 500 12px var(--font-system);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  cursor: pointer;
+  transition: background 120ms, color 120ms;
+}
+.btn-quiet:hover:not(:disabled) { background: var(--bg-control-on); color: var(--fg-primary); }
+.btn-quiet:active:not(:disabled) { filter: brightness(1.15); }
+.btn-quiet:focus-visible { outline: 2px solid var(--accent-ring); }
+.btn-quiet:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-quiet.danger, .btn-quiet.danger:hover:not(:disabled) { color: var(--recording-tint); }

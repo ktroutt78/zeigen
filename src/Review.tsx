@@ -4,7 +4,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { emit, listen } from "@tauri-apps/api/event";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { ask, open } from "@tauri-apps/plugin-dialog";
-import { Icon, I, P, RailIcon } from "./components/icons";
+import { CopyIcon, Icon, I, P, RailIcon } from "./components/icons";
 import { useConfirm } from "./components/ConfirmDialog";
 import Timeline from "./timeline/Timeline";
 import { openRecordingsWindow } from "./openRecordings";
@@ -6243,7 +6243,7 @@ function ExportPanel({
             {copied ? (
               <Icon d={P.check} size={15} stroke={1.8} />
             ) : (
-              <Icon d="M5 2h6v3M5 2v9a1 1 0 001 1h7a1 1 0 001-1V6L11 2M3 6h6v8" size={15} stroke={1.4} />
+              CopyIcon
             )}
           </button>
         </div>
@@ -6254,17 +6254,8 @@ function ExportPanel({
             onClick={() => onReveal()}
             disabled={busy}
             title={lastSavedPath}
-            style={{
-              ...TEXT_BUTTON,
-              width: "100%",
-              marginTop: 8,
-              display: "flex",
-              alignItems: "center",
-              gap: 6,
-              color: "var(--fg-secondary)",
-              opacity: busy ? 0.5 : 1,
-              cursor: busy ? "default" : "pointer",
-            }}
+            className="btn-quiet"
+            style={{ width: "100%", marginTop: 8, justifyContent: "flex-start" }}
           >
             {I.finder}
             <span style={{ flexShrink: 0 }}>Reveal in Finder</span>
@@ -6282,7 +6273,7 @@ function ExportPanel({
           </button>
         )}
 
-        <div style={{ display: "flex", justifyContent: "space-between", marginTop: 10 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginTop: 8 }}>
           {/* D-04 exception: Record another disables during an active save
               so the discard branch can't race ffmpeg reading the scratch.
               `busy` already covers `saving || discarding`; spelled out for
@@ -6290,25 +6281,17 @@ function ExportPanel({
           <button
             onClick={() => onRecordAnother()}
             disabled={saving || busy}
-            style={{
-              ...TEXT_BUTTON,
-              color: "var(--fg-secondary)",
-              cursor: saving || busy ? "not-allowed" : "pointer",
-              opacity: saving || busy ? 0.5 : 1,
-            }}
+            className="btn-quiet"
           >
+            {I.video}
             Record another
           </button>
           <button
             onClick={() => onDiscard()}
             disabled={busy || lastSavedPath != null}
-            style={{
-              ...TEXT_BUTTON,
-              color: "var(--recording-tint)",
-              cursor: busy || lastSavedPath != null ? "not-allowed" : "pointer",
-              opacity: busy || lastSavedPath != null ? 0.4 : 1,
-            }}
+            className="btn-quiet danger"
           >
+            {I.trash}
             Discard
           </button>
         </div>
@@ -6325,12 +6308,3 @@ const DISABLED_CONTROL: React.CSSProperties = { opacity: 0.4, cursor: "not-allow
 // Export's segmented buttons share the full width evenly.
 const EXPORT_SEG_BUTTON: React.CSSProperties = { padding: "5px 4px", minWidth: 0 };
 
-// Quiet text-only button (Record another, Discard, Reveal in Finder).
-const TEXT_BUTTON: React.CSSProperties = {
-  background: "transparent",
-  border: "none",
-  padding: "4px 0",
-  fontFamily: "var(--font-system)",
-  fontSize: 12,
-  fontWeight: 500,
-};
