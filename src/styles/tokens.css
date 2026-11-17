@@ -283,6 +283,7 @@
 .segmented.full > button { flex: 1; }
 .segmented > button { background: transparent; border: none; color: var(--fg-secondary); padding: 3px 10px; font: 500 12px var(--font-system); border-radius: 4px; cursor: pointer; }
 .segmented > button.on { background: var(--bg-control-on); color: var(--fg-primary); }
+.segmented > button:disabled { cursor: not-allowed; }
 
 /* Review rail — tool toolbar tile (icon over label) */
 .rail-tool {

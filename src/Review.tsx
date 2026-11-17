@@ -5234,6 +5234,8 @@ function ExportPanel({
   // access wouldn't). The active image path, and whether it's a Browse one-off
   // (an image that isn't one of the folder wallpapers).
   const bgImagePath = bg.background?.kind === "image" ? bg.background.path : null;
+  const noBg = bg.background == null;
+  const shownFrame = bg.frame ?? DEFAULT_FRAME;
   const isBrowsePick =
     bgImagePath != null && !bg.wallpapers.some((w) => w.source_path === bgImagePath);
   const browseThumb = isBrowsePick ? bg.thumbBySource[bgImagePath] : undefined;
@@ -6036,46 +6038,53 @@ function ExportPanel({
                   </div>
                 )}
               </Field>
+              {/* Margin and Corners are always shown so they never seem to vanish;
+                  with no background they are disabled and show what picking one
+                  gives (the default frame). */}
+              <Field label="Margin">
+                <div className="segmented full" style={noBg ? DISABLED_CONTROL : undefined}>
+                  <button
+                    className={(shownFrame.padding ?? 0) <= FRAME_TIGHT ? "on" : ""}
+                    disabled={noBg}
+                    onClick={() => bg.onMargin("tight")}
+                  >
+                    Tight
+                  </button>
+                  <button
+                    className={(shownFrame.padding ?? 0) > FRAME_TIGHT ? "on" : ""}
+                    disabled={noBg}
+                    onClick={() => bg.onMargin("wide")}
+                  >
+                    Wide
+                  </button>
+                </div>
+              </Field>
+              {/* Corners is a genuine choice only for display/area (no inherent
+                  corners). Window captures get a mandatory clip radius instead
+                  (it removes SCK's black-corner wedges), so the control is hidden
+                  for them rather than shown as a one-option toggle. */}
+              {!bg.windowSource && (
+                <Field label="Corners">
+                  <div className="segmented full" style={noBg ? DISABLED_CONTROL : undefined}>
+                    <button
+                      className={(shownFrame.corner_radius ?? 0) > 0 ? "on" : ""}
+                      disabled={noBg}
+                      onClick={() => bg.onCorner("rounded")}
+                    >
+                      Rounded
+                    </button>
+                    <button
+                      className={(shownFrame.corner_radius ?? 0) === 0 ? "on" : ""}
+                      disabled={noBg}
+                      onClick={() => bg.onCorner("square")}
+                    >
+                      Square
+                    </button>
+                  </div>
+                </Field>
+              )}
               {bg.background != null && (
                 <>
-                  <Field label="Margin">
-                    <div className="segmented full">
-                      <button
-                        className={(bg.frame?.padding ?? 0) <= FRAME_TIGHT ? "on" : ""}
-                        onClick={() => bg.onMargin("tight")}
-                      >
-                        Tight
-                      </button>
-                      <button
-                        className={(bg.frame?.padding ?? 0) > FRAME_TIGHT ? "on" : ""}
-                        onClick={() => bg.onMargin("wide")}
-                      >
-                        Wide
-                      </button>
-                    </div>
-                  </Field>
-                  {/* Corners is a genuine choice only for display/area (no inherent
-                      corners). Window captures get a mandatory clip radius instead
-                      (it removes SCK's black-corner wedges), so the control is hidden
-                      for them rather than shown as a one-option toggle. */}
-                  {!bg.windowSource && (
-                    <Field label="Corners">
-                      <div className="segmented full">
-                        <button
-                          className={(bg.frame?.corner_radius ?? 0) > 0 ? "on" : ""}
-                          onClick={() => bg.onCorner("rounded")}
-                        >
-                          Rounded
-                        </button>
-                        <button
-                          className={(bg.frame?.corner_radius ?? 0) === 0 ? "on" : ""}
-                          onClick={() => bg.onCorner("square")}
-                        >
-                          Square
-                        </button>
-                      </div>
-                    </Field>
-                  )}
                   {bg.background?.kind === "solid" && (
                     <Field label="Color">
                       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -6335,6 +6344,9 @@ function ExportPanel({
   );
 }
 
+// A control that does not apply right now: the same dimming the rail's disabled
+// tiles and sliders use.
+const DISABLED_CONTROL: React.CSSProperties = { opacity: 0.4, cursor: "not-allowed" };
 // Export's segmented buttons share the full width evenly.
 const EXPORT_SEG_BUTTON: React.CSSProperties = { padding: "5px 4px", minWidth: 0 };
 
