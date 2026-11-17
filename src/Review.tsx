@@ -409,6 +409,8 @@ type SidecarState = {
   // Measured webcam lead (ms), written at finalize; the export reads it.
   // Metadata, not an edit: carried through every rewrite, never compared.
   webcam_lead_ms?: number | null;
+  // What was recorded, written at finalize. Metadata like webcam_lead_ms.
+  name?: string | null;
 };
 
 // Mirror of Rust FrameStyle. Every knob is the no-op at 0. padding is the
@@ -801,6 +803,7 @@ function isLogicallyEmpty(s: SidecarState, duration: number | null): boolean {
   const noScenes = (!s.scenes || s.scenes.length === 0) && s.bubble_zoom_scale == null;
   // Finalize-time data like the bubble log: deleting it would lose the lead.
   const noLead = s.webcam_lead_ms == null;
+  const noName = s.name == null;
   // A background, frame margin or bubble size is an edit the export reads from
   // the sidecar: without these checks a recording whose ONLY edit was one of
   // them had its sidecar deleted and exported without it.
@@ -816,7 +819,8 @@ function isLogicallyEmpty(s: SidecarState, duration: number | null): boolean {
     noRedactions &&
     noCursor &&
     noScenes &&
-    noLead
+    noLead &&
+    noName
   );
 }
 
@@ -844,6 +848,7 @@ function sidecarWritePayload(s: SidecarState, duration: number): SidecarState {
     scenes: s.scenes && s.scenes.length > 0 ? s.scenes : undefined,
     bubble_zoom_scale: s.bubble_zoom_scale ?? undefined,
     webcam_lead_ms: s.webcam_lead_ms ?? undefined,
+    name: s.name ?? undefined,
   };
 }
 
@@ -1077,6 +1082,7 @@ export default function Review() {
   // 2026-07-29). Metadata: persisted but excluded from the dirty check.
   const [sourceKind, setSourceKind] = useState<string | null>(params.sourceKind);
   const [webcamLeadMs, setWebcamLeadMs] = useState<number | null>(null);
+  const [recordingName, setRecordingName] = useState<string | null>(null);
   const isWindowSource = sourceKind === "window";
   // Mandatory corner-clip for window captures: kills the SCK black-corner wedges. The
   // EXPORT measures the exact reach in the compositor; this generous fixed fraction is
@@ -1581,6 +1587,7 @@ export default function Review() {
             scenes: state.scenes ?? [],
             bubble_zoom_scale: state.bubble_zoom_scale ?? null,
             webcam_lead_ms: state.webcam_lead_ms ?? null,
+            name: state.name ?? null,
           });
           if (state.trim) setTrim(state.trim);
           if (state.bubble_position_log) setBubblePositionLog(state.bubble_position_log);
@@ -1605,6 +1612,7 @@ export default function Review() {
           if (state.scenes && state.scenes.length > 0) setScenes(state.scenes);
           if (state.bubble_zoom_scale != null) setBubbleZoomScale(state.bubble_zoom_scale);
           if (state.webcam_lead_ms != null) setWebcamLeadMs(state.webcam_lead_ms);
+          if (state.name != null) setRecordingName(state.name);
         } else {
           setSnapshot(EMPTY_STATE);
         }
@@ -1717,8 +1725,9 @@ export default function Review() {
       scenes,
       bubble_zoom_scale: bubbleZoomScale === 1 ? null : bubbleZoomScale,
       webcam_lead_ms: webcamLeadMs,
+      name: recordingName,
     }),
-    [trim, bubblePositionLog, thumbnailTime, bubbleRoundness, bubbleZone, bubbleScale, zoomSegments, redactions, frame, background, sourceKind, cursorStyle, scenes, bubbleZoomScale, webcamLeadMs],
+    [trim, bubblePositionLog, thumbnailTime, bubbleRoundness, bubbleZone, bubbleScale, zoomSegments, redactions, frame, background, sourceKind, cursorStyle, scenes, bubbleZoomScale, webcamLeadMs, recordingName],
   );
 
   const dirty = useMemo(

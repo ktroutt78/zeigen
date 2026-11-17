@@ -856,6 +856,8 @@ type ReviewOpenArgs = {
   windowPointShort: number | null;
   // Reopened from the recordings library: Review keeps the folder on close.
   kept?: boolean;
+  // What was recorded; the window title. null for older recordings.
+  name: string | null;
 };
 
 async function openReview(
@@ -884,7 +886,7 @@ async function openReview(
   const url = `/#review?${params.toString()}`;
   const win = new WebviewWindow(label, {
     url,
-    title: "Screen Recording",
+    title: args.name ?? "Screen Recording",
     width: 1280,
     height: 860,
     minWidth: 720,
@@ -978,6 +980,7 @@ type FinalizedRecording = {
   webcam_path: string | null;
   webcam_lead_ms: number;
   sources_dir: string | null;
+  name: string | null;
 };
 
 type EngineEvent =
@@ -1243,6 +1246,7 @@ function App() {
                     // check above).
                     sourceKind: ctrlRef.current.sourceKind,
                     windowPointShort: ctrlRef.current.windowPointShort,
+                    name: info.name,
                   },
                   decReview,
                 );
@@ -1328,6 +1332,7 @@ function App() {
                     // check above).
                     sourceKind: ctrlRef.current.sourceKind,
                     windowPointShort: ctrlRef.current.windowPointShort,
+                    name: info.name,
                   },
                   decReview,
                 );
@@ -1508,6 +1513,16 @@ function App() {
           ? null
           : cameras.find((c) => c.index === selectedCamera)?.name ?? null;
 
+      // What is being recorded: Review's window title and the Recordings
+      // list's main line.
+      let recordingName: string | null = null;
+      if (sourceKind === "window") {
+        const w = windows.find((x) => x.id === selectedWindow);
+        if (w) recordingName = `${w.title ? `${w.app} - ${w.title}` : w.app} (Window)`;
+      } else if (countdownDisplay) {
+        recordingName = `${countdownDisplay.name} (${sourceKind === "area" ? "Area" : "Display"})`;
+      }
+
       if (countdownDuration > 0) {
         setState("countdown");
         // Per-recording pre-warm runs concurrently with the countdown
@@ -1606,6 +1621,7 @@ function App() {
         areaY: sourceKind === "area" ? selectedArea?.y ?? null : null,
         areaWidth: sourceKind === "area" ? selectedArea?.width ?? null : null,
         areaHeight: sourceKind === "area" ? selectedArea?.height ?? null : null,
+        name: recordingName,
       });
 
       // Area indicator + chip lifecycle is driven by useEffects on
@@ -1947,6 +1963,7 @@ function App() {
             sourceKind: rec.source_kind as SourceKind,
             windowPointShort: null,
             kept: true,
+            name: rec.name,
           },
           () => {
             libraryOpen.delete(label);

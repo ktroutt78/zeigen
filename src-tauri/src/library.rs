@@ -22,6 +22,8 @@ pub struct LibraryRecording {
     pub webcam_path: Option<String>,
     pub webcam_lead_ms: f64,
     pub source_kind: String,
+    // What was recorded; None for recordings made before names existed.
+    pub name: Option<String>,
     // None when ffprobe cannot read the screen file.
     pub duration_s: Option<f64>,
     pub size_bytes: u64,
@@ -80,6 +82,7 @@ fn read_folder(dir: &Path) -> Option<LibraryRecording> {
         webcam_path: webcam.map(|p| p.to_string_lossy().into_owned()),
         webcam_lead_ms: sidecar.webcam_lead_ms.unwrap_or(WEBCAM_LEAD_MS),
         source_kind: sidecar.source_kind.unwrap_or_else(|| "display".into()),
+        name: sidecar.name,
         size_bytes: dir_size(dir),
     })
 }
@@ -156,7 +159,7 @@ mod tests {
         write(&a.join("sources/webcam.mp4"), "cam");
         write(
             &a.join(".recording-2026-01-01-100000.annotations.json"),
-            r#"{"webcam_lead_ms": -42.5, "source_kind": "window"}"#,
+            r#"{"webcam_lead_ms": -42.5, "source_kind": "window", "name": "Safari - Docs (Window)"}"#,
         );
 
         // Screen-only shape, newer, old sidecar without lead or source kind.
@@ -187,6 +190,7 @@ mod tests {
         assert!(newest.webcam_path.is_none());
         assert_eq!(newest.webcam_lead_ms, WEBCAM_LEAD_MS);
         assert_eq!(newest.source_kind, "display");
+        assert!(newest.name.is_none());
         assert!(newest.duration_s.is_none()); // not a real mp4
 
         let older = &list[1];
@@ -196,6 +200,7 @@ mod tests {
         assert_eq!(older.webcam_path.as_deref(), Some(&*a.join("sources/webcam.mp4").to_string_lossy()));
         assert_eq!(older.webcam_lead_ms, -42.5);
         assert_eq!(older.source_kind, "window");
+        assert_eq!(older.name.as_deref(), Some("Safari - Docs (Window)"));
         let sidecar_len = std::fs::metadata(a.join(".recording-2026-01-01-100000.annotations.json")).unwrap().len();
         assert_eq!(older.size_bytes, 6 + 3 + sidecar_len);
 
