@@ -2,6 +2,14 @@
 
 Things left worse than we'd like, with why. Newest at top. Remove an entry when it is paid.
 
+## Review feedback fixes: untried in the app (2026-11-17)
+
+- Seen only in headless Chrome with stubbed Tauri calls. Not in WKWebView: the tool row across the top, Export following the settings, the dimmed Margin/Corners, the preview without its own fill, the shorter title line.
+- The older-recording black start: the new `video_start_time` command returns 0.033333 for recording-2026-11-16-100818's screen file and 0.033021 for a stream copy like the NR preview, and in headless Chrome the clamp moves the resting position to the first picture. Chrome could not show the painted frame (its seeks never settle in the harness, and Chrome paints the first frame at 0 anyway), so whether WKWebView now rests on the picture, and whether the clamp's seek coexists with the muted play/pause that primes the first frame, is untried.
+- The clamp runs on every seek of the main video. A play from a trim-in of 0 on an older recording starts with a second, tiny seek to 0.03s.
+- The Bubble panel with a real bubble fits the default window with about 30px to spare once the top tool row is in; one more control there and it scrolls.
+- With no background chosen, Margin and Corners show the values a first pick will use (Wide, Square), dimmed.
+
 ## Save to folder: untried and rough (2026-11-17)
 
 - Not run in the app. Untried: a real external drive, unplugging it mid-take or before Save, the move at Stop onto the LaCie, the pending retry, the Settings row and its Move/Leave prompt, and the webview actually playing video and thumbnails from the chosen folder (the runtime asset-scope grant is proven only with `is_allowed` in a unit test).
@@ -25,12 +33,11 @@ Things left worse than we'd like, with why. Newest at top. Remove an entry when 
 - Looked at only in headless Chrome with the Tauri APIs stubbed and a synthetic test video, not in the real WKWebView window. Not seen there: the webcam bubble, the Bubble panel with a real bubble, the camera shading in zoom blocks, the post-save "Reveal in Finder" line, the GIF export rows, and the Save progress fill.
 - At the minimum window width (720) the timeline's trim readout ("In · Out · Length") wraps onto three lines beside the zoom controls.
 - Zoom, scene and blur blocks still fill the whole row height with a 5px radius, inside a lane rounded at 9px; a block starting at 0:00 or ending at the end pokes past the lane's corner by a pixel or two.
-- The video stage keeps its own dark fill and hairline border inside the preview panel (it is the picture surface, and its border is part of what the overlays measure; left alone to keep preview and export matched).
 
 ## Review polish: names, play bar, empty-row hints (2026-11-16)
 
 - Nothing here has been looked at in the app; checked by type check, build, and the sidecar and folder-scan tests.
-- Names are built once, at Record. A window whose title changes during the recording keeps its starting title. Recordings made before this have no name and show the date and "Screen Recording" as before.
+- Names are built once, at Record. A window whose title changes during the recording keeps its starting title. Recordings made before this have no name and show "Window recording", "Display recording", "Area recording" or "Screen recording".
 - Every named recording now gets a sidecar at finalize, and Review no longer treats a sidecar holding only a name as empty. That should keep no-edit screen-only recordings in the list (the first item of the entry below), but it has not been tried.
 - The empty-row hint sits in the middle of the lane, and the hover ghost's "+" draws under it when the pointer is near the middle.
 - The play bar's strip takes about 40px from the picture. At 1280x860 the picture may now be height-limited and slightly smaller than before; not measured.

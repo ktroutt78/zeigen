@@ -980,6 +980,7 @@ pub fn run() {
             edit::save_recording,
             zoom::suggest_zooms,
             edit::probe_audio_track,
+            edit::video_start_time,
             edit::render_preview_audio,
             wallpapers::list_wallpapers,
             wallpapers::wallpaper_thumb,

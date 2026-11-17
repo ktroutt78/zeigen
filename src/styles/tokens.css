@@ -283,9 +283,11 @@
 .segmented.full > button { flex: 1; }
 .segmented > button { background: transparent; border: none; color: var(--fg-secondary); padding: 3px 10px; font: 500 12px var(--font-system); border-radius: 4px; cursor: pointer; }
 .segmented > button.on { background: var(--bg-control-on); color: var(--fg-primary); }
+.segmented > button:disabled { cursor: not-allowed; }
 
-/* Review rail — tool toolbar tile (icon over label) */
+/* Review tool row — one icon tile per tool, sharing the row's width */
 .rail-tool {
+  flex: 1;
   display: flex; align-items: center; justify-content: center;
   padding: 9px 0; border-radius: var(--r-sm);
   background: transparent; border: none; cursor: pointer;
@@ -296,6 +298,11 @@
 .rail-tool:hover:not(:disabled) { background: var(--bg-elevated); color: var(--fg-primary); }
 .rail-tool.on { background: var(--accent-soft); color: var(--accent-bright); }
 .rail-tool:disabled { opacity: 0.4; cursor: not-allowed; }
+/* Review's tool settings: the last control's own bottom margin would add to the
+   fixed gap above Export, so the gap differs per tool without this. !important
+   because Field sets its margin inline. */
+.tool-settings > :last-child,
+.tool-settings > :last-child > :last-child { margin-bottom: 0 !important; }
 
 /* Keycap */
 .kbd {

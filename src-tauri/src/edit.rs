@@ -521,6 +521,33 @@ pub(crate) fn probe_audio_track_path(path: &Path) -> Result<Option<AudioTrackMet
     Ok(Some(AudioTrackMeta { start, duration }))
 }
 
+// When the first video frame starts, in seconds (0 when the file says nothing).
+// Recordings made before 2026-11-17 have a screen track that starts 0.02 to 0.04s
+// after time zero (the mic started after the screen); a player shows black for
+// that gap, so the preview never rests before this time, as the export skips it
+// (firstPictureTime in compositor-engine/main.swift).
+#[tauri::command]
+pub fn video_start_time(path: String) -> Result<f64, String> {
+    video_start_time_path(Path::new(&path))
+}
+
+pub(crate) fn video_start_time_path(path: &Path) -> Result<f64, String> {
+    let output = Command::new(FFPROBE_PATH)
+        .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=start_time", "-of", "csv=p=0"])
+        .arg(path)
+        .output()
+        .map_err(|e| format!("ffprobe video start failed: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "ffprobe video start non-zero for {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let s = String::from_utf8_lossy(&output.stdout);
+    Ok(s.trim().parse::<f64>().map_or(0.0, |t| t.max(0.0)))
+}
+
 // Generate a NR-processed sibling MP4 next to the scratch source so the
 // review window can play audio that matches what the save pipeline writes
 // (Phase 14 c2). The pipeline is the narrowest slice of run_edit_pipeline:
@@ -3928,6 +3955,28 @@ WATERMARK_SCALE_FRAC=0.08";
             .output().expect("ffmpeg");
         assert_eq!(o.stdout.len(), 1);
         assert!(o.stdout[0] > 200, "first exported frame is the picture, not black: {}", o.stdout[0]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The preview's resting point: a screen file whose video starts after time
+    // zero reports that start; an ordinary one reports 0.
+    #[test]
+    fn video_start_time_reads_a_late_start() {
+        let dir = std::env::temp_dir().join(format!("zeigen-videostart-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let late = dir.join("late.mp4");
+        let o = Command::new(FFMPEG_PATH)
+            .args(["-y", "-v", "error", "-itsoffset", "0.1", "-f", "lavfi", "-i", "color=c=white:s=320x240:r=30:d=1",
+                   "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+                   "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac"])
+            .arg(&late).output().expect("ffmpeg");
+        assert!(o.status.success(), "synth: {}", String::from_utf8_lossy(&o.stderr));
+        let t = video_start_time_path(&late).expect("probe");
+        assert!((t - 0.1).abs() < 0.01, "late start read as {t}");
+
+        let plain = synth_source(&dir, "plain.mp4", 1.0, 1.0, 320, 240);
+        assert_eq!(video_start_time_path(&plain).expect("probe"), 0.0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

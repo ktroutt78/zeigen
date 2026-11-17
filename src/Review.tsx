@@ -7,6 +7,7 @@ import { ask, open } from "@tauri-apps/plugin-dialog";
 import { Icon, I, P, RailIcon } from "./components/icons";
 import Timeline from "./timeline/Timeline";
 import { openRecordingsWindow } from "./openRecordings";
+import { recordingLength, recordingName as displayName } from "./recordingLabel";
 import { placeSegment } from "./timeline/place";
 import {
   sourceRectToOutputRect,
@@ -112,10 +113,9 @@ const ZOOM_PREVIEW_POST_S = 1.0;
 
 // Segment -> canonical keyframe run: 1.0 at the edges, full scale between,
 // ramps ZOOM_RAMP_S long (halved for short segments). All keyframes of a
-// segment share its center, auto_generated flag and reason. Key order matters:
-// statesEqual compares JSON.stringify against sidecar keyframes as Rust
-// serializes them (t, scale, center_x, center_y, ease, auto_generated, reason),
-// and reason is omitted when absent, as Rust omits it.
+// segment share its center, auto_generated flag and reason. Key order follows
+// Rust's serialization (t, scale, center_x, center_y, ease, auto_generated,
+// reason), and reason is omitted when absent, as Rust omits it.
 function zoomSegmentsToKeyframes(segments: ZoomSegment[]): ZoomKeyframe[] {
   const kfs: ZoomKeyframe[] = [];
   for (const seg of [...segments].sort((a, b) => a.start - b.start)) {
@@ -394,8 +394,8 @@ type SidecarState = {
   frame?: FrameStyle | null;
   background?: Background | null;
   // Capture source ("window"|"display"|"area"), persisted so a reopened window
-  // capture still gates off Rounded corners. Metadata — not an edit (excluded from
-  // the dirty check); the export never reads it.
+  // capture still gates off Rounded corners. Metadata, not an edit; the export
+  // never reads it.
   source_kind?: string | null;
   // Drawn-cursor style (CURSOR-SMOOTHING-PLAN). null/undefined = the defaults
   // (smooth, 1.0); only written when changed, same convention as bubble_zone.
@@ -535,17 +535,6 @@ function backgroundCss(
   const src = thumbs?.[bg.path] ?? bg.path;
   return `url("${convertFileSrc(src)}") center center / cover no-repeat`;
 }
-
-const EMPTY_STATE: SidecarState = {
-  trim: null,
-  bubble_position_log: [],
-  thumbnail_time: null,
-  bubble_roundness: null,
-  bubble_zone: null,
-  bubble_scale: null,
-  zoom: [],
-  redactions: [],
-};
 
 const SIDECAR_DEBOUNCE_MS = 350;
 
@@ -725,73 +714,12 @@ function fmtDur(s: number | null | undefined): string {
 }
 
 // Normalize trim: an "untrimmed" range [0, duration] is logically equivalent
-// to no trim at all. Storing the canonical form keeps dirty-detection honest
-// and keeps the sidecar file empty for clips with no edits.
+// to no trim at all. Storing the canonical form keeps the sidecar file empty for
+// clips with no edits.
 function normalizeTrim(trim: Trim | null | undefined, duration: number | null): Trim | null {
   if (!trim || duration == null) return null;
   if (trim.in <= TRIM_EPS && trim.out >= duration - TRIM_EPS) return null;
   return trim;
-}
-
-function statesEqual(a: SidecarState, b: SidecarState, duration: number | null): boolean {
-  const ta = normalizeTrim(a.trim, duration);
-  const tb = normalizeTrim(b.trim, duration);
-  if ((ta == null) !== (tb == null)) return false;
-  if (ta && tb && (Math.abs(ta.in - tb.in) > TRIM_EPS || Math.abs(ta.out - tb.out) > TRIM_EPS)) {
-    return false;
-  }
-  const tta = a.thumbnail_time ?? null;
-  const ttb = b.thumbnail_time ?? null;
-  if ((tta == null) !== (ttb == null)) return false;
-  if (tta != null && ttb != null && Math.abs(tta - ttb) > TRIM_EPS) return false;
-  const bra = a.bubble_roundness ?? null;
-  const brb = b.bubble_roundness ?? null;
-  if ((bra == null) !== (brb == null)) return false;
-  if (bra != null && brb != null && Math.abs(bra - brb) > 0.001) return false;
-  if ((a.bubble_zone ?? null) !== (b.bubble_zone ?? null)) return false;
-  const bsa = a.bubble_scale ?? 1;
-  const bsb = b.bubble_scale ?? 1;
-  if (Math.abs(bsa - bsb) > 0.001) return false;
-  const za = a.zoom ?? [];
-  const zb = b.zoom ?? [];
-  if (za.length !== zb.length) return false;
-  for (let i = 0; i < za.length; i++) {
-    if (JSON.stringify(za[i]) !== JSON.stringify(zb[i])) return false;
-  }
-  const ra = a.redactions ?? [];
-  const rb = b.redactions ?? [];
-  if (ra.length !== rb.length) return false;
-  for (let i = 0; i < ra.length; i++) {
-    if (JSON.stringify(ra[i]) !== JSON.stringify(rb[i])) return false;
-  }
-  // Frame styling: compare field-by-field with 0 defaults (not JSON.stringify) so
-  // Rust's skip-zero re-serialization on read-back doesn't read as perpetually dirty.
-  const fa = a.frame;
-  const fb = b.frame;
-  const na = frameIsNoop(fa);
-  const nb = frameIsNoop(fb);
-  if (na !== nb) return false;
-  if (!na && !nb) {
-    for (const key of ["padding", "corner_radius", "shadow", "inset"] as const) {
-      if (Math.abs((fa![key] ?? 0) - (fb![key] ?? 0)) > 1e-6) return false;
-    }
-  }
-  const ga = a.background ?? null;
-  const gb = b.background ?? null;
-  if ((ga == null) !== (gb == null)) return false;
-  if (ga && gb) {
-    if (ga.kind !== gb.kind) return false;
-    if (ga.kind === "solid" && gb.kind === "solid" && ga.hex.toLowerCase() !== gb.hex.toLowerCase())
-      return false;
-    if (ga.kind === "gradient" && gb.kind === "gradient" && ga.preset !== gb.preset) return false;
-    if (ga.kind === "image" && gb.kind === "image" && ga.path !== gb.path) return false;
-  }
-  const ca = a.cursor ?? DEFAULT_CURSOR_STYLE;
-  const cb = b.cursor ?? DEFAULT_CURSOR_STYLE;
-  if (ca.smoothing !== cb.smoothing || Math.abs(ca.size - cb.size) > 1e-6) return false;
-  if (JSON.stringify(a.scenes ?? []) !== JSON.stringify(b.scenes ?? [])) return false;
-  if (Math.abs((a.bubble_zoom_scale ?? 1) - (b.bubble_zoom_scale ?? 1)) > 0.001) return false;
-  return true;
 }
 
 // V2 Step 2: the bubble no longer animates along the position log. It's
@@ -872,7 +800,7 @@ function sidecarWritePayload(s: SidecarState, duration: number): SidecarState {
 // surfaces a pip (D-10). Saved files unchanged (D-01).
 type PreviewState =
   | { status: "rendering" }
-  | { status: "ready"; url: string }
+  | { status: "ready"; url: string; path: string }
   | { status: "failed" };
 
 export default function Review() {
@@ -951,7 +879,6 @@ export default function Review() {
   // Original-timeline timestamp for the user's chosen poster frame. null =
   // unset; export-time default (0.5s in) is applied on the Rust side.
   const [thumbnailTime, setThumbnailTime] = useState<number | null>(null);
-  const [snapshot, setSnapshot] = useState<SidecarState>(EMPTY_STATE);
 
   const [saving, setSaving] = useState(false);
   // 0-1 fraction from the Rust "save-progress" event, emitted from
@@ -1100,7 +1027,7 @@ export default function Review() {
   // Capture source — from the open params, overridden by a loaded sidecar's
   // source_kind on reopen. A window capture supplies its own (squircle) corners, so
   // Rounded is gated off for it; our arc can't coincide with the OS curve (DECISIONS
-  // 2026-07-29). Metadata: persisted but excluded from the dirty check.
+  // 2026-07-29). Metadata: persisted, not an edit.
   const [sourceKind, setSourceKind] = useState<string | null>(params.sourceKind);
   const [webcamLeadMs, setWebcamLeadMs] = useState<number | null>(null);
   const [recordingName, setRecordingName] = useState<string | null>(null);
@@ -1496,9 +1423,7 @@ export default function Review() {
   //
   // AUTO-LOAD (owner-approved 2026-07-16; detector has earned it — see
   // DECISIONS.md; effect is `autoLoadedRef` below). It runs suggest ONCE at
-  // review-open on a fresh recording, folds the result into the snapshot so
-  // it reads as the default (not "— edited"), and Clear-all is the escape
-  // hatch. NO persisted "already-suggested" flag is needed: each recording
+  // review-open on a fresh recording, and Clear-all is the escape hatch. NO persisted "already-suggested" flag is needed: each recording
   // gets exactly one review window (review-<stamp>) and the app never reopens
   // recordings, so the mount-time run happens exactly once and a Clear stays
   // cleared for free. IF reopening recordings is ever added, THAT is when a
@@ -1564,12 +1489,8 @@ export default function Review() {
       if (suggested.length === 0) return; // nothing zoom-worthy — silent
       const kf = zoomSegmentsToKeyframes(suggested);
       setZoomSegments(suggested);
-      // Fold into the baseline so the header reads clean (not "— edited") on
-      // open; a subsequent Clear then correctly reads as an edit.
-      setSnapshot((prev) => ({ ...prev, zoom: kf }));
-      // Persist now rather than waiting on the debounce — the export reads the
-      // sidecar, and the folded state is dirty=false so nothing else forces a
-      // write before an immediate save.
+      // Persist now rather than waiting on the debounce, so an immediate save
+      // (the export reads the sidecar) already has them.
       invoke("write_sidecar", {
         sourcePath,
         state: sidecarWritePayload({ ...currentState, zoom: kf }, duration),
@@ -1594,7 +1515,7 @@ export default function Review() {
   );
 
 
-  // Read sidecar on mount; record snapshot for discard semantics.
+  // Read sidecar on mount.
   useEffect(() => {
     if (!sourcePath) return;
     let cancelled = false;
@@ -1602,24 +1523,6 @@ export default function Review() {
       .then((state) => {
         if (cancelled) return;
         if (state) {
-          setSnapshot({
-            trim: state.trim ?? null,
-            bubble_position_log: state.bubble_position_log ?? [],
-            thumbnail_time: state.thumbnail_time ?? null,
-            bubble_roundness: state.bubble_roundness ?? null,
-            bubble_zone: state.bubble_zone ?? null,
-            bubble_scale: state.bubble_scale ?? null,
-            zoom: state.zoom ?? [],
-            redactions: state.redactions ?? [],
-            frame: state.frame ?? null,
-            background: state.background ?? null,
-            source_kind: state.source_kind ?? null,
-            cursor: state.cursor ?? null,
-            scenes: state.scenes ?? [],
-            bubble_zoom_scale: state.bubble_zoom_scale ?? null,
-            webcam_lead_ms: state.webcam_lead_ms ?? null,
-            name: state.name ?? null,
-          });
           if (state.trim) setTrim(state.trim);
           if (state.bubble_position_log) setBubblePositionLog(state.bubble_position_log);
           if (state.thumbnail_time != null) setThumbnailTime(state.thumbnail_time);
@@ -1644,8 +1547,6 @@ export default function Review() {
           if (state.bubble_zoom_scale != null) setBubbleZoomScale(state.bubble_zoom_scale);
           if (state.webcam_lead_ms != null) setWebcamLeadMs(state.webcam_lead_ms);
           if (state.name != null) setRecordingName(state.name);
-        } else {
-          setSnapshot(EMPTY_STATE);
         }
         // Set last, after any setZoomSegments above, so the auto-load effect
         // sees the loaded zoom track (React batches these together) and never
@@ -1713,7 +1614,7 @@ export default function Review() {
           swapRestoreTimeRef.current = v.currentTime;
           v.pause();
         }
-        setPreviewState({ status: "ready", url: convertFileSrc(previewPath) });
+        setPreviewState({ status: "ready", url: convertFileSrc(previewPath), path: previewPath });
       })
       .catch((err) => {
         console.warn("preview render failed", err);
@@ -1732,6 +1633,27 @@ export default function Review() {
     if (previewState.status === "ready") return previewState.url;
     return assetUrl;
   }, [previewState, assetUrl]);
+  const playbackPath = previewState.status === "ready" ? previewState.path : screenPath;
+
+  // Where the played file's first picture starts. Recordings made before
+  // 2026-11-17 have a screen track that starts 0.02 to 0.04s after time zero,
+  // and the video shows black before it; the export skips that gap
+  // (firstPictureTime in compositor-engine/main.swift), so the preview never
+  // rests there either. The NR preview file keeps the gap (video is copied), so
+  // each played file is asked separately.
+  const [pictureStart, setPictureStart] = useState(0);
+  useEffect(() => {
+    if (!playbackPath) return;
+    let live = true;
+    invoke<number>("video_start_time", { path: playbackPath })
+      .then((t) => {
+        if (live) setPictureStart(t);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [playbackPath]);
 
   // Initialize trim once duration is known and no sidecar trim was present.
   useEffect(() => {
@@ -1761,10 +1683,6 @@ export default function Review() {
     [trim, bubblePositionLog, thumbnailTime, bubbleRoundness, bubbleZone, bubbleScale, zoomSegments, redactions, frame, background, sourceKind, cursorStyle, scenes, bubbleZoomScale, webcamLeadMs, recordingName],
   );
 
-  const dirty = useMemo(
-    () => !statesEqual(currentState, snapshot, duration),
-    [currentState, snapshot, duration],
-  );
 
   // The layout path Rust computes from the current edit state (scene.rs via
   // scene_path) — the same path the export plays. Same debounce and stale-
@@ -2392,6 +2310,28 @@ export default function Review() {
     return () => v.removeEventListener("seeked", onSeeked);
   }, [playbackUrl]);
 
+  // The one clamp: any seek that lands before the first picture (play from a
+  // trim-in of 0, the trim loop, a scrub or hover at the very start, the zoom
+  // loop) is redirected to it while still seeking, so the black gap is never
+  // painted. Also applied when the file loads and when the start time arrives.
+  // Setting currentTime fires another 'seeking' at pictureStart, which passes
+  // the check, so it cannot loop. The gated-seek chase sees its own issued
+  // target on 'seeked' and settles; the webcam follows the screen as usual.
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v || pictureStart <= 0) return;
+    const clamp = () => {
+      if (v.readyState > 0 && v.currentTime < pictureStart - 0.001) v.currentTime = pictureStart;
+    };
+    clamp();
+    v.addEventListener("seeking", clamp);
+    v.addEventListener("loadedmetadata", clamp);
+    return () => {
+      v.removeEventListener("seeking", clamp);
+      v.removeEventListener("loadedmetadata", clamp);
+    };
+  }, [playbackUrl, pictureStart]);
+
   // True while a timeline scrub or trim-handle drag is in flight. Read by
   // BubbleLayer's sync layer to skip per-seek webcam aligns during the
   // drag (the second decoder otherwise seeks in lockstep with every scrub
@@ -2647,6 +2587,7 @@ export default function Review() {
     >
       <Header
         name={recordingName}
+        sourceKind={sourceKind}
         onRename={(next) => {
           // State first, so the edit state's own saves carry the name; then written
           // at once, since a rename does not wait on Save.
@@ -2656,7 +2597,6 @@ export default function Review() {
           );
           getCurrentWebviewWindow().setTitle(next).catch(() => {});
         }}
-        dirty={dirty}
         length={trimmedLen}
         previewFailed={previewState.status === "failed"}
       />
@@ -2825,24 +2765,26 @@ export default function Review() {
 
 function Header({
   name,
-  dirty,
+  sourceKind,
   length,
   previewFailed,
   onRename,
 }: {
   name: string | null;
-  dirty: boolean;
-  // Post-trim clip length. Lived in the old toolbar's info strip; the
-  // header is the only remaining info strip.
+  // What was captured; names an unnamed recording ("Window recording").
+  sourceKind: string | null;
+  // Post-trim clip length.
   length: number | null;
   previewFailed: boolean;
   onRename: (name: string) => void;
 }) {
-  // The name being typed; null when not renaming. An empty name keeps the old one.
+  const shown = displayName(name, sourceKind);
+  // The name being typed; null when not renaming. An empty or unchanged name
+  // keeps the old one (so an unnamed recording stays unnamed).
   const [draft, setDraft] = useState<string | null>(null);
   const commit = () => {
     const next = draft?.trim();
-    if (next && next !== name) onRename(next);
+    if (next && next !== shown) onRename(next);
     setDraft(null);
   };
   return (
@@ -2886,7 +2828,7 @@ function Header({
         />
       ) : (
         <span
-          onClick={() => setDraft(name ?? "")}
+          onClick={() => setDraft(shown)}
           style={{
             fontWeight: 600,
             fontSize: 14,
@@ -2900,19 +2842,21 @@ function Header({
           }}
           title="Click to rename"
         >
-          {name ?? "Screen Recording"}{dirty ? " — edited" : ""}
+          {shown}
         </span>
       )}
-      <span
-        style={{
-          fontSize: 13,
-          color: "var(--fg-tertiary)",
-          fontVariantNumeric: "tabular-nums",
-          whiteSpace: "nowrap",
-        }}
-      >
-        {fmt(length)} · .mp4 · just now
-      </span>
+      {length != null && (
+        <span
+          style={{
+            fontSize: 13,
+            color: "var(--fg-tertiary)",
+            fontVariantNumeric: "tabular-nums",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {recordingLength(length)}
+        </span>
+      )}
       {previewFailed && (
         <span
           style={{
@@ -3543,8 +3487,10 @@ function VideoStage(props: VideoStageProps) {
           width: "100%",
           borderRadius: "var(--r-md)",
           overflow: "hidden",
-          border: "1px solid var(--border-faint)",
-          background: "#14161b",
+          // No fill of its own: the picture (or its background canvas) sits
+          // straight on the preview panel. The border stays, transparent, so
+          // the box every overlay measures is unchanged.
+          border: "1px solid transparent",
         }}
       >
         {/* V2 Step 3: the screen video carries the zoom transform (applied to
@@ -3555,14 +3501,21 @@ function VideoStage(props: VideoStageProps) {
             to this transform wrapper, not the stage div behind it, so without the
             marker onStageClick's deselect never matched. Broke when this wrapper
             was inserted between the video and the stage (V2 Step 3 zoom). */}
-        {/* Background/padding preview (Slice 4): the canvas fills the stage behind
-            the video; the frame wrapper insets + rounds + shadows the video (and
+        {/* Background/padding preview (Slice 4): the canvas fills the picture's
+            box (the export's canvas) behind the video; the frame wrapper insets + rounds + shadows the video (and
             carries the zoom layer). Both collapse to no-ops when bgActive is false
             (no canvas; wrapper is inset:0), so a plain recording is unchanged. */}
         {bgActive && !scenePath && (
           <div
             data-stage-bg="1"
-            style={{ position: "absolute", inset: 0, background: bgCss }}
+            style={{
+              position: "absolute",
+              left: fullBox.x,
+              top: fullBox.y,
+              width: fullBox.w,
+              height: fullBox.h,
+              background: bgCss,
+            }}
           />
         )}
         {/* Path mode: the output picture (the export's canvas) behind the
@@ -3596,7 +3549,6 @@ function VideoStage(props: VideoStageProps) {
                 width: "100%",
                 height: "100%",
                 objectFit: "contain",
-                background: "#000",
                 pointerEvents: "none",
               }}
             />
@@ -4866,7 +4818,7 @@ function MessageStrip({
     <div
       style={{
         flexShrink: 0,
-        margin: "0 16px 12px 10px",
+        margin: "0 20px 12px",
         padding: "8px 10px",
         background: fill,
         borderRadius: "var(--r-md)",
@@ -4967,8 +4919,8 @@ function ToolTile({
   onClick: () => void;
   title?: string;
 }) {
-  // Icon-only rail (Screen Studio style): the label is the hover tooltip + a11y name,
-  // not visible text, so the rail stays narrow. The active highlight is the only cue,
+  // Icon-only tool row: the label is the hover tooltip + a11y name, not visible
+  // text, so all tools fit one row. The active highlight is the only cue,
   // so it's kept strong (.rail-tool.on).
   return (
     <button
@@ -5234,6 +5186,8 @@ function ExportPanel({
   // access wouldn't). The active image path, and whether it's a Browse one-off
   // (an image that isn't one of the folder wallpapers).
   const bgImagePath = bg.background?.kind === "image" ? bg.background.path : null;
+  const noBg = bg.background == null;
+  const shownFrame = bg.frame ?? DEFAULT_FRAME;
   const isBrowsePick =
     bgImagePath != null && !bg.wallpapers.some((w) => w.source_path === bgImagePath);
   const browseThumb = isBrowsePick ? bg.thumbBySource[bgImagePath] : undefined;
@@ -5404,21 +5358,22 @@ function ExportPanel({
       className="panel"
       style={{
         display: "flex",
-        flexDirection: "row",
+        flexDirection: "column",
         minHeight: 0,
         overflow: "hidden",
       }}
     >
-      {/* Vertical tool rail. Icon-only (Screen Studio style) with Lucide icons +
-          hover tooltips. Active tile carries the only cue (.rail-tool.on). */}
+      {/* Tool row across the top. Icon-only with Lucide icons + hover tooltips;
+          the tiles share the width evenly and the active tile carries the only
+          cue (.rail-tool.on). Below it the settings and Export use the panel's
+          full width with the same 20px margins on both sides. */}
       <div
         style={{
-          width: 48,
           flexShrink: 0,
           display: "flex",
-          flexDirection: "column",
           gap: 4,
-          padding: "12px 6px",
+          padding: "12px 20px",
+          borderBottom: "1px solid var(--border-faint)",
         }}
       >
         <ToolTile
@@ -5466,10 +5421,15 @@ function ExportPanel({
           icon={RailIcon.mark}
         />
       </div>
-      {/* Panel content column: the active tool's settings (scroll if the window
-          is short), then any note or error, then Export pinned at the bottom. */}
+      {/* Panel content column: the active tool's settings, a fixed gap, any note
+          or error, then Export right after them; leftover space stays below
+          Export. When the settings outgrow the window they scroll and Export
+          stays whole at the bottom. */}
       <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", padding: "16px 16px 12px 10px" }}>
+      <div
+        className="tool-settings"
+        style={{ flex: "0 1 auto", minHeight: 0, overflowY: "auto", overflowX: "hidden", padding: "16px 20px 0" }}
+      >
 
         {activeTool === "bubble" && (
           <>
@@ -6031,46 +5991,53 @@ function ExportPanel({
                   </div>
                 )}
               </Field>
+              {/* Margin and Corners are always shown so they never seem to vanish;
+                  with no background they are disabled and show what picking one
+                  gives (the default frame). */}
+              <Field label="Margin">
+                <div className="segmented full" style={noBg ? DISABLED_CONTROL : undefined}>
+                  <button
+                    className={(shownFrame.padding ?? 0) <= FRAME_TIGHT ? "on" : ""}
+                    disabled={noBg}
+                    onClick={() => bg.onMargin("tight")}
+                  >
+                    Tight
+                  </button>
+                  <button
+                    className={(shownFrame.padding ?? 0) > FRAME_TIGHT ? "on" : ""}
+                    disabled={noBg}
+                    onClick={() => bg.onMargin("wide")}
+                  >
+                    Wide
+                  </button>
+                </div>
+              </Field>
+              {/* Corners is a genuine choice only for display/area (no inherent
+                  corners). Window captures get a mandatory clip radius instead
+                  (it removes SCK's black-corner wedges), so the control is hidden
+                  for them rather than shown as a one-option toggle. */}
+              {!bg.windowSource && (
+                <Field label="Corners">
+                  <div className="segmented full" style={noBg ? DISABLED_CONTROL : undefined}>
+                    <button
+                      className={(shownFrame.corner_radius ?? 0) > 0 ? "on" : ""}
+                      disabled={noBg}
+                      onClick={() => bg.onCorner("rounded")}
+                    >
+                      Rounded
+                    </button>
+                    <button
+                      className={(shownFrame.corner_radius ?? 0) === 0 ? "on" : ""}
+                      disabled={noBg}
+                      onClick={() => bg.onCorner("square")}
+                    >
+                      Square
+                    </button>
+                  </div>
+                </Field>
+              )}
               {bg.background != null && (
                 <>
-                  <Field label="Margin">
-                    <div className="segmented full">
-                      <button
-                        className={(bg.frame?.padding ?? 0) <= FRAME_TIGHT ? "on" : ""}
-                        onClick={() => bg.onMargin("tight")}
-                      >
-                        Tight
-                      </button>
-                      <button
-                        className={(bg.frame?.padding ?? 0) > FRAME_TIGHT ? "on" : ""}
-                        onClick={() => bg.onMargin("wide")}
-                      >
-                        Wide
-                      </button>
-                    </div>
-                  </Field>
-                  {/* Corners is a genuine choice only for display/area (no inherent
-                      corners). Window captures get a mandatory clip radius instead
-                      (it removes SCK's black-corner wedges), so the control is hidden
-                      for them rather than shown as a one-option toggle. */}
-                  {!bg.windowSource && (
-                    <Field label="Corners">
-                      <div className="segmented full">
-                        <button
-                          className={(bg.frame?.corner_radius ?? 0) > 0 ? "on" : ""}
-                          onClick={() => bg.onCorner("rounded")}
-                        >
-                          Rounded
-                        </button>
-                        <button
-                          className={(bg.frame?.corner_radius ?? 0) === 0 ? "on" : ""}
-                          onClick={() => bg.onCorner("square")}
-                        >
-                          Square
-                        </button>
-                      </div>
-                    </Field>
-                  )}
                   {bg.background?.kind === "solid" && (
                     <Field label="Color">
                       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -6123,20 +6090,15 @@ function ExportPanel({
         )}
       </div>
 
+      {/* The fixed gap, any note or error, then Export: outside the scroll area,
+          so the gap holds even when the settings scroll. */}
+      <div style={{ flex: "none", paddingTop: 28 }}>
       {message}
-
-      {/* Export: pinned under the settings, never scrolls away. */}
-      <div style={{ flexShrink: 0, padding: "4px 16px 16px 10px" }}>
+      <div style={{ padding: "0 20px 20px" }}>
         <h2 style={PANEL_HEADING}>Export</h2>
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "72px minmax(0, 1fr)",
-            gap: "10px 12px",
-            alignItems: "center",
-          }}
-        >
-          <span style={EXPORT_LABEL}>Format</span>
+        {/* Each label sits above a full-width control, so every control shares
+            the Save row's edges. */}
+        <Field label="Format">
           <div className="segmented full">
             {(["mp4", "gif"] as const).map((f) => (
               <button
@@ -6150,57 +6112,43 @@ function ExportPanel({
               </button>
             ))}
           </div>
-          <span style={EXPORT_LABEL}>Resolution</span>
-          {format === "mp4" ? (
+        </Field>
+        <Field label="Resolution">
+          <div className="segmented full">
+            {(format === "mp4" ? mp4ResOptions : gifResOptions).map((r) => (
+              <button
+                key={r}
+                className={(format === "mp4" ? mp4Res : gifRes) === r ? "on" : ""}
+                onClick={() =>
+                  format === "mp4" ? setMp4Res(r) : setGifRes(r as "480p" | "720p" | "source")
+                }
+                disabled={saving}
+                style={EXPORT_SEG_BUTTON}
+              >
+                {r === "source" ? "Source" : r}
+              </button>
+            ))}
+          </div>
+        </Field>
+        {format === "gif" && (
+          <Field label="Frame rate">
             <div className="segmented full">
-              {mp4ResOptions.map((r) => (
+              {([10, 15, 20] as const).map((f) => (
                 <button
-                  key={r}
-                  className={mp4Res === r ? "on" : ""}
-                  onClick={() => setMp4Res(r)}
+                  key={f}
+                  className={gifFps === f ? "on" : ""}
+                  onClick={() => setGifFps(f)}
                   disabled={saving}
                   style={EXPORT_SEG_BUTTON}
                 >
-                  {r === "source" ? "Source" : r}
+                  {f} fps
                 </button>
               ))}
             </div>
-          ) : (
-            <div className="segmented full">
-              {gifResOptions.map((r) => (
-                <button
-                  key={r}
-                  className={gifRes === r ? "on" : ""}
-                  onClick={() => setGifRes(r)}
-                  disabled={saving}
-                  style={EXPORT_SEG_BUTTON}
-                >
-                  {r === "source" ? "Source" : r}
-                </button>
-              ))}
-            </div>
-          )}
-          {format === "gif" && (
-            <>
-              <span style={EXPORT_LABEL}>Frame rate</span>
-              <div className="segmented full">
-                {([10, 15, 20] as const).map((f) => (
-                  <button
-                    key={f}
-                    className={gifFps === f ? "on" : ""}
-                    onClick={() => setGifFps(f)}
-                    disabled={saving}
-                    style={EXPORT_SEG_BUTTON}
-                  >
-                    {f} fps
-                  </button>
-                ))}
-              </div>
-            </>
-          )}
-        </div>
+          </Field>
+        )}
 
-        <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
+        <div style={{ display: "flex", gap: 8 }}>
           <button
             onClick={onSaveClick}
             disabled={saveDisabled}
@@ -6346,14 +6294,16 @@ function ExportPanel({
         </div>
       </div>
       </div>
+      </div>
     </div>
   );
 }
 
-const EXPORT_LABEL: React.CSSProperties = { fontSize: 12, color: "var(--fg-secondary)" };
-// Export's segmented buttons share the width evenly (no side padding), so four
-// resolutions fit beside the label column.
-const EXPORT_SEG_BUTTON: React.CSSProperties = { padding: "5px 0", minWidth: 0 };
+// A control that does not apply right now: the same dimming the rail's disabled
+// tiles and sliders use.
+const DISABLED_CONTROL: React.CSSProperties = { opacity: 0.4, cursor: "not-allowed" };
+// Export's segmented buttons share the full width evenly.
+const EXPORT_SEG_BUTTON: React.CSSProperties = { padding: "5px 4px", minWidth: 0 };
 
 // Quiet text-only button (Record another, Discard, Reveal in Finder).
 const TEXT_BUTTON: React.CSSProperties = {

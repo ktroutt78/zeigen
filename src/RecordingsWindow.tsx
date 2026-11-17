@@ -10,6 +10,7 @@ import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { ask, message } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import "./styles/recordings.css";
+import { recordingLength, recordingName } from "./recordingLabel";
 
 export type LibraryRecording = {
   stamp: string;
@@ -55,24 +56,14 @@ function dayLabel(d: Date, now: Date): string {
   });
 }
 
-function length(s: number): string {
-  const t = Math.round(s);
-  return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, "0")}`;
-}
 
 function size(bytes: number): string {
   const mb = bytes / 1e6;
   return mb >= 1000 ? `${(mb / 1000).toFixed(1)} GB` : `${Math.round(mb)} MB`;
 }
 
-const FALLBACK_NAME: Record<string, string> = {
-  window: "Window recording",
-  display: "Display recording",
-  area: "Area recording",
-};
-
 function displayName(r: LibraryRecording): string {
-  return r.name ?? FALLBACK_NAME[r.source_kind] ?? "Screen recording";
+  return recordingName(r.name, r.source_kind);
 }
 
 const folderOf = (r: LibraryRecording) =>
@@ -402,7 +393,7 @@ function Card({
       />
       <div className="rec-thumb">
         {r.thumb_path && <img src={convertFileSrc(r.thumb_path)} alt="" draggable={false} />}
-        {r.duration_s != null && <span className="rec-badge">{length(r.duration_s)}</span>}
+        {r.duration_s != null && <span className="rec-badge">{recordingLength(r.duration_s)}</span>}
       </div>
       <button
         ref={moreRef}
