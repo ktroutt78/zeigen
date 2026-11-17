@@ -2668,6 +2668,7 @@ export default function Review() {
           zoom={zoomEditor}
           redact={redactionEditor}
           thumbnailTime={thumbnailTime}
+          setThumbnailTime={setThumbnailTime}
           bubbleRoundness={bubbleRoundness}
           bubbleZone={effectiveZone}
           bubbleScale={bubbleScale}
@@ -2930,8 +2931,9 @@ type LeftColumnProps = {
   zoom: ZoomEditor;
   redact: RedactionEditor;
   // Timeline marker only — the thumbnail picker itself lives in the right
-  // panel's Export section.
+  // panel's Export section. Dragging the marker moves the Mark.
   thumbnailTime: number | null;
+  setThumbnailTime: (t: number) => void;
   // Read-only: stamped into the sidecar at record time (recorder UI owns
   // the control); Review only previews it via BubbleLayer's border-radius.
   bubbleRoundness: number | null;
@@ -3010,6 +3012,7 @@ function LeftColumn(props: LeftColumnProps) {
         redact={props.redact}
         scene={props.scene}
         thumbnailTime={props.thumbnailTime}
+        setThumbnailTime={props.setThumbnailTime}
       />
     </div>
   );
