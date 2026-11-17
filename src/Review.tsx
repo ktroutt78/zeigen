@@ -634,6 +634,9 @@ type ReviewParams = {
   sourceKind: string | null;
   // Window's short side in points (window sources only) — sizes the corner clip.
   windowPointShort: number | null;
+  // Reopened from the recordings library: the folder is kept when the window
+  // closes or on Record another; only an explicit Discard deletes it.
+  kept: boolean;
 };
 
 function readParams(): ReviewParams {
@@ -647,6 +650,7 @@ function readParams(): ReviewParams {
       webcamLeadMs: 280,
       sourceKind: null,
       windowPointShort: null,
+      kept: false,
     };
   const params = new URLSearchParams(hash.slice(q + 1));
   const leadStr = params.get("webcamLeadMs");
@@ -660,6 +664,7 @@ function readParams(): ReviewParams {
     webcamLeadMs: Number.isFinite(lead) ? lead : 280,
     sourceKind: params.get("sourceKind"),
     windowPointShort: Number.isFinite(short) && short > 0 ? short : null,
+    kept: params.get("kept") === "1",
   };
 }
 
@@ -856,6 +861,7 @@ type PreviewState =
 export default function Review() {
   const [params] = useState(() => readParams());
   const sourcePath = params.path;
+  const kept = params.kept;
   // Phase 15 c3 dual-stream inputs. screenPath drives the screen <video>
   // (and the NR preview pipeline); webcamPath drives the bubble <video>;
   // webcamLeadMs is the webcam's start offset applied via currentTime
@@ -1504,6 +1510,9 @@ export default function Review() {
     if (autoLoadedRef.current) return;
     if (!sourcePath || duration == null || !sidecarLoaded) return;
     autoLoadedRef.current = true;
+    // A reopened library recording already had its first review: an empty
+    // zoom lane there means the user cleared it, so don't suggest again.
+    if (kept) return;
     if (zoomSegments.length > 0) return; // sidecar already had zooms — keep them
     (async () => {
       const kfs = await invoke<ZoomKeyframe[] | null>("suggest_zooms", {
@@ -1925,6 +1934,17 @@ export default function Review() {
     }
   }, [sourcePath]);
 
+  // Close and Record another: a kept (library) recording stays on disk and
+  // only its exports temp dir goes; a fresh recording is discarded as before.
+  const releaseRecording = useCallback(async () => {
+    if (!kept) return cleanupScratchAndExports();
+    const stamp = sourcePath ? parseStampFromPath(sourcePath) : null;
+    if (!stamp) return;
+    await invoke("cleanup_recording_exports", { stamp }).catch((err) =>
+      console.error("cleanup failed:", err),
+    );
+  }, [kept, sourcePath, cleanupScratchAndExports]);
+
   // Mirror lastSavedPath into a ref so the long-lived close-requested
   // handler can read the current value without re-registering on each save.
   const lastSavedPathRef = useRef<string | null>(null);
@@ -1941,10 +1961,12 @@ export default function Review() {
         if (proceedingRef.current) return; // already greenlit
         event.preventDefault();
         // Any save already happened → silent close. The cache temp dir
-        // still needs cleanup but the user has nothing to lose.
-        if (lastSavedPathRef.current) {
+        // still needs cleanup but the user has nothing to lose. A kept
+        // recording also closes silently: its edits autosave and it stays
+        // in the library, so there is nothing to lose either.
+        if (lastSavedPathRef.current || kept) {
           proceedingRef.current = true;
-          await cleanupScratchAndExports();
+          await releaseRecording();
           await win.destroy().catch((err) => {
             proceedingRef.current = false;
             setError(`close: ${err}`);
@@ -1966,7 +1988,7 @@ export default function Review() {
       cancelled = true;
       unlisten?.();
     };
-  }, [cleanupScratchAndExports]);
+  }, [kept, releaseRecording]);
 
   const closeWindow = useCallback(async () => {
     proceedingRef.current = true;
@@ -2012,13 +2034,13 @@ export default function Review() {
   const onRecordAnother = useCallback(async () => {
     setDiscarding(true);
     try {
-      await cleanupScratchAndExports();
+      await releaseRecording();
       await fireRecordAnother();
       await closeWindow();
     } finally {
       setDiscarding(false);
     }
-  }, [cleanupScratchAndExports, fireRecordAnother, closeWindow]);
+  }, [releaseRecording, fireRecordAnother, closeWindow]);
 
   // Close-modal Save: commits with the current ExportPanel selection
   // (format/resolution/fps lifted to Review for exactly this reason),
@@ -2035,13 +2057,13 @@ export default function Review() {
     const out = await onSave(spec);
     if (out) {
       setShowCloseModal(false);
-      await cleanupScratchAndExports();
+      await releaseRecording();
       await closeWindow();
     } else {
       // Save failed; surface the error and let the user retry/discard.
       setShowCloseModal(false);
     }
-  }, [onSave, format, mp4Res, gifRes, gifFps, cleanupScratchAndExports, closeWindow]);
+  }, [onSave, format, mp4Res, gifRes, gifFps, releaseRecording, closeWindow]);
 
   const onModalDiscard = useCallback(async () => {
     setShowCloseModal(false);
