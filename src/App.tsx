@@ -6,6 +6,7 @@ import { availableMonitors } from "@tauri-apps/api/window";
 import { emit } from "@tauri-apps/api/event";
 import { I, Icon, P } from "./components/icons";
 import { PILL_STRIP_CSS } from "./constants/bubble";
+import type { LibraryRecording } from "./RecordingsWindow";
 
 const DEFAULT_HOTKEY = "CmdOrCtrl+Shift+P";
 
@@ -853,6 +854,8 @@ type ReviewOpenArgs = {
   // arc — otherwise SCK's opaque-black corner fill shows as wedges over a
   // background. null for display/area (no inherent corners) or if unknown.
   windowPointShort: number | null;
+  // Reopened from the recordings library: Review keeps the folder on close.
+  kept?: boolean;
 };
 
 async function openReview(
@@ -875,6 +878,9 @@ async function openReview(
   if (args.windowPointShort != null) {
     params.set("windowPointShort", String(args.windowPointShort));
   }
+  if (args.kept) {
+    params.set("kept", "1");
+  }
   const url = `/#review?${params.toString()}`;
   const win = new WebviewWindow(label, {
     url,
@@ -896,6 +902,27 @@ async function openReview(
   });
   win.once("tauri://destroyed", () => {
     onDestroyed();
+  });
+}
+
+// The Recordings window (kept recordings). One instance: focus it if open.
+const RECORDINGS_LABEL = "recordings";
+async function openRecordingsWindow(): Promise<void> {
+  const existing = await WebviewWindow.getByLabel(RECORDINGS_LABEL);
+  if (existing) {
+    await existing.unminimize().catch(() => {});
+    await existing.setFocus().catch(() => {});
+    return;
+  }
+  new WebviewWindow(RECORDINGS_LABEL, {
+    url: "/#recordings",
+    title: "Recordings",
+    width: 560,
+    height: 520,
+    minWidth: 420,
+    minHeight: 280,
+    resizable: true,
+    center: true,
   });
 }
 
@@ -1845,6 +1872,7 @@ function App() {
     let unlistenTray: (() => void) | null = null;
     let unlistenHotkey: (() => void) | null = null;
     let unlistenRecordAnother: (() => void) | null = null;
+    let unlistenOpenRecording: (() => void) | null = null;
     let cancelled = false;
 
     (async () => {
@@ -1867,6 +1895,8 @@ function App() {
           c.setSelectedMic(v === "none" ? null : v);
         } else if (id.startsWith("disp:")) {
           c.setSelectedDisplay(Number(id.slice(5)));
+        } else if (id === "recordings") {
+          openRecordingsWindow().catch(() => {});
         }
       });
       const b = await listen<{}>("hotkey-toggle", () => {
@@ -1898,15 +1928,50 @@ function App() {
         }
         if (c.state === "idle" && c.canStartNow) c.start();
       });
+      // The Recordings window's Open: reopen a kept recording in Review the
+      // same way a fresh one opens, flagged kept so closing it keeps the
+      // folder. One window per recording; a second Open focuses it.
+      // libraryOpen covers the gap before a just-created window is findable.
+      const libraryOpen = new Set<string>();
+      const o = await listen<LibraryRecording>("open-recording", async (e) => {
+        if (ctrlRef.current.state !== "idle") return;
+        const rec = e.payload;
+        const label = `review-${rec.stamp}`;
+        const existing = await WebviewWindow.getByLabel(label);
+        if (existing || libraryOpen.has(label)) {
+          await existing?.setFocus().catch(() => {});
+          return;
+        }
+        libraryOpen.add(label);
+        incReview();
+        await openReview(
+          label,
+          {
+            scratchPath: rec.scratch_mp4_path,
+            screenPath: rec.screen_path,
+            webcamPath: rec.webcam_path,
+            webcamLeadMs: rec.webcam_lead_ms,
+            sourceKind: rec.source_kind as SourceKind,
+            windowPointShort: null,
+            kept: true,
+          },
+          () => {
+            libraryOpen.delete(label);
+            decReview();
+          },
+        );
+      });
       if (cancelled) {
         a();
         b();
         r();
+        o();
         return;
       }
       unlistenTray = a;
       unlistenHotkey = b;
       unlistenRecordAnother = r;
+      unlistenOpenRecording = o;
     })();
 
     return () => {
@@ -1914,6 +1979,7 @@ function App() {
       unlistenTray?.();
       unlistenHotkey?.();
       unlistenRecordAnother?.();
+      unlistenOpenRecording?.();
     };
   }, []);
 
@@ -2562,6 +2628,14 @@ function BrandBar({
         </span>
       )}
       <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 2 }}>
+        <button
+          className="btn-ghost"
+          title="Past recordings"
+          onClick={() => openRecordingsWindow().catch(() => {})}
+          style={{ padding: "4px 8px", fontSize: 12, color: "var(--fg-secondary)" }}
+        >
+          Recordings
+        </button>
         <button
           className="btn-ghost"
           title="Refresh devices"
