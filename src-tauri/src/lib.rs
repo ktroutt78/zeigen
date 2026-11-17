@@ -609,6 +609,9 @@ async fn recording_finalize(
         state.bubble_size = Some(bubble_size)
             .filter(|s| *s != WebcamSize::Medium && !state.bubble_position_log.is_empty());
         state.name = name.clone();
+        // New recordings replay the bubble's moves (composite::resolve_zones);
+        // Review's Follow recording choice turns this back on after a pick.
+        state.bubble_follow = (!state.bubble_position_log.is_empty()).then_some(true);
         edit::write_sidecar_path(&scratch_mp4_path, &state)?;
     }
 
@@ -1028,6 +1031,7 @@ pub fn run() {
             edit::delete_sidecar,
             edit::camera_path,
             edit::scene_path,
+            edit::bubble_start_zone,
             edit::cursor_preview,
             edit::window_corner,
             edit::rename_recording,
