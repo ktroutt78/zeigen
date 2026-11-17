@@ -3652,18 +3652,58 @@ function CursorLayer({
 }) {
   const clipRef = useRef<HTMLDivElement | null>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
-  const srcs = useMemo(
-    () => overlay?.shapes.map((sh) => `data:image/png;base64,${sh.png}`) ?? [],
-    [overlay],
-  );
+  // Each shape's picture is about 10x the cursor's point size (CursorArt.swift),
+  // and the preview shows it at a fraction of that. WebKit shrinks an <img> by
+  // reading 4 source pixels per screen pixel, so a 5x shrink skips most of the
+  // picture: stair-stepped diagonals and a broken white outline (Keith,
+  // 2026-11-16). So each shape gets a chain of half-size copies (a 2x canvas
+  // shrink is an exact average), and the <img> shows the smallest copy that
+  // still covers the cursor's size on screen: the browser never shrinks by 2x
+  // or more. The export does the same job with Lanczos.
+  const [levels, setLevels] = useState<{ src: string; w: number }[][]>([]);
+  useEffect(() => {
+    let stale = false;
+    setLevels([]);
+    if (!overlay) return;
+    Promise.all(
+      overlay.shapes.map(async (sh) => {
+        const im = new Image();
+        im.src = `data:image/png;base64,${sh.png}`;
+        await im.decode();
+        const chain = [{ src: im.src, w: im.naturalWidth }];
+        let from: CanvasImageSource = im;
+        let w = im.naturalWidth;
+        let h = im.naturalHeight;
+        while (w >= 32) {
+          w = Math.round(w / 2);
+          h = Math.round(h / 2);
+          const c = document.createElement("canvas");
+          c.width = w;
+          c.height = h;
+          c.getContext("2d")!.drawImage(from, 0, 0, w, h);
+          chain.push({ src: c.toDataURL(), w });
+          from = c;
+        }
+        return chain;
+      }),
+    )
+      .then((l) => {
+        if (!stale) setLevels(l);
+      })
+      .catch((e) => console.error("cursor shapes:", e));
+    return () => {
+      stale = true;
+    };
+  }, [overlay]);
   useEffect(() => {
     const clip = clipRef.current;
     const img = imgRef.current;
     const video = videoRef.current;
     const layer = clip?.parentElement;
     if (!overlay || !clip || !img || !video || !layer || !videoDims) return;
+    if (levels.length !== overlay.shapes.length) return;
     let raf = 0;
-    let shown = -1;
+    let shown = "";
     const tick = () => {
       raf = requestAnimationFrame(tick);
       const b = contentBox({ width: layer.clientWidth, height: layer.clientHeight }, videoDims);
@@ -3674,19 +3714,26 @@ function CursorLayer({
       const t = video.currentTime;
       const [x, y] = cursorAt(overlay, t);
       const i = cursorShapeAt(overlay, t);
-      if (i !== shown) {
-        img.src = srcs[i];
-        shown = i;
-      }
       const shape = overlay.shapes[i];
       const k = b.w / videoDims.w; // layer px per source px
+      // Width in device pixels, with the zoom layer's own scale and the display's.
+      const zoom = layer.clientWidth > 0 ? layer.getBoundingClientRect().width / layer.clientWidth : 1;
+      const need = shape.width * k * zoom * window.devicePixelRatio;
+      const chain = levels[i];
+      let level = 0;
+      while (level + 1 < chain.length && chain[level + 1].w >= need) level++;
+      const key = `${i}/${level}`;
+      if (key !== shown) {
+        img.src = chain[level].src;
+        shown = key;
+      }
       img.style.left = `${x * b.w - shape.hot_x * k}px`;
       img.style.top = `${y * b.h - shape.hot_y * k}px`;
       img.style.width = `${shape.width * k}px`;
     };
     tick();
     return () => cancelAnimationFrame(raf);
-  }, [overlay, srcs, videoRef, videoDims]);
+  }, [overlay, levels, videoRef, videoDims]);
   if (!overlay || !videoDims) return null;
   return (
     <div ref={clipRef} style={{ position: "absolute", overflow: "hidden", pointerEvents: "none" }}>
