@@ -83,11 +83,14 @@ const folderOf = (r: LibraryRecording) =>
 
 // An open Review would write its own copy of the name over a rename, and a
 // delete would pull the files out from under it.
-async function openInReview(r: LibraryRecording, what: string): Promise<boolean> {
+async function openInReview(r: LibraryRecording, what: "rename" | "delete"): Promise<boolean> {
   if (!(await WebviewWindow.getByLabel(`review-${r.stamp}`))) return false;
-  await message(`This recording is open in Review. Close it first to ${what} it.`, {
-    title: "Recordings",
-  });
+  await message(
+    what === "rename"
+      ? "This recording is open in Review. Rename it from Review's title instead."
+      : "This recording is open in Review. Close it first to delete it.",
+    { title: "Recordings" },
+  );
   return true;
 }
 
