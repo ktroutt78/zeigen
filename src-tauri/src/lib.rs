@@ -821,6 +821,7 @@ pub fn run() {
             edit::scene_path,
             edit::cursor_preview,
             edit::window_corner,
+            edit::rename_recording,
             edit::save_recording,
             zoom::suggest_zooms,
             edit::probe_audio_track,

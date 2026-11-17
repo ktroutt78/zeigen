@@ -1580,7 +1580,6 @@ export default function Review() {
     [zoomSegments, duration],
   );
 
-  const sourceName = sourcePath ? basename(sourcePath) : "Untitled Recording";
 
   // Read sidecar on mount; record snapshot for discard semantics.
   useEffect(() => {
@@ -2634,8 +2633,16 @@ export default function Review() {
       }}
     >
       <Header
-        sourceName={sourceName}
         name={recordingName}
+        onRename={(next) => {
+          // State first, so the edit state's own saves carry the name; then written
+          // at once, since a rename does not wait on Save.
+          setRecordingName(next);
+          invoke("rename_recording", { sourcePath, name: next }).catch((err) =>
+            setError(`rename: ${err}`),
+          );
+          getCurrentWebviewWindow().setTitle(next).catch(() => {});
+        }}
         dirty={dirty}
         length={trimmedLen}
         previewFailed={previewState.status === "failed"}
@@ -2803,20 +2810,27 @@ export default function Review() {
 }
 
 function Header({
-  sourceName,
   name,
   dirty,
   length,
   previewFailed,
+  onRename,
 }: {
-  sourceName: string;
   name: string | null;
   dirty: boolean;
   // Post-trim clip length. Lived in the old toolbar's info strip; the
   // header is the only remaining info strip.
   length: number | null;
   previewFailed: boolean;
+  onRename: (name: string) => void;
 }) {
+  // The name being typed; null when not renaming. An empty name keeps the old one.
+  const [draft, setDraft] = useState<string | null>(null);
+  const commit = () => {
+    const next = draft?.trim();
+    if (next && next !== name) onRename(next);
+    setDraft(null);
+  };
   return (
     <div
       style={{
@@ -2827,21 +2841,54 @@ function Header({
         gap: 10,
       }}
     >
-      <span
-        style={{
-          fontWeight: 600,
-          fontSize: 14,
-          letterSpacing: "-0.01em",
-          color: "var(--fg-primary)",
-          minWidth: 0,
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
-        }}
-        title={name ?? sourceName}
-      >
-        {name ?? "Screen Recording"}{dirty ? " — edited" : ""}
-      </span>
+      {draft != null ? (
+        <input
+          autoFocus
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onFocus={(e) => e.target.select()}
+          onKeyDown={(e) => {
+            // Keep Review's own shortcuts (space, arrows, delete) out of the name.
+            e.stopPropagation();
+            if (e.key === "Enter") commit();
+            else if (e.key === "Escape") setDraft(null);
+          }}
+          onBlur={commit}
+          aria-label="Recording name"
+          style={{
+            font: "inherit",
+            fontWeight: 600,
+            fontSize: 14,
+            letterSpacing: "-0.01em",
+            color: "var(--fg-primary)",
+            background: "var(--bg-track)",
+            border: "1px solid var(--accent)",
+            borderRadius: 6,
+            padding: "3px 6px",
+            margin: "0 -7px",
+            width: 320,
+            outline: "none",
+          }}
+        />
+      ) : (
+        <span
+          onClick={() => setDraft(name ?? "")}
+          style={{
+            fontWeight: 600,
+            fontSize: 14,
+            letterSpacing: "-0.01em",
+            color: "var(--fg-primary)",
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            cursor: "text",
+          }}
+          title="Click to rename"
+        >
+          {name ?? "Screen Recording"}{dirty ? " — edited" : ""}
+        </span>
+      )}
       <span
         style={{
           fontSize: 13,
@@ -4773,9 +4820,7 @@ function ErrorStrip({ error, onDismiss }: { error: string; onDismiss: () => void
           color: "var(--fg-secondary)",
           fontFamily: "var(--font-mono)",
           fontSize: 11,
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
+          overflowWrap: "anywhere",
           flex: 1,
         }}
         title={error}

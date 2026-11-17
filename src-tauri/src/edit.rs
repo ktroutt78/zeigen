@@ -1968,24 +1968,41 @@ pub fn window_corner(source_path: String) -> Option<f64> {
     String::from_utf8_lossy(&out.stdout).trim().parse().ok()
 }
 
-// Resolve the next available per-format slot in ~/Movies/Zeigen for a
-// given stamp + extension. First call returns `recording-<stamp>.<ext>`;
-// subsequent calls with the same stamp+ext return `-2`, `-3`, ... per
-// PHASE-11 D-11. Per-format scope: gif and mp4 don't collide because the
-// extension differs.
-fn next_per_format_slot(movies: &Path, stamp: &str, ext: &str) -> PathBuf {
-    let first = movies.join(format!("recording-{stamp}.{ext}"));
+// Where an export goes in ~/Movies/Zeigen. A named recording exports under its
+// name ("Q3 Sales Walkthrough.mp4", then " 2", " 3" while a file with that name
+// exists); one without a name keeps the dated name (`recording-<stamp>.<ext>`,
+// then `-2`, `-3`). Formats do not collide because the extension differs.
+fn export_slot(movies: &Path, stamp: &str, name: Option<&str>, ext: &str) -> PathBuf {
+    // "/" and ":" cannot be in a macOS file name; a leading dot would hide the file.
+    let named = name
+        .map(|n| n.replace(['/', ':'], "-").trim().trim_start_matches('.').to_string())
+        .filter(|n| !n.is_empty());
+    let (base, sep) = match named {
+        Some(n) => (n, " "),
+        None => (format!("recording-{stamp}"), "-"),
+    };
+    let first = movies.join(format!("{base}.{ext}"));
     if !first.exists() {
         return first;
     }
     let mut n = 2u32;
     loop {
-        let candidate = movies.join(format!("recording-{stamp}-{n}.{ext}"));
+        let candidate = movies.join(format!("{base}{sep}{n}.{ext}"));
         if !candidate.exists() {
             return candidate;
         }
         n += 1;
     }
+}
+
+// Rename a recording: the name lives in its sidecar. Written at once, apart from
+// the edit state's own saves, so a rename never waits on Save.
+#[tauri::command]
+pub fn rename_recording(source_path: String, name: String) -> Result<(), String> {
+    let source = Path::new(&source_path);
+    let mut state = read_sidecar_path(source)?.unwrap_or_default();
+    state.name = Some(name);
+    write_sidecar_path(source, &state)
 }
 
 #[derive(Serialize, Debug)]
@@ -2320,7 +2337,7 @@ fn save_recording_impl(
                 "source" => Mp4Resolution::Source,
                 other => return Err(format!("unknown mp4 resolution: {other}")),
             };
-            let output = next_per_format_slot(&movies, &stamp, "mp4");
+            let output = export_slot(&movies, &stamp, sidecar.name.as_deref(), "mp4");
             let report = run_edit_pipeline(
                 &screen_path,
                 &segments,
@@ -2341,7 +2358,7 @@ fn save_recording_impl(
                 other => return Err(format!("unknown gif resolution: {other}")),
             };
             let fps = fps.ok_or_else(|| "fps required for gif format".to_string())?;
-            let output = next_per_format_slot(&movies, &stamp, "gif");
+            let output = export_slot(&movies, &stamp, sidecar.name.as_deref(), "gif");
             let report = run_edit_pipeline(
                 &screen_path,
                 &segments,
@@ -3796,6 +3813,26 @@ WATERMARK_SCALE_FRAC=0.08";
             assert!(red(patch(2.4, x, y)), "webcam fills the frame in the scene at {x},{y}: {:?}", patch(2.4, x, y));
         }
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn exports_are_named_after_the_recording() {
+        let dir = std::env::temp_dir().join(format!("zeigen-slot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let slot = |name: Option<&str>| {
+            let p = export_slot(&dir, "2026-11-17-082731", name, "mp4");
+            std::fs::write(&p, b"").unwrap();
+            p.file_name().unwrap().to_string_lossy().into_owned()
+        };
+        assert_eq!(slot(Some("Q3 Sales Walkthrough")), "Q3 Sales Walkthrough.mp4");
+        assert_eq!(slot(Some("Q3 Sales Walkthrough")), "Q3 Sales Walkthrough 2.mp4");
+        assert_eq!(slot(Some("Q3 Sales Walkthrough")), "Q3 Sales Walkthrough 3.mp4");
+        assert_eq!(slot(Some("a/b: c")), "a-b- c.mp4");
+        assert_eq!(slot(None), "recording-2026-11-17-082731.mp4");
+        assert_eq!(slot(None), "recording-2026-11-17-082731-2.mp4");
+        assert_eq!(slot(Some("  ")), "recording-2026-11-17-082731-3.mp4");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -4,6 +4,14 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-17 — Design pass step 1 (Review) built; renaming
+
+- **Review restyle** (implementer, reviewed by me from its headless-browser screenshots; not seen in the real app): the window background is the darkest layer with three panels on it (preview, timeline, right side) and no cards inside them. Timeline rows are borderless and 44px. Settings sit straight on the right panel with sentence-case headings. Export is lighter (segmented choices, 36px Save, copy as an icon button, Record another / Discard as text). Notes and errors sit in the right panel above Export and no longer cover anything; errors wrap so they can be read in full. Keith asked for the mockup's "Recordings" link in the title bar, since the main window is hidden while Review is open.
+- **Left out of the mockup:** back-to-start / forward-to-end and a clickable speed (none exist today); Generate stays as the icon in the Zoom row's label.
+- **Renaming (Keith):** click Review's title to rename (Return saves, Esc cancels, empty keeps the old name). The name is written to the sidecar at once (`rename_recording`), without marking the recording edited. Exports are named after the recording ("Q3 Sales Walkthrough.mp4", then " 2", " 3"); "/" and ":" become "-" in the file name only; a recording with no name keeps `recording-<stamp>`. Automatic names count, so an unrenamed take exports as "Tableau - Book1 (Window).mp4". "Rename" in the Recordings menu comes with the Recordings step.
+
+---
+
 ## 2026-11-17 — Save location setting approved (build after the design pass)
 
 Keith wants to choose where Zeigen saves (Local Documents, or the LaCie external SSD). Approved plan:
