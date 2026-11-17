@@ -1011,6 +1011,16 @@ fn write_cursor_json(
 // pre-filtered to an existing logo. `webcam_segments` is 0 or 1 in the common
 // case; 2+ (a Continuity drop mid-recording) are concatenated back-to-back into
 // one bubble stream, and V3Render.caveat then describes the resulting drift.
+// The export's temp workspace, beside the screen file.
+fn v3_temp_dir(screen_path: &Path) -> PathBuf {
+    let stem = screen_path.file_stem().and_then(|s| s.to_str()).unwrap_or("source");
+    screen_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(".sources")
+        .join(format!("v3-{stem}"))
+}
+
 fn v3_render(
     screen_path: &Path,
     webcam_segments: &[std::path::PathBuf],
@@ -1020,6 +1030,7 @@ fn v3_render(
     resolution: Mp4Resolution,
     cursor: Option<&CursorTrack>,
     on_progress: &impl Fn(f64),
+    temp_dir: PathBuf,
 ) -> Result<V3Render, String> {
     on_progress(0.02);
     let bin = cicompositor_binary_path();
@@ -1030,15 +1041,6 @@ fn v3_render(
     let (out_w, out_h) = v3_output_dims(w, h, resolution);
 
     // Temp workspace for the zoom JSON, bubble PNGs, and the video-only render.
-    let stem = screen_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("source");
-    let temp_dir = screen_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(".sources")
-        .join(format!("v3-{stem}"));
     std::fs::create_dir_all(&temp_dir)
         .map_err(|e| format!("create {}: {e}", temp_dir.display()))?;
 
@@ -1236,6 +1238,7 @@ fn run_v3_export(
         resolution,
         cursor,
         &on_progress,
+        v3_temp_dir(screen_path),
     )?;
 
     // Mux: V3 video + SCREEN audio (arnndn, no itsoffset). faststart for /v/.
@@ -1316,6 +1319,7 @@ fn run_v3_gif(
         Mp4Resolution::Source,
         cursor,
         &on_progress,
+        v3_temp_dir(screen_path),
     )?;
     let filter = gif_palette_filter("0:v", resolution, fps);
     let out = std::process::Command::new(FFMPEG_PATH)
@@ -1713,6 +1717,62 @@ pub(crate) fn cursor_overlay(screen_path: &Path) -> Result<Option<CursorTrack>, 
     Ok(Some(track))
 }
 
+// Whether an export draws anything over the screen file (zoom, webcam,
+// watermark, background, drawn cursor) and so renders on the compositor. When
+// false the finished picture is the screen file's own frame.
+fn needs_compositor(sidecar: &SidecarState, webcam_segments: &[PathBuf], watermark: bool, cursor: bool) -> bool {
+    !zoom_keyframes_to_segments(&sidecar.zoom).is_empty()
+        || !webcam_segments.is_empty()
+        || watermark
+        || has_background(sidecar)
+        || cursor
+}
+
+// The finished picture at `t` (original timeline) as a JPEG 480 px wide, drawn
+// by the export's own render: the recording's edit with the trim narrowed to
+// two frames at `t`, at the smallest export size, no watermark, no audio.
+// Ok(false) when the export would not composite this recording, so its plain
+// screen frame is the finished picture and the caller extracts that. `work`
+// is the render's temp folder, removed afterwards.
+pub(crate) fn render_still(source: &Path, t: f64, work: &Path, out: &Path) -> Result<bool, String> {
+    let mut sidecar = read_sidecar_path(source)?.unwrap_or_default();
+    let (screen, segments) = export_inputs_from_source(source);
+    let cursor = cursor_overlay(&screen)?;
+    if !needs_compositor(&sidecar, &segments, false, cursor.is_some()) {
+        return Ok(false);
+    }
+    const FRAME: f64 = 1.0 / 30.0;
+    let dur = probe_duration_seconds(&screen)?;
+    let start = t.min(dur - 3.0 * FRAME).max(0.0);
+    sidecar.trim = Some(Trim { start, out: (start + 2.0 * FRAME).min(dur) });
+    let render = v3_render(
+        &screen,
+        &segments,
+        &sidecar,
+        PREVIEW_WEBCAM_SIZE,
+        None,
+        Mp4Resolution::P480,
+        cursor.as_ref(),
+        &|_| {},
+        work.to_path_buf(),
+    );
+    let result = render.and_then(|r| {
+        let o = Command::new(FFMPEG_PATH)
+            .args(["-v", "error", "-y", "-i"])
+            .arg(&r.video_only)
+            .args(["-frames:v", "1", "-vf", "scale=480:-2", "-q:v", "4", "-f", "image2"])
+            .arg(out)
+            .output()
+            .map_err(|e| format!("run ffmpeg: {e}"))?;
+        if !o.status.success() || std::fs::metadata(out).map_or(true, |m| m.len() == 0) {
+            return Err(format!("ffmpeg: {}", String::from_utf8_lossy(&o.stderr).trim()));
+        }
+        Ok(true)
+    });
+    let _ = std::fs::remove_dir_all(work);
+    result
+}
+
 pub(crate) fn run_edit_pipeline(
     screen_path: &Path,
     webcam_segments: &[std::path::PathBuf],
@@ -1736,11 +1796,10 @@ pub(crate) fn run_edit_pipeline(
     // GIF, handled first. An edited GIF (zoom/webcam/watermark) renders on
     // cicompositor then palettegen; a plain/trim/downscale-only GIF is a one-pass
     // palettegen. A V3 render failure fails the GIF loudly (no fallback), same as MP4.
+    let effective_wm = watermark.as_ref().filter(|w| w.logo_path.is_file());
+    let composite = needs_compositor(sidecar, webcam_segments, effective_wm.is_some(), has_cursor);
     if let PipelineMode::Gif { resolution, fps } = mode {
-        let has_zoom = !zoom_keyframes_to_segments(&sidecar.zoom).is_empty();
-        let has_webcam = !webcam_segments.is_empty();
-        let effective_wm = watermark.as_ref().filter(|w| w.logo_path.is_file());
-        if has_zoom || has_webcam || effective_wm.is_some() || has_background(sidecar) || has_cursor {
+        if composite {
             let note = run_v3_gif(
                 screen_path,
                 webcam_segments,
@@ -1768,10 +1827,7 @@ pub(crate) fn run_edit_pipeline(
         PipelineMode::Mp4 { resolution } => resolution,
         PipelineMode::Gif { .. } => unreachable!("GIF handled above"),
     };
-    let effective_wm = watermark.as_ref().filter(|w| w.logo_path.is_file());
-    let has_zoom = !zoom_keyframes_to_segments(&sidecar.zoom).is_empty();
-    let has_webcam = !webcam_segments.is_empty();
-    if has_zoom || has_webcam || effective_wm.is_some() || has_background(sidecar) || has_cursor {
+    if composite {
         match run_v3_export(
             screen_path,
             webcam_segments,

@@ -12,7 +12,9 @@
 // The Recordings window's cache, also in the folder root and rebuilt from the
 // recording when missing:
 //   .probe.json         the screen file's duration and the length it was probed at
-//   thumb-<ms>.jpg      the card's thumbnail, a frame <ms> into the screen file
+//   thumb-<ms>-<edit>.jpg  the card's thumbnail: the finished picture (the
+//                       export's render) <ms> into the recording, for the edit
+//                       whose sidecar hashes to <edit>
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -37,8 +39,8 @@ pub struct LibraryRecording {
     // None until the screen file has been probed, or when ffprobe cannot read it.
     pub duration_s: Option<f64>,
     pub size_bytes: u64,
-    // None until the thumbnail for the current Mark has been made, or when
-    // ffmpeg could not make it; the card shows a placeholder.
+    // None until the thumbnail for the current Mark and edit has been made, or
+    // when it could not be made; the card shows a placeholder.
     pub thumb_path: Option<String>,
     // Made while the Save to folder was on a drive and not moved there yet; it
     // is still in ~/Movies/Zeigen/.recordings (storage.rs).
@@ -79,7 +81,7 @@ pub async fn list_recordings(app: AppHandle) -> Result<Library, String> {
         };
         for r in list_for(&default_lib, &current_lib) {
             let Some(dir) = Path::new(&r.scratch_mp4_path).parent() else { continue };
-            if refresh_folder(dir, &edit::probe_duration_seconds, &extract_frame) {
+            if refresh_folder(dir, &edit::probe_duration_seconds, &make_thumb) {
                 if let Some(r) = read_folder(dir) {
                     let _ = app.emit("library-recording", r);
                 }
@@ -136,6 +138,8 @@ struct Folder {
     screen: PathBuf,
     webcam: Option<PathBuf>,
     sidecar: SidecarState,
+    // Hash of the sidecar's bytes: a new edit wants a new thumbnail.
+    edit_key: String,
 }
 
 fn folder(dir: &Path) -> Option<Folder> {
@@ -145,6 +149,12 @@ fn folder(dir: &Path) -> Option<Folder> {
     let stamp = dir.file_name()?.to_str()?.strip_prefix("recording-")?.to_string();
     let scratch_mp4 = dir.join(format!("recording-{stamp}.mp4"));
     let sidecar = edit::read_sidecar_path(&scratch_mp4).ok()??;
+    let edit_key = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::hash::DefaultHasher::new();
+        std::fs::read(edit::sidecar_path(&scratch_mp4)).ok()?.hash(&mut h);
+        format!("{:016x}", h.finish())
+    };
 
     // Same choice recording_finalize and export_inputs_from_source make: a
     // sources/screen.mp4 means the webcam shape; otherwise the logical mp4 is
@@ -158,14 +168,14 @@ fn folder(dir: &Path) -> Option<Folder> {
     } else {
         return None;
     };
-    Some(Folder { stamp, scratch_mp4, screen, webcam, sidecar })
+    Some(Folder { stamp, scratch_mp4, screen, webcam, sidecar, edit_key })
 }
 
 pub(crate) fn read_folder(dir: &Path) -> Option<LibraryRecording> {
     let f = folder(dir)?;
     let duration_s = cached_duration(dir, &f.screen).flatten();
     let thumb = thumb_time(f.sidecar.thumbnail_time, duration_s)
-        .map(|t| thumb_path(dir, t))
+        .map(|t| thumb_path(dir, t, &f.edit_key))
         .filter(|p| p.is_file());
     Some(LibraryRecording {
         stamp: f.stamp,
@@ -190,10 +200,11 @@ fn thumb_time(mark: Option<f64>, duration_s: Option<f64>) -> Option<f64> {
     mark.or_else(|| duration_s.map(|d| if d < 2.0 { d / 2.0 } else { 1.0 }))
 }
 
-// The time is in the name, so a thumbnail made for an older Mark is simply not
-// found, and the webview never shows a cached copy of the old picture.
-fn thumb_path(dir: &Path, t: f64) -> PathBuf {
-    dir.join(format!("thumb-{}.jpg", (t * 1000.0).round() as i64))
+// The time and the edit are in the name, so a thumbnail made for an older Mark
+// or edit is simply not found, and the webview never shows a cached copy of the
+// old picture.
+fn thumb_path(dir: &Path, t: f64, edit_key: &str) -> PathBuf {
+    dir.join(format!("thumb-{}-{edit_key}.jpg", (t * 1000.0).round() as i64))
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -214,12 +225,12 @@ fn cached_duration(dir: &Path, screen: &Path) -> Option<Option<f64>> {
 }
 
 type Probe<'a> = &'a dyn Fn(&Path) -> Result<f64, String>;
-type Extract<'a> = &'a dyn Fn(&Path, f64, &Path) -> Result<(), String>;
+type Thumb<'a> = &'a dyn Fn(&Folder, f64, &Path) -> Result<(), String>;
 
 // Makes whatever of the folder's cache is missing or stale: the duration, then
-// the thumbnail for the current Mark. True when it wrote anything. A frame that
-// cannot be extracted leaves no thumbnail (placeholder card) and no error.
-fn refresh_folder(dir: &Path, probe: Probe, extract: Extract) -> bool {
+// the thumbnail for the current Mark and edit. True when it wrote anything. A
+// thumbnail that cannot be made leaves none (placeholder card) and no error.
+fn refresh_folder(dir: &Path, probe: Probe, make: Thumb) -> bool {
     let Some(f) = folder(dir) else { return false };
     let mut changed = false;
     let duration_s = match cached_duration(dir, &f.screen) {
@@ -233,13 +244,13 @@ fn refresh_folder(dir: &Path, probe: Probe, extract: Extract) -> bool {
         }
     };
     let Some(t) = thumb_time(f.sidecar.thumbnail_time, duration_s) else { return changed };
-    let thumb = thumb_path(dir, t);
+    let thumb = thumb_path(dir, t, &f.edit_key);
     if thumb.is_file() {
         return changed;
     }
     // Written beside it and renamed, so the webview never loads half a file.
     let tmp = dir.join(".thumb-tmp.jpg");
-    if let Err(e) = extract(&f.screen, t, &tmp).and_then(|_| {
+    if let Err(e) = make(&f, t, &tmp).and_then(|_| {
         std::fs::rename(&tmp, &thumb).map_err(|e| format!("rename thumbnail: {e}"))
     }) {
         eprintln!("[library] no thumbnail for {}: {e}", dir.display());
@@ -253,6 +264,20 @@ fn refresh_folder(dir: &Path, probe: Probe, extract: Extract) -> bool {
         }
     }
     true
+}
+
+// The finished picture at `t`, drawn by the export's render (edit::render_still).
+// A render that fails for any reason falls back to the plain screen frame.
+fn make_thumb(f: &Folder, t: f64, out: &Path) -> Result<(), String> {
+    let work = f.scratch_mp4.with_file_name(".thumb-work");
+    match edit::render_still(&f.scratch_mp4, t, &work, out) {
+        Ok(true) => Ok(()),
+        Ok(false) => extract_frame(&f.screen, t, out),
+        Err(e) => {
+            eprintln!("[library] thumbnail render failed, using the screen frame: {e}");
+            extract_frame(&f.screen, t, out)
+        }
+    }
 }
 
 // One frame of the raw screen file, 480 px wide, as a JPEG.
@@ -496,7 +521,7 @@ mod tests {
             probes.set(probes.get() + 1);
             Ok(12.0)
         };
-        let extract = |_: &Path, _: f64, out: &Path| std::fs::write(out, "jpg").map_err(|e| e.to_string());
+        let extract = |_: &Folder, _: f64, out: &Path| std::fs::write(out, "jpg").map_err(|e| e.to_string());
 
         // Before any refresh the scan shows the recording without a duration.
         assert!(scan(&root)[0].duration_s.is_none());
@@ -523,7 +548,7 @@ mod tests {
         let dir = recording(&root, "{}");
         let made = std::cell::RefCell::new(Vec::new());
         let probe = |_: &Path| Ok(30.0);
-        let extract = |_: &Path, t: f64, out: &Path| {
+        let extract = |_: &Folder, t: f64, out: &Path| {
             made.borrow_mut().push(t);
             std::fs::write(out, "jpg").map_err(|e| e.to_string())
         };
@@ -531,7 +556,7 @@ mod tests {
         refresh_folder(&dir, &probe, &extract);
         assert_eq!(*made.borrow(), vec![1.0], "no mark: a second in");
         let first = scan(&root)[0].thumb_path.clone().unwrap();
-        assert!(first.ends_with("thumb-1000.jpg"));
+        assert!(first.contains("/thumb-1000-"));
 
         refresh_folder(&dir, &probe, &extract);
         assert_eq!(made.borrow().len(), 1, "same mark: not made again");
@@ -541,7 +566,7 @@ mod tests {
         assert!(scan(&root)[0].thumb_path.is_none(), "stale thumbnail is not shown");
         assert!(refresh_folder(&dir, &probe, &extract));
         assert_eq!(*made.borrow(), vec![1.0, 7.25]);
-        assert!(scan(&root)[0].thumb_path.clone().unwrap().ends_with("thumb-7250.jpg"));
+        assert!(scan(&root)[0].thumb_path.clone().unwrap().contains("/thumb-7250-"));
         assert!(!Path::new(&first).exists());
         assert!(!dir.join(".thumb-tmp.jpg").exists());
         let _ = std::fs::remove_dir_all(&root);
@@ -551,7 +576,7 @@ mod tests {
     fn failed_extract_or_probe_leaves_a_placeholder() {
         let root = temp_root("fail");
         let dir = recording(&root, "{}");
-        let fail = |_: &Path, _: f64, out: &Path| {
+        let fail = |_: &Folder, _: f64, out: &Path| {
             std::fs::write(out, "partial").unwrap();
             Err("ffmpeg: boom".to_string())
         };
@@ -570,22 +595,127 @@ mod tests {
             probes.set(probes.get() + 1);
             edit::probe_duration_seconds(p)
         };
-        refresh_folder(&dir2, &probe, &extract_frame);
-        refresh_folder(&dir2, &probe, &extract_frame);
+        refresh_folder(&dir2, &probe, &make_thumb);
+        refresh_folder(&dir2, &probe, &make_thumb);
         assert_eq!(probes.get(), 1);
         let r = &scan(&root2)[0];
         assert!(r.duration_s.is_none() && r.thumb_path.is_none());
 
         // A Mark on an unreadable file runs the real ffmpeg, which fails quietly.
         write(&dir2.join(".recording-2026-01-01-100000.annotations.json"), r#"{"thumbnail_time": 3.0}"#);
-        assert!(!refresh_folder(&dir2, &probe, &extract_frame));
+        assert!(!refresh_folder(&dir2, &probe, &make_thumb));
         assert!(scan(&root2)[0].thumb_path.is_none());
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&root2);
     }
 
+    // A webcam recording like the export tests' (blue screen with sound, red
+    // webcam, bubble bottom-right, a Full webcam scene from 1.5 s to 3.2 s), the
+    // Mark at `mark`.
+    fn synth_webcam_recording(root: &Path, mark: f64) -> PathBuf {
+        let dir = root.join("recording-2026-01-01-100000");
+        let sources = dir.join("sources");
+        std::fs::create_dir_all(&sources).unwrap();
+        let synth = |out: &Path, args: &[&str]| {
+            let o = Command::new(FFMPEG_PATH).args(["-y", "-v", "error"]).args(args)
+                .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"]).arg(out).output().unwrap();
+            assert!(o.status.success(), "synth: {}", String::from_utf8_lossy(&o.stderr));
+        };
+        synth(&sources.join("screen.mp4"), &["-f", "lavfi", "-i", "color=c=blue:s=1280x720:r=30:d=4",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=4", "-c:a", "aac", "-shortest"]);
+        synth(&sources.join("webcam.mp4"), &["-f", "lavfi", "-i", "color=c=red:s=480x480:r=30:d=4"]);
+        set_mark(&dir, mark, "bottom_right");
+        dir
+    }
+
+    fn set_mark(dir: &Path, mark: f64, zone: &str) {
+        let sidecar = format!(
+            r#"{{"thumbnail_time": {mark}, "bubble_zone": "{zone}",
+                "scenes": [{{"start": 1.5, "end": 3.2, "layout": "full_webcam"}}]}}"#
+        );
+        write(&dir.join(".recording-2026-01-01-100000.annotations.json"), &sidecar);
+    }
+
+    // Mean colour of an 8x8 patch of a JPEG.
+    fn patch(jpg: &Path, x: u32, y: u32) -> (u8, u8, u8) {
+        let o = Command::new(FFMPEG_PATH)
+            .args(["-v", "error", "-i"]).arg(jpg)
+            .args(["-vf", &format!("crop=8:8:{x}:{y},scale=1:1:flags=area"), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+            .output().unwrap();
+        assert_eq!(o.stdout.len(), 3, "{}", String::from_utf8_lossy(&o.stderr));
+        (o.stdout[0], o.stdout[1], o.stdout[2])
+    }
+    fn red((r, _, b): (u8, u8, u8)) -> bool { r > 150 && b < 100 }
+    fn blue((r, _, b): (u8, u8, u8)) -> bool { b > 150 && r < 100 }
+    // Any red patch in the bottom-right quarter of a 480x270 thumbnail.
+    fn has_bubble(jpg: &Path) -> bool {
+        (0..10).flat_map(|i| (0..6).map(move |j| (244 + i * 22, 137 + j * 21))).any(|(x, y)| red(patch(jpg, x, y)))
+    }
+
+    // The thumbnail is the finished picture: inside the Full webcam scene it is
+    // the webcam (red), outside it the screen (blue) with the bubble.
+    #[test]
+    fn thumbnail_is_the_finished_picture() {
+        let root = temp_root("finished");
+        let dir = synth_webcam_recording(&root, 2.4);
+        let probe = &edit::probe_duration_seconds;
+        assert!(refresh_folder(&dir, probe, &make_thumb));
+        let jpg = PathBuf::from(scan(&root)[0].thumb_path.clone().expect("thumbnail made"));
+        assert!(red(patch(&jpg, 236, 131)), "in the scene: webcam fills the picture {:?}", patch(&jpg, 236, 131));
+        assert!(red(patch(&jpg, 20, 20)), "in the scene: corner {:?}", patch(&jpg, 20, 20));
+
+        set_mark(&dir, 0.5, "bottom_right");
+        assert!(refresh_folder(&dir, probe, &make_thumb));
+        let jpg2 = PathBuf::from(scan(&root)[0].thumb_path.clone().unwrap());
+        assert!(blue(patch(&jpg2, 236, 131)), "outside the scene: the screen {:?}", patch(&jpg2, 236, 131));
+        assert!(has_bubble(&jpg2), "outside the scene: the webcam bubble shows");
+        assert!(!jpg.exists(), "the older thumbnail is removed");
+        assert!(!dir.join(".thumb-work").exists(), "render work folder removed");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Made again when the edit changes (same Mark), not when nothing changed.
+    #[test]
+    fn thumbnail_follows_the_edit() {
+        let root = temp_root("edit");
+        let dir = recording(&root, r#"{"thumbnail_time": 2.0}"#);
+        let made = std::cell::Cell::new(0);
+        let make = |_: &Folder, _: f64, out: &Path| {
+            made.set(made.get() + 1);
+            std::fs::write(out, "jpg").map_err(|e| e.to_string())
+        };
+        refresh_folder(&dir, &|_| Ok(30.0), &make);
+        refresh_folder(&dir, &|_| Ok(30.0), &make);
+        assert_eq!(made.get(), 1, "nothing changed: not made again");
+        let first = scan(&root)[0].thumb_path.clone().unwrap();
+        write(&dir.join(".recording-2026-01-01-100000.annotations.json"),
+            r#"{"thumbnail_time": 2.0, "bubble_zone": "top_left"}"#);
+        assert!(scan(&root)[0].thumb_path.is_none(), "the old edit's thumbnail is not shown");
+        assert!(refresh_folder(&dir, &|_| Ok(30.0), &make));
+        assert_eq!(made.get(), 2, "edit changed: made again");
+        assert!(!Path::new(&first).exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // A render that fails (here a damaged cursor log, which also fails the
+    // export) falls back to the plain screen frame: blue, no bubble.
+    #[test]
+    fn failed_render_falls_back_to_the_screen_frame() {
+        let root = temp_root("fallback");
+        let dir = synth_webcam_recording(&root, 0.5);
+        write(&dir.join("sources/.screen.cursor.json"), "not json");
+        assert!(edit::render_still(&dir.join("recording-2026-01-01-100000.mp4"), 0.5,
+            &root.join("work"), &root.join("x.jpg")).is_err());
+        assert!(refresh_folder(&dir, &edit::probe_duration_seconds, &make_thumb));
+        let jpg = PathBuf::from(scan(&root)[0].thumb_path.clone().expect("plain thumbnail made"));
+        assert!(blue(patch(&jpg, 236, 131)));
+        assert!(!has_bubble(&jpg), "plain screen frame: no bubble");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     // Thumbnails of the real library written to a temp dir (the recordings are
-    // only read), for eyeballing and timing:
+    // only read; the render's work folder is in the temp dir too), for
+    // eyeballing and timing:
     // cargo test --lib real_library_thumbs -- --ignored --nocapture
     #[test]
     #[ignore]
@@ -594,16 +724,20 @@ mod tests {
         std::fs::create_dir_all(&out).unwrap();
         for dir in std::fs::read_dir(storage::library(&storage::active().unwrap().root)).unwrap().flatten().map(|e| e.path()) {
             let Some(f) = folder(&dir) else { continue };
-            let t0 = std::time::Instant::now();
             let d = edit::probe_duration_seconds(&f.screen).ok();
-            let probe_ms = t0.elapsed().as_millis();
             let Some(t) = thumb_time(f.sidecar.thumbnail_time, d) else { continue };
-            let jpg = out.join(format!("{}.jpg", f.stamp));
+            // THUMB_AT=0.9 times the frame at 90% of the recording instead.
+            let t = std::env::var("THUMB_AT").ok().and_then(|v| v.parse::<f64>().ok()).zip(d).map_or(t, |(k, d)| k * d);
+            let plain = out.join(format!("{}-plain.jpg", f.stamp));
+            let t0 = std::time::Instant::now();
+            let p = extract_frame(&f.screen, t, &plain);
+            let plain_ms = t0.elapsed().as_millis();
+            let done = out.join(format!("{}-finished.jpg", f.stamp));
             let t1 = std::time::Instant::now();
-            let r = extract_frame(&f.screen, t, &jpg);
+            let r = edit::render_still(&f.scratch_mp4, t, &out.join(format!("work-{}", f.stamp)), &done);
             println!(
-                "{} dur={d:?} mark={:?} t={t} probe={probe_ms}ms extract={}ms {:?} {}",
-                f.stamp, f.sidecar.thumbnail_time, t1.elapsed().as_millis(), r.err(), jpg.display()
+                "{} dur={d:?} mark={:?} t={t} plain={plain_ms}ms {:?} finished={}ms {r:?}",
+                f.stamp, f.sidecar.thumbnail_time, p.err(), t1.elapsed().as_millis()
             );
         }
     }
