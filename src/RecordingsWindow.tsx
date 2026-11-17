@@ -7,9 +7,10 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { ask, message } from "@tauri-apps/plugin-dialog";
+import { message } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import "./styles/recordings.css";
+import { useConfirm } from "./components/ConfirmDialog";
 import { recordingLength, recordingName } from "./recordingLabel";
 
 export type LibraryRecording = {
@@ -25,9 +26,20 @@ export type LibraryRecording = {
   thumb_path: string | null;
   // Still on this Mac, waiting to move to the Save to folder's drive.
   pending_move: boolean;
+  // Saved or copied to the clipboard at least once; kept longer.
+  exported: boolean;
+  // The last file it was saved to, when that file is still there.
+  exported_path: string | null;
 };
 
-type Library = { keep_days: number; recordings: LibraryRecording[] };
+type Library = {
+  keep_days_exported: number;
+  keep_days_unexported: number;
+  recordings: LibraryRecording[];
+};
+
+const keepLine = (l: Library) =>
+  `unsaved takes kept ${l.keep_days_unexported} days, exported ${l.keep_days_exported}`;
 
 // Stamp is YYYY-MM-DD-HHMMSS, local time.
 function stampTime(stamp: string): Date | null {
@@ -71,11 +83,14 @@ const folderOf = (r: LibraryRecording) =>
 
 // An open Review would write its own copy of the name over a rename, and a
 // delete would pull the files out from under it.
-async function openInReview(r: LibraryRecording, what: string): Promise<boolean> {
+async function openInReview(r: LibraryRecording, what: "rename" | "delete"): Promise<boolean> {
   if (!(await WebviewWindow.getByLabel(`review-${r.stamp}`))) return false;
-  await message(`This recording is open in Review. Close it first to ${what} it.`, {
-    title: "Recordings",
-  });
+  await message(
+    what === "rename"
+      ? "This recording is open in Review. Rename it from Review's title instead."
+      : "This recording is open in Review. Close it first to delete it.",
+    { title: "Recordings" },
+  );
   return true;
 }
 
@@ -86,6 +101,7 @@ export default function RecordingsWindow() {
   const [query, setQuery] = useState("");
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
+  const [confirmDialog, confirm] = useConfirm();
 
   const load = useCallback(
     () =>
@@ -145,17 +161,18 @@ export default function RecordingsWindow() {
   const onDelete = useCallback(
     async (r: LibraryRecording) => {
       if (await openInReview(r, "delete")) return;
-      const ok = await ask(
-        `Delete the recording from ${stampDate(r.stamp)}? Files you exported from it stay.`,
-        { title: "Delete recording?", kind: "warning", okLabel: "Delete", cancelLabel: "Cancel" },
-      );
+      const ok = await confirm({
+        title: "Delete recording?",
+        message: `Delete the recording from ${stampDate(r.stamp)}? Files you exported from it stay.`,
+        confirmLabel: "Delete",
+      });
       if (!ok) return;
       await invoke("discard_recording", { scratchMp4Path: r.scratch_mp4_path }).catch((e) =>
         setError(String(e)),
       );
       load();
     },
-    [load],
+    [load, confirm],
   );
 
   const onStartRename = useCallback(async (r: LibraryRecording) => {
@@ -175,8 +192,13 @@ export default function RecordingsWindow() {
     [load],
   );
 
+  // The last exported file when it is still there (the list checks), else
+  // the recording's folder.
   const onReveal = useCallback((r: LibraryRecording) => {
-    revealItemInDir(folderOf(r)).catch((e) => setError(`show in Finder: ${e}`));
+    const folder = () => revealItemInDir(folderOf(r));
+    (r.exported_path ? revealItemInDir(r.exported_path).catch(folder) : folder()).catch((e) =>
+      setError(`show in Finder: ${e}`),
+    );
   }, []);
 
   const all = lib?.recordings ?? [];
@@ -228,8 +250,8 @@ export default function RecordingsWindow() {
           </h1>
           {lib && all.length > 0 && (
             <span className="faint" style={{ fontSize: "var(--text-small)", whiteSpace: "nowrap" }}>
-              {all.length === 1 ? "1 recording" : `${all.length} recordings`} · {size(total)} · kept
-              for {lib.keep_days} days
+              {all.length === 1 ? "1 recording" : `${all.length} recordings`} · {size(total)} ·{" "}
+              {keepLine(lib)}
             </span>
           )}
         </div>
@@ -265,7 +287,8 @@ export default function RecordingsWindow() {
         )}
         {lib && all.length === 0 && (
           <Empty title="No recordings yet">
-            Recordings are kept here for {lib.keep_days} days.
+            Recordings are kept here for {lib.keep_days_unexported} days, or{" "}
+            {lib.keep_days_exported} once exported.
           </Empty>
         )}
         {all.length > 0 && groups.length === 0 && (
@@ -304,6 +327,7 @@ export default function RecordingsWindow() {
           </section>
         ))}
       </div>
+      {confirmDialog}
     </main>
   );
 }
@@ -393,6 +417,7 @@ function Card({
       />
       <div className="rec-thumb">
         {r.thumb_path && <img src={convertFileSrc(r.thumb_path)} alt="" draggable={false} />}
+        {r.exported && <span className="rec-badge rec-exported">Exported</span>}
         {r.duration_s != null && <span className="rec-badge">{recordingLength(r.duration_s)}</span>}
       </div>
       <button

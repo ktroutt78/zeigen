@@ -2,6 +2,17 @@
 
 Things left worse than we'd like, with why. Newest at top. Remove an entry when it is paid.
 
+## Recordings feedback: untried and rough (2026-11-17)
+
+- Not run in the app. Seen in headless Chrome with stubbed Tauri calls: the Exported badge, the header line, the in-window Delete confirm, the rename refusal text (the native alert drawn by a stand-in), and the Mark marker mid-drag (marker and preview followed the drag). Untried in WKWebView: Show in Finder selecting the exported file, the confirm's focus ring and Esc, and the preview returning to the playhead when a Mark drag ends or is cancelled (the harness's virtual clock never settles a seek; plain hover shows the same there).
+- Thumbnail cost is one compositor run per thumbnail: 0.4 to 0.8 s near the start of the real recordings, rising with how far in the Mark is on webcam takes, because the webcam reader decodes every frame up to the Mark (1.8 s at 3:25 into a 3:49 take). A Mark near the end of a 10-minute take would be about 5 s, in the background, one at a time.
+- The thumbnail is keyed on a hash of the sidecar's bytes, so any change to the sidecar makes a new one, including a rename or an edit that does not change the picture.
+- Deleting a recording while its thumbnail is being made could race: the render writes `.thumb-work/` and `.thumb-tmp.jpg` into the folder for up to a couple of seconds, and a Delete in that moment can fail with "directory not empty".
+- Exports made before `.exported.json` existed are found by file name in the active and default save folders. Two recordings with the same name both count as exported if either was (kept longer, the safe direction). A recording whose export file was deleted or moved before the first launch with this change counts as never exported. On 2026-11-17, six of the twelve kept recordings had no export file and become due on the first launch 7 days after they were made.
+- A record stays after its export file is deleted: the recording still counts as exported and Show in Finder falls back to the folder.
+- The in-window confirm has no focus trap (Tab can reach the page behind it) and does not hand focus back to the card when it closes.
+- A press within 3 px of the playhead line scrubs rather than grabbing the Mark. Right after M the Mark sits under the playhead, so it is grabbed a few pixels to either side.
+
 ## Review feedback fixes: untried in the app (2026-11-17)
 
 - Seen only in headless Chrome with stubbed Tauri calls. Not in WKWebView: the tool row across the top, Export following the settings, the dimmed Margin/Corners, the preview without its own fill, the shorter title line.
@@ -46,7 +57,6 @@ Things left worse than we'd like, with why. Newest at top. Remove an entry when 
 
 - Seen only in headless Chrome with stubbed Tauri calls and real thumbnails made from the library into a temp dir. Not opened in the app: clicking a card, Rename, Show in Finder, Delete, the hover ring and the "..." fade, and thumbnails filling in live are all untried.
 - A thumbnail that ffmpeg cannot make is tried again on every list (each focus). Only a recording whose screen file probes fine but will not give a frame hits this; an unreadable file is skipped because its failed probe is cached.
-- Deleting a recording while its thumbnail is being made could race: ffmpeg may write `.thumb-tmp.jpg` into the folder as it is removed, and the delete then fails with "directory not empty". The window is a fraction of a second, once per recording.
 - If the background fill-in finishes before the list call returns, the list overwrites that update and the thumbnail shows only after the next focus.
 - Thumbnails are letterboxed (contain) on the canvas colour, so tall window and area recordings get wide dark side bars. Cover cropped too much of those; not tuned per shape.
 - The menu opens below the "..." button and is not flipped near the bottom of the window; it scrolls with the grid.

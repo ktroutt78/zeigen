@@ -12,7 +12,15 @@
 // The Recordings window's cache, also in the folder root and rebuilt from the
 // recording when missing:
 //   .probe.json         the screen file's duration and the length it was probed at
-//   thumb-<ms>.jpg      the card's thumbnail, a frame <ms> into the screen file
+//
+// Not a cache, kept for good:
+//   .exported.json      written once a Save or Copy to clipboard succeeded: the
+//                       last exported file (null when only copied) and when.
+//                       Exported recordings are kept longer (sweep_expired).
+//                       Not in the sidecar, which Review rewrites from its state.
+//   thumb-<ms>-<edit>.jpg  the card's thumbnail: the finished picture (the
+//                       export's render) <ms> into the recording, for the edit
+//                       whose sidecar hashes to <edit>
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -37,17 +45,22 @@ pub struct LibraryRecording {
     // None until the screen file has been probed, or when ffprobe cannot read it.
     pub duration_s: Option<f64>,
     pub size_bytes: u64,
-    // None until the thumbnail for the current Mark has been made, or when
-    // ffmpeg could not make it; the card shows a placeholder.
+    // None until the thumbnail for the current Mark and edit has been made, or
+    // when it could not be made; the card shows a placeholder.
     pub thumb_path: Option<String>,
     // Made while the Save to folder was on a drive and not moved there yet; it
     // is still in ~/Movies/Zeigen/.recordings (storage.rs).
     pub pending_move: bool,
+    // Saved or copied to the clipboard at least once.
+    pub exported: bool,
+    // The last file it was saved to, when that file is still there.
+    pub exported_path: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
 pub struct Library {
-    pub keep_days: i64,
+    pub keep_days_exported: i64,
+    pub keep_days_unexported: i64,
     pub recordings: Vec<LibraryRecording>,
 }
 
@@ -67,6 +80,7 @@ pub async fn list_recordings(app: AppHandle) -> Result<Library, String> {
         storage::clear_pending(&default_lib);
     }
     let current_lib = storage::library(&storage::active()?.root);
+    record_legacy_exports(&current_lib, &export_files(&save_roots()?));
     let recordings = list_for(&default_lib, &current_lib);
     std::thread::spawn(move || {
         let _one_at_a_time = REFRESH.lock();
@@ -79,14 +93,14 @@ pub async fn list_recordings(app: AppHandle) -> Result<Library, String> {
         };
         for r in list_for(&default_lib, &current_lib) {
             let Some(dir) = Path::new(&r.scratch_mp4_path).parent() else { continue };
-            if refresh_folder(dir, &edit::probe_duration_seconds, &extract_frame) {
+            if refresh_folder(dir, &edit::probe_duration_seconds, &make_thumb) {
                 if let Some(r) = read_folder(dir) {
                     let _ = app.emit("library-recording", r);
                 }
             }
         }
     });
-    Ok(Library { keep_days: KEEP_DAYS, recordings })
+    Ok(Library { keep_days_exported: KEEP_DAYS_EXPORTED, keep_days_unexported: KEEP_DAYS_UNEXPORTED, recordings })
 }
 
 // The current library, plus the default library's recordings still waiting to
@@ -136,6 +150,8 @@ struct Folder {
     screen: PathBuf,
     webcam: Option<PathBuf>,
     sidecar: SidecarState,
+    // Hash of the sidecar's bytes: a new edit wants a new thumbnail.
+    edit_key: String,
 }
 
 fn folder(dir: &Path) -> Option<Folder> {
@@ -145,6 +161,12 @@ fn folder(dir: &Path) -> Option<Folder> {
     let stamp = dir.file_name()?.to_str()?.strip_prefix("recording-")?.to_string();
     let scratch_mp4 = dir.join(format!("recording-{stamp}.mp4"));
     let sidecar = edit::read_sidecar_path(&scratch_mp4).ok()??;
+    let edit_key = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::hash::DefaultHasher::new();
+        std::fs::read(edit::sidecar_path(&scratch_mp4)).ok()?.hash(&mut h);
+        format!("{:016x}", h.finish())
+    };
 
     // Same choice recording_finalize and export_inputs_from_source make: a
     // sources/screen.mp4 means the webcam shape; otherwise the logical mp4 is
@@ -158,15 +180,16 @@ fn folder(dir: &Path) -> Option<Folder> {
     } else {
         return None;
     };
-    Some(Folder { stamp, scratch_mp4, screen, webcam, sidecar })
+    Some(Folder { stamp, scratch_mp4, screen, webcam, sidecar, edit_key })
 }
 
 pub(crate) fn read_folder(dir: &Path) -> Option<LibraryRecording> {
     let f = folder(dir)?;
     let duration_s = cached_duration(dir, &f.screen).flatten();
     let thumb = thumb_time(f.sidecar.thumbnail_time, duration_s)
-        .map(|t| thumb_path(dir, t))
+        .map(|t| thumb_path(dir, t, &f.edit_key))
         .filter(|p| p.is_file());
+    let record = read_record(dir);
     Some(LibraryRecording {
         stamp: f.stamp,
         scratch_mp4_path: f.scratch_mp4.to_string_lossy().into_owned(),
@@ -179,6 +202,8 @@ pub(crate) fn read_folder(dir: &Path) -> Option<LibraryRecording> {
         size_bytes: dir_size(dir),
         thumb_path: thumb.map(|p| p.to_string_lossy().into_owned()),
         pending_move: storage::is_pending(dir),
+        exported: record.is_some(),
+        exported_path: record.and_then(|r| r.path).filter(|p| Path::new(p).is_file()),
     })
 }
 
@@ -190,10 +215,11 @@ fn thumb_time(mark: Option<f64>, duration_s: Option<f64>) -> Option<f64> {
     mark.or_else(|| duration_s.map(|d| if d < 2.0 { d / 2.0 } else { 1.0 }))
 }
 
-// The time is in the name, so a thumbnail made for an older Mark is simply not
-// found, and the webview never shows a cached copy of the old picture.
-fn thumb_path(dir: &Path, t: f64) -> PathBuf {
-    dir.join(format!("thumb-{}.jpg", (t * 1000.0).round() as i64))
+// The time and the edit are in the name, so a thumbnail made for an older Mark
+// or edit is simply not found, and the webview never shows a cached copy of the
+// old picture.
+fn thumb_path(dir: &Path, t: f64, edit_key: &str) -> PathBuf {
+    dir.join(format!("thumb-{}-{edit_key}.jpg", (t * 1000.0).round() as i64))
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -214,12 +240,12 @@ fn cached_duration(dir: &Path, screen: &Path) -> Option<Option<f64>> {
 }
 
 type Probe<'a> = &'a dyn Fn(&Path) -> Result<f64, String>;
-type Extract<'a> = &'a dyn Fn(&Path, f64, &Path) -> Result<(), String>;
+type Thumb<'a> = &'a dyn Fn(&Folder, f64, &Path) -> Result<(), String>;
 
 // Makes whatever of the folder's cache is missing or stale: the duration, then
-// the thumbnail for the current Mark. True when it wrote anything. A frame that
-// cannot be extracted leaves no thumbnail (placeholder card) and no error.
-fn refresh_folder(dir: &Path, probe: Probe, extract: Extract) -> bool {
+// the thumbnail for the current Mark and edit. True when it wrote anything. A
+// thumbnail that cannot be made leaves none (placeholder card) and no error.
+fn refresh_folder(dir: &Path, probe: Probe, make: Thumb) -> bool {
     let Some(f) = folder(dir) else { return false };
     let mut changed = false;
     let duration_s = match cached_duration(dir, &f.screen) {
@@ -233,13 +259,13 @@ fn refresh_folder(dir: &Path, probe: Probe, extract: Extract) -> bool {
         }
     };
     let Some(t) = thumb_time(f.sidecar.thumbnail_time, duration_s) else { return changed };
-    let thumb = thumb_path(dir, t);
+    let thumb = thumb_path(dir, t, &f.edit_key);
     if thumb.is_file() {
         return changed;
     }
     // Written beside it and renamed, so the webview never loads half a file.
     let tmp = dir.join(".thumb-tmp.jpg");
-    if let Err(e) = extract(&f.screen, t, &tmp).and_then(|_| {
+    if let Err(e) = make(&f, t, &tmp).and_then(|_| {
         std::fs::rename(&tmp, &thumb).map_err(|e| format!("rename thumbnail: {e}"))
     }) {
         eprintln!("[library] no thumbnail for {}: {e}", dir.display());
@@ -253,6 +279,20 @@ fn refresh_folder(dir: &Path, probe: Probe, extract: Extract) -> bool {
         }
     }
     true
+}
+
+// The finished picture at `t`, drawn by the export's render (edit::render_still).
+// A render that fails for any reason falls back to the plain screen frame.
+fn make_thumb(f: &Folder, t: f64, out: &Path) -> Result<(), String> {
+    let work = f.scratch_mp4.with_file_name(".thumb-work");
+    match edit::render_still(&f.scratch_mp4, t, &work, out) {
+        Ok(true) => Ok(()),
+        Ok(false) => extract_frame(&f.screen, t, out),
+        Err(e) => {
+            eprintln!("[library] thumbnail render failed, using the screen frame: {e}");
+            extract_frame(&f.screen, t, out)
+        }
+    }
 }
 
 // One frame of the raw screen file, 480 px wide, as a JPEG.
@@ -271,24 +311,130 @@ fn extract_frame(screen: &Path, t: f64, out: &Path) -> Result<(), String> {
     Ok(())
 }
 
-// Recordings are kept this long after they were made, then removed at launch
-// (Keith, 2026-11-16). Age is the recording time in the folder's name, not the
+// Recordings are kept this long after they were made, then removed at launch:
+// one saved or copied at least once for 30 days, one never exported for 7
+// (Keith, 2026-11-17). Age is the recording time in the folder's name, not the
 // folder's modification time, which every reopen and edit would refresh.
-const KEEP_DAYS: i64 = 30;
+const KEEP_DAYS_EXPORTED: i64 = 30;
+const KEEP_DAYS_UNEXPORTED: i64 = 7;
 
-pub(crate) fn sweep_expired(root: &Path, now: chrono::NaiveDateTime) {
+pub(crate) fn sweep_expired(root: &Path, exports: &[PathBuf], now: chrono::NaiveDateTime) {
     let Ok(entries) = std::fs::read_dir(root) else { return };
     for dir in entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
-        let made = dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .and_then(|n| n.strip_prefix("recording-"))
-            .and_then(|s| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d-%H%M%S").ok());
-        if made.is_some_and(|m| now - m > chrono::Duration::days(KEEP_DAYS)) {
-            eprintln!("[library] removing {} (older than {KEEP_DAYS} days)", dir.display());
+        let Some(stamp) = dir.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_prefix("recording-")) else {
+            continue;
+        };
+        let Ok(made) = chrono::NaiveDateTime::parse_from_str(stamp, "%Y-%m-%d-%H%M%S") else { continue };
+        let age = now - made;
+        if age <= chrono::Duration::days(KEEP_DAYS_UNEXPORTED) {
+            continue;
+        }
+        // Looks for an export made before records were kept, so that one is
+        // found before its recording counts as never exported.
+        let expired = age > chrono::Duration::days(KEEP_DAYS_EXPORTED)
+            || exported(&dir, stamp, exports).is_none();
+        if expired {
+            eprintln!("[library] removing {} (past its keep time)", dir.display());
             let _ = std::fs::remove_dir_all(&dir);
         }
     }
+}
+
+const EXPORTED: &str = ".exported.json";
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+struct ExportRecord {
+    // The last exported file; None when it only ever went to the clipboard.
+    path: Option<String>,
+    // When, local time.
+    at: String,
+}
+
+fn read_record(dir: &Path) -> Option<ExportRecord> {
+    serde_json::from_slice(&std::fs::read(dir.join(EXPORTED)).ok()?).ok()
+}
+
+fn write_record(dir: &Path, r: &ExportRecord) {
+    if let Err(e) = std::fs::write(dir.join(EXPORTED), serde_json::to_vec(r).unwrap()) {
+        eprintln!("[library] could not record the export of {}: {e}", dir.display());
+    }
+}
+
+fn local_time(t: std::time::SystemTime) -> String {
+    chrono::DateTime::<chrono::Local>::from(t).format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+// A Save (`file`) or a Copy to clipboard (None) of the recording in `dir`
+// succeeded. A copy keeps the last saved file.
+pub(crate) fn mark_exported(dir: &Path, file: Option<&Path>) {
+    let path = match file {
+        Some(f) => Some(f.to_string_lossy().into_owned()),
+        None => read_record(dir).and_then(|r| r.path),
+    };
+    write_record(dir, &ExportRecord { path, at: local_time(std::time::SystemTime::now()) });
+}
+
+// The folders exports go to: the active root and the default root.
+fn save_roots() -> Result<Vec<PathBuf>, String> {
+    let default = storage::default_root()?;
+    let active = storage::active()?.root;
+    Ok(if active == default { vec![default] } else { vec![active, default] })
+}
+
+// The mp4 and GIF files directly in `roots`.
+pub(crate) fn export_files(roots: &[PathBuf]) -> Vec<PathBuf> {
+    roots
+        .iter()
+        .flat_map(|r| std::fs::read_dir(r).into_iter().flatten().flatten().map(|e| e.path()))
+        .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "mp4" || x == "gif"))
+        .collect()
+}
+
+// A file name export_slot could have given an export of this recording:
+// "<name>.mp4", "<name> 2.mp4", "recording-<stamp>.gif", "recording-<stamp>-2.gif".
+fn is_export_of(file: &str, stamp: &str, name: Option<&str>) -> bool {
+    let Some(stem) = file.strip_suffix(".mp4").or_else(|| file.strip_suffix(".gif")) else { return false };
+    let numbered = |base: &str, sep: &str| {
+        stem == base
+            || stem
+                .strip_prefix(base)
+                .and_then(|r| r.strip_prefix(sep))
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    };
+    numbered(&format!("recording-{stamp}"), "-")
+        || edit::export_name(name).is_some_and(|n| numbered(&n, " "))
+}
+
+// The recording's export record. One exported before records were kept has
+// none: an export file named for it in `exports` (the save folders) counts,
+// and the newest such file is recorded so the search is not repeated.
+fn exported(dir: &Path, stamp: &str, exports: &[PathBuf]) -> Option<ExportRecord> {
+    if let Some(r) = read_record(dir) {
+        return Some(r);
+    }
+    let name = edit::read_sidecar_path(&dir.join(format!("recording-{stamp}.mp4"))).ok().flatten().and_then(|s| s.name);
+    let (file, modified) = exports
+        .iter()
+        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| is_export_of(n, stamp, name.as_deref())))
+        .filter_map(|p| Some((p, std::fs::metadata(p).ok()?.modified().ok()?)))
+        .max_by_key(|(_, m)| *m)?;
+    let r = ExportRecord { path: Some(file.to_string_lossy().into_owned()), at: local_time(modified) };
+    write_record(dir, &r);
+    Some(r)
+}
+
+fn record_legacy_exports(lib: &Path, exports: &[PathBuf]) {
+    for dir in std::fs::read_dir(lib).into_iter().flatten().flatten().map(|e| e.path()) {
+        if let Some(stamp) = dir.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_prefix("recording-")) {
+            exported(&dir, stamp, exports);
+        }
+    }
+}
+
+// Launch clean-up of the current library (lib.rs).
+pub(crate) fn sweep_current_library() {
+    let (Ok(a), Ok(roots)) = (storage::active(), save_roots()) else { return };
+    sweep_expired(&storage::library(&a.root), &export_files(&roots), chrono::Local::now().naive_local());
 }
 
 // Review is done with a recording but it stays in the library: drop what is
@@ -391,21 +537,101 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    fn at(s: &str) -> chrono::NaiveDateTime {
+        chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d-%H%M%S").unwrap()
+    }
+
+    // Unexported takes go after 7 days, exported ones (Save or clipboard) after 30.
     #[test]
-    fn sweep_removes_only_recordings_older_than_thirty_days() {
-        let root = std::env::temp_dir().join(format!("zeigen-sweep-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let old = root.join("recording-2026-01-01-100000");
-        let fresh = root.join("recording-2026-01-20-100000");
+    fn sweep_keeps_exported_recordings_longer() {
+        let root = temp_root("sweep");
+        let saved = root.join("recording-2026-01-01-100000");
+        let copied = root.join("recording-2026-01-01-110000");
+        let unexported = root.join("recording-2026-01-01-120000");
         let other = root.join(".prewarm");
-        for d in [&old, &fresh, &other] {
+        for d in [&saved, &copied, &unexported, &other] {
             write(&d.join("x"), "x");
         }
-        let now = chrono::NaiveDateTime::parse_from_str("2026-02-01-100001", "%Y-%m-%d-%H%M%S").unwrap();
-        sweep_expired(&root, now);
-        assert!(!old.exists(), "31 days old: removed");
-        assert!(fresh.exists(), "12 days old: kept");
+        mark_exported(&saved, Some(Path::new("/elsewhere/Demo.mp4")));
+        mark_exported(&copied, None);
+
+        sweep_expired(&root, &[], at("2026-01-08-100000"));
+        assert!(saved.exists() && copied.exists() && unexported.exists(), "7 days: all kept");
+
+        sweep_expired(&root, &[], at("2026-01-09-130000"));
+        assert!(!unexported.exists(), "8 days, never exported: removed");
+        assert!(saved.exists(), "8 days, saved: kept");
+        assert!(copied.exists(), "8 days, copied to the clipboard: kept");
+
+        sweep_expired(&root, &[], at("2026-02-01-130000"));
+        assert!(!saved.exists() && !copied.exists(), "31 days: removed");
         assert!(other.exists(), "not a recording folder: never touched");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // A clipboard copy after a save keeps the saved file as the last export.
+    #[test]
+    fn clipboard_copy_counts_as_exported() {
+        let root = temp_root("clip");
+        let dir = recording(&root, "{}");
+        assert!(!scan(&root)[0].exported);
+        mark_exported(&dir, None);
+        let r = &scan(&root)[0];
+        assert!(r.exported && r.exported_path.is_none());
+        let file = root.join("Demo.mp4");
+        write(&file, "mp4");
+        mark_exported(&dir, Some(&file));
+        mark_exported(&dir, None);
+        let r = &scan(&root)[0];
+        assert!(r.exported);
+        assert_eq!(r.exported_path.as_deref(), Some(&*file.to_string_lossy()));
+        std::fs::remove_file(&file).unwrap();
+        assert!(scan(&root)[0].exported_path.is_none(), "a file that is gone is not offered");
+        assert!(scan(&root)[0].exported);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Exports made before records were kept are found by their file names, in
+    // either form export_slot gives, before the 7-day removal; the find is
+    // recorded.
+    #[test]
+    fn legacy_exports_are_found_by_name() {
+        assert!(is_export_of("recording-2026-01-01-100000.mp4", "2026-01-01-100000", None));
+        assert!(is_export_of("recording-2026-01-01-100000-3.gif", "2026-01-01-100000", None));
+        assert!(is_export_of("Q3 Demo.gif", "2026-01-01-100000", Some("Q3 Demo")));
+        assert!(is_export_of("Q3 Demo 2.mp4", "2026-01-01-100000", Some("Q3 Demo")));
+        assert!(is_export_of("a-b- c.mp4", "2026-01-01-100000", Some("a/b: c")));
+        assert!(is_export_of("recording-2026-01-01-100000.mp4", "2026-01-01-100000", Some("Q3 Demo")), "exported before it was named");
+        assert!(!is_export_of("Q3 Demo 2.mov", "2026-01-01-100000", Some("Q3 Demo")));
+        assert!(!is_export_of("Q3 Demo extra.mp4", "2026-01-01-100000", Some("Q3 Demo")));
+        assert!(!is_export_of("recording-2026-01-01-100001.mp4", "2026-01-01-100000", None));
+        assert!(!is_export_of("recording-2026-01-01-100000-.mp4", "2026-01-01-100000", None));
+
+        let root = temp_root("legacy");
+        let lib = root.join("Zeigen/.recordings");
+        let named = lib.join("recording-2026-01-01-100000");
+        write(&named.join("recording-2026-01-01-100000.mp4"), "screen");
+        write(&named.join(".recording-2026-01-01-100000.annotations.json"), r#"{"name": "Q3 Demo"}"#);
+        let dated = lib.join("recording-2026-01-02-100000");
+        write(&dated.join("recording-2026-01-02-100000.mp4"), "screen");
+        write(&dated.join(".recording-2026-01-02-100000.annotations.json"), "{}");
+        let never = lib.join("recording-2026-01-03-100000");
+        write(&never.join("recording-2026-01-03-100000.mp4"), "screen");
+        write(&never.join(".recording-2026-01-03-100000.annotations.json"), r#"{"name": "Other"}"#);
+        write(&root.join("Zeigen/Q3 Demo 2.mp4"), "mp4");
+        write(&root.join("Default/recording-2026-01-02-100000-2.gif"), "gif");
+        let exports = export_files(&[root.join("Zeigen"), root.join("Default")]);
+        assert_eq!(exports.len(), 2);
+
+        sweep_expired(&lib, &exports, at("2026-01-12-100000"));
+        assert!(named.exists() && dated.exists(), "exported before records: kept");
+        assert!(!never.exists(), "no export file: removed");
+        let list = scan(&lib);
+        assert!(list.iter().all(|r| r.exported));
+        assert_eq!(list[1].exported_path.as_deref(), Some(&*root.join("Zeigen/Q3 Demo 2.mp4").to_string_lossy()));
+        assert!(list[0].exported_path.as_deref().unwrap().ends_with("Default/recording-2026-01-02-100000-2.gif"));
+        // Recorded: found again with no export files to search.
+        assert!(exported(&named, "2026-01-01-100000", &[]).is_some());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -456,8 +682,7 @@ mod tests {
             write(&d.join("x"), "x");
         }
         write(&old_default.join(storage::PENDING_MOVE), "");
-        let now = chrono::NaiveDateTime::parse_from_str("2026-03-01-100000", "%Y-%m-%d-%H%M%S").unwrap();
-        sweep_expired(&current, now);
+        sweep_expired(&current, &[], at("2026-03-01-100000"));
         assert!(!old_current.exists());
         assert!(old_default.exists(), "not in the current library: not swept");
         let _ = std::fs::remove_dir_all(&root);
@@ -496,7 +721,7 @@ mod tests {
             probes.set(probes.get() + 1);
             Ok(12.0)
         };
-        let extract = |_: &Path, _: f64, out: &Path| std::fs::write(out, "jpg").map_err(|e| e.to_string());
+        let extract = |_: &Folder, _: f64, out: &Path| std::fs::write(out, "jpg").map_err(|e| e.to_string());
 
         // Before any refresh the scan shows the recording without a duration.
         assert!(scan(&root)[0].duration_s.is_none());
@@ -523,7 +748,7 @@ mod tests {
         let dir = recording(&root, "{}");
         let made = std::cell::RefCell::new(Vec::new());
         let probe = |_: &Path| Ok(30.0);
-        let extract = |_: &Path, t: f64, out: &Path| {
+        let extract = |_: &Folder, t: f64, out: &Path| {
             made.borrow_mut().push(t);
             std::fs::write(out, "jpg").map_err(|e| e.to_string())
         };
@@ -531,7 +756,7 @@ mod tests {
         refresh_folder(&dir, &probe, &extract);
         assert_eq!(*made.borrow(), vec![1.0], "no mark: a second in");
         let first = scan(&root)[0].thumb_path.clone().unwrap();
-        assert!(first.ends_with("thumb-1000.jpg"));
+        assert!(first.contains("/thumb-1000-"));
 
         refresh_folder(&dir, &probe, &extract);
         assert_eq!(made.borrow().len(), 1, "same mark: not made again");
@@ -541,7 +766,7 @@ mod tests {
         assert!(scan(&root)[0].thumb_path.is_none(), "stale thumbnail is not shown");
         assert!(refresh_folder(&dir, &probe, &extract));
         assert_eq!(*made.borrow(), vec![1.0, 7.25]);
-        assert!(scan(&root)[0].thumb_path.clone().unwrap().ends_with("thumb-7250.jpg"));
+        assert!(scan(&root)[0].thumb_path.clone().unwrap().contains("/thumb-7250-"));
         assert!(!Path::new(&first).exists());
         assert!(!dir.join(".thumb-tmp.jpg").exists());
         let _ = std::fs::remove_dir_all(&root);
@@ -551,7 +776,7 @@ mod tests {
     fn failed_extract_or_probe_leaves_a_placeholder() {
         let root = temp_root("fail");
         let dir = recording(&root, "{}");
-        let fail = |_: &Path, _: f64, out: &Path| {
+        let fail = |_: &Folder, _: f64, out: &Path| {
             std::fs::write(out, "partial").unwrap();
             Err("ffmpeg: boom".to_string())
         };
@@ -570,22 +795,127 @@ mod tests {
             probes.set(probes.get() + 1);
             edit::probe_duration_seconds(p)
         };
-        refresh_folder(&dir2, &probe, &extract_frame);
-        refresh_folder(&dir2, &probe, &extract_frame);
+        refresh_folder(&dir2, &probe, &make_thumb);
+        refresh_folder(&dir2, &probe, &make_thumb);
         assert_eq!(probes.get(), 1);
         let r = &scan(&root2)[0];
         assert!(r.duration_s.is_none() && r.thumb_path.is_none());
 
         // A Mark on an unreadable file runs the real ffmpeg, which fails quietly.
         write(&dir2.join(".recording-2026-01-01-100000.annotations.json"), r#"{"thumbnail_time": 3.0}"#);
-        assert!(!refresh_folder(&dir2, &probe, &extract_frame));
+        assert!(!refresh_folder(&dir2, &probe, &make_thumb));
         assert!(scan(&root2)[0].thumb_path.is_none());
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&root2);
     }
 
+    // A webcam recording like the export tests' (blue screen with sound, red
+    // webcam, bubble bottom-right, a Full webcam scene from 1.5 s to 3.2 s), the
+    // Mark at `mark`.
+    fn synth_webcam_recording(root: &Path, mark: f64) -> PathBuf {
+        let dir = root.join("recording-2026-01-01-100000");
+        let sources = dir.join("sources");
+        std::fs::create_dir_all(&sources).unwrap();
+        let synth = |out: &Path, args: &[&str]| {
+            let o = Command::new(FFMPEG_PATH).args(["-y", "-v", "error"]).args(args)
+                .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"]).arg(out).output().unwrap();
+            assert!(o.status.success(), "synth: {}", String::from_utf8_lossy(&o.stderr));
+        };
+        synth(&sources.join("screen.mp4"), &["-f", "lavfi", "-i", "color=c=blue:s=1280x720:r=30:d=4",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=4", "-c:a", "aac", "-shortest"]);
+        synth(&sources.join("webcam.mp4"), &["-f", "lavfi", "-i", "color=c=red:s=480x480:r=30:d=4"]);
+        set_mark(&dir, mark, "bottom_right");
+        dir
+    }
+
+    fn set_mark(dir: &Path, mark: f64, zone: &str) {
+        let sidecar = format!(
+            r#"{{"thumbnail_time": {mark}, "bubble_zone": "{zone}",
+                "scenes": [{{"start": 1.5, "end": 3.2, "layout": "full_webcam"}}]}}"#
+        );
+        write(&dir.join(".recording-2026-01-01-100000.annotations.json"), &sidecar);
+    }
+
+    // Mean colour of an 8x8 patch of a JPEG.
+    fn patch(jpg: &Path, x: u32, y: u32) -> (u8, u8, u8) {
+        let o = Command::new(FFMPEG_PATH)
+            .args(["-v", "error", "-i"]).arg(jpg)
+            .args(["-vf", &format!("crop=8:8:{x}:{y},scale=1:1:flags=area"), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+            .output().unwrap();
+        assert_eq!(o.stdout.len(), 3, "{}", String::from_utf8_lossy(&o.stderr));
+        (o.stdout[0], o.stdout[1], o.stdout[2])
+    }
+    fn red((r, _, b): (u8, u8, u8)) -> bool { r > 150 && b < 100 }
+    fn blue((r, _, b): (u8, u8, u8)) -> bool { b > 150 && r < 100 }
+    // Any red patch in the bottom-right quarter of a 480x270 thumbnail.
+    fn has_bubble(jpg: &Path) -> bool {
+        (0..10).flat_map(|i| (0..6).map(move |j| (244 + i * 22, 137 + j * 21))).any(|(x, y)| red(patch(jpg, x, y)))
+    }
+
+    // The thumbnail is the finished picture: inside the Full webcam scene it is
+    // the webcam (red), outside it the screen (blue) with the bubble.
+    #[test]
+    fn thumbnail_is_the_finished_picture() {
+        let root = temp_root("finished");
+        let dir = synth_webcam_recording(&root, 2.4);
+        let probe = &edit::probe_duration_seconds;
+        assert!(refresh_folder(&dir, probe, &make_thumb));
+        let jpg = PathBuf::from(scan(&root)[0].thumb_path.clone().expect("thumbnail made"));
+        assert!(red(patch(&jpg, 236, 131)), "in the scene: webcam fills the picture {:?}", patch(&jpg, 236, 131));
+        assert!(red(patch(&jpg, 20, 20)), "in the scene: corner {:?}", patch(&jpg, 20, 20));
+
+        set_mark(&dir, 0.5, "bottom_right");
+        assert!(refresh_folder(&dir, probe, &make_thumb));
+        let jpg2 = PathBuf::from(scan(&root)[0].thumb_path.clone().unwrap());
+        assert!(blue(patch(&jpg2, 236, 131)), "outside the scene: the screen {:?}", patch(&jpg2, 236, 131));
+        assert!(has_bubble(&jpg2), "outside the scene: the webcam bubble shows");
+        assert!(!jpg.exists(), "the older thumbnail is removed");
+        assert!(!dir.join(".thumb-work").exists(), "render work folder removed");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Made again when the edit changes (same Mark), not when nothing changed.
+    #[test]
+    fn thumbnail_follows_the_edit() {
+        let root = temp_root("edit");
+        let dir = recording(&root, r#"{"thumbnail_time": 2.0}"#);
+        let made = std::cell::Cell::new(0);
+        let make = |_: &Folder, _: f64, out: &Path| {
+            made.set(made.get() + 1);
+            std::fs::write(out, "jpg").map_err(|e| e.to_string())
+        };
+        refresh_folder(&dir, &|_| Ok(30.0), &make);
+        refresh_folder(&dir, &|_| Ok(30.0), &make);
+        assert_eq!(made.get(), 1, "nothing changed: not made again");
+        let first = scan(&root)[0].thumb_path.clone().unwrap();
+        write(&dir.join(".recording-2026-01-01-100000.annotations.json"),
+            r#"{"thumbnail_time": 2.0, "bubble_zone": "top_left"}"#);
+        assert!(scan(&root)[0].thumb_path.is_none(), "the old edit's thumbnail is not shown");
+        assert!(refresh_folder(&dir, &|_| Ok(30.0), &make));
+        assert_eq!(made.get(), 2, "edit changed: made again");
+        assert!(!Path::new(&first).exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // A render that fails (here a damaged cursor log, which also fails the
+    // export) falls back to the plain screen frame: blue, no bubble.
+    #[test]
+    fn failed_render_falls_back_to_the_screen_frame() {
+        let root = temp_root("fallback");
+        let dir = synth_webcam_recording(&root, 0.5);
+        write(&dir.join("sources/.screen.cursor.json"), "not json");
+        assert!(edit::render_still(&dir.join("recording-2026-01-01-100000.mp4"), 0.5,
+            &root.join("work"), &root.join("x.jpg")).is_err());
+        assert!(refresh_folder(&dir, &edit::probe_duration_seconds, &make_thumb));
+        let jpg = PathBuf::from(scan(&root)[0].thumb_path.clone().expect("plain thumbnail made"));
+        assert!(blue(patch(&jpg, 236, 131)));
+        assert!(!has_bubble(&jpg), "plain screen frame: no bubble");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     // Thumbnails of the real library written to a temp dir (the recordings are
-    // only read), for eyeballing and timing:
+    // only read; the render's work folder is in the temp dir too), for
+    // eyeballing and timing:
     // cargo test --lib real_library_thumbs -- --ignored --nocapture
     #[test]
     #[ignore]
@@ -594,16 +924,20 @@ mod tests {
         std::fs::create_dir_all(&out).unwrap();
         for dir in std::fs::read_dir(storage::library(&storage::active().unwrap().root)).unwrap().flatten().map(|e| e.path()) {
             let Some(f) = folder(&dir) else { continue };
-            let t0 = std::time::Instant::now();
             let d = edit::probe_duration_seconds(&f.screen).ok();
-            let probe_ms = t0.elapsed().as_millis();
             let Some(t) = thumb_time(f.sidecar.thumbnail_time, d) else { continue };
-            let jpg = out.join(format!("{}.jpg", f.stamp));
+            // THUMB_AT=0.9 times the frame at 90% of the recording instead.
+            let t = std::env::var("THUMB_AT").ok().and_then(|v| v.parse::<f64>().ok()).zip(d).map_or(t, |(k, d)| k * d);
+            let plain = out.join(format!("{}-plain.jpg", f.stamp));
+            let t0 = std::time::Instant::now();
+            let p = extract_frame(&f.screen, t, &plain);
+            let plain_ms = t0.elapsed().as_millis();
+            let done = out.join(format!("{}-finished.jpg", f.stamp));
             let t1 = std::time::Instant::now();
-            let r = extract_frame(&f.screen, t, &jpg);
+            let r = edit::render_still(&f.scratch_mp4, t, &out.join(format!("work-{}", f.stamp)), &done);
             println!(
-                "{} dur={d:?} mark={:?} t={t} probe={probe_ms}ms extract={}ms {:?} {}",
-                f.stamp, f.sidecar.thumbnail_time, t1.elapsed().as_millis(), r.err(), jpg.display()
+                "{} dur={d:?} mark={:?} t={t} plain={plain_ms}ms {:?} finished={}ms {r:?}",
+                f.stamp, f.sidecar.thumbnail_time, p.err(), t1.elapsed().as_millis()
             );
         }
     }

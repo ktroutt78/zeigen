@@ -38,11 +38,18 @@ type TimelineProps = {
   // null = no webcam: no Scene row.
   scene: SceneEditor | null;
   thumbnailTime: number | null;
+  // Moves the Mark (dragging its marker on the Video row).
+  setThumbnailTime: (t: number) => void;
 };
 
 // Wide enough for "Zoom" plus its Generate and trash buttons, clear of the
 // EDGE_PAD the scroll viewport reaches into this column.
 const LABEL_COL_W = 120;
+// The Mark marker's grab area, centred on it. Within PLAYHEAD_GRAB_PX of the
+// playhead line a press scrubs the playhead instead.
+const MARK_HIT_W = 12;
+const MARK_HIT_H = 18;
+const PLAYHEAD_GRAB_PX = 3;
 const RULER_H = 18;
 const ROW_H = 44;
 const ROW_GAP = 8;
@@ -88,6 +95,8 @@ export default function Timeline(props: TimelineProps) {
   const [viewportWidth, setViewportWidth] = useState(0);
   const [hover, setHover] = useState<number | null>(null);
   const [zoomLabelHover, setZoomLabelHover] = useState(false);
+  // The Mark's time while its marker is being dragged.
+  const [markDrag, setMarkDrag] = useState<number | null>(null);
   const playheadRef = useRef<HTMLDivElement | null>(null);
   // Zoom factor: the tracks column is zoom x the viewport's width (1 = fit).
   // zoomRef is the latest requested value, ahead of the render, so a burst of
@@ -309,8 +318,64 @@ export default function Timeline(props: TimelineProps) {
   };
 
   const onTracksPointerLeave = () => {
+    // A Mark drag keeps its preview while the pointer is off the tracks.
+    if (markDrag != null) return;
     setHover(null);
     props.previewAt(null);
+  };
+
+  // The Mark marker: a drag moves the Mark, showing the frame under the marker
+  // in the preview the way hover does (playhead restored on release); release
+  // commits, Esc cancels. Clamped to the recording like M, which marks the
+  // playhead wherever it is (outside the trim too). A click without movement
+  // jumps the playhead to the Mark, as before. A press on the playhead line
+  // is left to the track, which scrubs.
+  const onMarkPointerDown = (e: React.PointerEvent) => {
+    if (!scale || props.thumbnailTime == null) return;
+    const rect = getRect();
+    if (Math.abs(e.clientX - (rect.left + scale.xAt(getPlayhead(), rect.width))) <= PLAYHEAD_GRAB_PX) return;
+    e.stopPropagation();
+    e.preventDefault();
+    const from = props.thumbnailTime;
+    const startX = e.clientX;
+    const video = props.videoRef.current;
+    const wasPlaying = !!video && !video.paused;
+    let dragging = false;
+    let at = from;
+    setHover(null);
+    const finish = (commit: boolean) => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("keydown", onKey, true);
+      if (!dragging) return;
+      props.previewAt(null);
+      setMarkDrag(null);
+      if (commit) props.setThumbnailTime(at);
+      if (wasPlaying) video?.play().catch(() => {});
+    };
+    const onMove = (ev: PointerEvent) => {
+      if (!dragging && Math.abs(ev.clientX - startX) > MOVE_THRESHOLD_PX) {
+        dragging = true;
+        video?.pause();
+      }
+      if (!dragging) return;
+      at = Math.max(0, Math.min(scale.duration, scale.rawTimeAtClientX(ev.clientX, rect)));
+      setMarkDrag(at);
+      props.previewAt(at);
+    };
+    const onUp = () => {
+      if (!dragging) props.setPlayhead(from);
+      finish(true);
+    };
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key !== "Escape") return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      finish(false);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("keydown", onKey, true);
   };
 
   // A segment being moved or resized: preview the edge being placed.
@@ -586,32 +651,35 @@ export default function Timeline(props: TimelineProps) {
                 )}
               </div>
 
-              {/* Thumbnail tick, inside the row's bottom edge. Click jumps the
-                  scrubber to the picked frame so the user can verify. Muted color
-                  + tooltip when the picked time falls outside the active trim. */}
+              {/* Mark (thumbnail) marker, inside the row's bottom edge. Drag
+                  moves the Mark; a click jumps the playhead to it. Muted color
+                  + tooltip when it falls outside the active trim. Drawn before
+                  the trim handles so they stay on top where the two overlap. */}
               {props.thumbnailTime != null && scale && (() => {
-                const t = props.thumbnailTime;
+                const t = markDrag ?? props.thumbnailTime;
                 const outOfRange =
                   props.trim != null &&
                   (t < props.trim.in - TRIM_EPS || t > props.trim.out + TRIM_EPS);
                 const color = outOfRange ? "var(--fg-tertiary)" : "var(--accent)";
                 const title = outOfRange
                   ? `Thumbnail at ${t.toFixed(2)}s — outside trim range, save will fall back to a frame inside the trimmed output`
-                  : `Thumbnail at ${t.toFixed(2)}s — click to jump`;
+                  : `Thumbnail at ${t.toFixed(2)}s — drag to move, click to jump`;
                 return (
                   <div
-                    onPointerDown={(e) => {
-                      e.stopPropagation();
-                      e.preventDefault();
-                      props.setPlayhead(t);
-                    }}
-                    title={title}
+                    onPointerDown={onMarkPointerDown}
+                    title={markDrag == null ? title : undefined}
                     style={{
                       position: "absolute",
                       left: `${scale.pct(t)}%`,
                       bottom: 0,
+                      width: MARK_HIT_W,
+                      height: MARK_HIT_H,
                       transform: "translateX(-50%)",
-                      cursor: "pointer",
+                      display: "flex",
+                      alignItems: "flex-end",
+                      justifyContent: "center",
+                      cursor: "ew-resize",
+                      touchAction: "none",
                     }}
                   >
                     <svg width={10} height={12} viewBox="0 0 10 12" style={{ display: "block" }} aria-hidden>

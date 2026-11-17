@@ -5,6 +5,7 @@ import { emit, listen } from "@tauri-apps/api/event";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { Icon, I, P, RailIcon } from "./components/icons";
+import { useConfirm } from "./components/ConfirmDialog";
 import Timeline from "./timeline/Timeline";
 import { openRecordingsWindow } from "./openRecordings";
 import { recordingLength, recordingName as displayName } from "./recordingLabel";
@@ -879,6 +880,7 @@ export default function Review() {
   // Original-timeline timestamp for the user's chosen poster frame. null =
   // unset; export-time default (0.5s in) is applied on the Rust side.
   const [thumbnailTime, setThumbnailTime] = useState<number | null>(null);
+  const [confirmDialog, confirm] = useConfirm();
 
   const [saving, setSaving] = useState(false);
   // 0-1 fraction from the Rust "save-progress" event, emitted from
@@ -1969,11 +1971,10 @@ export default function Review() {
   // it for good (Keith, 2026-11-16).
   const onDiscard = useCallback(async () => {
     if (kept) {
-      const ok = await ask("This deletes the recording for good. It cannot be reopened afterwards.", {
+      const ok = await confirm({
         title: "Delete this recording?",
-        kind: "warning",
-        okLabel: "Delete",
-        cancelLabel: "Cancel",
+        message: "This deletes the recording for good. It cannot be reopened afterwards.",
+        confirmLabel: "Delete",
       });
       if (!ok) return;
     }
@@ -1984,7 +1985,7 @@ export default function Review() {
     } finally {
       setDiscarding(false);
     }
-  }, [kept, cleanupScratchAndExports, closeWindow]);
+  }, [kept, confirm, cleanupScratchAndExports, closeWindow]);
 
   // Reveal — only shown post-save. Points at the most recent save in any
   // format (per D-13 — chronological, not format-prioritized).
@@ -2667,6 +2668,7 @@ export default function Review() {
           zoom={zoomEditor}
           redact={redactionEditor}
           thumbnailTime={thumbnailTime}
+          setThumbnailTime={setThumbnailTime}
           bubbleRoundness={bubbleRoundness}
           bubbleZone={effectiveZone}
           bubbleScale={bubbleScale}
@@ -2759,6 +2761,7 @@ export default function Review() {
           destination={destination}
         />
       )}
+      {confirmDialog}
     </main>
   );
 }
@@ -2928,8 +2931,9 @@ type LeftColumnProps = {
   zoom: ZoomEditor;
   redact: RedactionEditor;
   // Timeline marker only — the thumbnail picker itself lives in the right
-  // panel's Export section.
+  // panel's Export section. Dragging the marker moves the Mark.
   thumbnailTime: number | null;
+  setThumbnailTime: (t: number) => void;
   // Read-only: stamped into the sidecar at record time (recorder UI owns
   // the control); Review only previews it via BubbleLayer's border-radius.
   bubbleRoundness: number | null;
@@ -3008,6 +3012,7 @@ function LeftColumn(props: LeftColumnProps) {
         redact={props.redact}
         scene={props.scene}
         thumbnailTime={props.thumbnailTime}
+        setThumbnailTime={props.setThumbnailTime}
       />
     </div>
   );

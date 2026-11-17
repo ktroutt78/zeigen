@@ -903,10 +903,8 @@ pub fn run() {
             exports::sweep_stale_exports();
             thumbs::sweep_stale_thumbs();
             sweep_stale_scratch();
-            // The 30-day clean-up runs on the current library only.
-            if let Ok(a) = storage::active() {
-                library::sweep_expired(&storage::library(&a.root), chrono::Local::now().naive_local());
-            }
+            // The keep-time clean-up runs on the current library only.
+            library::sweep_current_library();
             if let Some(chosen) = storage::chosen() {
                 allow_save_dir(&handle, &chosen);
             }
