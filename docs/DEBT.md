@@ -2,6 +2,17 @@
 
 Things left worse than we'd like, with why. Newest at top. Remove an entry when it is paid.
 
+## Save to folder: untried and rough (2026-11-17)
+
+- Not run in the app. Untried: a real external drive, unplugging it mid-take or before Save, the move at Stop onto the LaCie, the pending retry, the Settings row and its Move/Leave prompt, and the webview actually playing video and thumbnails from the chosen folder (the runtime asset-scope grant is proven only with `is_allowed` in a unit test).
+- No progress is shown while finalize copies a recording to an external drive. The main window is hidden and Review opens only when the copy ends, so a long take on a slow drive looks like a pause after Stop.
+- The Move offered on a folder change shows only "Moving N recordings..." and then the result, with no per-recording progress, and only in the Settings view (leaving Settings hides it; the move still runs).
+- The pending retry runs whenever the chosen folder is available and is not ~/Movies/Zeigen, not only when it is on another volume. Otherwise a recording waiting for a drive would never move after the setting changes to an internal folder. With no chosen folder, leftover markers are cleared.
+- Checking the folder writes and removes a tiny probe file each time the main window gains focus and at Record; on a spun-down drive that wakes it.
+- "In use" (skipped by moves) is a Review window or the recording in progress. Between finalize returning and Review's window existing there is a moment where a retry could move the folder Review is about to open; it needs the drive to come back in that moment.
+- A recording list can hold old paths for a pending recording until it reloads after `library-changed`; an Open in that moment opens Review on the old, now-moved folder.
+- If deleting the original fails after a verified copy, the remains stay in ~/Movies/Zeigen/.recordings without a marker; they show up again only if the setting goes back to the default.
+
 ## Compact capture window and hover pickers: untried (2026-11-17)
 
 - Seen only in headless Chrome with stubbed Tauri calls. Not tried in the app: the overlaid title bar (whether the Recordings and Settings icons line up with the traffic lights, and dragging the window by that row), the window growing to fit a long error, and the native selects laid invisibly over the picker line and device rows.
