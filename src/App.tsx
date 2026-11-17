@@ -7,7 +7,7 @@ import { emit } from "@tauri-apps/api/event";
 import { ask, open as openDialog } from "@tauri-apps/plugin-dialog";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import "./styles/capture.css";
-import { PILL_STRIP_CSS } from "./constants/bubble";
+import { BUBBLE_SIZE_PT, PILL_STRIP_CSS, type BubbleSize } from "./constants/bubble";
 import type { LibraryRecording } from "./RecordingsWindow";
 import { openRecordingsWindow } from "./openRecordings";
 import { recordingName } from "./recordingLabel";
@@ -40,8 +40,6 @@ function useRemembered<T>(key: string, initial: T) {
 const BUBBLE_LABEL = "webcam-bubble";
 let bubbleDeviceName: string | null = null;
 
-const BUBBLE_W = 240;
-const BUBBLE_H = BUBBLE_W + PILL_STRIP_CSS;
 const BUBBLE_MARGIN = 24;
 
 // Anchor rect for placing the bubble. Coords + size are in logical
@@ -98,8 +96,16 @@ async function openBubble(deviceName: string, anchor: BubbleAnchor) {
     return;
   }
 
+  await closeBubbleToolbar();
   if (existing) await existing.close().catch(() => {});
   bubbleDeviceName = deviceName;
+
+  // The S / M / L picked on the bubble's toolbar, remembered in settings.
+  const size = await invoke<{ bubble_size?: BubbleSize | null }>("get_settings")
+    .then((s) => s.bubble_size ?? "medium")
+    .catch(() => "medium" as const);
+  const BUBBLE_W = BUBBLE_SIZE_PT[size];
+  const BUBBLE_H = BUBBLE_W + PILL_STRIP_CSS;
 
   // Plant via set_window_frame_cg on tauri://created. Tauri's constructor
   // x/y drops negative coords for screens left of primary and can land
@@ -143,6 +149,7 @@ async function openBubble(deviceName: string, anchor: BubbleAnchor) {
     } catch (e) {
       console.error("bubble setup failed", e);
     }
+    void syncBubbleToolbar();
   });
   win.once("tauri://error", (e) => {
     console.error("bubble window error", e);
@@ -151,7 +158,56 @@ async function openBubble(deviceName: string, anchor: BubbleAnchor) {
 
 async function closeBubble() {
   bubbleDeviceName = null;
+  await closeBubbleToolbar();
   const existing = await WebviewWindow.getByLabel(BUBBLE_LABEL);
+  if (existing) await existing.close().catch(() => {});
+}
+
+// The shape / size pill above the bubble (BubbleToolbar.tsx): its own small
+// window, open only while the bubble is up AND the app is idle, so it can
+// never be on screen during a countdown or a recording. (The engine also
+// leaves Zeigen's windows out of display and area recordings, and a window
+// recording captures only the picked window's app.)
+const TOOLBAR_LABEL = "bubble-toolbar";
+const TOOLBAR_W = 196;
+const TOOLBAR_H = 42;
+let toolbarWanted = false;
+
+async function syncBubbleToolbar() {
+  const [bubble, toolbar] = await Promise.all([
+    WebviewWindow.getByLabel(BUBBLE_LABEL),
+    WebviewWindow.getByLabel(TOOLBAR_LABEL),
+  ]);
+  if (!toolbarWanted || !bubble) {
+    if (toolbar) await closeBubbleToolbar();
+    return;
+  }
+  if (toolbar) return;
+  const win = new WebviewWindow(TOOLBAR_LABEL, {
+    url: "/#bubble-toolbar",
+    title: "Webcam bubble",
+    width: TOOLBAR_W,
+    height: TOOLBAR_H,
+    decorations: false,
+    transparent: true,
+    alwaysOnTop: true,
+    resizable: false,
+    skipTaskbar: true,
+    visibleOnAllWorkspaces: true,
+    shadow: false,
+    focus: false,
+    // Like the bubble: the first click on a button reaches the button.
+    acceptFirstMouse: true,
+  });
+  // Wanted may have flipped while the window was being made.
+  win.once("tauri://created", () => {
+    if (!toolbarWanted) void closeBubbleToolbar();
+  });
+}
+
+async function closeBubbleToolbar() {
+  await invoke("bubble_hover_stop").catch(() => {});
+  const existing = await WebviewWindow.getByLabel(TOOLBAR_LABEL);
   if (existing) await existing.close().catch(() => {});
 }
 
@@ -974,15 +1030,16 @@ function App() {
   const [selectedArea, setSelectedArea] = useState<AreaSelection | null>(null);
   const [selectedMic, setSelectedMic] = useState<string | null>(null);
   const [selectedCamera, setSelectedCamera] = useState<number | null>(null);
-  // Bubble roundness preference (null = circle). Set before recording; the
-  // backend stamps the value into each recording's sidecar at finalize, so
-  // this is a remembered default, not an edit of existing recordings.
-  const [bubbleRoundness, setBubbleRoundness] = useState<number | null>(null);
   const [countdownDuration, setCountdownDuration] = useRemembered<CountdownDuration>("countdown", 5);
   const [lengthCapMode, setLengthCapMode] = useRemembered<LengthCapMode>("lengthCapMode", "off");
   const [lengthCapTargetSec, setLengthCapTargetSec] = useRemembered<number>("lengthCapTargetSec", 600);
   const [noiseReduction, setNoiseReduction] = useState<NrLevel>("med");
   const [state, setState] = useState<EngineState>("idle");
+  // Start pressed; cleared once the state leaves idle (or the start fails).
+  const [starting, setStarting] = useState(false);
+  useEffect(() => {
+    if (state !== "idle") setStarting(false);
+  }, [state]);
   const [progress, setProgress] = useState({ frames: 0, dropped: 0, elapsed_s: 0 });
   const [lastSaved, setLastSaved] = useState<string | null>(null);
   const [finalizeInfo, setFinalizeInfo] = useState<FinalizedRecording | null>(null);
@@ -1020,15 +1077,14 @@ function App() {
   // progress bar instead of staring at nothing during a multi-minute composite.
   const [compositeProgress, setCompositeProgress] = useState<number | null>(null);
 
-  // Load persisted noise-reduction level and bubble roundness on launch.
+  // Load the persisted noise-reduction level on launch.
   useEffect(() => {
-    invoke<{ noise_reduction?: string; bubble_roundness?: number | null }>("get_settings")
+    invoke<{ noise_reduction?: string }>("get_settings")
       .then((s) => {
         const lvl = s.noise_reduction;
         if (lvl === "off" || lvl === "low" || lvl === "med" || lvl === "high") {
           setNoiseReduction(lvl);
         }
-        setBubbleRoundness(s.bubble_roundness ?? null);
       })
       .catch(() => {});
   }, []);
@@ -1355,6 +1411,9 @@ function App() {
     if (sourceKind === "display" && selectedDisplay == null) return;
     if (sourceKind === "window" && selectedWindow == null) return;
     if (sourceKind === "area" && selectedArea == null) return;
+    // Hides the bubble toolbar at once, before the countdown (or, with the
+    // countdown off, the engine's started event) changes state.
+    setStarting(true);
     try {
       setError(null);
       setFinalizeInfo(null);
@@ -1513,6 +1572,7 @@ function App() {
           invoke("prewarm_abort").catch(() => {});
           await prewarmBounded;
           setState("idle");
+          setStarting(false);
           return;
         }
         // Wait for pre-warm to finish (engine back to .idle, scratch
@@ -1557,6 +1617,7 @@ function App() {
       // marquee-confirm through recording-end), not by start() itself.
     } catch (err) {
       setState("idle");
+      setStarting(false);
       setError(String(err));
     }
   };
@@ -2032,6 +2093,13 @@ function App() {
     }
   }, [cameraName, reviewActivity, sourceKind, selectedArea, selectedDisplay, selectedWindow, displays, windows]);
 
+  // The bubble's shape / size toolbar exists only while idle with a bubble up.
+  const toolbarOn = cameraName != null && reviewActivity === 0 && state === "idle" && !starting;
+  useEffect(() => {
+    toolbarWanted = toolbarOn;
+    void syncBubbleToolbar();
+  }, [toolbarOn]);
+
   // The bubble's hover close button. The bubble window can't reach this
   // window's state directly, so it emits an event; treat it exactly like
   // picking "Off" in the camera dropdown (the lifecycle effect above then
@@ -2243,18 +2311,6 @@ function App() {
               setNoiseReduction(v);
               invoke("set_noise_reduction", { level: v }).catch((e) => setError(String(e)));
             }}
-            bubbleRoundness={bubbleRoundness}
-            onBubbleRoundness={(v) => {
-              setBubbleRoundness(v);
-              // Live-preview push to the floating bubble window; the window
-              // also reads get_settings on mount, so a missed event can't
-              // leave it stale.
-              emit("bubble-style", { roundness: v }).catch(() => {});
-              invoke("set_bubble_roundness", { roundness: v }).catch((e) => setError(String(e)));
-            }}
-            // Roundness is captured into the recording at start, so lock it
-            // while a recording (or its countdown) runs.
-            bubbleLocked={busy}
             onRefresh={refresh}
             storage={storage}
             saveDirLocked={busy}
@@ -2777,9 +2833,6 @@ function SettingsView({
   onLengthCapTargetSec,
   noiseReduction,
   onNoiseReduction,
-  bubbleRoundness,
-  onBubbleRoundness,
-  bubbleLocked,
   onRefresh,
   storage,
   saveDirLocked,
@@ -2796,9 +2849,6 @@ function SettingsView({
   onLengthCapTargetSec: (v: number) => void;
   noiseReduction: NrLevel;
   onNoiseReduction: (v: NrLevel) => void;
-  bubbleRoundness: number | null;
-  onBubbleRoundness: (v: number | null) => void;
-  bubbleLocked: boolean;
   onRefresh: () => void;
   storage: StorageStatus | null;
   saveDirLocked: boolean;
@@ -2839,7 +2889,6 @@ function SettingsView({
     if (typeof picked === "string") await changeSaveDir(picked);
   };
   const saveDirFixed = saveDirLocked || moving;
-  const pct = Math.round((bubbleRoundness ?? 1) * 100);
   return (
     <div>
       <div className="cap-set-row">
@@ -2906,31 +2955,6 @@ function SettingsView({
           ]}
           onChange={onNoiseReduction}
         />
-      </div>
-
-      {/* Full circle maps to null so the preference, and each recording's
-          sidecar stamp, omits the field (the legacy mask path). */}
-      <div className="cap-set-row">
-        <span className="cap-label">Webcam bubble shape</span>
-        <div className="cap-set-line">
-          <input
-            type="range"
-            className="slider"
-            aria-label="Webcam bubble shape"
-            min={0}
-            max={100}
-            value={pct}
-            disabled={bubbleLocked}
-            onChange={(e) => {
-              const v = Number(e.target.value);
-              onBubbleRoundness(v >= 100 ? null : v / 100);
-            }}
-            style={{ flex: 1, display: "block", "--fill": `${pct}%` } as React.CSSProperties}
-          />
-          <span className="cap-help" style={{ width: 44, textAlign: "right" }}>
-            {pct === 100 ? "Circle" : pct === 0 ? "Square" : `${pct}%`}
-          </span>
-        </div>
       </div>
 
       <div className="cap-set-row">

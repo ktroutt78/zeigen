@@ -11,6 +11,14 @@ import { openRecordingsWindow } from "./openRecordings";
 import { recordingLength, recordingName as displayName } from "./recordingLabel";
 import { placeSegment } from "./timeline/place";
 import {
+  BUBBLE_SIZES,
+  BUBBLE_SIZE_LABEL,
+  BUBBLE_SIZE_PT,
+  bubbleScaleFor,
+  sizeForScale,
+  type BubbleSize,
+} from "./constants/bubble";
+import {
   sourceRectToOutputRect,
   redactCell,
   redactionsPayload,
@@ -326,10 +334,6 @@ const BUBBLE_ZONES: BubbleZone[] = [
 // Mirrors composite.rs PADDING_PX; used to offset the parked preview.
 const BUBBLE_ZONE_PADDING_PX = 30;
 
-// Bubble "Size" presets: Normal (1.0, the recorded diameter) and Small.
-// ~0.5x diameter -- starting value, tunable on eye-check. Baked at export
-// (resolve_diameter_px) and mirrored in the BubbleLayer preview.
-const BUBBLE_SMALL_SCALE = 0.5;
 
 function zoneHAlign(z: BubbleZone): "left" | "center" | "right" {
   if (z.endsWith("left")) return "left";
@@ -373,9 +377,11 @@ type SidecarState = {
   // byte-identical to pre-E1, so the slider only writes the field when the
   // user moves it off full circle.
   bubble_roundness?: number | null;
-  // Bubble "Size" preset multiplier: 1.0 Normal, ~0.5 Small. null/undefined =
-  // Normal (unscaled); only written when the user picks Small so untouched and
-  // pre-feature sidecars stay byte-identical (same convention as bubble_zone).
+  // Bubble size multiplier on the recorded diameter, set by the Size control
+  // (S / M / L relative to bubble_size). null/undefined = as recorded; only
+  // written when changed so untouched sidecars stay byte-identical (same
+  // convention as bubble_zone). Baked at export (resolve_diameter_px) and
+  // mirrored in the BubbleLayer preview.
   bubble_scale?: number | null;
   // Zoom layer keyframes (step-2 schema). Undefined/empty = no zoom; the
   // debounced save writes the field only when non-empty so a no-zoom
@@ -413,6 +419,9 @@ type SidecarState = {
   webcam_lead_ms?: number | null;
   // What was recorded, written at finalize. Metadata like webcam_lead_ms.
   name?: string | null;
+  // The S / M / L the bubble was recorded at, written at finalize.
+  // null/undefined = medium. Metadata like name.
+  bubble_size?: BubbleSize | null;
 };
 
 // Mirror of Rust FrameStyle. Every knob is the no-op at 0. padding is the
@@ -728,7 +737,7 @@ function normalizeTrim(trim: Trim | null | undefined, duration: number | null): 
 // from the effective zone). The log survives only as the diameter source and
 // as the migration input for the zone default. DEFAULT_BUBBLE_DIAMETER_PX is
 // the fallback when a sidecar logged no diameter.
-const DEFAULT_BUBBLE_DIAMETER_FRAC = 240 / 1512; // mirrors WebcamSize::Medium frac
+const DEFAULT_BUBBLE_DIAMETER_FRAC = BUBBLE_SIZE_PT.medium / 1512; // mirrors WebcamSize::Medium frac
 
 function isLogicallyEmpty(s: SidecarState, duration: number | null): boolean {
   // Bubble keyframes are finalize-time data the review must preserve —
@@ -744,7 +753,7 @@ function isLogicallyEmpty(s: SidecarState, duration: number | null): boolean {
   const noScenes = (!s.scenes || s.scenes.length === 0) && s.bubble_zoom_scale == null;
   // Finalize-time data like the bubble log: deleting it would lose the lead.
   const noLead = s.webcam_lead_ms == null;
-  const noName = s.name == null;
+  const noName = s.name == null && s.bubble_size == null;
   // A background, frame margin or bubble size is an edit the export reads from
   // the sidecar: without these checks a recording whose ONLY edit was one of
   // them had its sidecar deleted and exported without it.
@@ -790,6 +799,7 @@ function sidecarWritePayload(s: SidecarState, duration: number): SidecarState {
     bubble_zoom_scale: s.bubble_zoom_scale ?? undefined,
     webcam_lead_ms: s.webcam_lead_ms ?? undefined,
     name: s.name ?? undefined,
+    bubble_size: s.bubble_size ?? undefined,
   };
 }
 
@@ -875,7 +885,7 @@ export default function Review() {
   // dirties the sidecar; untouched recordings keep bubble_zone absent and the
   // export re-derives the same default.
   const [bubbleZone, setBubbleZone] = useState<BubbleZone | null>(null);
-  // Bubble "Size" preset: 1.0 Normal (recorded diameter), BUBBLE_SMALL_SCALE Small.
+  // Bubble "Size": multiplier on the recorded diameter (1 = as recorded).
   const [bubbleScale, setBubbleScale] = useState(1);
   // Original-timeline timestamp for the user's chosen poster frame. null =
   // unset; export-time default (0.5s in) is applied on the Rust side.
@@ -1033,6 +1043,8 @@ export default function Review() {
   const [sourceKind, setSourceKind] = useState<string | null>(params.sourceKind);
   const [webcamLeadMs, setWebcamLeadMs] = useState<number | null>(null);
   const [recordingName, setRecordingName] = useState<string | null>(null);
+  // The S / M / L the bubble was recorded at (sidecar bubble_size).
+  const [recordedBubbleSize, setRecordedBubbleSize] = useState<BubbleSize | null>(null);
   const isWindowSource = sourceKind === "window";
   // Mandatory corner-clip for window captures: kills the SCK black-corner wedges. The
   // EXPORT measures the exact reach in the compositor; this generous fixed fraction is
@@ -1549,6 +1561,7 @@ export default function Review() {
           if (state.bubble_zoom_scale != null) setBubbleZoomScale(state.bubble_zoom_scale);
           if (state.webcam_lead_ms != null) setWebcamLeadMs(state.webcam_lead_ms);
           if (state.name != null) setRecordingName(state.name);
+          if (state.bubble_size != null) setRecordedBubbleSize(state.bubble_size);
         }
         // Set last, after any setZoomSegments above, so the auto-load effect
         // sees the loaded zoom track (React batches these together) and never
@@ -1681,8 +1694,9 @@ export default function Review() {
       bubble_zoom_scale: bubbleZoomScale === 1 ? null : bubbleZoomScale,
       webcam_lead_ms: webcamLeadMs,
       name: recordingName,
+      bubble_size: recordedBubbleSize,
     }),
-    [trim, bubblePositionLog, thumbnailTime, bubbleRoundness, bubbleZone, bubbleScale, zoomSegments, redactions, frame, background, sourceKind, cursorStyle, scenes, bubbleZoomScale, webcamLeadMs, recordingName],
+    [trim, bubblePositionLog, thumbnailTime, bubbleRoundness, bubbleZone, bubbleScale, zoomSegments, redactions, frame, background, sourceKind, cursorStyle, scenes, bubbleZoomScale, webcamLeadMs, recordingName, recordedBubbleSize],
   );
 
 
@@ -2690,6 +2704,7 @@ export default function Review() {
           onBubbleZone={setBubbleZone}
           bubbleScale={bubbleScale}
           onBubbleScale={setBubbleScale}
+          recordedBubbleSize={recordedBubbleSize ?? "medium"}
           bubbleZoomScale={bubbleZoomScale}
           onBubbleZoomScale={setBubbleZoomScale}
           hasBubble={hasBubble}
@@ -2939,7 +2954,7 @@ type LeftColumnProps = {
   bubbleRoundness: number | null;
   // V2 Step 2: resolved bubble zone for the parked preview.
   bubbleZone: BubbleZone;
-  // Bubble "Size" preset multiplier (1.0 Normal, ~0.5 Small) for the preview.
+  // Bubble "Size" multiplier on the recorded diameter, for the preview.
   bubbleScale: number;
   // Background canvas + framing (Slice 4) for the WYSIWYG preview.
   frame: FrameStyle | null;
@@ -3867,7 +3882,7 @@ function BubbleLayer({
   // caller falls back to the migration default). Only the position is
   // constant; the webcam <video> still plays via the sync layer.
   bubbleZone: BubbleZone;
-  // Bubble "Size" preset multiplier (1.0 Normal, ~0.5 Small); scales the
+  // Bubble "Size" multiplier on the recorded diameter; scales the
   // preview diameter to mirror the export's resolve_diameter_px.
   bubbleScale: number;
   // True during a timeline scrub / trim-handle drag. The sync layer skips
@@ -4010,7 +4025,7 @@ function BubbleLayer({
     const { x: cx, y: cy, w: cw, h: ch } = contentBox(stage, videoDims, insetFrac);
 
     const frac = bubblePositionLog[0].diameter_frac ?? DEFAULT_BUBBLE_DIAMETER_FRAC;
-    // bubbleScale is the Review "Size" preset (1.0 Normal, ~0.5 Small); it
+    // bubbleScale is the Review "Size" multiplier (1 = as recorded); it
     // multiplies the diameter here exactly as resolve_diameter_px does at export.
     const cssDiameter = frac * cw * bubbleScale;
 
@@ -5066,6 +5081,7 @@ function ExportPanel({
   onBubbleZone,
   bubbleScale,
   onBubbleScale,
+  recordedBubbleSize,
   bubbleZoomScale,
   onBubbleZoomScale,
   hasBubble,
@@ -5108,6 +5124,8 @@ function ExportPanel({
   onBubbleZone: (z: BubbleZone) => void;
   bubbleScale: number;
   onBubbleScale: (s: number) => void;
+  // The S / M / L the bubble was recorded at; Size picks are relative to it.
+  recordedBubbleSize: BubbleSize;
   // Bubble size while the screen is zoomed (1 = unchanged), 0.5..1.
   bubbleZoomScale: number;
   onBubbleZoomScale: (s: number) => void;
@@ -5443,18 +5461,15 @@ function ExportPanel({
                 <>
                   <Field label="Size">
                     <div className="segmented full">
-                      <button
-                        className={bubbleScale === 1 ? "on" : ""}
-                        onClick={() => onBubbleScale(1)}
-                      >
-                        Normal
-                      </button>
-                      <button
-                        className={bubbleScale !== 1 ? "on" : ""}
-                        onClick={() => onBubbleScale(BUBBLE_SMALL_SCALE)}
-                      >
-                        Small
-                      </button>
+                      {BUBBLE_SIZES.map((sz) => (
+                        <button
+                          key={sz}
+                          className={sizeForScale(recordedBubbleSize, bubbleScale) === sz ? "on" : ""}
+                          onClick={() => onBubbleScale(bubbleScaleFor(recordedBubbleSize, sz))}
+                        >
+                          {BUBBLE_SIZE_LABEL[sz]}
+                        </button>
+                      ))}
                     </div>
                   </Field>
                   <Field label={`Size during zoom — ${Math.round(bubbleZoomScale * 100)}%`}>

@@ -61,8 +61,8 @@ pub struct SidecarState {
     // preview/legacy data — export reads it only for the bubble diameter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bubble_zone: Option<crate::composite::BubbleZone>,
-    // Review "Size" preset multiplier for the baked bubble diameter: 1.0 Normal,
-    // ~0.5 Small. None = Normal (unscaled) and is skipped when serialized, so
+    // Review "Size" multiplier for the baked bubble diameter (S / M / L picked
+    // relative to bubble_size). None = as recorded (unscaled) and is skipped when serialized, so
     // untouched and pre-feature sidecars stay byte-identical — the same
     // absent-unless-set convention as bubble_zone/roundness.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -135,6 +135,13 @@ pub struct SidecarState {
     // the export never reads it. Declared last.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    // The S / M / L size the bubble was recorded at (the floating bubble's
+    // size at Start). Written at finalize with the position log; Review's Size
+    // control reads it to turn S / M / L into a bubble_scale relative to the
+    // recorded diameter. None = Medium (every recording before the setting).
+    // Declared last.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bubble_size: Option<crate::composite::WebcamSize>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
@@ -2588,7 +2595,18 @@ mod tests {
             bubble_zoom_scale: None,
             webcam_lead_ms: None,
             name: None,
+            bubble_size: None,
         }
+    }
+
+    #[test]
+    fn bubble_size_is_absent_unless_set_and_round_trips() {
+        let none = serde_json::to_string(&SidecarState::default()).unwrap();
+        assert!(!none.contains("bubble_size"));
+        let large = SidecarState { bubble_size: Some(crate::composite::WebcamSize::Large), ..Default::default() };
+        let json = serde_json::to_string(&large).unwrap();
+        assert!(json.contains(r#""bubble_size":"large""#));
+        assert_eq!(serde_json::from_str::<SidecarState>(&json).unwrap(), large);
     }
 
     // Structural half of the invariant: an empty zoom track cannot

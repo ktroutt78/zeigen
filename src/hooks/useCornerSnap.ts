@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { currentMonitor } from "@tauri-apps/api/window";
 import { PhysicalPosition } from "@tauri-apps/api/dpi";
@@ -77,7 +78,13 @@ export function useCornerSnap() {
         if (cancelled) return;
         if (debounce !== null) window.clearTimeout(debounce);
         debounce = window.setTimeout(() => {
-          snapToNearestCorner().catch(() => {});
+          // The shape / size toolbar follows the drag as a child window;
+          // once the bubble settles, re-pick above or below it (no-op when
+          // the toolbar isn't open).
+          snapToNearestCorner()
+            .catch(() => {})
+            .then(() => invoke("place_bubble_toolbar"))
+            .catch(() => {});
         }, DRAG_END_DEBOUNCE_MS);
       });
       if (cancelled) {

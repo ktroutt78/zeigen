@@ -22,6 +22,11 @@ pub struct Settings {
     // reshapes an existing recording.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bubble_roundness: Option<f64>,
+    // Webcam bubble size (S / M / L) picked on the floating bubble. None =
+    // Medium. Like the roundness, a remembered default: the size each
+    // recording was made with is stamped into its sidecar at finalize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bubble_size: Option<crate::composite::WebcamSize>,
     // "Save to" folder (storage.rs). None = ~/Movies/Zeigen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub save_dir: Option<String>,
@@ -33,6 +38,7 @@ impl Default for Settings {
             watermark: WatermarkSettings::default(),
             noise_reduction: default_noise_reduction(),
             bubble_roundness: None,
+            bubble_size: None,
             save_dir: None,
         }
     }
@@ -95,6 +101,13 @@ fn home_config_dir() -> Option<PathBuf> {
 pub fn bubble_roundness() -> Option<f64> {
     let dir = home_config_dir()?;
     read_settings_from(&dir).bubble_roundness
+}
+
+// Bubble size preference, read at recording start like the roundness.
+pub fn bubble_size() -> crate::composite::WebcamSize {
+    home_config_dir()
+        .and_then(|dir| read_settings_from(&dir).bubble_size)
+        .unwrap_or_default()
 }
 
 // The "Save to" folder, read fresh each call (storage.rs resolves it).
@@ -203,6 +216,14 @@ pub fn set_bubble_roundness(app: AppHandle, roundness: Option<f64>) -> Result<()
     settings.bubble_roundness = roundness
         .filter(|r| *r < 1.0)
         .map(|r| r.clamp(0.0, 1.0));
+    write_settings_to(&dir, &settings)
+}
+
+#[tauri::command]
+pub fn set_bubble_size(app: AppHandle, size: crate::composite::WebcamSize) -> Result<(), String> {
+    let dir = config_dir(&app)?;
+    let mut settings = read_settings_from(&dir);
+    settings.bubble_size = Some(size).filter(|s| *s != crate::composite::WebcamSize::Medium);
     write_settings_to(&dir, &settings)
 }
 

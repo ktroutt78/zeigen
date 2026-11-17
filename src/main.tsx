@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import "./styles/global.css";
 import App from "./App";
 import WebcamBubble from "./components/WebcamBubble";
+import BubbleToolbar from "./components/BubbleToolbar";
 import Review from "./Review";
 import CountdownOverlay from "./CountdownOverlay";
 import TimerChipWindow from "./TimerChipWindow";
@@ -13,7 +14,10 @@ import AreaIndicator from "./AreaIndicator";
 import RecordingsWindow from "./RecordingsWindow";
 
 const hash = window.location.hash;
-const root = hash.startsWith("#bubble")
+// #bubble-toolbar before #bubble: it starts with it.
+const root = hash.startsWith("#bubble-toolbar")
+  ? <BubbleToolbar />
+  : hash.startsWith("#bubble")
   ? <WebcamBubble />
   : hash.startsWith("#review")
   ? <Review />

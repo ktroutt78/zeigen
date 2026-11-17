@@ -78,9 +78,16 @@ pub(crate) const FFPROBE_PATH: &str = "/opt/homebrew/bin/ffprobe";
 // first-frame host time (recordings made before the change).
 pub(crate) const WEBCAM_LEAD_MS: f64 = 105.0;
 
-#[derive(Clone, Copy)]
+// The webcam bubble's S / M / L size, picked on the floating bubble before
+// recording (settings.rs remembers it). px() is the bubble's diameter in
+// screen points at that size; src/constants/bubble.ts BUBBLE_SIZE_PT mirrors
+// it and sizes the floating bubble window, whose measured diameter is what the
+// position log records (diameter_frac) and the export draws.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum WebcamSize {
     Small,
+    #[default]
     Medium,
     Large,
 }
@@ -117,7 +124,7 @@ pub(crate) fn resolve_diameter_px(
         .first()
         .and_then(|e| e.diameter_frac)
         .unwrap_or_else(|| size.frac());
-    // scale is the Review "Size" preset (1.0 Normal, ~0.5 Small); it multiplies
+    // scale is Review's Size pick (S / M / L relative to the recorded size); it multiplies
     // the logged (or fallback) diameter. Padding off the pinned edge is unscaled.
     (frac * scale * frame_width as f64).round().max(1.0) as u32
 }
