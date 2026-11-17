@@ -38,6 +38,7 @@
   --bg-input:    #16171a;  /* form fields, tracks (== window base) */
   --bg-hover:    rgba(255,255,255,0.04);  /* ghost overlay         */
   --bg-active:   rgba(255,255,255,0.06);
+  --bg-track:    rgba(255,255,255,0.04);  /* timeline row lane, barely there */
 
   /* Tray / popover (translucent — sits over wallpaper) */
   --bg-tray:     rgba(30,32,36,0.96);
@@ -309,6 +310,15 @@
 .row + .row { border-top: 1px solid var(--border-faint); }
 .row-label { color: var(--fg-primary); font-weight: 400; }
 .row-help { color: var(--fg-tertiary); font-size: 11px; margin-top: 2px; line-height: 1.35; }
+
+/* One surface on the window background (Review's preview, timeline and
+   settings). Nothing inside a panel carries its own fill or border except
+   the controls themselves. */
+.panel {
+  background: var(--bg-window);
+  border: 1px solid var(--border-faint);
+  border-radius: var(--r-lg);
+}
 
 .card {
   background: var(--bg-elevated);

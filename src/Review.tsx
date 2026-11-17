@@ -6,6 +6,7 @@ import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { Icon, I, P, RailIcon } from "./components/icons";
 import Timeline from "./timeline/Timeline";
+import { openRecordingsWindow } from "./openRecordings";
 import { placeSegment } from "./timeline/place";
 import {
   sourceRectToOutputRect,
@@ -564,6 +565,13 @@ function cyclePlaybackRate(current: number, dir: 1 | -1): number {
 
 type WmCorner = "tl" | "tr" | "bl" | "br";
 const WM_CORNERS: WmCorner[] = ["tl", "tr", "bl", "br"];
+const WM_CORNER_ARROW: Record<WmCorner, string> = { tl: "↖", tr: "↗", bl: "↙", br: "↘" };
+const WM_CORNER_NAME: Record<WmCorner, string> = {
+  tl: "Top left",
+  tr: "Top right",
+  bl: "Bottom left",
+  br: "Bottom right",
+};
 
 // Mirrors the Rust settings::Settings shape (settings.json).
 type AppSettings = {
@@ -2618,7 +2626,9 @@ export default function Review() {
         overflow: "hidden",
         display: "flex",
         flexDirection: "column",
-        background: "var(--bg-window)",
+        // The window is the darkest layer; three panels (preview, timeline,
+        // right side) sit on it with 8px gaps.
+        background: "var(--bg-canvas)",
         color: "var(--fg-primary)",
         fontFamily: "var(--font-system)",
       }}
@@ -2633,16 +2643,16 @@ export default function Review() {
       <div
         style={{
           display: "grid",
-          // Right region = icon-only tool rail (40px) + the 320px panel; the rail
-          // moved here from a horizontal row atop the panel (which had run out of
-          // width at 7 tools), buying back the panel's vertical space. Preview (1fr)
-          // takes the 40px hit.
-          gridTemplateColumns: "1fr 360px",
+          // Left = preview panel over timeline panel; right = tool rail + the
+          // active tool's settings + export, one panel full height.
+          gridTemplateColumns: "minmax(0, 1fr) 360px",
           // Clamp the single row to the container height so a tall column
           // (the left video stage's aspect-ratio height at wide window sizes)
           // can never inflate the row past the viewport and push the right
-          // panel's pinned footer off-screen. WebKit needs this explicitly.
+          // panel's pinned export block off-screen. WebKit needs this explicitly.
           gridTemplateRows: "minmax(0, 1fr)",
+          gap: 8,
+          padding: "0 8px 8px",
           flex: 1,
           minHeight: 0,
         }}
@@ -2771,12 +2781,15 @@ export default function Review() {
             thumbBySource,
           }}
           cursor={cursorOverlay ? { style: cursorStyle, onChange: setCursorStyle } : null}
+          message={
+            error ? (
+              <ErrorStrip error={error} onDismiss={() => setError(null)} />
+            ) : notice ? (
+              <NoticeStrip notice={notice} onDismiss={() => setNotice(null)} />
+            ) : null
+          }
         />
       </div>
-      {error && <ErrorStrip error={error} onDismiss={() => setError(null)} />}
-      {!error && notice && (
-        <NoticeStrip notice={notice} onDismiss={() => setNotice(null)} />
-      )}
       {showCloseModal && (
         <CloseModal
           onSave={onModalSave}
@@ -2807,32 +2820,17 @@ function Header({
   return (
     <div
       style={{
-        height: 42,
-        padding: "0 14px",
+        height: 44,
+        padding: "0 20px",
         display: "flex",
         alignItems: "center",
-        gap: 8,
-        background: "var(--bg-window)",
+        gap: 10,
       }}
     >
       <span
         style={{
-          width: 18,
-          height: 18,
-          borderRadius: 5,
-          background: "var(--accent)",
-          display: "inline-flex",
-          alignItems: "center",
-          justifyContent: "center",
-          color: "#fff",
-        }}
-      >
-        <Icon d={P.play} size={9} stroke={0} fill="currentColor" />
-      </span>
-      <span
-        style={{
           fontWeight: 600,
-          fontSize: 13,
+          fontSize: 14,
           letterSpacing: "-0.01em",
           color: "var(--fg-primary)",
           minWidth: 0,
@@ -2844,34 +2842,42 @@ function Header({
       >
         {name ?? "Screen Recording"}{dirty ? " — edited" : ""}
       </span>
-      <span style={{ color: "var(--fg-tertiary)", fontSize: 12 }}>·</span>
       <span
         style={{
-          fontFamily: "var(--font-mono)",
-          fontSize: 11,
+          fontSize: 13,
           color: "var(--fg-tertiary)",
+          fontVariantNumeric: "tabular-nums",
+          whiteSpace: "nowrap",
         }}
       >
-        {fmt(length)} · .mp4
+        {fmt(length)} · .mp4 · just now
       </span>
-      <span style={{ color: "var(--fg-tertiary)", fontSize: 12 }}>·</span>
-      <span style={{ color: "var(--fg-tertiary)", fontSize: 12 }}>just now</span>
       {previewFailed && (
         <span
           style={{
             marginLeft: "auto",
-            padding: "2px 8px",
-            borderRadius: 999,
-            fontSize: 11,
-            background: "rgba(255, 180, 0, 0.12)",
-            color: "var(--warning, #f5b400)",
-            border: "1px solid rgba(255, 180, 0, 0.3)",
+            fontSize: 12,
+            color: "var(--warning)",
+            whiteSpace: "nowrap",
           }}
           title="Save still applies noise reduction — only the in-window preview fell back to raw audio."
         >
           Preview is raw — save still applies NR
         </span>
       )}
+      <button
+        className="btn-ghost"
+        title="Past recordings"
+        onClick={() => openRecordingsWindow().catch(() => {})}
+        style={{
+          marginLeft: previewFailed ? 8 : "auto",
+          flexShrink: 0,
+          fontSize: 13,
+          color: "var(--fg-secondary)",
+        }}
+      >
+        Recordings
+      </button>
     </div>
   );
 }
@@ -2938,12 +2944,14 @@ type LeftColumnProps = {
   scenePath: ScenePath | null;
 };
 
+// Two panels stacked: preview (stage + play bar) over the timeline.
 function LeftColumn(props: LeftColumnProps) {
   return (
     <div
       style={{
         display: "flex",
         flexDirection: "column",
+        gap: 8,
         minWidth: 0,
         minHeight: 0,
         overflow: "hidden",
@@ -3035,13 +3043,12 @@ function ThumbnailPopover({
       />
       <div
         style={{
-          // Fixed, just left of the 296px panel and below the header —
-          // deterministic anchor that works whether the popover was opened
-          // by click or by the M shortcut (which may have just expanded a
-          // collapsed Export section, so no row rect exists yet).
+          // Fixed, just left of the 360px right panel (plus its 8px window
+          // margin) and below the header — deterministic anchor that works
+          // whether the popover was opened by click or by the M shortcut.
           position: "fixed",
           top: 56,
-          right: 332,
+          right: 384,
           width: 280,
           background: "var(--bg-elevated)",
           border: "1px solid var(--border-subtle)",
@@ -3190,8 +3197,8 @@ function ToolRow({
 // panel width.
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div style={{ marginBottom: 8 }}>
-      <div style={{ fontSize: 11.5, color: "var(--fg-secondary)", marginBottom: 4 }}>
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ fontSize: 12, color: "var(--fg-secondary)", marginBottom: 8 }}>
         {label}
       </div>
       {children}
@@ -3443,10 +3450,10 @@ function VideoStage(props: VideoStageProps) {
   // the video; the stage (and every overlay measured from it) takes the rest.
   return (
     <div
+      className="panel"
       style={{
         position: "relative",
-        padding: 16,
-        background: "var(--bg-canvas)",
+        padding: "16px 20px 8px",
         flex: 1,
         minHeight: 0,
         display: "flex",
@@ -4600,30 +4607,31 @@ function PlayBar({
   togglePlay: () => void;
   playbackRate: number;
 }) {
+  // Time left, round play button centred, speed right (both side slots the
+  // same width so the button stays centred under the picture).
+  const side: React.CSSProperties = {
+    flex: 1,
+    fontFamily: "var(--font-mono)",
+    fontSize: 12,
+    fontVariantNumeric: "tabular-nums",
+  };
   return (
-    <div
-      style={{
-        flexShrink: 0,
-        display: "flex",
-        alignItems: "center",
-        gap: 10,
-        padding: "7px 12px",
-        background: "var(--bg-overlay-medium)",
-        backdropFilter: "blur(14px)",
-        WebkitBackdropFilter: "blur(14px)",
-        border: "0.5px solid rgba(255,255,255,0.1)",
-        borderRadius: "var(--r-md)",
-        color: "#fff",
-      }}
-    >
+    <div style={{ flexShrink: 0, display: "flex", alignItems: "center", gap: 16 }}>
+      <span style={{ ...side, textAlign: "right", color: "var(--fg-secondary)" }}>
+        {fmt(currentTime)} / {fmt(duration)}
+      </span>
       <button
         onClick={togglePlay}
         style={{
-          background: "transparent",
+          width: 36,
+          height: 36,
+          flexShrink: 0,
+          borderRadius: "50%",
+          background: "var(--fg-primary)",
           border: "none",
-          color: "#fff",
+          color: "var(--bg-window)",
           cursor: "pointer",
-          padding: 2,
+          padding: 0,
           display: "inline-flex",
           alignItems: "center",
           justifyContent: "center",
@@ -4631,33 +4639,20 @@ function PlayBar({
         aria-label={playing ? "Pause" : "Play"}
       >
         {playing ? (
-          <Icon d={P.pause} size={14} stroke={1.6} />
+          <Icon d={P.pause} size={14} stroke={1.8} />
         ) : (
           <Icon d={P.play} size={14} stroke={0} fill="currentColor" />
         )}
       </button>
       <span
         style={{
-          fontFamily: "var(--font-mono)",
-          fontSize: 11,
-          color: "rgba(255,255,255,0.85)",
-          fontVariantNumeric: "tabular-nums",
+          ...side,
+          color: playbackRate !== 1 ? "var(--accent-tint)" : "var(--fg-tertiary)",
         }}
+        title="Playback speed (< and > to change)"
       >
-        {fmt(currentTime)} / {fmt(duration)}
+        {playbackRate}x
       </span>
-      {playbackRate !== 1 && (
-        <span
-          style={{
-            fontFamily: "var(--font-mono)",
-            fontSize: 11,
-            color: "var(--accent)",
-            fontVariantNumeric: "tabular-nums",
-          }}
-        >
-          {playbackRate}x
-        </span>
-      )}
     </div>
   );
 }
@@ -4764,72 +4759,15 @@ function NoticeStrip({
   onDismiss: () => void;
 }) {
   return (
-    <div
-      style={{
-        position: "fixed",
-        left: 14,
-        right: 14,
-        bottom: 14,
-        padding: "6px 10px",
-        background: "var(--accent-soft)",
-        border: "1px solid var(--accent)",
-        borderRadius: 6,
-        display: "flex",
-        alignItems: "center",
-        gap: 8,
-        fontSize: 11.5,
-        zIndex: 999,
-      }}
-    >
-      <span style={{ color: "var(--accent)", fontWeight: 600, flexShrink: 0 }}>Note</span>
-      <span
-        style={{
-          color: "var(--fg-secondary)",
-          fontSize: 11.5,
-          flex: 1,
-        }}
-      >
-        {notice}
-      </span>
-      <button
-        onClick={onDismiss}
-        aria-label="Dismiss"
-        style={{
-          background: "transparent",
-          border: "none",
-          color: "var(--fg-tertiary)",
-          cursor: "pointer",
-          padding: 0,
-          lineHeight: 1,
-          fontSize: 14,
-        }}
-      >
-        ×
-      </button>
-    </div>
+    <MessageStrip label="Note" labelColor="var(--accent-tint)" fill="var(--accent-soft)" onDismiss={onDismiss}>
+      <span style={{ color: "var(--fg-secondary)", flex: 1 }}>{notice}</span>
+    </MessageStrip>
   );
 }
 
 function ErrorStrip({ error, onDismiss }: { error: string; onDismiss: () => void }) {
   return (
-    <div
-      style={{
-        position: "fixed",
-        left: 14,
-        right: 14,
-        bottom: 14,
-        padding: "6px 10px",
-        background: "var(--recording-soft)",
-        border: "1px solid oklch(0.62 0.18 25 / 0.35)",
-        borderRadius: 6,
-        display: "flex",
-        alignItems: "center",
-        gap: 8,
-        fontSize: 11.5,
-        zIndex: 999,
-      }}
-    >
-      <span style={{ color: "var(--recording-tint)", fontWeight: 600, flexShrink: 0 }}>Error</span>
+    <MessageStrip label="Error" labelColor="var(--recording-tint)" fill="var(--recording-soft)" onDismiss={onDismiss}>
       <span
         style={{
           color: "var(--fg-secondary)",
@@ -4844,6 +4782,42 @@ function ErrorStrip({ error, onDismiss }: { error: string; onDismiss: () => void
       >
         {error}
       </span>
+    </MessageStrip>
+  );
+}
+
+// In the layout flow (right panel, above Export): it pushes content down and
+// never covers a control.
+function MessageStrip({
+  label,
+  labelColor,
+  fill,
+  onDismiss,
+  children,
+}: {
+  label: string;
+  labelColor: string;
+  fill: string;
+  onDismiss: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      style={{
+        flexShrink: 0,
+        margin: "0 16px 12px 10px",
+        padding: "8px 10px",
+        background: fill,
+        borderRadius: "var(--r-md)",
+        display: "flex",
+        alignItems: "flex-start",
+        gap: 8,
+        fontSize: 12,
+        lineHeight: 1.4,
+      }}
+    >
+      <span style={{ color: labelColor, fontWeight: 600, flexShrink: 0 }}>{label}</span>
+      {children}
       <button
         onClick={onDismiss}
         aria-label="Dismiss"
@@ -4854,7 +4828,8 @@ function ErrorStrip({ error, onDismiss }: { error: string; onDismiss: () => void
           cursor: "pointer",
           padding: 0,
           lineHeight: 1,
-          fontSize: 14,
+          fontSize: 15,
+          flexShrink: 0,
         }}
       >
         ×
@@ -4899,20 +4874,19 @@ function persistActiveTool(id: ToolId) {
   }
 }
 
-// Rail contextual-card + eyebrow chrome, shared by every tool card.
-const CTX_CARD: React.CSSProperties = {
-  background: "var(--bg-elevated)",
-  borderRadius: "var(--r-md)",
-  padding: 12,
-  marginBottom: 14,
-};
-const RAIL_EYEBROW: React.CSSProperties = {
-  fontSize: 10.5,
+// Heading of the active tool's settings and of Export. The settings sit
+// straight on the right panel, no card.
+const PANEL_HEADING: React.CSSProperties = {
+  fontSize: 15,
   fontWeight: 600,
-  letterSpacing: "0.08em",
-  textTransform: "uppercase",
+  color: "var(--fg-primary)",
+  margin: "0 0 14px",
+};
+// Quiet explanatory copy under a tool's controls.
+const HINT: React.CSSProperties = {
+  fontSize: 12,
+  lineHeight: 1.4,
   color: "var(--fg-tertiary)",
-  margin: "0 2px 8px",
 };
 
 // One tile in the rail tool toolbar (icon over label). Active = accent-soft
@@ -5100,6 +5074,7 @@ function ExportPanel({
   watermark,
   bg,
   cursor,
+  message,
 }: {
   sourcePath: string | null;
   zoom: ZoomEditor;
@@ -5166,6 +5141,8 @@ function ExportPanel({
   // Drawn-cursor controls; null when the recording has its cursor baked in
   // (nothing to adjust), which hides them.
   cursor: { style: CursorStyle; onChange: (s: CursorStyle) => void } | null;
+  // The current note or error strip (or null), shown above Export.
+  message: React.ReactNode;
 }) {
   // Transient post-save flash. Driven off lastSavedAt (parent state), reset
   // to 0 by a 1.5s timer.
@@ -5363,27 +5340,24 @@ function ExportPanel({
 
   return (
     <div
+      className="panel"
       style={{
         display: "flex",
         flexDirection: "row",
-        background: "var(--bg-sidebar)",
         minHeight: 0,
         overflow: "hidden",
       }}
     >
-      {/* Vertical tool rail (moved from a horizontal row that ran out of width at
-          7 tools; frees the panel's vertical space). Icon-only (Screen Studio style)
-          with Lucide icons + hover tooltips — narrower, and the four rectangle-ish
-          labels no longer cramp. Active tile carries the only cue (.rail-tool.on). */}
+      {/* Vertical tool rail. Icon-only (Screen Studio style) with Lucide icons +
+          hover tooltips. Active tile carries the only cue (.rail-tool.on). */}
       <div
         style={{
-          width: 40,
+          width: 48,
           flexShrink: 0,
           display: "flex",
           flexDirection: "column",
-          gap: 2,
-          padding: "8px 4px",
-          borderRight: "1px solid var(--border-faint)",
+          gap: 4,
+          padding: "12px 6px",
         }}
       >
         <ToolTile
@@ -5431,26 +5405,14 @@ function ExportPanel({
           icon={RailIcon.mark}
         />
       </div>
-      {/* Panel content column. */}
-      <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-      {/* Sections scroll vertically if the window is short; horizontal
-          overflow is impossible by construction (full-width rows only). */}
-      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", padding: "10px 12px 12px", display: "flex", flexDirection: "column" }}>
-        {/* Tools + active panel: a flexShrink:0 block so its inner (block-flow)
-            layout is unchanged; the Export block below rides the same scroll
-            region with marginTop:auto. */}
-        <div style={{ flexShrink: 0 }}>
-        {/* Tool tiles live in the vertical rail (left). Trim was dropped — the
-            timeline below owns the handles + I/O keys, so its panel was only
-            instructions with no unique control. */}
+      {/* Panel content column: the active tool's settings (scroll if the window
+          is short), then any note or error, then Export pinned at the bottom. */}
+      <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", padding: "16px 16px 12px 10px" }}>
 
         {activeTool === "bubble" && (
           <>
-            <div style={RAIL_EYEBROW}>Webcam bubble</div>
-            {/* Padding trimmed from the shared 12 so the 3x3 grid + Size row
-                clear the 338px scroll-free ceiling at 940x860 with margin,
-                without shrinking the (16/9, legible) position tiles. */}
-            <div style={{ ...CTX_CARD, padding: 8, marginBottom: 8 }}>
+            <h2 style={PANEL_HEADING}>Webcam bubble</h2>
               {hasBubble ? (
                 <>
                   <Field label="Size">
@@ -5484,24 +5446,18 @@ function ExportPanel({
                   <Field label="Position">
                     <ZonePicker value={bubbleZone} onChange={onBubbleZone} />
                   </Field>
-                  <div style={{ fontSize: 10.5, color: "var(--fg-tertiary)", lineHeight: 1.2 }}>
-                    Size and position are baked on export.
-                  </div>
+                  <div style={HINT}>Size and position are baked on export.</div>
                 </>
               ) : (
-                <div style={{ fontSize: 11.5, color: "var(--fg-tertiary)" }}>
-                  No webcam bubble in this recording.
-                </div>
+                <div style={HINT}>No webcam bubble in this recording.</div>
               )}
-            </div>
           </>
         )}
 
         {activeTool === "zoom" && (
           <>
-            <div style={RAIL_EYEBROW}>Zoom</div>
-            <div style={CTX_CARD}>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <h2 style={PANEL_HEADING}>Zoom</h2>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {zoom.selectedIndex != null && zoom.segments[zoom.selectedIndex] ? (
               <>
                 <Field
@@ -5522,18 +5478,18 @@ function ExportPanel({
                   />
                 </Field>
                 {zoom.segments[zoom.selectedIndex].reason && (
-                  <div style={{ fontSize: 11, color: "var(--fg-tertiary)" }}>
+                  <div style={HINT}>
                     Why: {zoom.segments[zoom.selectedIndex].reason}
                   </div>
                 )}
-                <div style={{ fontSize: 11, color: "var(--fg-tertiary)" }}>
+                <div style={HINT}>
                   Drag the crosshair on the video to set the zoom center. Adjust
                   timing on the timeline lane. Deselect (Esc) to watch the zoom
                   in the preview.
                 </div>
                 <button
                   className="btn-secondary"
-                  style={{ height: 26, fontSize: 11.5 }}
+                  style={{ height: 30, fontSize: 12, marginTop: 4 }}
                   onClick={() => {
                     const i = zoom.selectedIndex;
                     if (i != null) zoom.remove(i);
@@ -5543,7 +5499,7 @@ function ExportPanel({
                 </button>
               </>
             ) : zoom.segments.length > 0 ? (
-              <div style={{ fontSize: 11, color: "var(--fg-tertiary)" }}>
+              <div style={HINT}>
                 {zoom.segments.length === 1
                   ? "1 zoom"
                   : `${zoom.segments.length} zooms`}{" "}
@@ -5551,20 +5507,18 @@ function ExportPanel({
                 timing; playback previews the applied zoom.
               </div>
             ) : (
-              <div style={{ fontSize: 11, color: "var(--fg-tertiary)" }}>
+              <div style={HINT}>
                 No zooms. Hover the Zoom row on the timeline and click to add
                 one, or press Generate there. Playback previews live.
               </div>
             )}
           </div>
-            </div>
           </>
         )}
 
         {activeTool === "cursor" && (
           <>
-            <div style={RAIL_EYEBROW}>Cursor</div>
-            <div style={CTX_CARD}>
+            <h2 style={PANEL_HEADING}>Cursor</h2>
               {cursor ? (
                 <>
                   <Field label="Smoothing">
@@ -5596,21 +5550,19 @@ function ExportPanel({
                   </Field>
                 </>
               ) : (
-                <div style={{ fontSize: 11.5, color: "var(--fg-tertiary)" }}>
+                <div style={HINT}>
                   This recording's cursor is part of the video, so it can't be
                   restyled. Recordings made from now on can.
                 </div>
               )}
-            </div>
           </>
         )}
 
         {activeTool === "redact" && (
           <>
-            <div style={RAIL_EYEBROW}>Redact</div>
-            <div style={CTX_CARD}>
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                <div style={{ fontSize: 11, color: "var(--fg-tertiary)", lineHeight: 1.4 }}>
+            <h2 style={PANEL_HEADING}>Redact</h2>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                <div style={HINT}>
                   Drag on the paused video to frost over anything sensitive. Press{" "}
                   <span className="kbd">Space</span> to preview the panel tracking the
                   zoom. Boxes stay glued to what they cover.
@@ -5628,9 +5580,7 @@ function ExportPanel({
                   </button>
                 )}
                 {redact.regions.length === 0 ? (
-                  <div style={{ fontSize: 11, color: "var(--fg-tertiary)" }}>
-                    No panels yet. Drag a box on the video to add one.
-                  </div>
+                  <div style={HINT}>No panels yet. Drag a box on the video to add one.</div>
                 ) : (
                   <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                     {redact.regions.map((r, i) => {
@@ -5738,24 +5688,15 @@ function ExportPanel({
                       fontVariantNumeric: "tabular-nums" as const,
                     };
                     return (
-                      <div
-                        style={{
-                          display: "flex",
-                          flexDirection: "column",
-                          gap: 6,
-                          marginTop: 2,
-                          paddingTop: 6,
-                          borderTop: "1px solid var(--border-faint)",
-                        }}
-                      >
-                        <div style={{ fontSize: 10, letterSpacing: "0.04em", color: "var(--accent)", fontWeight: 600 }}>
-                          {count > 1 ? `${count} PANELS RANGE` : `PANEL ${i + 1} RANGE`}
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 6 }}>
+                        <div style={{ fontSize: 12, color: "var(--fg-secondary)" }}>
+                          {count > 1 ? `Range of ${count} panels` : `Panel ${i + 1} range`}
                         </div>
                         <div style={{ display: "flex", gap: 8 }}>
                           {(["start", "end"] as const).map((edge) => (
                             <div key={edge} style={{ flex: 1 }}>
-                              <div style={{ fontSize: 10, color: "var(--fg-tertiary)", textTransform: "capitalize" }}>
-                                {edge}
+                              <div style={{ fontSize: 11, color: "var(--fg-tertiary)" }}>
+                                {edge === "start" ? "Start" : "End"}
                               </div>
                               <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                                 <span style={{ ...mono, fontSize: 12 }}>
@@ -5817,15 +5758,13 @@ function ExportPanel({
                   </button>
                 )}
               </div>
-            </div>
           </>
         )}
 
         {activeTool === "watermark" && (
           <>
-            <div style={RAIL_EYEBROW}>Watermark</div>
-            <div style={CTX_CARD}>
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <h2 style={PANEL_HEADING}>Watermark</h2>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {watermark.logoPath ? (
             <>
               <label
@@ -5883,8 +5822,10 @@ function ExportPanel({
                       key={c}
                       className={watermark.corner === c ? "on" : ""}
                       onClick={() => watermark.onCorner(c)}
+                      title={WM_CORNER_NAME[c]}
+                      aria-label={WM_CORNER_NAME[c]}
                     >
-                      {c.toUpperCase()}
+                      {WM_CORNER_ARROW[c]}
                     </button>
                   ))}
                 </div>
@@ -5916,12 +5857,10 @@ function ExportPanel({
             </>
           ) : (
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span style={{ flex: 1, fontSize: 11.5, color: "var(--fg-tertiary)" }}>
-                No logo chosen
-              </span>
+              <span style={{ ...HINT, flex: 1 }}>No logo chosen</span>
               <button
                 className="btn-secondary"
-                style={{ height: 24, padding: "0 10px", fontSize: 11 }}
+                style={{ height: 28, padding: "0 10px", fontSize: 12 }}
                 onClick={watermark.onPick}
               >
                 Choose…
@@ -5929,14 +5868,12 @@ function ExportPanel({
             </div>
           )}
         </div>
-            </div>
           </>
         )}
 
         {activeTool === "background" && (
           <>
-            <div style={RAIL_EYEBROW}>Background</div>
-            <div style={CTX_CARD}>
+            <h2 style={PANEL_HEADING}>Background</h2>
               <Field label="Style">
                 {/* Two tabs so the grid can't grow the panel: Gradients is a
                     fixed set; Wallpapers scrolls inside a capped-height box no
@@ -6093,19 +6030,15 @@ function ExportPanel({
                       </div>
                     </Field>
                   )}
-                  <div style={{ fontSize: 10.5, color: "var(--fg-tertiary)", lineHeight: 1.3 }}>
-                    Shadow and edge are always on. Baked on export.
-                  </div>
+                  <div style={HINT}>Shadow and edge are always on. Baked on export.</div>
                 </>
               )}
-            </div>
           </>
         )}
 
         {activeTool === "mark" && (
           <>
-            <div style={RAIL_EYEBROW}>Thumbnail</div>
-            <div style={CTX_CARD}>
+            <h2 style={PANEL_HEADING}>Thumbnail</h2>
               <ToolRow
                 icon="M5 2h6v11l-3-2.5L5 13z"
                 label={thumbnail.thumbnailTime != null ? "Change frame" : "Set current frame"}
@@ -6113,11 +6046,10 @@ function ExportPanel({
                 active={thumbnail.thumbnailTime != null}
                 onClick={onThumbnailClick}
               />
-              <div style={{ fontSize: 11, color: "var(--fg-tertiary)", lineHeight: 1.35, marginTop: 8 }}>
+              <div style={{ ...HINT, marginTop: 10 }}>
                 Choose the frame shown before playback. The webcam bubble is added
                 in the final export.
               </div>
-            </div>
           </>
         )}
         {popoverOpen && capturedTime != null && (
@@ -6130,14 +6062,20 @@ function ExportPanel({
         )}
       </div>
 
-        {/* Export — rides the scroll region (not a fixed sibling), so the only
-            un-shrinkable bottom chrome is the 91px footer. marginTop:auto glues
-            it above the footer when there's room and lets it scroll WITH the
-            panel when the column is too short to afford it (short 1080p displays,
-            maximized). The footer can never be pushed off-screen. */}
-        <div style={{ flexShrink: 0, marginTop: "auto", paddingTop: 10, borderTop: "1px solid var(--border-faint)" }}>
-          <div style={{ ...RAIL_EYEBROW, marginBottom: 10 }}>Export</div>
-        <Field label="Format">
+      {message}
+
+      {/* Export: pinned under the settings, never scrolls away. */}
+      <div style={{ flexShrink: 0, padding: "4px 16px 16px 10px" }}>
+        <h2 style={PANEL_HEADING}>Export</h2>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "72px minmax(0, 1fr)",
+            gap: "10px 12px",
+            alignItems: "center",
+          }}
+        >
+          <span style={EXPORT_LABEL}>Format</span>
           <div className="segmented full">
             {(["mp4", "gif"] as const).map((f) => (
               <button
@@ -6145,15 +6083,14 @@ function ExportPanel({
                 className={format === f ? "on" : ""}
                 onClick={() => setFormat(f)}
                 disabled={saving}
+                style={EXPORT_SEG_BUTTON}
               >
                 {f === "mp4" ? "MP4" : "GIF"}
               </button>
             ))}
           </div>
-        </Field>
-
-        {format === "mp4" ? (
-          <Field label="Resolution">
+          <span style={EXPORT_LABEL}>Resolution</span>
+          {format === "mp4" ? (
             <div className="segmented full">
               {mp4ResOptions.map((r) => (
                 <button
@@ -6161,14 +6098,13 @@ function ExportPanel({
                   className={mp4Res === r ? "on" : ""}
                   onClick={() => setMp4Res(r)}
                   disabled={saving}
+                  style={EXPORT_SEG_BUTTON}
                 >
                   {r === "source" ? "Source" : r}
                 </button>
               ))}
             </div>
-          </Field>
-        ) : (
-          <Field label="Resolution">
+          ) : (
             <div className="segmented full">
               {gifResOptions.map((r) => (
                 <button
@@ -6176,270 +6112,194 @@ function ExportPanel({
                   className={gifRes === r ? "on" : ""}
                   onClick={() => setGifRes(r)}
                   disabled={saving}
+                  style={EXPORT_SEG_BUTTON}
                 >
                   {r === "source" ? "Source" : r}
                 </button>
               ))}
             </div>
-          </Field>
-        )}
-
-        {format === "gif" && (
-          <Field label="FPS">
-            <div className="segmented full">
-              {([10, 15, 20] as const).map((f) => (
-                <button
-                  key={f}
-                  className={gifFps === f ? "on" : ""}
-                  onClick={() => setGifFps(f)}
-                  disabled={saving}
-                >
-                  {f}
-                </button>
-              ))}
-            </div>
-          </Field>
-        )}
-
-        <button
-          onClick={onSaveClick}
-          disabled={saveDisabled}
-          className="btn-primary"
-          style={{
-            position: "relative",
-            overflow: "hidden",
-            marginTop: 8,
-            width: "100%",
-            padding: "8px 0",
-            height: 32,
-            fontSize: 12.5,
-            fontWeight: 600,
-            letterSpacing: "-0.005em",
-            display: "inline-flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 6,
-            opacity: saveDisabled ? 0.6 : 1,
-            cursor: saveDisabled ? "not-allowed" : "pointer",
-          }}
-        >
-          {saving && saveProgress != null && (
-            // Fill bar behind the label — a percent in text is easy to miss;
-            // this makes progress visible at a glance without staring at digits.
-            <span
-              style={{
-                position: "absolute",
-                inset: 0,
-                width: `${Math.round(saveProgress * 100)}%`,
-                background: "rgba(255,255,255,0.22)",
-                transition: "width 200ms linear",
-              }}
-            />
           )}
-          <span style={{ position: "relative", display: "inline-flex", alignItems: "center", gap: 6 }}>
-            {justSaved ? (
-              <>
-                <Icon d={P.check} size={13} stroke={1.8} />
-                <span>Saved</span>
-              </>
-            ) : saving ? (
-              <span>
-                Saving…{saveProgress != null ? ` ${Math.round(saveProgress * 100)}%` : ""}
-              </span>
-            ) : (
-              <>
-                <Icon d={P.check} size={13} stroke={1.6} />
-                <span>Save as {formatLabel}</span>
-              </>
-            )}
-          </span>
-        </button>
+          {format === "gif" && (
+            <>
+              <span style={EXPORT_LABEL}>Frame rate</span>
+              <div className="segmented full">
+                {([10, 15, 20] as const).map((f) => (
+                  <button
+                    key={f}
+                    className={gifFps === f ? "on" : ""}
+                    onClick={() => setGifFps(f)}
+                    disabled={saving}
+                    style={EXPORT_SEG_BUTTON}
+                  >
+                    {f} fps
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
 
-        {/* Export destinations — formerly the standalone Share section.
-            Reveal in Finder stays post-save-only. */}
-        <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
-        <DestRow
-          icon={<Icon d="M5 2h6v3M5 2v9a1 1 0 001 1h7a1 1 0 001-1V6L11 2M3 6h6v8" size={14} stroke={1.4} />}
-          title="Copy to Clipboard"
-          sub="Paste into Slack, Mail, Messages…"
-          action={
-            copied ? (
+        <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
+          <button
+            onClick={onSaveClick}
+            disabled={saveDisabled}
+            className="btn-primary"
+            style={{
+              position: "relative",
+              overflow: "hidden",
+              flex: 1,
+              height: 36,
+              padding: 0,
+              borderRadius: "var(--r-md)",
+              fontSize: 13,
+              fontWeight: 600,
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              opacity: saveDisabled ? 0.6 : 1,
+              cursor: saveDisabled ? "not-allowed" : "pointer",
+            }}
+          >
+            {saving && saveProgress != null && (
+              // Fill bar behind the label — a percent in text is easy to miss;
+              // this makes progress visible at a glance without staring at digits.
               <span
                 style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 4,
-                  fontSize: 11.5,
-                  color: "var(--success-tint)",
+                  position: "absolute",
+                  inset: 0,
+                  width: `${Math.round(saveProgress * 100)}%`,
+                  background: "rgba(255,255,255,0.22)",
+                  transition: "width 200ms linear",
                 }}
-              >
-                <Icon d={P.check} size={12} stroke={1.8} />
-                <span>Copied</span>
-              </span>
-            ) : undefined
-          }
-          kbd={
-            copied ? undefined : (
-              <>
-                <span className="kbd">⌘</span>
-                <span className="kbd">C</span>
-              </>
-            )
-          }
-          onClick={onCopyClipboard}
-          disabled={!sourcePath || busy}
-        />
+              />
+            )}
+            <span style={{ position: "relative", display: "inline-flex", alignItems: "center", gap: 6 }}>
+              {justSaved ? (
+                <>
+                  <Icon d={P.check} size={13} stroke={1.8} />
+                  <span>Saved</span>
+                </>
+              ) : saving ? (
+                <span>
+                  Saving…{saveProgress != null ? ` ${Math.round(saveProgress * 100)}%` : ""}
+                </span>
+              ) : (
+                <span>Save {formatLabel}</span>
+              )}
+            </span>
+          </button>
+          {/* Copy to clipboard: paste into Slack, Mail, Messages. Same pipeline
+              as Save, nothing written to Movies. Swaps to a check for ~1.5s. */}
+          <button
+            onClick={onCopyClipboard}
+            disabled={!sourcePath || busy}
+            title={copied ? "Copied" : "Copy to clipboard (⌘C)"}
+            aria-label="Copy to clipboard"
+            style={{
+              width: 36,
+              height: 36,
+              flexShrink: 0,
+              padding: 0,
+              borderRadius: "var(--r-md)",
+              border: "none",
+              background: "var(--bg-elevated)",
+              color: copied ? "var(--success-tint)" : "var(--fg-primary)",
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              cursor: !sourcePath || busy ? "default" : "pointer",
+              opacity: !sourcePath || busy ? 0.5 : 1,
+            }}
+          >
+            {copied ? (
+              <Icon d={P.check} size={15} stroke={1.8} />
+            ) : (
+              <Icon d="M5 2h6v3M5 2v9a1 1 0 001 1h7a1 1 0 001-1V6L11 2M3 6h6v8" size={15} stroke={1.4} />
+            )}
+          </button>
+        </div>
+
+        {/* Post-save only. */}
         {lastSavedPath && (
-          <DestRow
-            icon={I.finder}
-            title="Reveal in Finder"
-            sub={basename(lastSavedPath)}
+          <button
             onClick={() => onReveal()}
             disabled={busy}
-          />
+            title={lastSavedPath}
+            style={{
+              ...TEXT_BUTTON,
+              width: "100%",
+              marginTop: 8,
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              color: "var(--fg-secondary)",
+              opacity: busy ? 0.5 : 1,
+              cursor: busy ? "default" : "pointer",
+            }}
+          >
+            {I.finder}
+            <span style={{ flexShrink: 0 }}>Reveal in Finder</span>
+            <span
+              style={{
+                minWidth: 0,
+                color: "var(--fg-tertiary)",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {basename(lastSavedPath)}
+            </span>
+          </button>
         )}
-        </div>
-        </div>
-      </div>
 
-      {/* Pinned lifecycle footer — always visible, not part of the scroll region. */}
-      <div
-        style={{
-          borderTop: "1px solid var(--border-faint)",
-          padding: "10px 14px 14px",
-          display: "flex",
-          flexDirection: "column",
-          gap: 8,
-        }}
-      >
-        {/* D-04 exception: Record another disables during an active save
-            so the discard branch can't race ffmpeg reading the scratch.
-            `busy` already covers `saving || discarding`; spelled out for
-            grep-ability. See DECISIONS.md 2026-05-20. */}
-        <button
-          onClick={() => onRecordAnother()}
-          disabled={saving || busy}
-          className="btn-secondary"
-          style={{
-            width: "100%",
-            padding: "7px 0",
-            height: 30,
-            fontSize: 12.5,
-            fontWeight: 500,
-            display: "inline-flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 6,
-            cursor: saving || busy ? "not-allowed" : "pointer",
-            opacity: saving || busy ? 0.5 : 1,
-          }}
-        >
-          <Icon d={P.play} size={11} stroke={0} fill="currentColor" />
-          <span>Record another</span>
-        </button>
-        <button
-          onClick={() => onDiscard()}
-          disabled={busy || lastSavedPath != null}
-          style={{
-            width: "100%",
-            padding: "6px 0",
-            height: 28,
-            background: "transparent",
-            border: "1px solid transparent",
-            color: "var(--recording-tint)",
-            fontSize: 12,
-            fontWeight: 500,
-            display: "inline-flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 6,
-            cursor: busy || lastSavedPath != null ? "not-allowed" : "pointer",
-            opacity: busy || lastSavedPath != null ? 0.4 : 1,
-            fontFamily: "var(--font-system)",
-          }}
-        >
-          {I.trash}
-          <span>Discard recording</span>
-        </button>
+        <div style={{ display: "flex", justifyContent: "space-between", marginTop: 10 }}>
+          {/* D-04 exception: Record another disables during an active save
+              so the discard branch can't race ffmpeg reading the scratch.
+              `busy` already covers `saving || discarding`; spelled out for
+              grep-ability. See DECISIONS.md 2026-05-20. */}
+          <button
+            onClick={() => onRecordAnother()}
+            disabled={saving || busy}
+            style={{
+              ...TEXT_BUTTON,
+              color: "var(--fg-secondary)",
+              cursor: saving || busy ? "not-allowed" : "pointer",
+              opacity: saving || busy ? 0.5 : 1,
+            }}
+          >
+            Record another
+          </button>
+          <button
+            onClick={() => onDiscard()}
+            disabled={busy || lastSavedPath != null}
+            style={{
+              ...TEXT_BUTTON,
+              color: "var(--recording-tint)",
+              cursor: busy || lastSavedPath != null ? "not-allowed" : "pointer",
+              opacity: busy || lastSavedPath != null ? 0.4 : 1,
+            }}
+          >
+            Discard
+          </button>
+        </div>
       </div>
       </div>
     </div>
   );
 }
 
-function DestRow({
-  icon,
-  title,
-  sub,
-  action,
-  kbd,
-  primary,
-  onClick,
-  disabled,
-}: {
-  icon: React.ReactNode;
-  title: string;
-  sub: string;
-  action?: React.ReactNode;
-  kbd?: React.ReactNode;
-  primary?: boolean;
-  onClick?: () => void;
-  disabled?: boolean;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      style={{
-        display: "grid",
-        gridTemplateColumns: "28px 1fr auto",
-        alignItems: "center",
-        gap: 10,
-        padding: "9px 11px",
-        width: "100%",
-        background: primary ? "var(--accent-soft)" : "var(--bg-elevated)",
-        border: `1px solid ${primary ? "var(--accent)" : "var(--border-faint)"}`,
-        borderRadius: 7,
-        cursor: disabled ? "default" : "pointer",
-        opacity: disabled ? 0.5 : 1,
-        textAlign: "left",
-        color: "var(--fg-primary)",
-        fontFamily: "var(--font-system)",
-      }}
-    >
-      <span
-        style={{
-          width: 26,
-          height: 26,
-          borderRadius: 6,
-          background: primary ? "var(--accent)" : "var(--bg-input)",
-          color: primary ? "#fff" : "var(--fg-secondary)",
-          border: "1px solid var(--border-faint)",
-          display: "inline-flex",
-          alignItems: "center",
-          justifyContent: "center",
-        }}
-      >
-        {icon}
-      </span>
-      <span style={{ display: "flex", flexDirection: "column", gap: 1, minWidth: 0 }}>
-        <span style={{ fontSize: 12.5, fontWeight: 600, letterSpacing: "-0.005em" }}>{title}</span>
-        <span
-          style={{
-            fontSize: 11,
-            color: "var(--fg-tertiary)",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-        >
-          {sub}
-        </span>
-      </span>
-      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-        {action && <span style={{ color: "var(--fg-tertiary)" }}>{action}</span>}
-        {kbd && <span style={{ display: "inline-flex", gap: 3 }}>{kbd}</span>}
-      </span>
-    </button>
-  );
-}
+const EXPORT_LABEL: React.CSSProperties = { fontSize: 12, color: "var(--fg-secondary)" };
+// Export's segmented buttons share the width evenly (no side padding), so four
+// resolutions fit beside the label column.
+const EXPORT_SEG_BUTTON: React.CSSProperties = { padding: "5px 0", minWidth: 0 };
+
+// Quiet text-only button (Record another, Discard, Reveal in Finder).
+const TEXT_BUTTON: React.CSSProperties = {
+  background: "transparent",
+  border: "none",
+  padding: "4px 0",
+  fontFamily: "var(--font-system)",
+  fontSize: 12,
+  fontWeight: 500,
+};

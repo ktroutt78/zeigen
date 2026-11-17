@@ -40,12 +40,12 @@ type TimelineProps = {
   thumbnailTime: number | null;
 };
 
-// Wide enough for "ZOOM" plus its Generate and trash buttons, clear of the
+// Wide enough for "Zoom" plus its Generate and trash buttons, clear of the
 // EDGE_PAD the scroll viewport reaches into this column.
 const LABEL_COL_W = 120;
 const RULER_H = 18;
-const ROW_H = 36;
-const ROW_GAP = 6;
+const ROW_H = 44;
+const ROW_GAP = 8;
 // The scroll viewport reaches this far past each end of the tracks column so
 // trim handles and labels that stick out past 0 or the end are not clipped.
 const EDGE_PAD = 12;
@@ -58,19 +58,16 @@ const FOLLOW_PAGE_AT = 0.9;
 const FOLLOW_LAND_AT = 0.1;
 
 const labelStyle: React.CSSProperties = {
-  fontSize: 11,
-  color: "var(--fg-tertiary)",
-  letterSpacing: "0.04em",
-  textTransform: "uppercase",
-  fontWeight: 600,
+  fontSize: 13,
+  color: "var(--fg-secondary)",
 };
 
+// A row's lane: a barely visible fill, no border.
 const rowBg: React.CSSProperties = {
   position: "absolute",
   inset: 0,
-  borderRadius: 6,
-  border: "1px solid var(--border-faint)",
-  background: "rgba(255,255,255,0.03)",
+  borderRadius: "var(--r-md)",
+  background: "var(--bg-track)",
 };
 
 const zoomButton: React.CSSProperties = {
@@ -383,14 +380,7 @@ export default function Timeline(props: TimelineProps) {
   })();
 
   return (
-    <div
-      style={{
-        margin: "8px 12px 12px",
-        padding: "12px 16px 14px",
-        background: "var(--bg-sidebar)",
-        borderRadius: "var(--r-lg)",
-      }}
-    >
+    <div className="panel" style={{ flexShrink: 0, padding: "10px 20px 16px" }}>
       <div
         style={{
           display: "flex",
@@ -399,8 +389,7 @@ export default function Timeline(props: TimelineProps) {
           marginBottom: 6,
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <span style={labelStyle}>Timeline</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, minHeight: 26 }}>
           {sceneChooser}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -443,7 +432,7 @@ export default function Timeline(props: TimelineProps) {
             </button>
             <button
               className="btn-ghost"
-              style={{ ...zoomButton, fontSize: 11 }}
+              style={{ ...zoomButton, fontSize: 12 }}
               disabled={!canZoom}
               title="Fit the whole recording"
               onClick={() => zoomTo(1, controlAnchor())}
@@ -484,7 +473,7 @@ export default function Timeline(props: TimelineProps) {
                 marginTop: ROW_GAP,
                 display: "flex",
                 alignItems: "center",
-                gap: 6,
+                gap: 8,
               }}
             >
               {r.icon}
