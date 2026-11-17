@@ -1968,7 +1968,7 @@ pub fn window_corner(source_path: String) -> Option<f64> {
     String::from_utf8_lossy(&out.stdout).trim().parse().ok()
 }
 
-// Where an export goes in ~/Movies/Zeigen. A named recording exports under its
+// Where an export goes in `movies` (the active root). A named recording exports under its
 // name ("Q3 Sales Walkthrough.mp4", then " 2", " 3" while a file with that name
 // exists); one without a name keeps the dated name (`recording-<stamp>.<ext>`,
 // then `-2`, `-3`). Formats do not collide because the extension differs.
@@ -2243,7 +2243,8 @@ fn validate_poster_mp4(path: &Path) -> bool {
 }
 
 // Phase 11 unified save. Every save re-reads the raw scratch mp4 + current
-// sidecar and produces a file in ~/Movies/Zeigen/. The scratch dir is not
+// sidecar and produces a file in the active root (storage.rs: the Save to
+// folder, or ~/Movies/Zeigen when it is unavailable, with a note saying so). The scratch dir is not
 // touched — it survives until the review window closes, so subsequent
 // saves can re-read raw + live sidecar and write a new collision slot.
 //
@@ -2272,6 +2273,7 @@ pub fn save_recording(
         }
     };
     save_recording_impl(
+        &crate::storage::active()?,
         stamp,
         source_path,
         format,
@@ -2289,6 +2291,7 @@ pub fn save_recording(
 // an AppHandle — mock_app() plumbing isn't worth it for one progress event.
 #[allow(clippy::too_many_arguments)]
 fn save_recording_impl(
+    out: &crate::storage::Active,
     stamp: String,
     source_path: String,
     format: String,
@@ -2310,10 +2313,7 @@ fn save_recording_impl(
     let watermark =
         Watermark::from_args(watermark_logo, watermark_corner, watermark_scale, watermark_opacity);
 
-    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-    let movies = PathBuf::from(home).join("Movies/Zeigen");
-    std::fs::create_dir_all(&movies)
-        .map_err(|e| format!("create {}: {e}", movies.display()))?;
+    let movies = &out.root;
 
     let sidecar = read_sidecar_path(source)?.unwrap_or_default();
 
@@ -2337,7 +2337,7 @@ fn save_recording_impl(
                 "source" => Mp4Resolution::Source,
                 other => return Err(format!("unknown mp4 resolution: {other}")),
             };
-            let output = export_slot(&movies, &stamp, sidecar.name.as_deref(), "mp4");
+            let output = export_slot(movies, &stamp, sidecar.name.as_deref(), "mp4");
             let report = run_edit_pipeline(
                 &screen_path,
                 &segments,
@@ -2358,7 +2358,7 @@ fn save_recording_impl(
                 other => return Err(format!("unknown gif resolution: {other}")),
             };
             let fps = fps.ok_or_else(|| "fps required for gif format".to_string())?;
-            let output = export_slot(&movies, &stamp, sidecar.name.as_deref(), "gif");
+            let output = export_slot(movies, &stamp, sidecar.name.as_deref(), "gif");
             let report = run_edit_pipeline(
                 &screen_path,
                 &segments,
@@ -2381,6 +2381,14 @@ fn save_recording_impl(
     // reflects whether the user's pick was within the trim range.
     let is_mp4 = format.as_str() == "mp4";
     try_embed_poster(&output, &sidecar, is_mp4);
+
+    // The Save to folder was unavailable: the file is in ~/Movies/Zeigen and the
+    // note says so (Review shows route_note as a notice).
+    let route_note = match (&out.fallback_from, route_note) {
+        (Some(c), Some(n)) => Some(format!("{} {n}", crate::storage::unavailable_note(c, true))),
+        (Some(c), None) => Some(crate::storage::unavailable_note(c, true)),
+        (None, n) => n,
+    };
 
     Ok(SaveResult {
         output_path: output.to_string_lossy().into_owned(),
@@ -3814,6 +3822,63 @@ WATERMARK_SCALE_FRAC=0.08";
         }
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A recording kept in a Save to folder's library (not ~/Movies/Zeigen) is
+    // found, its sidecar reads, and its export lands in that folder under the
+    // recording's name. With the folder unavailable the export lands in the
+    // fallback root and says so.
+    #[test]
+    fn recording_in_a_chosen_library_exports_into_the_chosen_root() {
+        ensure_audio_model_for_tests();
+        let t = std::env::temp_dir().join(format!("zeigen-chosen-export-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        let chosen = t.join("LaCie/Zeigen");
+        let stamp = "2026-11-17-090000";
+        let dir = crate::storage::library(&chosen).join(format!("recording-{stamp}"));
+        let sources = dir.join("sources");
+        std::fs::create_dir_all(&sources).unwrap();
+        let synth = |out: &Path, args: &[&str]| {
+            let o = Command::new(FFMPEG_PATH).args(["-y", "-v", "error"]).args(args)
+                .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"]).arg(out).output().expect("ffmpeg");
+            assert!(o.status.success(), "synth: {}", String::from_utf8_lossy(&o.stderr));
+        };
+        synth(&sources.join("screen.mp4"), &["-f", "lavfi", "-i", "color=c=blue:s=640x360:r=30:d=2",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=2", "-c:a", "aac", "-shortest"]);
+        synth(&sources.join("webcam.mp4"), &["-f", "lavfi", "-i", "color=c=red:s=240x240:r=30:d=2"]);
+        let logical = dir.join(format!("recording-{stamp}.mp4"));
+        let sidecar = SidecarState {
+            name: Some("Chosen Folder Demo".into()),
+            bubble_zone: Some(crate::composite::BubbleZone::BottomRight),
+            ..Default::default()
+        };
+        write_sidecar_path(&logical, &sidecar).unwrap();
+
+        let (screen, webcams) = export_inputs_from_source(&logical);
+        assert_eq!(screen, sources.join("screen.mp4"));
+        assert_eq!(webcams, vec![sources.join("webcam.mp4")]);
+        assert_eq!(read_sidecar_path(&logical).unwrap().unwrap().name.as_deref(), Some("Chosen Folder Demo"));
+
+        let save = |out: &crate::storage::Active| {
+            save_recording_impl(out, stamp.into(), logical.to_string_lossy().into_owned(), "mp4".into(),
+                "source".into(), None, None, None, None, None, |_| {})
+                .expect("export")
+        };
+        let r = save(&crate::storage::Active { root: chosen.clone(), fallback_from: None });
+        assert_eq!(Path::new(&r.output_path), chosen.join("Chosen Folder Demo.mp4"));
+        assert!(Path::new(&r.output_path).is_file());
+        assert!(r.route_note.is_none());
+
+        let fallback_root = t.join("Movies/Zeigen");
+        std::fs::create_dir_all(&fallback_root).unwrap();
+        let missing = t.join("Volumes/Gone/Zeigen");
+        let r = save(&crate::storage::Active { root: fallback_root.clone(), fallback_from: Some(missing.clone()) });
+        assert_eq!(Path::new(&r.output_path), fallback_root.join("Chosen Folder Demo.mp4"));
+        let note = r.route_note.expect("fallback note");
+        assert!(note.contains("isn't available. Saved to ~/Movies/Zeigen instead."), "{note}");
+        assert!(note.contains("Volumes/Gone/Zeigen"), "{note}");
+        assert!(!missing.exists());
+        let _ = std::fs::remove_dir_all(&t);
     }
 
     #[test]

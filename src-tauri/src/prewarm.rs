@@ -59,11 +59,6 @@ pub struct PrewarmHandle {
     aborted: bool,
 }
 
-fn movies_dir() -> Result<PathBuf, String> {
-    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-    Ok(PathBuf::from(home).join("Movies/Zeigen"))
-}
-
 // Wait up to `total_ms`, in `ABORT_POLL_MS` increments, returning early
 // if the shared aborted flag flips. Returns true if aborted during wait.
 fn wait_with_abort_poll(app: &AppHandle, total_ms: u64) -> bool {
@@ -227,7 +222,7 @@ pub fn prewarm_capture(
     // disposable independently from real recording-* dirs. Track B
     // owns its removal; Track A's throwaway webcam file lands here too.
     let stamp = Local::now().format("%Y-%m-%d-%H%M%S-%3f").to_string();
-    let scratch_dir = movies_dir()?
+    let scratch_dir = crate::storage::default_root()?
         .join(".scratch")
         .join(format!(".prewarm-{stamp}"));
     std::fs::create_dir_all(&scratch_dir)
