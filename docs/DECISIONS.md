@@ -4,6 +4,18 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-17 — Design pass step 2 (Recordings library) built
+
+Implementer, reviewed by me from its headless-browser screenshots; not seen in the real app.
+
+- The Recordings window is a grid of compact cards, four across at the default 900x680 and more as it widens, grouped Today / Yesterday / date, with the count, total size and "kept for 30 days" in the header and a search box. Click a card to open; a "…" menu on hover or focus has Rename, Show in Finder and Delete. Rename and Delete refuse while the recording is open in Review.
+- Thumbnails are made once per recording and stored in its folder (`thumb-<ms>.jpg`, 480 px wide): the Mark frame if set, otherwise one second in (the midpoint under 2 s). They are the plain screen picture, without the webcam bubble, zoom or background. The list appears at once and thumbnails fill in from a background thread.
+- The list no longer probes every recording on each focus: durations are cached in `.probe.json` in each folder.
+- Recordings with no name show "Window recording", "Display recording", "Area recording" or "Screen recording".
+- Open shortfalls are in DEBT (thumbnail retried on each focus when ffmpeg cannot make one; letterboxed thumbnails for tall recordings; the menu does not flip near the bottom edge).
+
+---
+
 ## 2026-11-17 — Fixes from the polish test verified by Keith
 
 All pass on the installed build: names without the doubled app ("Tableau - Book1 (Window)") in the title bar, Review's title and the list; real display names ("Built-in Retina Display (Display)"); no black first frame in new or older exports, nor in the preview at 0:00 (this confirms the recorder half, which I could not run); window corners match between preview and export without zoom; Generate shows no bar over the Scene row or Discard. Keith also accepted the rename rules as described (see the entry below).
