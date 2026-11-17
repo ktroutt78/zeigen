@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { emit } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 
 function readDuration(): number {
@@ -34,6 +34,17 @@ export default function CountdownOverlay() {
     }, 1000);
     return () => window.clearTimeout(id);
   }, [n]);
+
+  // Clicks pass through to whatever is underneath (the capture window's
+  // Cancel button may be on this display), and a cancel from anywhere closes
+  // the overlay at once.
+  useEffect(() => {
+    getCurrentWebviewWindow().setIgnoreCursorEvents(true).catch(() => {});
+    const unlisten = listen("countdown-cancelled", () => close());
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

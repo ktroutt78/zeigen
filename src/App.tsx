@@ -1561,6 +1561,7 @@ function App() {
     }
   };
 
+  const stopRef = useRef(() => {});
   const stop = () => {
     if (state === "countdown") {
       // Stop pressed while the countdown is still playing — cancel the
@@ -1813,6 +1814,18 @@ function App() {
   useEffect(() => {
     invoke("mic_monitor", { microphoneUid: micOpen ? selectedMic : null }).catch(() => {});
   }, [micOpen, selectedMic]);
+
+  // Esc cancels the countdown from this window too (clicking here takes key
+  // focus away from the countdown overlay, which handles Esc otherwise).
+  stopRef.current = stop;
+  useEffect(() => {
+    if (state !== "countdown") return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") stopRef.current();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [state]);
 
   // Listen for tray clicks and global hotkey toggles.
   useEffect(() => {
@@ -2225,7 +2238,10 @@ function App() {
   }, [view]);
 
   const busy = recording || state === "countdown";
-  const pickDisabled = recording || displays.length === 0;
+  // Nothing about the take can change once it is armed: during the countdown
+  // and while "Starting…" the tiles, picker and device rows are disabled.
+  const locked = recording || state === "countdown" || starting;
+  const pickDisabled = locked || displays.length === 0;
 
   if (view === "settings") {
     return (
@@ -2359,21 +2375,21 @@ function App() {
               label="Display"
               icon={Glyph.display}
               on={sourceKind === "display"}
-              disabled={recording}
+              disabled={locked}
               onClick={() => handleDisplayTileClick().catch((e) => setError(String(e)))}
             />
             <SourceTile
               label="Window"
               icon={Glyph.window}
               on={sourceKind === "window"}
-              disabled={recording}
+              disabled={locked}
               onClick={handleWindowTileClick}
             />
             <SourceTile
               label="Area"
               icon={Glyph.area}
               on={sourceKind === "area"}
-              disabled={recording}
+              disabled={locked}
               onClick={handleAreaTileClick}
             />
           </div>
@@ -2436,7 +2452,7 @@ function App() {
             value={selectedCamera == null ? "" : String(selectedCamera)}
             onPick={(v) => setSelectedCamera(Number(v))}
             onToggle={() => setSelectedCamera(cameraName != null ? null : offCamera?.index ?? null)}
-            disabled={recording}
+            disabled={locked}
           />
           <DeviceRow
             kind="Microphone"
@@ -2449,7 +2465,7 @@ function App() {
             value={selectedMic ?? ""}
             onPick={(v) => setSelectedMic(v)}
             onToggle={() => setSelectedMic(selectedMic != null ? null : offMic?.uid ?? null)}
-            disabled={recording}
+            disabled={locked}
             meter={selectedMic != null}
           />
         </section>
