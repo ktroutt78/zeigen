@@ -7,6 +7,7 @@ import { ask, open } from "@tauri-apps/plugin-dialog";
 import { Icon, I, P, RailIcon } from "./components/icons";
 import Timeline from "./timeline/Timeline";
 import { openRecordingsWindow } from "./openRecordings";
+import { recordingLength, recordingName as displayName } from "./recordingLabel";
 import { placeSegment } from "./timeline/place";
 import {
   sourceRectToOutputRect,
@@ -112,10 +113,9 @@ const ZOOM_PREVIEW_POST_S = 1.0;
 
 // Segment -> canonical keyframe run: 1.0 at the edges, full scale between,
 // ramps ZOOM_RAMP_S long (halved for short segments). All keyframes of a
-// segment share its center, auto_generated flag and reason. Key order matters:
-// statesEqual compares JSON.stringify against sidecar keyframes as Rust
-// serializes them (t, scale, center_x, center_y, ease, auto_generated, reason),
-// and reason is omitted when absent, as Rust omits it.
+// segment share its center, auto_generated flag and reason. Key order follows
+// Rust's serialization (t, scale, center_x, center_y, ease, auto_generated,
+// reason), and reason is omitted when absent, as Rust omits it.
 function zoomSegmentsToKeyframes(segments: ZoomSegment[]): ZoomKeyframe[] {
   const kfs: ZoomKeyframe[] = [];
   for (const seg of [...segments].sort((a, b) => a.start - b.start)) {
@@ -394,8 +394,8 @@ type SidecarState = {
   frame?: FrameStyle | null;
   background?: Background | null;
   // Capture source ("window"|"display"|"area"), persisted so a reopened window
-  // capture still gates off Rounded corners. Metadata — not an edit (excluded from
-  // the dirty check); the export never reads it.
+  // capture still gates off Rounded corners. Metadata, not an edit; the export
+  // never reads it.
   source_kind?: string | null;
   // Drawn-cursor style (CURSOR-SMOOTHING-PLAN). null/undefined = the defaults
   // (smooth, 1.0); only written when changed, same convention as bubble_zone.
@@ -535,17 +535,6 @@ function backgroundCss(
   const src = thumbs?.[bg.path] ?? bg.path;
   return `url("${convertFileSrc(src)}") center center / cover no-repeat`;
 }
-
-const EMPTY_STATE: SidecarState = {
-  trim: null,
-  bubble_position_log: [],
-  thumbnail_time: null,
-  bubble_roundness: null,
-  bubble_zone: null,
-  bubble_scale: null,
-  zoom: [],
-  redactions: [],
-};
 
 const SIDECAR_DEBOUNCE_MS = 350;
 
@@ -725,73 +714,12 @@ function fmtDur(s: number | null | undefined): string {
 }
 
 // Normalize trim: an "untrimmed" range [0, duration] is logically equivalent
-// to no trim at all. Storing the canonical form keeps dirty-detection honest
-// and keeps the sidecar file empty for clips with no edits.
+// to no trim at all. Storing the canonical form keeps the sidecar file empty for
+// clips with no edits.
 function normalizeTrim(trim: Trim | null | undefined, duration: number | null): Trim | null {
   if (!trim || duration == null) return null;
   if (trim.in <= TRIM_EPS && trim.out >= duration - TRIM_EPS) return null;
   return trim;
-}
-
-function statesEqual(a: SidecarState, b: SidecarState, duration: number | null): boolean {
-  const ta = normalizeTrim(a.trim, duration);
-  const tb = normalizeTrim(b.trim, duration);
-  if ((ta == null) !== (tb == null)) return false;
-  if (ta && tb && (Math.abs(ta.in - tb.in) > TRIM_EPS || Math.abs(ta.out - tb.out) > TRIM_EPS)) {
-    return false;
-  }
-  const tta = a.thumbnail_time ?? null;
-  const ttb = b.thumbnail_time ?? null;
-  if ((tta == null) !== (ttb == null)) return false;
-  if (tta != null && ttb != null && Math.abs(tta - ttb) > TRIM_EPS) return false;
-  const bra = a.bubble_roundness ?? null;
-  const brb = b.bubble_roundness ?? null;
-  if ((bra == null) !== (brb == null)) return false;
-  if (bra != null && brb != null && Math.abs(bra - brb) > 0.001) return false;
-  if ((a.bubble_zone ?? null) !== (b.bubble_zone ?? null)) return false;
-  const bsa = a.bubble_scale ?? 1;
-  const bsb = b.bubble_scale ?? 1;
-  if (Math.abs(bsa - bsb) > 0.001) return false;
-  const za = a.zoom ?? [];
-  const zb = b.zoom ?? [];
-  if (za.length !== zb.length) return false;
-  for (let i = 0; i < za.length; i++) {
-    if (JSON.stringify(za[i]) !== JSON.stringify(zb[i])) return false;
-  }
-  const ra = a.redactions ?? [];
-  const rb = b.redactions ?? [];
-  if (ra.length !== rb.length) return false;
-  for (let i = 0; i < ra.length; i++) {
-    if (JSON.stringify(ra[i]) !== JSON.stringify(rb[i])) return false;
-  }
-  // Frame styling: compare field-by-field with 0 defaults (not JSON.stringify) so
-  // Rust's skip-zero re-serialization on read-back doesn't read as perpetually dirty.
-  const fa = a.frame;
-  const fb = b.frame;
-  const na = frameIsNoop(fa);
-  const nb = frameIsNoop(fb);
-  if (na !== nb) return false;
-  if (!na && !nb) {
-    for (const key of ["padding", "corner_radius", "shadow", "inset"] as const) {
-      if (Math.abs((fa![key] ?? 0) - (fb![key] ?? 0)) > 1e-6) return false;
-    }
-  }
-  const ga = a.background ?? null;
-  const gb = b.background ?? null;
-  if ((ga == null) !== (gb == null)) return false;
-  if (ga && gb) {
-    if (ga.kind !== gb.kind) return false;
-    if (ga.kind === "solid" && gb.kind === "solid" && ga.hex.toLowerCase() !== gb.hex.toLowerCase())
-      return false;
-    if (ga.kind === "gradient" && gb.kind === "gradient" && ga.preset !== gb.preset) return false;
-    if (ga.kind === "image" && gb.kind === "image" && ga.path !== gb.path) return false;
-  }
-  const ca = a.cursor ?? DEFAULT_CURSOR_STYLE;
-  const cb = b.cursor ?? DEFAULT_CURSOR_STYLE;
-  if (ca.smoothing !== cb.smoothing || Math.abs(ca.size - cb.size) > 1e-6) return false;
-  if (JSON.stringify(a.scenes ?? []) !== JSON.stringify(b.scenes ?? [])) return false;
-  if (Math.abs((a.bubble_zoom_scale ?? 1) - (b.bubble_zoom_scale ?? 1)) > 0.001) return false;
-  return true;
 }
 
 // V2 Step 2: the bubble no longer animates along the position log. It's
@@ -951,7 +879,6 @@ export default function Review() {
   // Original-timeline timestamp for the user's chosen poster frame. null =
   // unset; export-time default (0.5s in) is applied on the Rust side.
   const [thumbnailTime, setThumbnailTime] = useState<number | null>(null);
-  const [snapshot, setSnapshot] = useState<SidecarState>(EMPTY_STATE);
 
   const [saving, setSaving] = useState(false);
   // 0-1 fraction from the Rust "save-progress" event, emitted from
@@ -1100,7 +1027,7 @@ export default function Review() {
   // Capture source — from the open params, overridden by a loaded sidecar's
   // source_kind on reopen. A window capture supplies its own (squircle) corners, so
   // Rounded is gated off for it; our arc can't coincide with the OS curve (DECISIONS
-  // 2026-07-29). Metadata: persisted but excluded from the dirty check.
+  // 2026-07-29). Metadata: persisted, not an edit.
   const [sourceKind, setSourceKind] = useState<string | null>(params.sourceKind);
   const [webcamLeadMs, setWebcamLeadMs] = useState<number | null>(null);
   const [recordingName, setRecordingName] = useState<string | null>(null);
@@ -1496,9 +1423,7 @@ export default function Review() {
   //
   // AUTO-LOAD (owner-approved 2026-07-16; detector has earned it — see
   // DECISIONS.md; effect is `autoLoadedRef` below). It runs suggest ONCE at
-  // review-open on a fresh recording, folds the result into the snapshot so
-  // it reads as the default (not "— edited"), and Clear-all is the escape
-  // hatch. NO persisted "already-suggested" flag is needed: each recording
+  // review-open on a fresh recording, and Clear-all is the escape hatch. NO persisted "already-suggested" flag is needed: each recording
   // gets exactly one review window (review-<stamp>) and the app never reopens
   // recordings, so the mount-time run happens exactly once and a Clear stays
   // cleared for free. IF reopening recordings is ever added, THAT is when a
@@ -1564,12 +1489,8 @@ export default function Review() {
       if (suggested.length === 0) return; // nothing zoom-worthy — silent
       const kf = zoomSegmentsToKeyframes(suggested);
       setZoomSegments(suggested);
-      // Fold into the baseline so the header reads clean (not "— edited") on
-      // open; a subsequent Clear then correctly reads as an edit.
-      setSnapshot((prev) => ({ ...prev, zoom: kf }));
-      // Persist now rather than waiting on the debounce — the export reads the
-      // sidecar, and the folded state is dirty=false so nothing else forces a
-      // write before an immediate save.
+      // Persist now rather than waiting on the debounce, so an immediate save
+      // (the export reads the sidecar) already has them.
       invoke("write_sidecar", {
         sourcePath,
         state: sidecarWritePayload({ ...currentState, zoom: kf }, duration),
@@ -1594,7 +1515,7 @@ export default function Review() {
   );
 
 
-  // Read sidecar on mount; record snapshot for discard semantics.
+  // Read sidecar on mount.
   useEffect(() => {
     if (!sourcePath) return;
     let cancelled = false;
@@ -1602,24 +1523,6 @@ export default function Review() {
       .then((state) => {
         if (cancelled) return;
         if (state) {
-          setSnapshot({
-            trim: state.trim ?? null,
-            bubble_position_log: state.bubble_position_log ?? [],
-            thumbnail_time: state.thumbnail_time ?? null,
-            bubble_roundness: state.bubble_roundness ?? null,
-            bubble_zone: state.bubble_zone ?? null,
-            bubble_scale: state.bubble_scale ?? null,
-            zoom: state.zoom ?? [],
-            redactions: state.redactions ?? [],
-            frame: state.frame ?? null,
-            background: state.background ?? null,
-            source_kind: state.source_kind ?? null,
-            cursor: state.cursor ?? null,
-            scenes: state.scenes ?? [],
-            bubble_zoom_scale: state.bubble_zoom_scale ?? null,
-            webcam_lead_ms: state.webcam_lead_ms ?? null,
-            name: state.name ?? null,
-          });
           if (state.trim) setTrim(state.trim);
           if (state.bubble_position_log) setBubblePositionLog(state.bubble_position_log);
           if (state.thumbnail_time != null) setThumbnailTime(state.thumbnail_time);
@@ -1644,8 +1547,6 @@ export default function Review() {
           if (state.bubble_zoom_scale != null) setBubbleZoomScale(state.bubble_zoom_scale);
           if (state.webcam_lead_ms != null) setWebcamLeadMs(state.webcam_lead_ms);
           if (state.name != null) setRecordingName(state.name);
-        } else {
-          setSnapshot(EMPTY_STATE);
         }
         // Set last, after any setZoomSegments above, so the auto-load effect
         // sees the loaded zoom track (React batches these together) and never
@@ -1761,10 +1662,6 @@ export default function Review() {
     [trim, bubblePositionLog, thumbnailTime, bubbleRoundness, bubbleZone, bubbleScale, zoomSegments, redactions, frame, background, sourceKind, cursorStyle, scenes, bubbleZoomScale, webcamLeadMs, recordingName],
   );
 
-  const dirty = useMemo(
-    () => !statesEqual(currentState, snapshot, duration),
-    [currentState, snapshot, duration],
-  );
 
   // The layout path Rust computes from the current edit state (scene.rs via
   // scene_path) — the same path the export plays. Same debounce and stale-
@@ -2647,6 +2544,7 @@ export default function Review() {
     >
       <Header
         name={recordingName}
+        sourceKind={sourceKind}
         onRename={(next) => {
           // State first, so the edit state's own saves carry the name; then written
           // at once, since a rename does not wait on Save.
@@ -2656,7 +2554,6 @@ export default function Review() {
           );
           getCurrentWebviewWindow().setTitle(next).catch(() => {});
         }}
-        dirty={dirty}
         length={trimmedLen}
         previewFailed={previewState.status === "failed"}
       />
@@ -2825,24 +2722,26 @@ export default function Review() {
 
 function Header({
   name,
-  dirty,
+  sourceKind,
   length,
   previewFailed,
   onRename,
 }: {
   name: string | null;
-  dirty: boolean;
-  // Post-trim clip length. Lived in the old toolbar's info strip; the
-  // header is the only remaining info strip.
+  // What was captured; names an unnamed recording ("Window recording").
+  sourceKind: string | null;
+  // Post-trim clip length.
   length: number | null;
   previewFailed: boolean;
   onRename: (name: string) => void;
 }) {
-  // The name being typed; null when not renaming. An empty name keeps the old one.
+  const shown = displayName(name, sourceKind);
+  // The name being typed; null when not renaming. An empty or unchanged name
+  // keeps the old one (so an unnamed recording stays unnamed).
   const [draft, setDraft] = useState<string | null>(null);
   const commit = () => {
     const next = draft?.trim();
-    if (next && next !== name) onRename(next);
+    if (next && next !== shown) onRename(next);
     setDraft(null);
   };
   return (
@@ -2886,7 +2785,7 @@ function Header({
         />
       ) : (
         <span
-          onClick={() => setDraft(name ?? "")}
+          onClick={() => setDraft(shown)}
           style={{
             fontWeight: 600,
             fontSize: 14,
@@ -2900,19 +2799,21 @@ function Header({
           }}
           title="Click to rename"
         >
-          {name ?? "Screen Recording"}{dirty ? " — edited" : ""}
+          {shown}
         </span>
       )}
-      <span
-        style={{
-          fontSize: 13,
-          color: "var(--fg-tertiary)",
-          fontVariantNumeric: "tabular-nums",
-          whiteSpace: "nowrap",
-        }}
-      >
-        {fmt(length)} · .mp4 · just now
-      </span>
+      {length != null && (
+        <span
+          style={{
+            fontSize: 13,
+            color: "var(--fg-tertiary)",
+            fontVariantNumeric: "tabular-nums",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {recordingLength(length)}
+        </span>
+      )}
       {previewFailed && (
         <span
           style={{

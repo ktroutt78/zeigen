@@ -10,6 +10,7 @@ import "./styles/capture.css";
 import { PILL_STRIP_CSS } from "./constants/bubble";
 import type { LibraryRecording } from "./RecordingsWindow";
 import { openRecordingsWindow } from "./openRecordings";
+import { recordingName } from "./recordingLabel";
 
 const DEFAULT_HOTKEY = "CmdOrCtrl+Shift+P";
 
@@ -913,7 +914,7 @@ async function openReview(
   const url = `/#review?${params.toString()}`;
   const win = new WebviewWindow(label, {
     url,
-    title: args.name ?? "Screen Recording",
+    title: recordingName(args.name, args.sourceKind),
     width: 1280,
     height: 860,
     minWidth: 720,
