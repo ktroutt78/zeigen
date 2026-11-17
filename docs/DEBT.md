@@ -2,6 +2,14 @@
 
 Things left worse than we'd like, with why. Newest at top. Remove an entry when it is paid.
 
+## Recordings window: rough edges (2026-11-16)
+
+- A recording whose edit state is "logically empty" has no sidecar (Review deletes it), and the list skips folders without one. A screen-only display recording with no edits would vanish from the list. None of the nine kept recordings is affected today; it matters once step 2 puts every new recording in the library. Fix: list folders by their screen file and treat a missing sidecar as defaults, or stop Review deleting an empty sidecar for kept recordings.
+- Discarding a reopened recording, or saving from it, sends the same `recording-discarded` / `recording-committed` events a fresh recording does, so the main window's status strip clears or updates even when it was showing a different recording.
+- The window learns "recording in progress" from engine `started` / `stopped` / `error` events. A pre-warm's start and stop briefly disable Open; if the window opens mid-recording it shows Open enabled (the main window still refuses the request unless idle).
+- The list probes every recording with ffprobe on each load and on every focus; fine for nine, slow once there are hundreds.
+- Nobody has opened a recording through the window yet; it was checked by type check, the folder-scan test, and a read-only listing of the real library.
+
 ## Window corners: preview and export differ (2026-11-16)
 
 The export rounds a window recording's corners by what it measures in the picture (about 3% of the short side on current macOS windows). The preview rounds by a fixed 5.5% (`WINDOW_CLIP_PREVIEW_FRAC` in `Review.tsx`), so the preview's corners are rounder than the export's. Breaks the preview-equals-export rule. Fix: measure once at finalize, store it in the edit state, and have both use it.
