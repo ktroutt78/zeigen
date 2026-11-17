@@ -2,6 +2,14 @@
 
 Things left worse than we'd like, with why. Newest at top. Remove an entry when it is paid.
 
+## Review lighter restyle: loose ends (2026-11-17)
+
+- Looked at only in headless Chrome with the Tauri APIs stubbed and a synthetic test video, not in the real WKWebView window. Not seen there: the webcam bubble, the Bubble panel with a real bubble, the camera shading in zoom blocks, the post-save "Reveal in Finder" line, the GIF export rows, and the Save progress fill.
+- The shared `.segmented` control keeps its old look (fill equal to the panel colour plus a hairline border), because the capture window uses it too. On the new panel it reads as an outline. Restyle it once, for all windows, in the capture-window step.
+- At the minimum window width (720) the timeline's trim readout ("In · Out · Length") wraps onto three lines beside the zoom controls.
+- Zoom, scene and blur blocks still fill the whole row height with a 5px radius, inside a lane rounded at 9px; a block starting at 0:00 or ending at the end pokes past the lane's corner by a pixel or two.
+- The video stage keeps its own dark fill and hairline border inside the preview panel (it is the picture surface, and its border is part of what the overlays measure; left alone to keep preview and export matched).
+
 ## Review polish: names, play bar, empty-row hints (2026-11-16)
 
 - Nothing here has been looked at in the app; checked by type check, build, and the sidecar and folder-scan tests.
