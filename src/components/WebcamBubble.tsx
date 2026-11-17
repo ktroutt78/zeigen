@@ -74,8 +74,8 @@ export default function WebcamBubble() {
   const { state: recState, elapsed, capSec } = useRecordingState();
 
   // Corner roundness (null = circle). Initial value from settings on mount
-  // — the slider in the main window persists there — then live updates via
-  // the bubble-style event while the user drags. Same border-radius
+  // — the shape buttons on the bubble's toolbar persist there — then live
+  // updates via the bubble-style event. Same border-radius
   // arithmetic as the export mask (roundness * 50% of the square element ==
   // roundness * diameter/2 in composite.rs), so this preview IS the export
   // shape.

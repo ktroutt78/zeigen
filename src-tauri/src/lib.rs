@@ -40,12 +40,11 @@ struct ActiveRecording {
     scratch_dir: PathBuf,
     scratch_mp4_path: PathBuf,
     webcam: Option<WebcamRecorder>,
-    // Phase 15 c3: webcam_size/corner aren't read by finalize anymore
-    // (composite moved to export). Kept on the struct so engine_start
-    // keeps parsing the API contract unchanged — a future settings UI
-    // can read these. dead_code allowed pending that surface.
-    #[allow(dead_code)]
+    // Bubble size (S / M / L) at Start: the remembered setting unless the
+    // caller passes one. Stamped into the sidecar at finalize (bubble_size).
     webcam_size: WebcamSize,
+    // Phase 15 c3: webcam_corner isn't read by finalize anymore (composite
+    // moved to export). Kept so engine_start keeps parsing the API contract.
     #[allow(dead_code)]
     webcam_corner: Corner,
     started_at: Instant,
@@ -224,7 +223,10 @@ fn engine_start(
         scratch_dir: scratch_dir.clone(),
         scratch_mp4_path: scratch_mp4_path.clone(),
         webcam,
-        webcam_size: parse_size(webcam_size.as_deref()),
+        webcam_size: webcam_size
+            .as_deref()
+            .map(|s| parse_size(Some(s)))
+            .unwrap_or_else(settings::bubble_size),
         webcam_corner: parse_corner(webcam_corner.as_deref()),
         started_at: Instant::now(),
         first_frame_at: None,
@@ -442,11 +444,11 @@ async fn recording_finalize(
     let screen_host_s = rec.screen_host_s;
     let bubble_position_log = rec.bubble_position_log;
     let bubble_roundness = rec.bubble_roundness;
+    let bubble_size = rec.webcam_size;
     let name = rec.name;
-    // webcam_size / webcam_corner used to feed composite at finalize.
-    // Phase 15 c3 defers composite to export; export defaults to Medium/
-    // BottomRight (engine_start parses these from None → defaults today,
-    // so dropping them at finalize is a no-op for current recordings).
+    // The export sizes the bubble from the logged diameter (the floating
+    // bubble's real size), not from webcam_size; bubble_size is a label for
+    // Review's S / M / L control.
 
     // c3 outputs: the dual-stream player needs screen_path + optional
     // webcam_path. Both None for screen-only recordings (in which case
@@ -558,6 +560,10 @@ async fn recording_finalize(
         // circle). Stamped here so the recording keeps the shape it was made
         // with; the export side reads only the sidecar, never the setting.
         state.bubble_roundness = bubble_roundness;
+        // The S / M / L the bubble was recorded at, only with a bubble and
+        // only when not Medium (absent = Medium, as for older recordings).
+        state.bubble_size = Some(bubble_size)
+            .filter(|s| *s != WebcamSize::Medium && !state.bubble_position_log.is_empty());
         state.name = name.clone();
         edit::write_sidecar_path(&scratch_mp4_path, &state)?;
     }
@@ -962,10 +968,17 @@ pub fn run() {
             update_tray_state,
             update_tray_elapsed,
             set_hotkey,
+            hotkey::hotkey_pause,
+            hotkey::hotkey_resume,
             quit_app,
             macos::set_window_frame_cg,
             macos::picker_cursor_start,
             macos::picker_cursor_stop,
+            macos::place_bubble_toolbar,
+            macos::attach_bubble_toolbar,
+            macos::resize_bubble,
+            macos::bubble_hover_start,
+            macos::bubble_hover_stop,
             bubble_position_event,
             edit::read_sidecar,
             edit::write_sidecar,
@@ -998,6 +1011,7 @@ pub fn run() {
             settings::clear_watermark_logo,
             settings::set_noise_reduction,
             settings::set_bubble_roundness,
+            settings::set_bubble_size,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

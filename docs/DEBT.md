@@ -2,6 +2,16 @@
 
 Things left worse than we'd like, with why. Newest at top. Remove an entry when it is paid.
 
+## Capture feedback: untried and rough (2026-11-17)
+
+- Not run in the app. Seen only in headless Chrome with stubbed Tauri calls: the bubble's shape/size pill (as two iframes placed by hand), the hotkey recorder idle, listening and refusing, the Start reasons, the picker line without Identify, Review's S / M / L. Untried: the pill showing on hover over a bubble that is not the key window (the cursor poller), the pill following a drag as a child window, the above/below flip at the top of a screen, resize keeping the bubble in its corner, whether creating the pill window or clicking it moves focus differently from clicking the bubble, and a hotkey taken by another app being refused.
+- The pill decides above or below only when a drag settles. Dragged to the top of a screen, it sits off the top until the mouse is let go.
+- Hover counts the bubble window's whole rectangle, including the transparent corners around the circle and the strip with the close button below it.
+- While Zeigen is idle with a camera on, the hover poller wakes 30 times a second and hops to the main thread to read the cursor and two window frames.
+- The S / M / L diameters live twice: composite.rs WebcamSize::px and src/constants/bubble.ts BUBBLE_SIZE_PT. The export draws the measured window diameter, so a mismatch would only mislabel Review's Size buttons.
+- A roundness set with the old slider (say 0.35) highlights the nearest preset on the pill but keeps drawing its own value until a preset is clicked. A recording sized with Review's old Small (half the recorded diameter) highlights S but stays at half size; clicking S makes it three quarters.
+- macOS menu shortcuts reach the app menu before the hotkey recorder sees them: pressing Cmd+W while it listens closes the main window, which quits Zeigen, and Cmd+Q quits. Those combinations can't be recorded.
+
 ## Recordings feedback: untried and rough (2026-11-17)
 
 - Not run in the app. Seen in headless Chrome with stubbed Tauri calls: the Exported badge, the header line, the in-window Delete confirm, the rename refusal text (the native alert drawn by a stand-in), and the Mark marker mid-drag (marker and preview followed the drag). Untried in WKWebView: Show in Finder selecting the exported file, the confirm's focus ring and Esc, and the preview returning to the playhead when a Mark drag ends or is cancelled (the harness's virtual clock never settles a seek; plain hover shows the same there).

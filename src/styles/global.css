@@ -19,3 +19,34 @@ body {
 }
 
 * { box-sizing: border-box; }
+
+/* Shape / size pill above the floating webcam bubble (BubbleToolbar.tsx).
+   Same dark glass as the bubble's own pill. */
+.bubble-toolbar {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  background: rgba(20, 20, 22, 0.78);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  border: 0.5px solid rgba(255, 255, 255, 0.18);
+  border-radius: 99px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+}
+.bubble-toolbar > button {
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 99px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.72);
+  font: 600 11px var(--font-system);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.bubble-toolbar > button:hover { color: #fff; }
+.bubble-toolbar > button.on { background: rgba(255, 255, 255, 0.2); color: #fff; }
+.bubble-toolbar-sep { width: 1px; height: 14px; margin: 0 3px; background: rgba(255, 255, 255, 0.18); }

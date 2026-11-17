@@ -1,6 +1,6 @@
 use objc2::runtime::AnyObject;
-use objc2::{msg_send, Encode, Encoding, RefEncode};
-use std::sync::atomic::{AtomicBool, Ordering};
+use objc2::{class, msg_send, Encode, Encoding, RefEncode};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -185,5 +185,211 @@ pub fn picker_cursor_stop() {
     // take() drops the guard before join(), so start()'s re-lock can't deadlock.
     if let Some(h) = poller_slot().lock().unwrap().take() {
         let _ = h.join();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WEBCAM BUBBLE TOOLBAR
+//
+// The shape / size pill shown above the floating bubble before recording is a
+// second small window (label bubble-toolbar), attached to the bubble as an
+// NSWindow child so AppKit moves it with the bubble while it is dragged. The
+// bubble window's own geometry, drag and position log are untouched.
+//
+// Hover comes from the global cursor position compared with the two window
+// frames, not from DOM mouse events: macOS sends mouseMoved/entered only to
+// the key window, and the bubble is almost never key (the app being recorded
+// is). NSEvent.mouseLocation is permission-free and in the same Cocoa screen
+// coordinates as NSWindow.frame, so no conversion is needed. The poller runs
+// only while the toolbar window exists, which App.tsx limits to idle (closed
+// at Start, during the countdown and while recording).
+// ---------------------------------------------------------------------------
+
+const BUBBLE_LABEL: &str = "webcam-bubble";
+const TOOLBAR_LABEL: &str = "bubble-toolbar";
+// Points between the bubble window's edge and the toolbar window's.
+const TOOLBAR_GAP: f64 = 2.0;
+// NSWindowOrderingMode NSWindowAbove.
+const NS_WINDOW_ABOVE: isize = 1;
+
+fn ns_window_of(app: &AppHandle, label: &str) -> Option<*mut AnyObject> {
+    let w = app.get_webview_window(label)?;
+    let p = w.ns_window().ok()? as *mut AnyObject;
+    (!p.is_null()).then_some(p)
+}
+
+unsafe fn frame_of(w: *mut AnyObject) -> NSRect {
+    msg_send![w, frame]
+}
+
+// The visible part (no menu bar / Dock) of the screen the window is on.
+unsafe fn visible_frame_of(w: *mut AnyObject) -> Option<NSRect> {
+    let screen: *mut AnyObject = msg_send![w, screen];
+    if screen.is_null() {
+        return None;
+    }
+    Some(msg_send![screen, visibleFrame])
+}
+
+fn contains(r: NSRect, p: NSPoint) -> bool {
+    p.x >= r.origin.x
+        && p.x < r.origin.x + r.size.width
+        && p.y >= r.origin.y
+        && p.y < r.origin.y + r.size.height
+}
+
+// Where the toolbar goes for a bubble frame: centred above it, or below it
+// when the screen has no room above; kept inside the screen sideways. Cocoa
+// coordinates (y up). Pure, so it is unit-tested.
+fn toolbar_origin(bubble: NSRect, toolbar: NSSize, visible: NSRect) -> NSPoint {
+    let max_x = (visible.origin.x + visible.size.width - toolbar.width).max(visible.origin.x);
+    let x = (bubble.origin.x + bubble.size.width / 2.0 - toolbar.width / 2.0).clamp(visible.origin.x, max_x);
+    let above = bubble.origin.y + bubble.size.height + TOOLBAR_GAP;
+    let y = if above + toolbar.height <= visible.origin.y + visible.size.height {
+        above
+    } else {
+        bubble.origin.y - TOOLBAR_GAP - toolbar.height
+    };
+    NSPoint { x, y }
+}
+
+// New bubble window frame for a new size. The bubble's circle sits at the top
+// of its window and is as wide as the window. The circle keeps the corner
+// nearest the screen's corner fixed (bottom-right stays bottom-right), so a
+// bubble parked in a corner stays parked there. Pure, unit-tested.
+fn resized_bubble(old: NSRect, width: f64, height: f64, visible: NSRect) -> NSRect {
+    let top = old.origin.y + old.size.height;
+    let cx = old.origin.x + old.size.width / 2.0;
+    let cy = top - old.size.width / 2.0;
+    let keep_right = cx > visible.origin.x + visible.size.width / 2.0;
+    let keep_bottom = cy < visible.origin.y + visible.size.height / 2.0;
+    let x = if keep_right { old.origin.x + old.size.width - width } else { old.origin.x };
+    let new_top = if keep_bottom { top - old.size.width + width } else { top };
+    NSRect { origin: NSPoint { x, y: new_top - height }, size: NSSize { width, height } }
+}
+
+#[tauri::command]
+pub fn place_bubble_toolbar(app: AppHandle) {
+    let (Some(b), Some(t)) = (ns_window_of(&app, BUBBLE_LABEL), ns_window_of(&app, TOOLBAR_LABEL)) else {
+        return;
+    };
+    unsafe {
+        let bf = frame_of(b);
+        let tf = frame_of(t);
+        let vis = visible_frame_of(b).unwrap_or(bf);
+        let origin = toolbar_origin(bf, tf.size, vis);
+        let _: () = msg_send![t, setFrameOrigin: origin];
+    }
+}
+
+// Called by the toolbar window once it is up: make it the bubble's child (so
+// it follows drags) and put it in place.
+#[tauri::command]
+pub fn attach_bubble_toolbar(app: AppHandle) {
+    let (Some(b), Some(t)) = (ns_window_of(&app, BUBBLE_LABEL), ns_window_of(&app, TOOLBAR_LABEL)) else {
+        return;
+    };
+    unsafe {
+        let _: () = msg_send![b, addChildWindow: t, ordered: NS_WINDOW_ABOVE];
+    }
+    place_bubble_toolbar(app);
+}
+
+// Resize the floating bubble to an S / M / L size (width = circle diameter,
+// height adds the pill strip; both from the frontend's constants).
+#[tauri::command]
+pub fn resize_bubble(app: AppHandle, width: f64, height: f64) -> Result<(), String> {
+    let b = ns_window_of(&app, BUBBLE_LABEL).ok_or("bubble window not found")?;
+    unsafe {
+        let old = frame_of(b);
+        let vis = visible_frame_of(b).unwrap_or(old);
+        let frame = resized_bubble(old, width, height, vis);
+        let _: () = msg_send![b, setFrame: frame display: true];
+    }
+    place_bubble_toolbar(app);
+    Ok(())
+}
+
+static HOVER_GEN: AtomicU64 = AtomicU64::new(0);
+
+// Emits "bubble-hover" [over_bubble, over_toolbar] to the toolbar window when
+// either changes, ~30 times a second. Stops on bubble_hover_stop, on the next
+// start, or by itself once the toolbar window is gone.
+#[tauri::command]
+pub fn bubble_hover_start(app: AppHandle) {
+    let gen = HOVER_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    std::thread::spawn(move || {
+        let last = std::sync::Arc::new(AtomicU8::new(u8::MAX));
+        while HOVER_GEN.load(Ordering::SeqCst) == gen && app.get_webview_window(TOOLBAR_LABEL).is_some() {
+            let (a, last) = (app.clone(), last.clone());
+            // AppKit window state is read on the main thread.
+            let _ = app.run_on_main_thread(move || {
+                let (Some(b), Some(t)) = (ns_window_of(&a, BUBBLE_LABEL), ns_window_of(&a, TOOLBAR_LABEL)) else {
+                    return;
+                };
+                let (over_b, over_t) = unsafe {
+                    let p: NSPoint = msg_send![class!(NSEvent), mouseLocation];
+                    (contains(frame_of(b), p), contains(frame_of(t), p))
+                };
+                let code = over_b as u8 | (over_t as u8) << 1;
+                if last.swap(code, Ordering::SeqCst) != code {
+                    let _ = a.emit_to(TOOLBAR_LABEL, "bubble-hover", (over_b, over_t));
+                }
+            });
+            std::thread::sleep(Duration::from_millis(33));
+        }
+    });
+}
+
+#[tauri::command]
+pub fn bubble_hover_stop() {
+    HOVER_GEN.fetch_add(1, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rect(x: f64, y: f64, w: f64, h: f64) -> NSRect {
+        NSRect { origin: NSPoint { x, y }, size: NSSize { width: w, height: h } }
+    }
+    const SCREEN: NSRect = NSRect {
+        origin: NSPoint { x: 0.0, y: 0.0 },
+        size: NSSize { width: 1512.0, height: 945.0 },
+    };
+
+    #[test]
+    fn toolbar_sits_centred_above_the_bubble() {
+        let o = toolbar_origin(rect(1000.0, 100.0, 240.0, 290.0), NSSize { width: 220.0, height: 44.0 }, SCREEN);
+        assert_eq!((o.x, o.y), (1010.0, 100.0 + 290.0 + TOOLBAR_GAP));
+    }
+
+    #[test]
+    fn toolbar_goes_below_when_no_room_above() {
+        let o = toolbar_origin(rect(1000.0, 640.0, 240.0, 290.0), NSSize { width: 220.0, height: 44.0 }, SCREEN);
+        assert_eq!(o.y, 640.0 - TOOLBAR_GAP - 44.0);
+    }
+
+    #[test]
+    fn toolbar_stays_on_screen_sideways() {
+        let o = toolbar_origin(rect(1400.0, 100.0, 180.0, 230.0), NSSize { width: 220.0, height: 44.0 }, SCREEN);
+        assert_eq!(o.x, 1512.0 - 220.0);
+    }
+
+    #[test]
+    fn resize_keeps_the_bottom_right_corner_of_the_circle() {
+        // Medium (240 + 50 strip) parked bottom-right -> Large (320 + 50).
+        let old = rect(1248.0, -26.0, 240.0, 290.0); // circle bottom at y = 24
+        let new = resized_bubble(old, 320.0, 370.0, SCREEN);
+        assert_eq!(new.origin.x + new.size.width, 1488.0); // right edge kept
+        assert_eq!(new.origin.y + new.size.height - 320.0, 24.0); // circle bottom kept
+    }
+
+    #[test]
+    fn resize_keeps_the_top_left_corner_of_the_circle() {
+        let old = rect(24.0, 945.0 - 24.0 - 290.0, 240.0, 290.0);
+        let new = resized_bubble(old, 180.0, 230.0, SCREEN);
+        assert_eq!(new.origin.x, 24.0);
+        assert_eq!(new.origin.y + new.size.height, 945.0 - 24.0);
     }
 }

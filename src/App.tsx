@@ -7,10 +7,12 @@ import { emit } from "@tauri-apps/api/event";
 import { ask, open as openDialog } from "@tauri-apps/plugin-dialog";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import "./styles/capture.css";
-import { PILL_STRIP_CSS } from "./constants/bubble";
+import { BUBBLE_SIZE_PT, PILL_STRIP_CSS, type BubbleSize } from "./constants/bubble";
 import type { LibraryRecording } from "./RecordingsWindow";
 import { openRecordingsWindow } from "./openRecordings";
 import { recordingName } from "./recordingLabel";
+import { captureKey, hotkeyGlyphs } from "./hotkey";
+import { startBlockedReason } from "./startReason";
 
 const DEFAULT_HOTKEY = "CmdOrCtrl+Shift+P";
 
@@ -38,8 +40,6 @@ function useRemembered<T>(key: string, initial: T) {
 const BUBBLE_LABEL = "webcam-bubble";
 let bubbleDeviceName: string | null = null;
 
-const BUBBLE_W = 240;
-const BUBBLE_H = BUBBLE_W + PILL_STRIP_CSS;
 const BUBBLE_MARGIN = 24;
 
 // Anchor rect for placing the bubble. Coords + size are in logical
@@ -96,8 +96,16 @@ async function openBubble(deviceName: string, anchor: BubbleAnchor) {
     return;
   }
 
+  await closeBubbleToolbar();
   if (existing) await existing.close().catch(() => {});
   bubbleDeviceName = deviceName;
+
+  // The S / M / L picked on the bubble's toolbar, remembered in settings.
+  const size = await invoke<{ bubble_size?: BubbleSize | null }>("get_settings")
+    .then((s) => s.bubble_size ?? "medium")
+    .catch(() => "medium" as const);
+  const BUBBLE_W = BUBBLE_SIZE_PT[size];
+  const BUBBLE_H = BUBBLE_W + PILL_STRIP_CSS;
 
   // Plant via set_window_frame_cg on tauri://created. Tauri's constructor
   // x/y drops negative coords for screens left of primary and can land
@@ -141,6 +149,7 @@ async function openBubble(deviceName: string, anchor: BubbleAnchor) {
     } catch (e) {
       console.error("bubble setup failed", e);
     }
+    void syncBubbleToolbar();
   });
   win.once("tauri://error", (e) => {
     console.error("bubble window error", e);
@@ -149,7 +158,56 @@ async function openBubble(deviceName: string, anchor: BubbleAnchor) {
 
 async function closeBubble() {
   bubbleDeviceName = null;
+  await closeBubbleToolbar();
   const existing = await WebviewWindow.getByLabel(BUBBLE_LABEL);
+  if (existing) await existing.close().catch(() => {});
+}
+
+// The shape / size pill above the bubble (BubbleToolbar.tsx): its own small
+// window, open only while the bubble is up AND the app is idle, so it can
+// never be on screen during a countdown or a recording. (The engine also
+// leaves Zeigen's windows out of display and area recordings, and a window
+// recording captures only the picked window's app.)
+const TOOLBAR_LABEL = "bubble-toolbar";
+const TOOLBAR_W = 196;
+const TOOLBAR_H = 42;
+let toolbarWanted = false;
+
+async function syncBubbleToolbar() {
+  const [bubble, toolbar] = await Promise.all([
+    WebviewWindow.getByLabel(BUBBLE_LABEL),
+    WebviewWindow.getByLabel(TOOLBAR_LABEL),
+  ]);
+  if (!toolbarWanted || !bubble) {
+    if (toolbar) await closeBubbleToolbar();
+    return;
+  }
+  if (toolbar) return;
+  const win = new WebviewWindow(TOOLBAR_LABEL, {
+    url: "/#bubble-toolbar",
+    title: "Webcam bubble",
+    width: TOOLBAR_W,
+    height: TOOLBAR_H,
+    decorations: false,
+    transparent: true,
+    alwaysOnTop: true,
+    resizable: false,
+    skipTaskbar: true,
+    visibleOnAllWorkspaces: true,
+    shadow: false,
+    focus: false,
+    // Like the bubble: the first click on a button reaches the button.
+    acceptFirstMouse: true,
+  });
+  // Wanted may have flipped while the window was being made.
+  win.once("tauri://created", () => {
+    if (!toolbarWanted) void closeBubbleToolbar();
+  });
+}
+
+async function closeBubbleToolbar() {
+  await invoke("bubble_hover_stop").catch(() => {});
+  const existing = await WebviewWindow.getByLabel(TOOLBAR_LABEL);
   if (existing) await existing.close().catch(() => {});
 }
 
@@ -172,7 +230,7 @@ async function openCountdown(
 
   // Plant the countdown window via NSWindow.setFrame (Cocoa points) instead
   // of Tauri's constructor x/y/width/height. The constructor route landed
-  // the window at half size on macOS; identify overlays already work around
+  // the window at half size on macOS; the picker overlays already work around
   // this with set_window_frame_cg.
   // Engine reports display frame in CG points (origin AND size — what
   // SCDisplay returns on M-series macs set to a scaled "looks like" mode).
@@ -221,137 +279,12 @@ async function openCountdown(
   });
 }
 
-const IDENTIFY_LABEL_PREFIX = "identify-";
-
 type DisplayShape = {
   x: number;
   y: number;
   width: number;
   height: number;
 };
-
-async function openIdentifyOverlays(displays: DisplayShape[]) {
-  if (displays.length === 0) return;
-  // Primary screen Cocoa height is needed in Rust to flip CG (top-left,
-  // Y down) into Cocoa (bottom-left, Y up) for NSWindow.setFrameOrigin.
-  // Pull it from the Tauri monitor at (0, 0).
-  const monitors = await availableMonitors();
-  const primary =
-    monitors.find((m) => m.position.x === 0 && m.position.y === 0) ||
-    monitors[0];
-  const primaryCocoaHeight =
-    primary && primary.scaleFactor
-      ? primary.size.height / primary.scaleFactor
-      : 1080;
-  for (let i = 0; i < displays.length; i++) {
-    const display = displays[i];
-    const label = `${IDENTIFY_LABEL_PREFIX}${i}`;
-    const existing = await WebviewWindow.getByLabel(label);
-    if (existing) await existing.close().catch(() => {});
-    new WebviewWindow(label, {
-      url: `/#identify?n=${i + 1}`,
-      title: "Identify",
-      // Initial size doesn't matter — Rust setSize resizes after creation.
-      // Constructor x/y omitted because Tauri silently drops negative on
-      // macOS for screens left of primary.
-      width: 400,
-      height: 400,
-      decorations: false,
-      transparent: true,
-      alwaysOnTop: true,
-      skipTaskbar: true,
-      resizable: false,
-      visibleOnAllWorkspaces: true,
-      shadow: false,
-      focus: false,
-    });
-    void (async () => {
-      for (let attempt = 0; attempt < 50; attempt++) {
-        const win = await WebviewWindow.getByLabel(label);
-        if (win) {
-          try {
-            await invoke("set_window_frame_cg", {
-              label,
-              cgX: display.x,
-              cgY: display.y,
-              width: display.width,
-              height: display.height,
-              primaryCocoaHeight,
-            });
-          } catch (e) {
-            console.error(`[identify] ${label} setup failed`, e);
-          }
-          return;
-        }
-        await new Promise((r) => setTimeout(r, 20));
-      }
-      console.error(`[identify] ${label} window never registered`);
-    })();
-  }
-}
-
-const IDENTIFY_WINDOW_LABEL_PREFIX = "identify-window-";
-
-// Outline a captured window with a translucent rectangle + corner badge so
-// the user can confirm "yes, that's the window I picked." Mirrors the
-// display-identify pattern: open a transparent NSWindow at the target's
-// CG bounds, let the overlay component handle its own fade-out and self-close.
-async function openIdentifyWindowOverlay(window: WindowSource) {
-  const monitors = await availableMonitors();
-  const primary =
-    monitors.find((m) => m.position.x === 0 && m.position.y === 0) ||
-    monitors[0];
-  const primaryCocoaHeight =
-    primary && primary.scaleFactor
-      ? primary.size.height / primary.scaleFactor
-      : 1080;
-  const label = `${IDENTIFY_WINDOW_LABEL_PREFIX}${window.id}`;
-  const existing = await WebviewWindow.getByLabel(label);
-  if (existing) await existing.close().catch(() => {});
-  const params = new URLSearchParams({
-    app: window.app,
-    title: window.title,
-  });
-  new WebviewWindow(label, {
-    url: `/#identify-window?${params.toString()}`,
-    title: "Identify",
-    // Initial size doesn't matter — Rust set_window_frame_cg resizes after
-    // creation. Constructor x/y omitted because Tauri silently drops
-    // negative on macOS for screens left of primary.
-    width: 400,
-    height: 400,
-    decorations: false,
-    transparent: true,
-    alwaysOnTop: true,
-    skipTaskbar: true,
-    resizable: false,
-    visibleOnAllWorkspaces: true,
-    shadow: false,
-    focus: false,
-  });
-  void (async () => {
-    for (let attempt = 0; attempt < 50; attempt++) {
-      const win = await WebviewWindow.getByLabel(label);
-      if (win) {
-        try {
-          await invoke("set_window_frame_cg", {
-            label,
-            cgX: window.x,
-            cgY: window.y,
-            width: window.width,
-            height: window.height,
-            primaryCocoaHeight,
-          });
-        } catch (e) {
-          console.error(`[identify-window] ${label} setup failed`, e);
-        }
-        return;
-      }
-      await new Promise((r) => setTimeout(r, 20));
-    }
-    console.error(`[identify-window] ${label} window never registered`);
-  })();
-}
 
 const TIMER_CHIP_LABEL = "timer-chip";
 // Sized to fit the RecordingControlPill (timer + pause + stop). Chrome
@@ -519,7 +452,7 @@ async function openAreaIndicator(rect: {
     url: `/#area-indicator`,
     title: "Recording area",
     // Initial size doesn't matter — set_window_frame_cg resizes after
-    // creation (same pattern as identify/countdown).
+    // creation (same pattern as the countdown).
     width: 400,
     height: 400,
     decorations: false,
@@ -1097,15 +1030,16 @@ function App() {
   const [selectedArea, setSelectedArea] = useState<AreaSelection | null>(null);
   const [selectedMic, setSelectedMic] = useState<string | null>(null);
   const [selectedCamera, setSelectedCamera] = useState<number | null>(null);
-  // Bubble roundness preference (null = circle). Set before recording; the
-  // backend stamps the value into each recording's sidecar at finalize, so
-  // this is a remembered default, not an edit of existing recordings.
-  const [bubbleRoundness, setBubbleRoundness] = useState<number | null>(null);
   const [countdownDuration, setCountdownDuration] = useRemembered<CountdownDuration>("countdown", 5);
   const [lengthCapMode, setLengthCapMode] = useRemembered<LengthCapMode>("lengthCapMode", "off");
   const [lengthCapTargetSec, setLengthCapTargetSec] = useRemembered<number>("lengthCapTargetSec", 600);
   const [noiseReduction, setNoiseReduction] = useState<NrLevel>("med");
   const [state, setState] = useState<EngineState>("idle");
+  // Start pressed; cleared once the state leaves idle (or the start fails).
+  const [starting, setStarting] = useState(false);
+  useEffect(() => {
+    if (state !== "idle") setStarting(false);
+  }, [state]);
   const [progress, setProgress] = useState({ frames: 0, dropped: 0, elapsed_s: 0 });
   const [lastSaved, setLastSaved] = useState<string | null>(null);
   const [finalizeInfo, setFinalizeInfo] = useState<FinalizedRecording | null>(null);
@@ -1143,15 +1077,14 @@ function App() {
   // progress bar instead of staring at nothing during a multi-minute composite.
   const [compositeProgress, setCompositeProgress] = useState<number | null>(null);
 
-  // Load persisted noise-reduction level and bubble roundness on launch.
+  // Load the persisted noise-reduction level on launch.
   useEffect(() => {
-    invoke<{ noise_reduction?: string; bubble_roundness?: number | null }>("get_settings")
+    invoke<{ noise_reduction?: string }>("get_settings")
       .then((s) => {
         const lvl = s.noise_reduction;
         if (lvl === "off" || lvl === "low" || lvl === "med" || lvl === "high") {
           setNoiseReduction(lvl);
         }
-        setBubbleRoundness(s.bubble_roundness ?? null);
       })
       .catch(() => {});
   }, []);
@@ -1167,8 +1100,8 @@ function App() {
           case "ready":
             break;
           case "enumerated": {
-            // Main display first, then left to right. The Identify overlay's
-            // numbers follow this order, as does the picker.
+            // Main display first, then left to right; the picker follows
+            // this order.
             const displays = [...ev.displays].sort(
               (a, b) =>
                 Number(b.x === 0 && b.y === 0) - Number(a.x === 0 && a.y === 0) ||
@@ -1478,6 +1411,9 @@ function App() {
     if (sourceKind === "display" && selectedDisplay == null) return;
     if (sourceKind === "window" && selectedWindow == null) return;
     if (sourceKind === "area" && selectedArea == null) return;
+    // Hides the bubble toolbar at once, before the countdown (or, with the
+    // countdown off, the engine's started event) changes state.
+    setStarting(true);
     try {
       setError(null);
       setFinalizeInfo(null);
@@ -1636,6 +1572,7 @@ function App() {
           invoke("prewarm_abort").catch(() => {});
           await prewarmBounded;
           setState("idle");
+          setStarting(false);
           return;
         }
         // Wait for pre-warm to finish (engine back to .idle, scratch
@@ -1680,6 +1617,7 @@ function App() {
       // marquee-confirm through recording-end), not by start() itself.
     } catch (err) {
       setState("idle");
+      setStarting(false);
       setError(String(err));
     }
   };
@@ -2155,6 +2093,13 @@ function App() {
     }
   }, [cameraName, reviewActivity, sourceKind, selectedArea, selectedDisplay, selectedWindow, displays, windows]);
 
+  // The bubble's shape / size toolbar exists only while idle with a bubble up.
+  const toolbarOn = cameraName != null && reviewActivity === 0 && state === "idle" && !starting;
+  useEffect(() => {
+    toolbarWanted = toolbarOn;
+    void syncBubbleToolbar();
+  }, [toolbarOn]);
+
   // The bubble's hover close button. The bubble window can't reach this
   // window's state directly, so it emits an event; treat it exactly like
   // picking "Off" in the camera dropdown (the lifecycle effect above then
@@ -2352,12 +2297,8 @@ function App() {
           <SettingsView
             hotkey={hotkey}
             onHotkey={async (combo) => {
-              try {
-                await invoke("set_hotkey", { combo });
-                setHotkey(combo);
-              } catch (e) {
-                setError(String(e));
-              }
+              await invoke("set_hotkey", { combo });
+              setHotkey(combo);
             }}
             countdownDuration={countdownDuration}
             onCountdownDuration={setCountdownDuration}
@@ -2370,18 +2311,6 @@ function App() {
               setNoiseReduction(v);
               invoke("set_noise_reduction", { level: v }).catch((e) => setError(String(e)));
             }}
-            bubbleRoundness={bubbleRoundness}
-            onBubbleRoundness={(v) => {
-              setBubbleRoundness(v);
-              // Live-preview push to the floating bubble window; the window
-              // also reads get_settings on mount, so a missed event can't
-              // leave it stale.
-              emit("bubble-style", { roundness: v }).catch(() => {});
-              invoke("set_bubble_roundness", { roundness: v }).catch((e) => setError(String(e)));
-            }}
-            // Roundness is captured into the recording at start, so lock it
-            // while a recording (or its countdown) runs.
-            bubbleLocked={busy}
             onRefresh={refresh}
             storage={storage}
             saveDirLocked={busy}
@@ -2423,13 +2352,20 @@ function App() {
       d?.name ?? `Display ${selectedArea.display_id}`
     }`;
   })();
+  const blockedReason = startBlockedReason({
+    state,
+    sourceKind,
+    picked: canStartNow,
+    displays: displays.length,
+    windows: windows.length,
+    permissionDenied: error === ERROR_MESSAGES.PERMISSION_DENIED,
+  });
   const hasPick =
     sourceKind === "display"
       ? selectedDisplay != null
       : sourceKind === "window"
       ? windows.some((w) => w.id === selectedWindow)
       : selectedArea != null;
-  const selectedWindowSource = windows.find((w) => w.id === selectedWindow) ?? null;
 
   return (
     <main className="cap accent-blue">
@@ -2506,9 +2442,8 @@ function App() {
                   onChange={(e) => setSelectedDisplay(Number(e.target.value))}
                   disabled={pickDisabled}
                 >
-                  {displays.map((d, i) => (
+                  {displays.map((d) => (
                     <option key={d.id} value={d.id}>
-                      {displays.length > 1 && `${i + 1} · `}
                       {d.name}, {d.width} x {d.height}
                     </option>
                   ))}
@@ -2534,30 +2469,7 @@ function App() {
                 </select>
               ) : null}
             </div>
-            {sourceKind === "display" ? (
-              <button
-                className="cap-text-btn"
-                title="Show each display's number"
-                onClick={() => openIdentifyOverlays(displays).catch((e) => setError(String(e)))}
-                disabled={pickDisabled}
-              >
-                Identify
-              </button>
-            ) : sourceKind === "window" ? (
-              <button
-                className="cap-text-btn"
-                title="Outline the chosen window"
-                onClick={() =>
-                  selectedWindowSource &&
-                  openIdentifyWindowOverlay(selectedWindowSource).catch((e) =>
-                    setError(String(e)),
-                  )
-                }
-                disabled={recording || !selectedWindowSource}
-              >
-                Identify
-              </button>
-            ) : (
+            {sourceKind === "area" && (
               <button className="cap-text-btn" onClick={openAreaPicker} disabled={pickDisabled}>
                 {selectedArea ? "Redraw" : "Select"}
               </button>
@@ -2628,8 +2540,11 @@ function App() {
           </button>
         )}
         <div className="cap-foot">
-          {countdownDuration === 0 ? "No countdown" : `${countdownDuration} s countdown`} · saves
-          to {storage?.destination ?? "~/Movies/Zeigen"}
+          {/* Why Start is disabled, when it is; otherwise what Start will do. */}
+          {blockedReason ??
+            `${countdownDuration === 0 ? "No countdown" : `${countdownDuration} s countdown`} · saves to ${
+              storage?.destination ?? "~/Movies/Zeigen"
+            }`}
         </div>
       </div>
     </main>
@@ -2642,33 +2557,6 @@ const WINDOW_H = 600;
 function windowLabel(w: WindowSource): string {
   const t = w.title.trim();
   return t ? `${w.app} - ${t}` : w.app;
-}
-
-// "CmdOrCtrl+Shift+P" -> "⇧⌘P", modifiers in macOS order.
-function hotkeyGlyphs(combo: string): string {
-  const MODS: Record<string, string> = {
-    cmdorctrl: "⌘",
-    commandorcontrol: "⌘",
-    cmd: "⌘",
-    command: "⌘",
-    super: "⌘",
-    meta: "⌘",
-    ctrl: "⌃",
-    control: "⌃",
-    alt: "⌥",
-    option: "⌥",
-    shift: "⇧",
-  };
-  const ORDER = "⌃⌥⇧⌘";
-  const mods: string[] = [];
-  let key = "";
-  for (const part of combo.split("+").map((s) => s.trim()).filter(Boolean)) {
-    const g = MODS[part.toLowerCase()];
-    if (g) mods.push(g);
-    else key = part.length === 1 ? part.toUpperCase() : part;
-  }
-  mods.sort((a, b) => ORDER.indexOf(a) - ORDER.indexOf(b));
-  return mods.join("") + key;
 }
 
 // Line icons from the capture-compact mockup (24x24, stroke).
@@ -2945,16 +2833,14 @@ function SettingsView({
   onLengthCapTargetSec,
   noiseReduction,
   onNoiseReduction,
-  bubbleRoundness,
-  onBubbleRoundness,
-  bubbleLocked,
   onRefresh,
   storage,
   saveDirLocked,
   onStorageChanged,
 }: {
   hotkey: string;
-  onHotkey: (combo: string) => void;
+  // Registers the combination; rejects (keeping the old one) when it can't.
+  onHotkey: (combo: string) => Promise<void>;
   countdownDuration: CountdownDuration;
   onCountdownDuration: (v: CountdownDuration) => void;
   lengthCapMode: LengthCapMode;
@@ -2963,15 +2849,11 @@ function SettingsView({
   onLengthCapTargetSec: (v: number) => void;
   noiseReduction: NrLevel;
   onNoiseReduction: (v: NrLevel) => void;
-  bubbleRoundness: number | null;
-  onBubbleRoundness: (v: number | null) => void;
-  bubbleLocked: boolean;
   onRefresh: () => void;
   storage: StorageStatus | null;
   saveDirLocked: boolean;
   onStorageChanged: () => Promise<void>;
 }) {
-  const [draft, setDraft] = useState(hotkey);
   // "Moving 9 recordings…", then the result, or why the folder was refused.
   const [moveText, setMoveText] = useState<string | null>(null);
   const [moving, setMoving] = useState(false);
@@ -3007,26 +2889,11 @@ function SettingsView({
     if (typeof picked === "string") await changeSaveDir(picked);
   };
   const saveDirFixed = saveDirLocked || moving;
-  const dirty = draft.trim() !== hotkey && draft.trim().length > 0;
-  const pct = Math.round((bubbleRoundness ?? 1) * 100);
   return (
     <div>
       <div className="cap-set-row">
         <span className="cap-label">Start and stop hotkey</span>
-        <div className="cap-set-line">
-          <input
-            className="cap-input"
-            aria-label="Start and stop hotkey"
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            placeholder="CmdOrCtrl+Shift+P"
-            style={{ flex: 1, minWidth: 0 }}
-          />
-          <button className="cap-btn" disabled={!dirty} onClick={() => onHotkey(draft.trim())}>
-            Apply
-          </button>
-        </div>
-        <span className="cap-help">For example CmdOrCtrl+Shift+P or Alt+Shift+5</span>
+        <HotkeyRecorder hotkey={hotkey} onHotkey={onHotkey} />
       </div>
 
       <div className="cap-set-row">
@@ -3090,31 +2957,6 @@ function SettingsView({
         />
       </div>
 
-      {/* Full circle maps to null so the preference, and each recording's
-          sidecar stamp, omits the field (the legacy mask path). */}
-      <div className="cap-set-row">
-        <span className="cap-label">Webcam bubble shape</span>
-        <div className="cap-set-line">
-          <input
-            type="range"
-            className="slider"
-            aria-label="Webcam bubble shape"
-            min={0}
-            max={100}
-            value={pct}
-            disabled={bubbleLocked}
-            onChange={(e) => {
-              const v = Number(e.target.value);
-              onBubbleRoundness(v >= 100 ? null : v / 100);
-            }}
-            style={{ flex: 1, display: "block", "--fill": `${pct}%` } as React.CSSProperties}
-          />
-          <span className="cap-help" style={{ width: 44, textAlign: "right" }}>
-            {pct === 100 ? "Circle" : pct === 0 ? "Square" : `${pct}%`}
-          </span>
-        </div>
-      </div>
-
       <div className="cap-set-row">
         <span className="cap-label">Save to</span>
         <div className="cap-set-line">
@@ -3151,6 +2993,79 @@ function SettingsView({
         <span className="cap-help">Look again for displays, windows, cameras and microphones</span>
       </div>
     </div>
+  );
+}
+
+// Click, then press the new combination: it is registered at once. Esc cancels.
+// While listening, the current hotkey is unregistered (hotkey_pause) so it
+// can't start a recording, and macOS doesn't swallow it before we see it.
+function HotkeyRecorder({
+  hotkey,
+  onHotkey,
+}: {
+  hotkey: string;
+  onHotkey: (combo: string) => Promise<void>;
+}) {
+  const [listening, setListening] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const btnRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    if (!listening) return;
+    invoke("hotkey_pause").catch(() => {});
+    let done = false;
+    const finish = (msg: string | null) => {
+      done = true;
+      setNote(msg);
+      setListening(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (done) return;
+      const r = captureKey(e);
+      if (r.kind === "wait") return;
+      if (r.kind === "cancel") return finish(null);
+      if (r.kind === "refused") return setNote(r.message);
+      done = true;
+      onHotkey(r.combo)
+        .then(() => finish(null))
+        .catch(() =>
+          finish(`Couldn't use ${hotkeyGlyphs(r.combo)}. macOS or another app may already use it.`),
+        );
+    };
+    // Clicking elsewhere, or leaving the window, cancels.
+    const onBlur = () => !done && finish(null);
+    const onDown = (e: MouseEvent) => e.target !== btnRef.current && onBlur();
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("blur", onBlur);
+    window.addEventListener("mousedown", onDown, true);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("blur", onBlur);
+      window.removeEventListener("mousedown", onDown, true);
+      // Put the (possibly new) hotkey back; a no-op when already registered.
+      invoke("hotkey_resume").catch(() => {});
+    };
+  }, [listening]);
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        className={`cap-input cap-hotkey${listening ? " listening" : ""}`}
+        aria-label="Start and stop hotkey"
+        onClick={() => {
+          setNote(null);
+          setListening(true);
+        }}
+      >
+        {listening ? "Press keys…" : hotkeyGlyphs(hotkey)}
+      </button>
+      <span className="cap-help">
+        {note ?? (listening ? "Esc to cancel" : "Click, then press the new keys")}
+      </span>
+    </>
   );
 }
 
