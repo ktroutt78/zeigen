@@ -2,6 +2,10 @@
 
 Things left worse than we'd like, with why. Newest at top. Remove an entry when it is paid.
 
+## Countdown Cancel and the moving bubble (2026-11-17)
+- The capture window now stays up during the countdown so its button can read Cancel. Its other controls (source tiles, camera, mic) are not disabled during the countdown; changing one then does nothing to the armed take.
+- A bubble moved during a recording is drawn in one place for the whole take: the export and preview use a single zone (the corner nearest the average logged position), by design since V2 Step 2. The timed positions are still recorded in the sidecar. Plan with Keith, not built.
+
 ## Armed start: untried in the app (2026-11-17)
 - Only the webcam recorder's hold-then-go was run (2.0 s file after 2 s held). The engine's arm/go, the cancel path and the whole start sequence are untried: the terminal has no Screen Recording permission.
 - The start sound now plays at the instant the file begins, so the mic may pick it up at the very start of a take.

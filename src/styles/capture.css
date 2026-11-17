@@ -217,6 +217,7 @@
 }
 .cap-start:hover:not(:disabled) { background: var(--accent-bright); }
 .cap-start.stop { background: var(--recording); }
+.cap-start.cancel, .cap-start.cancel:hover { background: var(--bg-control-on); color: var(--fg-primary); }
 .cap-start:disabled { opacity: 0.5; cursor: not-allowed; }
 .cap-start-dot { width: 10px; height: 10px; border-radius: 50%; background: currentColor; }
 .cap-start-dot.square { border-radius: 2px; }

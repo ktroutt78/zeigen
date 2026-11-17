@@ -1788,7 +1788,9 @@ function App() {
   useEffect(() => {
     const win = getCurrentWebviewWindow();
     const compositing = compositeProgress !== null;
-    if ((state === "idle" && reviewActivity === 0) || compositing) {
+    // It stays up through the countdown, where its Start button is Cancel;
+    // nothing is written until go.
+    if (((state === "idle" || state === "countdown") && reviewActivity === 0) || compositing) {
       win.show().catch(() => {});
     } else {
       win.hide().catch(() => {});
@@ -2475,6 +2477,11 @@ function App() {
             Stop
             <span className="cap-start-time">{fmtTime(progress.elapsed_s)}</span>
           </button>
+        ) : state === "countdown" ? (
+          <button className="cap-start cancel" onClick={stop}>
+            Cancel
+            <span className="cap-start-key">esc</span>
+          </button>
         ) : (
           <button
             className="cap-start"
@@ -2482,7 +2489,7 @@ function App() {
             disabled={state !== "idle" || starting || !canStartNow}
           >
             <span className="cap-start-dot" aria-hidden="true" />
-            {state === "countdown" || starting ? "Starting…" : "Start recording"}
+            {starting ? "Starting…" : "Start recording"}
             <span className="cap-start-key">{hotkeyGlyphs(hotkey)}</span>
           </button>
         )}
