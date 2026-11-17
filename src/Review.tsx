@@ -4818,7 +4818,7 @@ function MessageStrip({
     <div
       style={{
         flexShrink: 0,
-        margin: "0 16px 12px 10px",
+        margin: "0 20px 12px",
         padding: "8px 10px",
         background: fill,
         borderRadius: "var(--r-md)",
@@ -4919,8 +4919,8 @@ function ToolTile({
   onClick: () => void;
   title?: string;
 }) {
-  // Icon-only rail (Screen Studio style): the label is the hover tooltip + a11y name,
-  // not visible text, so the rail stays narrow. The active highlight is the only cue,
+  // Icon-only tool row: the label is the hover tooltip + a11y name, not visible
+  // text, so all tools fit one row. The active highlight is the only cue,
   // so it's kept strong (.rail-tool.on).
   return (
     <button
@@ -5358,21 +5358,22 @@ function ExportPanel({
       className="panel"
       style={{
         display: "flex",
-        flexDirection: "row",
+        flexDirection: "column",
         minHeight: 0,
         overflow: "hidden",
       }}
     >
-      {/* Vertical tool rail. Icon-only (Screen Studio style) with Lucide icons +
-          hover tooltips. Active tile carries the only cue (.rail-tool.on). */}
+      {/* Tool row across the top. Icon-only with Lucide icons + hover tooltips;
+          the tiles share the width evenly and the active tile carries the only
+          cue (.rail-tool.on). Below it the settings and Export use the panel's
+          full width with the same 20px margins on both sides. */}
       <div
         style={{
-          width: 48,
           flexShrink: 0,
           display: "flex",
-          flexDirection: "column",
           gap: 4,
-          padding: "12px 6px",
+          padding: "12px 20px",
+          borderBottom: "1px solid var(--border-faint)",
         }}
       >
         <ToolTile
@@ -5427,7 +5428,7 @@ function ExportPanel({
       <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
       <div
         className="tool-settings"
-        style={{ flex: "0 1 auto", minHeight: 0, overflowY: "auto", overflowX: "hidden", padding: "16px 16px 28px 10px" }}
+        style={{ flex: "0 1 auto", minHeight: 0, overflowY: "auto", overflowX: "hidden", padding: "16px 20px 0" }}
       >
 
         {activeTool === "bubble" && (
@@ -6089,10 +6090,11 @@ function ExportPanel({
         )}
       </div>
 
+      {/* The fixed gap, any note or error, then Export: outside the scroll area,
+          so the gap holds even when the settings scroll. */}
+      <div style={{ flex: "none", paddingTop: 28 }}>
       {message}
-
-      {/* Export: follows the settings, never scrolls away. */}
-      <div style={{ flex: "none", padding: "0 16px 16px 10px" }}>
+      <div style={{ padding: "0 20px 20px" }}>
         <h2 style={PANEL_HEADING}>Export</h2>
         {/* Each label sits above a full-width control, so every control shares
             the Save row's edges. */}
@@ -6290,6 +6292,7 @@ function ExportPanel({
             Discard
           </button>
         </div>
+      </div>
       </div>
       </div>
     </div>

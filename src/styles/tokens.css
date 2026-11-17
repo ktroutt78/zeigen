@@ -285,8 +285,9 @@
 .segmented > button.on { background: var(--bg-control-on); color: var(--fg-primary); }
 .segmented > button:disabled { cursor: not-allowed; }
 
-/* Review rail — tool toolbar tile (icon over label) */
+/* Review tool row — one icon tile per tool, sharing the row's width */
 .rail-tool {
+  flex: 1;
   display: flex; align-items: center; justify-content: center;
   padding: 9px 0; border-radius: var(--r-sm);
   background: transparent; border: none; cursor: pointer;
