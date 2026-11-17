@@ -42,7 +42,7 @@ import {
 // that into a horizontal scrollbar).
 //
 // Operates against the Phase 5.5 scratch path: Save commits the recording
-// to ~/Movies/Zeigen/ (baking edits if any), Discard destroys the scratch
+// to the Save to folder (baking edits if any), Discard destroys the scratch
 // dir entirely. Both close the window on success.
 
 type Position = { x: number; y: number };
@@ -647,6 +647,8 @@ type ReviewParams = {
   // Reopened from the recordings library: the folder is kept when the window
   // closes or on Record another; only an explicit Discard deletes it.
   kept: boolean;
+  // The move to the Save to folder failed at finalize; shown until dismissed.
+  moveNote: string | null;
 };
 
 function readParams(): ReviewParams {
@@ -661,6 +663,7 @@ function readParams(): ReviewParams {
       sourceKind: null,
       windowPointShort: null,
       kept: false,
+      moveNote: null,
     };
   const params = new URLSearchParams(hash.slice(q + 1));
   const leadStr = params.get("webcamLeadMs");
@@ -675,6 +678,7 @@ function readParams(): ReviewParams {
     sourceKind: params.get("sourceKind"),
     windowPointShort: Number.isFinite(short) && short > 0 ? short : null,
     kept: params.get("kept") === "1",
+    moveNote: params.get("moveNote"),
   };
 }
 
@@ -907,12 +911,13 @@ export default function Review() {
   // Soft info message — currently only fired post-save when the user's
   // thumbnail pick fell outside the trim range and the backend used the
   // clamped fallback. Distinct from `error` (red, destructive styling).
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(params.moveNote);
   // Notices are transient (e.g. "10 zooms suggested") — auto-dismiss after a
   // few seconds so the strip never lingers over the zoom lane. The × on the
-  // strip still dismisses immediately.
+  // strip still dismisses immediately. The failed-move note stays until
+  // dismissed: it says where the recording actually is.
   useEffect(() => {
-    if (notice == null) return;
+    if (notice == null || notice === params.moveNote) return;
     const id = setTimeout(() => setNotice(null), 5000);
     return () => clearTimeout(id);
   }, [notice]);
@@ -956,6 +961,14 @@ export default function Review() {
   const [saveProgress, setSaveProgress] = useState<number | null>(null);
   const [discarding, setDiscarding] = useState(false);
   const [showCloseModal, setShowCloseModal] = useState(false);
+  // Where Save puts the file (storage.rs): the Save to folder, or
+  // ~/Movies/Zeigen when it is unavailable.
+  const [destination, setDestination] = useState("~/Movies/Zeigen");
+  useEffect(() => {
+    invoke<{ destination: string }>("storage_status")
+      .then((s) => setDestination(s.destination))
+      .catch(() => {});
+  }, [showCloseModal]);
   const busy = saving || discarding;
 
   // Save-state: lastSavedPath drives Reveal target, Discard-disabled, and
@@ -1858,7 +1871,7 @@ export default function Review() {
 
   // Single save entrypoint. Every call re-reads raw scratch + the live
   // sidecar (the backend reads the sidecar adjacent to sourcePath) and
-  // produces one file in ~/Movies/Zeigen/. The scratch dir survives the
+  // produces one file in the Save to folder. The scratch dir survives the
   // session so subsequent saves can re-bake against edited sidecars.
   //
   // Returns the output path on success, null on failure. Called by the
@@ -1924,7 +1937,7 @@ export default function Review() {
           setNotice(notices.join(" "));
         }
         // Notify main so its post-finalize toast updates from the scratch
-        // path to whatever was just written under ~/Movies/Zeigen/.
+        // path to whatever was just written in the Save to folder.
         await emit("recording-committed", { final_path: result.output_path }).catch(
           () => {},
         );
@@ -2803,6 +2816,7 @@ export default function Review() {
           onDiscard={onModalDiscard}
           onCancel={onModalCancel}
           busy={busy}
+          destination={destination}
         />
       )}
     </main>
@@ -4709,11 +4723,13 @@ function CloseModal({
   onDiscard,
   onCancel,
   busy,
+  destination,
 }: {
   onSave: () => void;
   onDiscard: () => void;
   onCancel: () => void;
   busy: boolean;
+  destination: string;
 }) {
   // Default focus on Discard, per macOS convention (Pages, Numbers,
   // TextEdit). Enter triggers Discard; Esc triggers Cancel.
@@ -4752,7 +4768,7 @@ function CloseModal({
           Save your recording?
         </div>
         <div style={{ fontSize: 12.5, color: "var(--fg-secondary)", lineHeight: 1.4 }}>
-          You haven't saved this recording yet. Save to put a copy in ~/Movies/Zeigen.
+          You haven't saved this recording yet. Save to put a copy in {destination}.
           Discarding deletes the recording.
         </div>
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>

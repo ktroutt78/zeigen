@@ -1,5 +1,5 @@
-// The Recordings window: kept recordings from ~/Movies/Zeigen/.recordings as a
-// grid of cards grouped by day, newest first. Clicking a card hands the
+// The Recordings window: kept recordings from the Save to folder's .recordings
+// (plus any still waiting to move there, storage.rs) as a grid of cards grouped by day, newest first. Clicking a card hands the
 // recording to the main window, which owns the Review windows (open-recording
 // event, handled in App.tsx). Durations and thumbnails are filled in by the
 // backend after the list appears (library-recording events, library.rs).
@@ -22,6 +22,8 @@ export type LibraryRecording = {
   duration_s: number | null;
   size_bytes: number;
   thumb_path: string | null;
+  // Still on this Mac, waiting to move to the Save to folder's drive.
+  pending_move: boolean;
 };
 
 type Library = { keep_days: number; recordings: LibraryRecording[] };
@@ -112,6 +114,14 @@ export default function RecordingsWindow() {
     load();
     window.addEventListener("focus", load);
     return () => window.removeEventListener("focus", load);
+  }, [load]);
+
+  // Recordings waiting for the Save to folder's drive were moved there.
+  useEffect(() => {
+    const p = listen("library-changed", () => load());
+    return () => {
+      p.then((f) => f());
+    };
   }, [load]);
 
   // A duration or thumbnail the backend just made.
@@ -465,6 +475,7 @@ function Card({
         )}
         <div className="rec-meta">
           {time} · {size(r.size_bytes)}
+          {r.pending_move && " · Not yet moved"}
         </div>
       </div>
     </div>

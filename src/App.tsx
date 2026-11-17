@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { WebviewWindow, getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { availableMonitors } from "@tauri-apps/api/window";
 import { emit } from "@tauri-apps/api/event";
+import { ask, open as openDialog } from "@tauri-apps/plugin-dialog";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import "./styles/capture.css";
 import { PILL_STRIP_CSS } from "./constants/bubble";
@@ -858,6 +859,8 @@ type ReviewOpenArgs = {
   kept?: boolean;
   // What was recorded; the window title. null for older recordings.
   name: string | null;
+  // Shown in Review when the move to the Save to folder failed at finalize.
+  moveNote?: string | null;
 };
 
 async function openReview(
@@ -882,6 +885,9 @@ async function openReview(
   }
   if (args.kept) {
     params.set("kept", "1");
+  }
+  if (args.moveNote) {
+    params.set("moveNote", args.moveNote);
   }
   const url = `/#review?${params.toString()}`;
   const win = new WebviewWindow(label, {
@@ -965,6 +971,16 @@ type FinalizedRecording = {
   webcam_lead_ms: number;
   sources_dir: string | null;
   name: string | null;
+  // Set when the recording could not be moved to the Save to folder.
+  move_note: string | null;
+};
+
+// Where recordings and exports go now (storage.rs, storage_status).
+type StorageStatus = {
+  destination: string;
+  chosen: string | null;
+  chosen_available: boolean;
+  warning: string | null;
 };
 
 type EngineEvent =
@@ -1074,6 +1090,17 @@ function App() {
   const [finalizeInfo, setFinalizeInfo] = useState<FinalizedRecording | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [hotkey, setHotkey] = useState<string>(DEFAULT_HOTKEY);
+  // The Save to folder's state, re-checked on focus and at Record.
+  const [storage, setStorage] = useState<StorageStatus | null>(null);
+  const refreshStorage = () =>
+    invoke<StorageStatus>("storage_status")
+      .then(setStorage)
+      .catch((e) => setError(String(e)));
+  useEffect(() => {
+    void refreshStorage();
+    window.addEventListener("focus", refreshStorage);
+    return () => window.removeEventListener("focus", refreshStorage);
+  }, []);
   // Counter of in-flight or open review windows. Each `stopped` event
   // increments; the window's destroy listener (or finalize-error path)
   // decrements. Main window stays hidden while > 0.
@@ -1231,6 +1258,7 @@ function App() {
                     sourceKind: ctrlRef.current.sourceKind,
                     windowPointShort: ctrlRef.current.windowPointShort,
                     name: info.name,
+                    moveNote: info.move_note,
                   },
                   decReview,
                 );
@@ -1317,6 +1345,7 @@ function App() {
                     sourceKind: ctrlRef.current.sourceKind,
                     windowPointShort: ctrlRef.current.windowPointShort,
                     name: info.name,
+                    moveNote: info.move_note,
                   },
                   decReview,
                 );
@@ -1370,7 +1399,7 @@ function App() {
 
     // The review window emits `recording-committed` after commit_recording
     // succeeds — main updates its post-finalize toast from the now-stale
-    // scratch path to the actual final ~/Movies/Zeigen/recording-….mp4.
+    // scratch path to the actual exported file in the Save to folder.
     // `recording-discarded` clears the toast since the file is gone.
     let unlistenCommitted: (() => void) | null = null;
     let unlistenDiscarded: (() => void) | null = null;
@@ -1422,6 +1451,9 @@ function App() {
       setError(null);
       setFinalizeInfo(null);
       setLastSaved(null);
+      // Shows the warning above Start when the Save to folder is unavailable;
+      // the recording goes ahead into ~/Movies/Zeigen.
+      void refreshStorage();
 
       // Resolve the screen the countdown should land on. Display + area
       // modes use the chosen display directly; window mode picks whichever
@@ -2320,12 +2352,16 @@ function App() {
             // while a recording (or its countdown) runs.
             bubbleLocked={busy}
             onRefresh={refresh}
+            storage={storage}
+            saveDirLocked={busy}
+            onStorageChanged={refreshStorage}
           />
         </div>
         <div style={{ flex: 1 }} />
         <div ref={bottomRef}>
           <StatusLine
             error={error}
+            warning={storage?.warning ?? null}
             lastSaved={lastSaved}
             finalizeInfo={finalizeInfo}
             progress={progress}
@@ -2532,6 +2568,7 @@ function App() {
       <div ref={bottomRef}>
         <StatusLine
           error={error}
+          warning={storage?.warning ?? null}
           lastSaved={lastSaved}
           finalizeInfo={finalizeInfo}
           progress={progress}
@@ -2561,7 +2598,7 @@ function App() {
         )}
         <div className="cap-foot">
           {countdownDuration === 0 ? "No countdown" : `${countdownDuration} s countdown`} · saves
-          to ~/Movies/Zeigen
+          to {storage?.destination ?? "~/Movies/Zeigen"}
         </div>
       </div>
     </main>
@@ -2764,6 +2801,7 @@ function DeviceRow({
 
 function StatusLine({
   error,
+  warning,
   lastSaved,
   finalizeInfo,
   progress,
@@ -2771,6 +2809,8 @@ function StatusLine({
   onDismiss,
 }: {
   error: string | null;
+  // The Save to folder is unavailable; quiet, no dismiss (it clears itself).
+  warning: string | null;
   lastSaved: string | null;
   finalizeInfo: FinalizedRecording | null;
   progress: { frames: number; dropped: number; elapsed_s: number };
@@ -2783,12 +2823,14 @@ function StatusLine({
   let path = false;
   if (error) {
     [tone, label, body] = ["error", "Error", error];
+  } else if (state !== "idle" && progress.dropped > 0) {
+    [tone, label, body] = ["muted", "Frames dropped", `${progress.dropped} of ${progress.frames}`];
+  } else if (warning) {
+    [tone, label, body] = ["muted", "Save to", warning];
   } else if (state === "idle" && finalizeInfo) {
     [tone, label, body, path] = ["success", "Ready", finalizeInfo.scratch_mp4_path, true];
   } else if (state === "idle" && lastSaved) {
     [tone, label, body, path] = ["success", "Saved", lastSaved, true];
-  } else if (state !== "idle" && progress.dropped > 0) {
-    [tone, label, body] = ["muted", "Frames dropped", `${progress.dropped} of ${progress.frames}`];
   } else {
     return null;
   }
@@ -2876,6 +2918,9 @@ function SettingsView({
   onBubbleRoundness,
   bubbleLocked,
   onRefresh,
+  storage,
+  saveDirLocked,
+  onStorageChanged,
 }: {
   hotkey: string;
   onHotkey: (combo: string) => void;
@@ -2891,8 +2936,46 @@ function SettingsView({
   onBubbleRoundness: (v: number | null) => void;
   bubbleLocked: boolean;
   onRefresh: () => void;
+  storage: StorageStatus | null;
+  saveDirLocked: boolean;
+  onStorageChanged: () => Promise<void>;
 }) {
   const [draft, setDraft] = useState(hotkey);
+  // "Moving 9 recordings…", then the result, or why the folder was refused.
+  const [moveText, setMoveText] = useState<string | null>(null);
+  const [moving, setMoving] = useState(false);
+  // path null = back to ~/Movies/Zeigen. After the change, offers to move the
+  // recordings in the old library; Leave touches nothing.
+  const changeSaveDir = async (path: string | null) => {
+    setMoveText(null);
+    try {
+      const offer = await invoke<{ from: string; count: number; bytes: number } | null>(
+        "set_save_dir",
+        { path },
+      );
+      await onStorageChanged();
+      if (!offer) return;
+      const what = offer.count === 1 ? "recording" : `${offer.count} recordings`;
+      const move = await ask(`Move your ${what} (${fmtBytes(offer.bytes)}) to the new folder?`, {
+        title: "Move recordings?",
+        okLabel: "Move",
+        cancelLabel: "Leave",
+      });
+      if (!move) return;
+      setMoving(true);
+      setMoveText(`Moving ${offer.count === 1 ? "1 recording" : what}…`);
+      setMoveText(await invoke<string>("move_recordings", { from: offer.from }));
+    } catch (e) {
+      setMoveText(String(e));
+    } finally {
+      setMoving(false);
+    }
+  };
+  const chooseSaveDir = async () => {
+    const picked = await openDialog({ directory: true, multiple: false, title: "Save to" });
+    if (typeof picked === "string") await changeSaveDir(picked);
+  };
+  const saveDirFixed = saveDirLocked || moving;
   const dirty = draft.trim() !== hotkey && draft.trim().length > 0;
   const pct = Math.round((bubbleRoundness ?? 1) * 100);
   return (
@@ -3002,6 +3085,34 @@ function SettingsView({
       </div>
 
       <div className="cap-set-row">
+        <span className="cap-label">Save to</span>
+        <div className="cap-set-line">
+          <span
+            className="cap-help"
+            title={storage?.chosen ?? "~/Movies/Zeigen"}
+            style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+          >
+            {storage?.chosen ?? "~/Movies/Zeigen"}
+          </span>
+          <button className="cap-btn" disabled={saveDirFixed} onClick={() => void chooseSaveDir()}>
+            Choose…
+          </button>
+          <button
+            className="cap-btn"
+            disabled={saveDirFixed || !storage?.chosen}
+            onClick={() => void changeSaveDir(null)}
+          >
+            Reset
+          </button>
+        </div>
+        {storage?.chosen && !storage.chosen_available && (
+          <span className="cap-help">Not available. Saving to ~/Movies/Zeigen until it is.</span>
+        )}
+        {saveDirLocked && <span className="cap-help">Can't be changed while recording</span>}
+        {moveText && <span className="cap-help">{moveText}</span>}
+      </div>
+
+      <div className="cap-set-row">
         <span className="cap-label">Devices</span>
         <button className="cap-btn" onClick={onRefresh} style={{ alignSelf: "flex-start" }}>
           Refresh devices
@@ -3010,6 +3121,12 @@ function SettingsView({
       </div>
     </div>
   );
+}
+
+// "850 MB", "4.2 GB".
+function fmtBytes(bytes: number): string {
+  const mb = bytes / 1e6;
+  return mb >= 1000 ? `${(mb / 1000).toFixed(1)} GB` : `${Math.max(1, Math.round(mb))} MB`;
 }
 
 function Segmented<T extends string | number>({
