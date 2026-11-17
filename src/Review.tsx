@@ -6,6 +6,7 @@ import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { ask, open } from "@tauri-apps/plugin-dialog";
 import { Icon, I, P, RailIcon } from "./components/icons";
 import Timeline from "./timeline/Timeline";
+import { openRecordingsWindow } from "./openRecordings";
 import { placeSegment } from "./timeline/place";
 import {
   sourceRectToOutputRect,
@@ -2864,6 +2865,19 @@ function Header({
           Preview is raw — save still applies NR
         </span>
       )}
+      <button
+        className="btn-ghost"
+        title="Past recordings"
+        onClick={() => openRecordingsWindow().catch(() => {})}
+        style={{
+          marginLeft: previewFailed ? 8 : "auto",
+          flexShrink: 0,
+          fontSize: 13,
+          color: "var(--fg-secondary)",
+        }}
+      >
+        Recordings
+      </button>
     </div>
   );
 }

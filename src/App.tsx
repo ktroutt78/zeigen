@@ -7,6 +7,7 @@ import { emit } from "@tauri-apps/api/event";
 import { I, Icon, P } from "./components/icons";
 import { PILL_STRIP_CSS } from "./constants/bubble";
 import type { LibraryRecording } from "./RecordingsWindow";
+import { openRecordingsWindow } from "./openRecordings";
 
 const DEFAULT_HOTKEY = "CmdOrCtrl+Shift+P";
 
@@ -904,22 +905,6 @@ async function openReview(
   });
   win.once("tauri://destroyed", () => {
     onDestroyed();
-  });
-}
-
-// The Recordings window (kept recordings). One instance: focus it if open.
-const RECORDINGS_LABEL = "recordings";
-async function openRecordingsWindow(): Promise<void> {
-  if (await invoke<boolean>("focus_window", { label: RECORDINGS_LABEL })) return;
-  new WebviewWindow(RECORDINGS_LABEL, {
-    url: "/#recordings",
-    title: "Recordings",
-    width: 560,
-    height: 520,
-    minWidth: 420,
-    minHeight: 280,
-    resizable: true,
-    center: true,
   });
 }
 
