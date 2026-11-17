@@ -939,7 +939,13 @@ final class RecordingSession: NSObject,
                 firstVideoPTS = rawPTS
                 if audioInput != nil && !micTimeoutScheduled {
                     micTimeoutScheduled = true
-                    DispatchQueue.global().asyncAfter(deadline: .now() + 0.250) { [weak self] in
+                    // macOS starts the built-in mic, then stops and restarts
+                    // it once while its privacy indicator comes up; the
+                    // restart takes about 0.4 s (system log, 2026-11-17). The
+                    // old 250 ms wait only passed when a buffer slipped out
+                    // before that restart. Nothing is lost by waiting: the
+                    // recording begins at the first mic sample either way.
+                    DispatchQueue.global().asyncAfter(deadline: .now() + Self.micFirstSampleWait) { [weak self] in
                         self?.checkMicTimeout()
                     }
                 }
@@ -1127,6 +1133,8 @@ final class RecordingSession: NSObject,
         removeNotificationObservers()
     }
 
+    private static let micFirstSampleWait: TimeInterval = 2.0
+
     private func checkMicTimeout() {
         let shouldFire: Bool = lock.withLock {
             if firstAudioPTS.isValid { return false }
@@ -1138,7 +1146,7 @@ final class RecordingSession: NSObject,
         guard shouldFire else { return }
         onFatalError(EngineError(
             code: "MIC_NO_FIRST_SAMPLE",
-            message: "first mic sample not received within 250ms of first video sample"
+            message: "first mic sample not received within \(Self.micFirstSampleWait)s of first video sample"
         ))
     }
 

@@ -4,6 +4,13 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-17 — Mic start wait raised from 250 ms to 2 s
+
+- **Symptom** (Keith): every take failed with "The microphone produced no audio" on the MacBook Pro Microphone, after working the same morning.
+- **Root cause, from the system log:** on every start macOS starts the built-in mic, reports its privacy sensor as "Denied (unexpected)", stops the mic's IO thread, and restarts it about 0.4 s later. The engine gave up 250 ms after the first screen frame. Takes only ever worked because a first buffer slipped out before the restart: the mic ran 117 ms (08:55 today) and 537 ms (20:40 yesterday) before being stopped on good takes, and 9, 8 and 1 ms on the three failed takes at 12:10-12:11.
+- **Not shown to be caused by today's builds.** The engine's own sequence is identical in good and failed takes. Why macOS stopped the mic sooner at midday is not known.
+- **Fix:** wait 2 s. The recording already begins at the first mic sample, so the only cost is that a take starts up to about half a second after the screen stream does. A mic that never delivers still fails, after 2 s.
+
 ## 2026-11-17 — Capture window follow-ups; Export pinned
 
 - **Export is pinned to the bottom of Review's right panel** (Keith): following the settings made it jump per tool. Settings stay at the top.

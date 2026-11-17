@@ -2,6 +2,10 @@
 
 Things left worse than we'd like, with why. Newest at top. Remove an entry when it is paid.
 
+## Failed starts leave a folder behind (2026-11-17)
+- A take that fails before it starts (for example no mic audio) leaves `recording-<stamp>/sources/webcam.mp4` and a `.pending-move` marker in `~/Movies/Zeigen/.recordings` when a save folder is chosen. It would then be moved to the chosen folder and show as a broken card. Five such folders exist from 12:10-12:14 on 2026-11-17. Fix: remove the folder when a take fails before start.
+- The 2 s mic wait is untried in the app (the terminal has no Screen Recording permission).
+
 ## Capture feedback: untried and rough (2026-11-17)
 
 - Not run in the app. Seen only in headless Chrome with stubbed Tauri calls: the bubble's shape/size pill (as two iframes placed by hand), the hotkey recorder idle, listening and refusing, the Start reasons, the picker line without Identify, Review's S / M / L. Untried: the pill showing on hover over a bubble that is not the key window (the cursor poller), the pill following a drag as a child window, the above/below flip at the top of a screen, resize keeping the bubble in its corner, whether creating the pill window or clicking it moves focus differently from clicking the bubble, and a hotkey taken by another app being refused.
