@@ -18,12 +18,21 @@ Things left worse than we'd like, with why. Newest at top. Remove an entry when 
 - The empty-row hint sits in the middle of the lane, and the hover ghost's "+" draws under it when the pointer is near the middle.
 - The play bar's strip takes about 40px from the picture. At 1280x860 the picture may now be height-limited and slightly smaller than before; not measured.
 
+## Recordings library grid: what is rough (2026-11-17)
+
+- Seen only in headless Chrome with stubbed Tauri calls and real thumbnails made from the library into a temp dir. Not opened in the app: clicking a card, Rename, Show in Finder, Delete, the hover ring and the "..." fade, and thumbnails filling in live are all untried.
+- A thumbnail that ffmpeg cannot make is tried again on every list (each focus). Only a recording whose screen file probes fine but will not give a frame hits this; an unreadable file is skipped because its failed probe is cached.
+- Deleting a recording while its thumbnail is being made could race: ffmpeg may write `.thumb-tmp.jpg` into the folder as it is removed, and the delete then fails with "directory not empty". The window is a fraction of a second, once per recording.
+- If the background fill-in finishes before the list call returns, the list overwrites that update and the thumbnail shows only after the next focus.
+- Thumbnails are letterboxed (contain) on the canvas colour, so tall window and area recordings get wide dark side bars. Cover cropped too much of those; not tuned per shape.
+- The menu opens below the "..." button and is not flipped near the bottom of the window; it scrolls with the grid.
+- Search filters by name only, and the header count and size are for the whole library, not the filtered view.
+
 ## Recordings window: rough edges (2026-11-16)
 
 - A recording whose edit state is "logically empty" has no sidecar (Review deletes it), and the list skips folders without one. A screen-only display recording with no edits would vanish from the list. None of the nine kept recordings is affected today; it matters once step 2 puts every new recording in the library. Fix: list folders by their screen file and treat a missing sidecar as defaults, or stop Review deleting an empty sidecar for kept recordings.
 - Discarding a reopened recording, or saving from it, sends the same `recording-discarded` / `recording-committed` events a fresh recording does, so the main window's status strip clears or updates even when it was showing a different recording.
 - The window learns "recording in progress" from engine `started` / `stopped` / `error` events. A pre-warm's start and stop briefly disable Open; if the window opens mid-recording it shows Open enabled (the main window still refuses the request unless idle).
-- The list probes every recording with ffprobe on each load and on every focus; fine for nine, slow once there are hundreds.
 - Nobody has opened a recording through the window yet; it was checked by type check, the folder-scan test, and a read-only listing of the real library.
 
 ## Native webcam recorder: what is rough (2026-11-16)
