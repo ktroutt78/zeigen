@@ -3704,6 +3704,69 @@ WATERMARK_SCALE_FRAC=0.08";
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // A recording as it is laid out on disk today (sources/screen.mp4 +
+    // sources/webcam.mp4, no numbered pieces), found through the same lookup the
+    // app's export and scene preview use, exported with a Full webcam scene. The
+    // webcam must be in the picture: as the bubble outside the scene and filling
+    // the frame inside it. Guards the 2026-11-16 regression where the lookup knew
+    // only the numbered pieces and every new recording exported with no webcam.
+    #[test]
+    fn new_style_recording_exports_its_webcam_and_scene() {
+        ensure_audio_model_for_tests();
+        let dir = std::env::temp_dir().join(format!("zeigen-newstyle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let sources = dir.join("sources");
+        std::fs::create_dir_all(&sources).unwrap();
+        let synth = |out: &Path, args: &[&str]| {
+            let o = Command::new(FFMPEG_PATH).args(["-y", "-v", "error"]).args(args)
+                .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"]).arg(out).output().expect("ffmpeg");
+            assert!(o.status.success(), "synth: {}", String::from_utf8_lossy(&o.stderr));
+        };
+        // Blue screen with sound, red webcam.
+        synth(&sources.join("screen.mp4"), &["-f", "lavfi", "-i", "color=c=blue:s=1280x720:r=30:d=4",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=4", "-c:a", "aac", "-shortest"]);
+        synth(&sources.join("webcam.mp4"), &["-f", "lavfi", "-i", "color=c=red:s=480x480:r=30:d=4"]);
+
+        let (screen, webcams) = export_inputs_from_source(&dir.join("recording-x.mp4"));
+        assert_eq!(webcams, vec![sources.join("webcam.mp4")], "the lookup finds the single webcam file");
+
+        let sidecar = SidecarState {
+            bubble_zone: Some(crate::composite::BubbleZone::BottomRight),
+            scenes: vec![SceneSeg { start: 1.5, end: 3.2, layout: crate::scene::Layout::FullWebcam }],
+            ..Default::default()
+        };
+        let out = dir.join("out.mp4");
+        run_v3_export(&screen, &webcams, &out, &sidecar,
+            crate::composite::WebcamSize::Medium, None, Mp4Resolution::Source, None, |_| {})
+            .expect("export");
+
+        // Mean colour of an 8x8 patch of the frame at t.
+        let patch = |t: f64, x: u32, y: u32| -> (u8, u8, u8) {
+            let o = Command::new(FFMPEG_PATH)
+                .args(["-v", "error", "-ss", &format!("{t}"), "-i"]).arg(&out)
+                .args(["-frames:v", "1", "-vf", &format!("crop=8:8:{x}:{y},scale=1:1:flags=area"),
+                       "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+                .output().expect("ffmpeg patch");
+            assert_eq!(o.stdout.len(), 3, "patch at {t}s: {}", String::from_utf8_lossy(&o.stderr));
+            (o.stdout[0], o.stdout[1], o.stdout[2])
+        };
+        let red = |(r, _, b): (u8, u8, u8)| r > 150 && b < 100;
+        let blue = |(r, _, b): (u8, u8, u8)| b > 150 && r < 100;
+
+        // Before the scene: screen in the middle, and the webcam bubble somewhere
+        // in the bottom-right quarter (its exact size is not this test's business).
+        assert!(blue(patch(0.5, 636, 356)), "screen shows before the scene: {:?}", patch(0.5, 636, 356));
+        let bubble = (0..8).flat_map(|i| (0..5).map(move |j| (660 + i * 76, 380 + j * 66)))
+            .any(|(x, y)| red(patch(0.5, x, y)));
+        assert!(bubble, "the webcam bubble is in the export before the scene");
+        // Inside the scene: the webcam fills the picture.
+        for (x, y) in [(636, 356), (100, 100), (1170, 610)] {
+            assert!(red(patch(2.4, x, y)), "webcam fills the frame in the scene at {x},{y}: {:?}", patch(2.4, x, y));
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // Multi-segment webcam (Continuity drop) -> V3 concatenates the segments
     // back-to-back into one bubble stream and returns a drift caveat note. Also
     // proves the COMMON case (a single clean segment) returns Ok(None) — no note,

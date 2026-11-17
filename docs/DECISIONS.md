@@ -11,6 +11,9 @@ Keith's first step 2 recording: lip-sync fine across a pause, but a Full webcam 
 - **Cause (mine):** step 2 writes the webcam as one file, `sources/webcam.mp4`, and removed the numbered pieces (`webcam-00.mp4`). The scene layout and the export find the webcam through `export_inputs_from_source`, which looked only for the numbered pieces and ignored `webcam.mp4`. With no pieces it reported "no webcam": scenes switched off in the preview, and an export would have had no webcam at all. The preview's bubble still showed because Review plays `webcam.mp4` directly. I had assumed the export read `webcam.mp4`; it did not, and nothing I ran exercised that lookup.
 - **Fix:** the lookup uses `webcam.mp4` when it exists and the numbered pieces only when it does not. A test covers a new recording, an old one with both, pieces only, and screen only.
 - **Older recordings:** unaffected by the bug (they still have their pieces); they now use their joined `webcam.mp4`, which holds the same frames.
+- **Keith confirmed the export side:** the export had no webcam at all (no bubble, no scene); zooms were fine. Same cause.
+- **Test added at his request** (`new_style_recording_exports_its_webcam_and_scene`): builds a recording folder as it is laid out today, finds its files through the real lookup, exports with a Full webcam scene, and checks the picture: bubble present before the scene, webcam filling the frame inside it. Runs with the normal test suite.
+- **Older recordings checked:** in all five kept recordings with a webcam, the joined `webcam.mp4` has exactly as many frames as its pieces (3110, 2083, 1179, 6823, 6868), so reading the joined file changes nothing for them.
 - **Checked:** Keith's recording (210755) exported through the test harness shows the Full webcam scene at 0:20 and the bubble at 0:10. The harness passes the webcam file directly, so the lookup itself is proven by the unit test, not by that export. Not checked: the preview in the app.
 
 ---
