@@ -4,6 +4,18 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-17 — Capture window follow-ups; Export pinned
+
+- **Export is pinned to the bottom of Review's right panel** (Keith): following the settings made it jump per tool. Settings stay at the top.
+- **Bubble controls on the bubble** (Keith): hovering the floating bubble before recording shows a pill with circle / rounded square / square and S / M / L (180 / 240 / 320 pt; M is the old size). The pill is a second window attached to the bubble, so the bubble's geometry and position log are untouched; hover is read from the global mouse position because hover events do not reliably reach a window that is not key. It exists only while idle, and Zeigen's windows are excluded from display and area captures and cannot be in a window capture, so it cannot appear in a recording. The size carries into the recording through the logged diameter and is stamped in the sidecar; Review's "Normal / Small" became the same S / M / L. The shape slider left Settings.
+- **Identify removed** (Keith), with the display numbers that matched it.
+- **Hotkey** shown as symbols and set by pressing keys; a failed registration keeps the old hotkey (it used to be dropped). Cmd+W and Cmd+Q cannot be chosen (the menu takes them first; DEBT).
+- **Start says why it is disabled** ("Pick a window to start" etc.).
+
+Implementer-built, reviewed by me from screenshots; not yet seen in the real app.
+
+---
+
 ## 2026-11-17 — Review and Recordings feedback from Keith's checks
 
 **Review (built, merged as review-feedback):** Export follows the settings with a fixed gap; labels sit above full-width export controls; the tool icons are a row across the top of the right panel so content has equal margins (Keith); the preview panel has one layer (the background canvas now covers only the picture's box, which also matches the export); the title is the name plus length, with "Window recording" etc. when unnamed; "— edited", ".mp4" and "just now" dropped. Margin and Corners are always shown, disabled until a background is chosen: Margin had never been removed, it only ever appeared with a background. The preview skips the gap before the first real frame on recordings made before the recorder fix (`video_start_time`), which I had missed when fixing the export.
