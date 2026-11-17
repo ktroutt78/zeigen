@@ -296,6 +296,11 @@
 .rail-tool:hover:not(:disabled) { background: var(--bg-elevated); color: var(--fg-primary); }
 .rail-tool.on { background: var(--accent-soft); color: var(--accent-bright); }
 .rail-tool:disabled { opacity: 0.4; cursor: not-allowed; }
+/* Review's tool settings: the last control's own bottom margin would add to the
+   fixed gap above Export, so the gap differs per tool without this. !important
+   because Field sets its margin inline. */
+.tool-settings > :last-child,
+.tool-settings > :last-child > :last-child { margin-bottom: 0 !important; }
 
 /* Keycap */
 .kbd {

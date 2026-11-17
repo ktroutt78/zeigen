@@ -5466,10 +5466,15 @@ function ExportPanel({
           icon={RailIcon.mark}
         />
       </div>
-      {/* Panel content column: the active tool's settings (scroll if the window
-          is short), then any note or error, then Export pinned at the bottom. */}
+      {/* Panel content column: the active tool's settings, a fixed gap, any note
+          or error, then Export right after them; leftover space stays below
+          Export. When the settings outgrow the window they scroll and Export
+          stays whole at the bottom. */}
       <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", padding: "16px 16px 12px 10px" }}>
+      <div
+        className="tool-settings"
+        style={{ flex: "0 1 auto", minHeight: 0, overflowY: "auto", overflowX: "hidden", padding: "16px 16px 28px 10px" }}
+      >
 
         {activeTool === "bubble" && (
           <>
@@ -6125,8 +6130,8 @@ function ExportPanel({
 
       {message}
 
-      {/* Export: pinned under the settings, never scrolls away. */}
-      <div style={{ flexShrink: 0, padding: "4px 16px 16px 10px" }}>
+      {/* Export: follows the settings, never scrolls away. */}
+      <div style={{ flex: "none", padding: "0 16px 16px 10px" }}>
         <h2 style={PANEL_HEADING}>Export</h2>
         <div
           style={{
