@@ -50,6 +50,10 @@
   --bg-overlay-medium: rgba(13,14,17,0.72);
   --bg-overlay-strong: rgba(13,14,17,0.86);
 
+  /* Hover pickers drawn over the user's screens */
+  --picker-tint:  oklch(0.60 0.17 252 / 0.18);  /* the window or display under the mouse */
+  --picker-scrim: rgba(13,14,17,0.45);          /* the displays that are not */
+
   /* ─── Borders — used sparingly; elevation divides regions ───── */
   --border-faint:  rgba(255,255,255,0.05);  /* rare row dividers  */
   --border-subtle: rgba(255,255,255,0.08);  /* window chrome ring */
