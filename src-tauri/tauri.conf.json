@@ -15,10 +15,10 @@
       {
         "label": "main",
         "title": "Zeigen",
-        "width": 560,
-        "height": 760,
-        "minWidth": 540,
-        "minHeight": 760,
+        "width": 380,
+        "height": 600,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
         "resizable": false,
         "acceptFirstMouse": true
       }

@@ -1,0 +1,245 @@
+/* The capture window: a compact launcher. Content sits straight on the
+   window background; only the controls carry a fill. */
+
+.cap {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  padding: 0 16px 16px;
+  background: var(--bg-window);
+  color: var(--fg-primary);
+  font-family: var(--font-system);
+  user-select: none;
+}
+
+/* Shares the row with the macOS traffic lights (overlay title bar), and is
+   the window's drag handle. */
+.cap-header {
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+  margin-right: -8px;
+}
+.cap-header.left { justify-content: flex-start; padding-left: 64px; margin-right: 0; }
+
+.cap-icon-btn {
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.cap-icon-btn:hover { background: var(--bg-hover); color: var(--fg-primary); }
+
+.cap-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 18px;
+  min-height: 30px;
+}
+.cap-brand-name { font-size: 20px; font-weight: 650; letter-spacing: -0.01em; }
+
+.cap-rec-chip {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border-radius: var(--r-pill);
+  background: var(--recording-soft);
+  color: var(--recording-tint);
+  font: 500 11px var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.cap-section { display: flex; flex-direction: column; gap: 8px; margin-bottom: 18px; }
+.cap-section.devices { gap: 6px; }
+.cap-label { font-size: 12px; color: var(--fg-secondary); }
+
+.cap-tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.cap-tile {
+  height: 76px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background: var(--bg-control);
+  color: var(--fg-secondary);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font: 400 13px var(--font-system);
+  cursor: pointer;
+  transition: background var(--dur-quick) var(--ease-ds), color var(--dur-quick) var(--ease-ds);
+}
+.cap-tile:hover:not(:disabled) { color: var(--fg-primary); background: var(--bg-control-on); }
+.cap-tile.on, .cap-tile.on:hover:not(:disabled) {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--fg-primary);
+}
+.cap-tile:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* The current pick, under the tiles. A transparent native <select> laid over
+   the text is the keyboard and fallback way to choose. */
+.cap-pickline { display: flex; align-items: center; gap: 4px; height: 34px; }
+.cap-pick {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  height: 34px;
+  padding: 0 4px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg-secondary);
+  font-size: 13px;
+}
+.cap-pick:hover:not(.disabled) { color: var(--fg-primary); }
+.cap-pick.empty { color: var(--fg-tertiary); }
+.cap-pick.disabled { opacity: 0.5; }
+.cap-pick > svg { flex-shrink: 0; }
+.cap-pick-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cap-pick:has(select:focus-visible) { outline: 2px solid var(--accent-ring); }
+
+.cap-overlay-select {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+  font-size: 13px;
+}
+.cap-overlay-select:disabled { cursor: not-allowed; }
+
+.cap-text-btn {
+  flex-shrink: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-tertiary);
+  padding: 4px 6px;
+  font: 400 12px var(--font-system);
+  cursor: pointer;
+}
+.cap-text-btn:hover:not(:disabled) { color: var(--fg-primary); }
+.cap-text-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.cap-device {
+  position: relative;
+  height: 44px;
+  padding: 0 8px 0 12px;
+  border-radius: 10px;
+  background: var(--bg-control);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+.cap-device:has(select:focus-visible) { outline: 2px solid var(--accent-ring); }
+.cap-device.disabled { opacity: 0.5; }
+.cap-device-icon { color: var(--fg-secondary); display: flex; flex-shrink: 0; }
+.cap-device-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cap-device.off .cap-device-name { color: var(--fg-tertiary); }
+
+/* Sits above the row's overlay <select>, so it toggles instead of opening it. */
+.cap-pill {
+  position: relative;
+  z-index: 1;
+  min-width: 40px;
+  padding: 3px 9px;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+  color: var(--accent-fg);
+  font: 600 11px var(--font-system);
+  cursor: pointer;
+}
+.cap-pill.off { background: var(--bg-control-on); color: var(--fg-secondary); }
+.cap-pill:disabled { cursor: not-allowed; }
+
+.cap-status { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 12px; font-size: 12px; line-height: 1.4; }
+.cap-status-label { flex-shrink: 0; font-weight: 600; }
+.cap-status.error .cap-status-label { color: var(--recording-tint); }
+.cap-status.success .cap-status-label { color: var(--success-tint); }
+.cap-status.muted .cap-status-label { color: var(--fg-secondary); }
+.cap-status-body { flex: 1; min-width: 0; color: var(--fg-secondary); overflow-wrap: anywhere; }
+.cap-status-body.path {
+  font: 11px var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cap-status-x {
+  border: 0;
+  background: transparent;
+  color: var(--fg-tertiary);
+  padding: 0 2px;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.cap-start {
+  width: 100%;
+  height: 46px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--accent);
+  color: var(--accent-fg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  font: 600 15px var(--font-system);
+  cursor: pointer;
+}
+.cap-start:hover:not(:disabled) { background: var(--accent-bright); }
+.cap-start.stop { background: var(--recording); }
+.cap-start:disabled { opacity: 0.5; cursor: not-allowed; }
+.cap-start-dot { width: 10px; height: 10px; border-radius: 50%; background: currentColor; }
+.cap-start-dot.square { border-radius: 2px; }
+.cap-start-key { font-size: 12px; font-weight: 500; opacity: 0.8; }
+.cap-start-time { font: 500 13px var(--font-mono); font-variant-numeric: tabular-nums; }
+.cap-foot { margin-top: 10px; text-align: center; font-size: 12px; color: var(--fg-tertiary); }
+
+/* Settings view */
+.cap-title { font-size: 20px; font-weight: 650; letter-spacing: -0.01em; margin: 0 0 14px; }
+.cap-set-row { display: flex; flex-direction: column; gap: 7px; padding: 10px 0; }
+.cap-set-line { display: flex; align-items: center; gap: 8px; }
+.cap-help { font-size: 11px; color: var(--fg-tertiary); }
+.cap-input {
+  height: 28px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: var(--bg-control);
+  color: var(--fg-primary);
+  font: 12px var(--font-mono);
+  outline: none;
+}
+.cap-input:focus-visible { box-shadow: 0 0 0 2px var(--accent-ring); }
+.cap-input.num { width: 56px; text-align: center; appearance: textfield; -webkit-appearance: textfield; }
+.cap-input.num::-webkit-inner-spin-button, .cap-input.num::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.cap-btn {
+  white-space: nowrap;
+  height: 28px;
+  padding: 0 11px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: var(--bg-control-on);
+  color: var(--fg-primary);
+  font: 500 12px var(--font-system);
+  cursor: pointer;
+}
+.cap-btn:disabled { opacity: 0.45; cursor: not-allowed; }

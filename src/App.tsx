@@ -4,7 +4,8 @@ import { listen } from "@tauri-apps/api/event";
 import { WebviewWindow, getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { availableMonitors } from "@tauri-apps/api/window";
 import { emit } from "@tauri-apps/api/event";
-import { I, Icon, P } from "./components/icons";
+import { LogicalSize } from "@tauri-apps/api/dpi";
+import "./styles/capture.css";
 import { PILL_STRIP_CSS } from "./constants/bubble";
 import type { LibraryRecording } from "./RecordingsWindow";
 import { openRecordingsWindow } from "./openRecordings";
@@ -659,178 +660,176 @@ async function openMarqueeOverlays(
   });
 }
 
-const WINDOW_PICKER_LABEL_PREFIX = "window-picker-";
-
-// Hover picker: one transparent always-on-top overlay per display, each
-// pre-loaded with the windows that sit on it (frames translated into that
-// display's coordinate space). The overlay highlights the frontmost window
-// under the cursor; a click selects it, a click on empty space or Cancel
-// dismisses. Resolves to the chosen SCWindow id, or null on cancel.
+// Hover pickers (window and display): one transparent always-on-top overlay
+// per display, placed with set_window_frame_cg. No overlay is ever focused or
+// key: hover and click come from the native cursor poller (`picker-cursor` /
+// `picker-click`), which every overlay maps to its own display, so hover works
+// on every display (DECISIONS 2026-07-28). Overlays stay visible to screen
+// capture on purpose: hiding them from capture hides them on USB-driven
+// displays too (CLAUDE.md gotcha); they are closed before any recording.
 //
-// KNOWN LIMITATION (deferred 2026-07-25): hover only works on the primary
-// display. macOS delivers mouseMoved events only to the *key* window, and
-// just one window can be key. Only overlay 0 is focused at creation
-// (`focus: i === 0`); the others can never become key because their
-// self-focus call lives in onPointerMove, which never fires without the
-// mouseMoved they don't get. (Marquee dodges this: mouseDragged is
-// delivered to non-key windows, mouseMoved is not.) The robust fix is one
-// overlay spanning the union of all displays; until then the Window
-// dropdown remains the fallback for secondary displays.
+// Resolves with the `<kind>-selected` payload, or null on cancel. Every exit
+// (select, cancel, Esc in the main window or in an overlay, a setup error)
+// goes through finish(), which stops the poller and closes every overlay.
+let pickerOpen = false;
+async function runPickerOverlays<T, D extends DisplayShape>(
+  kind: "window-picker" | "display-picker",
+  displays: D[],
+  extraParams: (d: D) => Record<string, string>,
+): Promise<T | null> {
+  if (displays.length === 0 || pickerOpen) return null;
+  pickerOpen = true;
+  const labels = displays.map((_, i) => `${kind}-${i}`);
+  const unlistens: Array<() => void> = [];
+  let resolveFn!: (v: T | null) => void;
+  const result = new Promise<T | null>((r) => {
+    resolveFn = r;
+  });
+  let finished = false;
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === "Escape") finish(null);
+  };
+  const finish = async (v: T | null) => {
+    if (finished) return;
+    finished = true;
+    void invoke("picker_cursor_stop");
+    window.removeEventListener("keydown", onKey);
+    unlistens.forEach((u) => u());
+    for (const label of labels) {
+      const w = await WebviewWindow.getByLabel(label);
+      if (w) await w.close().catch(() => {});
+    }
+    pickerOpen = false;
+    resolveFn(v);
+  };
+
+  try {
+    // The main window is key when its tile is clicked, and stays key (no
+    // overlay takes focus), so Esc lands here.
+    window.addEventListener("keydown", onKey);
+    unlistens.push(await listen<T>(`${kind}-selected`, (e) => finish(e.payload)));
+    unlistens.push(await listen(`${kind}-cancelled`, () => finish(null)));
+    // Each overlay says when it is listening; restarting the poller (it is
+    // idempotent) re-sends the current cursor position, so the display or
+    // window under the mouse lights up before the mouse moves.
+    unlistens.push(
+      await listen("picker-overlay-ready", () => {
+        if (!finished) void invoke("picker_cursor_start");
+      }),
+    );
+
+    const cocoaH = await primaryCocoaHeight();
+    for (let i = 0; i < displays.length; i++) {
+      const d = displays[i];
+      const label = labels[i];
+      const params = new URLSearchParams({
+        display_index: String(i + 1),
+        origin_x: String(d.x),
+        origin_y: String(d.y),
+        disp_w: String(d.width),
+        disp_h: String(d.height),
+        ...extraParams(d),
+      });
+      const old = await WebviewWindow.getByLabel(label);
+      if (old) await old.close().catch(() => {});
+      new WebviewWindow(label, {
+        url: `/#${kind}?${params.toString()}`,
+        title: kind === "window-picker" ? "Pick Window" : "Pick Display",
+        width: 400,
+        height: 400,
+        decorations: false,
+        transparent: true,
+        alwaysOnTop: true,
+        skipTaskbar: true,
+        resizable: false,
+        visibleOnAllWorkspaces: true,
+        shadow: false,
+        // Never focus/key an overlay: keying one steals key from the others
+        // (the priming-click root cause, DECISIONS 2026-07-28).
+        focus: false,
+      });
+      void placeWhenRegistered(label, d, cocoaH);
+    }
+    void invoke("picker_cursor_start");
+  } catch (e) {
+    console.error(`[${kind}] setup failed`, e);
+    void finish(null);
+  }
+  return result;
+}
+
+// Tauri's constructor x/y drops negative coords on macOS for screens left of
+// primary, so place via set_window_frame_cg once the window exists.
+async function placeWhenRegistered(label: string, d: DisplayShape, cocoaH: number) {
+  for (let attempt = 0; attempt < 50; attempt++) {
+    if (await WebviewWindow.getByLabel(label)) {
+      await invoke("set_window_frame_cg", {
+        label,
+        cgX: d.x,
+        cgY: d.y,
+        width: d.width,
+        height: d.height,
+        primaryCocoaHeight: cocoaH,
+      }).catch((e) => console.error(`[picker] ${label} placement failed`, e));
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  console.error(`[picker] ${label} window never registered`);
+}
+
+async function primaryCocoaHeight(): Promise<number> {
+  const monitors = await availableMonitors();
+  const primary =
+    monitors.find((m) => m.position.x === 0 && m.position.y === 0) ||
+    monitors[0];
+  return primary && primary.scaleFactor
+    ? primary.size.height / primary.scaleFactor
+    : 1080;
+}
+
+// Window picker: each overlay gets the windows on its display, translated to
+// display-relative points, plus the full front-to-back occluder stack so it
+// can tell when the frontmost window under the cursor is one we didn't
+// enumerate. Resolves to the chosen SCWindow id, or null on cancel.
 async function openWindowPickerOverlays(
   displays: DisplayShape[],
   windows: WindowSource[],
   stack: StackWindow[],
 ): Promise<number | null> {
-  if (displays.length === 0) return null;
+  const on = (r: { x: number; y: number; width: number; height: number }, d: DisplayShape) =>
+    r.x < d.x + d.width && r.x + r.width > d.x && r.y < d.y + d.height && r.y + r.height > d.y;
+  const picked = await runPickerOverlays<{ id: number }, DisplayShape>("window-picker", displays, (d) => ({
+    wins: JSON.stringify(
+      windows
+        .filter((w) => w.on_screen && on(w, d))
+        .map((w) => ({
+          id: w.id,
+          x: w.x - d.x,
+          y: w.y - d.y,
+          w: w.width,
+          h: w.height,
+          app: w.app,
+          title: w.title,
+          z: w.z,
+        })),
+    ),
+    stack: JSON.stringify(
+      stack
+        .filter((s) => on(s, d))
+        .map((s) => ({ id: s.id, x: s.x - d.x, y: s.y - d.y, w: s.width, h: s.height })),
+    ),
+  }));
+  return picked?.id ?? null;
+}
 
-  const monitors = await availableMonitors();
-  const primary =
-    monitors.find((m) => m.position.x === 0 && m.position.y === 0) ||
-    monitors[0];
-  const primaryCocoaHeight =
-    primary && primary.scaleFactor
-      ? primary.size.height / primary.scaleFactor
-      : 1080;
-
-  const labels: string[] = [];
-
-  for (let i = 0; i < displays.length; i++) {
-    const d = displays[i];
-    const label = `${WINDOW_PICKER_LABEL_PREFIX}${i}`;
-    labels.push(label);
-
-    // Windows whose frame intersects this display, translated to
-    // display-relative points (the overlay treats client coords as
-    // display-relative). Only on-screen windows can be highlighted.
-    const winsForDisplay = windows
-      .filter(
-        (w) =>
-          w.on_screen &&
-          w.x < d.x + d.width &&
-          w.x + w.width > d.x &&
-          w.y < d.y + d.height &&
-          w.y + w.height > d.y,
-      )
-      .map((w) => ({
-        id: w.id,
-        x: w.x - d.x,
-        y: w.y - d.y,
-        w: w.width,
-        h: w.height,
-        app: w.app,
-        title: w.title,
-        z: w.z,
-      }));
-
-    // The full occluder stack, translated to this display's coords and
-    // limited to windows intersecting it. Front-to-back order is preserved so
-    // the overlay can resolve the frontmost window (pickable or not) at a
-    // point. Kept as raw {id,rect} so the overlay stays z-order-honest even
-    // for windows absent from winsForDisplay.
-    const stackForDisplay = stack
-      .filter(
-        (s) =>
-          s.x < d.x + d.width &&
-          s.x + s.width > d.x &&
-          s.y < d.y + d.height &&
-          s.y + s.height > d.y,
-      )
-      .map((s) => ({
-        id: s.id,
-        x: s.x - d.x,
-        y: s.y - d.y,
-        w: s.width,
-        h: s.height,
-      }));
-
-    const params = new URLSearchParams({
-      display_index: String(i + 1),
-      wins: JSON.stringify(winsForDisplay),
-      stack: JSON.stringify(stackForDisplay),
-      // This display's CG origin + size, so the overlay can self-map the
-      // poller's global CG cursor points to its own local coords (Slice 2).
-      origin_x: String(d.x),
-      origin_y: String(d.y),
-      disp_w: String(d.width),
-      disp_h: String(d.height),
-    });
-
-    const old = await WebviewWindow.getByLabel(label);
-    if (old) await old.close().catch(() => {});
-
-    new WebviewWindow(label, {
-      url: `/#window-picker?${params.toString()}`,
-      title: "Pick Window",
-      width: 400,
-      height: 400,
-      decorations: false,
-      transparent: true,
-      alwaysOnTop: true,
-      skipTaskbar: true,
-      resizable: false,
-      visibleOnAllWorkspaces: true,
-      shadow: false,
-      // Never focus/key an overlay: hover comes from the cursor poller, not
-      // key-window mouseMoved, so keying is unnecessary and keying one overlay
-      // steals key from the others (the priming-click root cause). Slice 2.
-      focus: false,
-    });
-
-    void (async () => {
-      for (let attempt = 0; attempt < 50; attempt++) {
-        const win = await WebviewWindow.getByLabel(label);
-        if (win) {
-          try {
-            await invoke("set_window_frame_cg", {
-              label,
-              cgX: d.x,
-              cgY: d.y,
-              width: d.width,
-              height: d.height,
-              primaryCocoaHeight,
-            });
-            // No setFocus: hover is poller-driven and keying an overlay only
-            // re-triggers the key-steal (DECISIONS 2026-07-28). Slice 2.
-          } catch (e) {
-            console.error(`[window-picker] ${label} setup failed`, e);
-          }
-          return;
-        }
-        await new Promise((r) => setTimeout(r, 20));
-      }
-      console.error(`[window-picker] ${label} window never registered`);
-    })();
-  }
-
-  // Slice 1 (poller plan): start the native cursor poller while the picker is
-  // open. Slice 2 wires overlays to its picker-cursor/picker-click events.
-  void invoke("picker_cursor_start");
-
-  return new Promise<number | null>(async (resolve) => {
-    const closeAll = async () => {
-      for (const label of labels) {
-        const w = await WebviewWindow.getByLabel(label);
-        if (w) await w.close().catch(() => {});
-      }
-    };
-    const unlistens: Array<() => void> = [];
-    const finish = async (result: number | null) => {
-      // Single choke point for select, cancel, AND Esc -- stop the poller here
-      // so no 60 Hz timer survives a picker close on any exit path.
-      void invoke("picker_cursor_stop");
-      unlistens.forEach((u) => u());
-      await closeAll();
-      resolve(result);
-    };
-    unlistens.push(
-      await listen<{ id: number }>("window-picker-selected", (e) => {
-        finish(e.payload?.id ?? null);
-      }),
-    );
-    unlistens.push(
-      await listen("window-picker-cancelled", () => finish(null)),
-    );
-  });
+// Display picker: resolves to the chosen display's id, or null on cancel.
+async function openDisplayPickerOverlays(displays: Display[]): Promise<number | null> {
+  const picked = await runPickerOverlays<{ id: number }, Display>("display-picker", displays, (d) => ({
+    id: String(d.id),
+    name: d.name,
+  }));
+  return picked?.id ?? null;
 }
 
 type ReviewOpenArgs = {
@@ -985,8 +984,6 @@ type EngineEvent =
     }
   | { event: "stream_stopped" }
   | { event: "error"; code: string; message: string };
-
-const NO_CAMERA = "__none__";
 
 function isContinuity(name: string): boolean {
   return /iphone|continuity/i.test(name);
@@ -2220,273 +2217,593 @@ function App() {
     };
   }, []);
 
-  return (
-    <main
-      className="accent-blue"
-      style={{
-        minHeight: "100vh",
-        display: "flex",
-        flexDirection: "column",
-        background: "var(--bg-window)",
-        color: "var(--fg-primary)",
-      }}
-    >
-      <BrandBar
-        recording={recording}
-        elapsed={progress.elapsed_s}
-        onRefresh={refresh}
-      />
+  // Display tile: switch to display and, with more than one display, hover-
+  // pick one across all of them (a cancel keeps the previous pick).
+  const handleDisplayTileClick = async () => {
+    setSourceKind("display");
+    if (displays.length <= 1) {
+      if (displays[0]) setSelectedDisplay(displays[0].id);
+      return;
+    }
+    const picked = await openDisplayPickerOverlays(displays);
+    if (picked != null) setSelectedDisplay(picked);
+  };
 
+  // Window tile: switch to window and start the hover picker straight away.
+  const handleWindowTileClick = () => {
+    setSourceKind("window");
+    openWindowPicker().catch((e) => setError(String(e)));
+  };
+
+  // The device rows' On pill restores the last device chosen this session,
+  // or the first available one.
+  const lastCameraName = useRef<string | null>(null);
+  if (cameraName) lastCameraName.current = cameraName;
+  const lastMicUid = useRef<string | null>(null);
+  if (selectedMic) lastMicUid.current = selectedMic;
+  const offCamera =
+    cameras.find((c) => c.name === lastCameraName.current) ?? cameras[0] ?? null;
+  const offMic = mics.find((m) => m.uid === lastMicUid.current) ?? mics[0] ?? null;
+
+  // The window is 380x600 (tauri.conf.json) and grows to fit when a state
+  // needs more height (a long error, the settings view) instead of scrolling.
+  const [view, setView] = useState<"main" | "settings">("main");
+  const topRef = useRef<HTMLDivElement | null>(null);
+  const bottomRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    let lastH = WINDOW_H;
+    const fit = () => {
+      const need =
+        (topRef.current?.offsetHeight ?? 0) + (bottomRef.current?.offsetHeight ?? 0) + 32;
+      const h = Math.max(WINDOW_H, Math.ceil(need));
+      if (h === lastH) return;
+      lastH = h;
+      getCurrentWebviewWindow()
+        .setSize(new LogicalSize(WINDOW_W, h))
+        .catch(() => {});
+    };
+    const ro = new ResizeObserver(fit);
+    if (topRef.current) ro.observe(topRef.current);
+    if (bottomRef.current) ro.observe(bottomRef.current);
+    return () => ro.disconnect();
+  }, [view]);
+
+  const busy = recording || state === "countdown";
+  const pickDisabled = recording || displays.length === 0;
+
+  if (view === "settings") {
+    return (
+      <main className="cap accent-blue">
+        <div ref={topRef}>
+          <div className="cap-header left" data-tauri-drag-region>
+            <button
+              className="cap-icon-btn"
+              aria-label="Back"
+              title="Back"
+              onClick={() => setView("main")}
+            >
+              {Glyph.back}
+            </button>
+          </div>
+          <h1 className="cap-title">Settings</h1>
+          <SettingsView
+            hotkey={hotkey}
+            onHotkey={async (combo) => {
+              try {
+                await invoke("set_hotkey", { combo });
+                setHotkey(combo);
+              } catch (e) {
+                setError(String(e));
+              }
+            }}
+            countdownDuration={countdownDuration}
+            onCountdownDuration={setCountdownDuration}
+            lengthCapMode={lengthCapMode}
+            onLengthCapMode={setLengthCapMode}
+            lengthCapTargetSec={lengthCapTargetSec}
+            onLengthCapTargetSec={setLengthCapTargetSec}
+            noiseReduction={noiseReduction}
+            onNoiseReduction={(v) => {
+              setNoiseReduction(v);
+              invoke("set_noise_reduction", { level: v }).catch((e) => setError(String(e)));
+            }}
+            bubbleRoundness={bubbleRoundness}
+            onBubbleRoundness={(v) => {
+              setBubbleRoundness(v);
+              // Live-preview push to the floating bubble window; the window
+              // also reads get_settings on mount, so a missed event can't
+              // leave it stale.
+              emit("bubble-style", { roundness: v }).catch(() => {});
+              invoke("set_bubble_roundness", { roundness: v }).catch((e) => setError(String(e)));
+            }}
+            // Roundness is captured into the recording at start, so lock it
+            // while a recording (or its countdown) runs.
+            bubbleLocked={busy}
+            onRefresh={refresh}
+          />
+        </div>
+        <div style={{ flex: 1 }} />
+        <div ref={bottomRef}>
+          <StatusLine
+            error={error}
+            lastSaved={lastSaved}
+            finalizeInfo={finalizeInfo}
+            progress={progress}
+            state={state}
+            onDismiss={() => {
+              setError(null);
+              setLastSaved(null);
+              setFinalizeInfo(null);
+            }}
+          />
+        </div>
+      </main>
+    );
+  }
+
+  const pick = (() => {
+    if (sourceKind === "display") {
+      const d = displays.find((x) => x.id === selectedDisplay);
+      return d ? d.name : "Choose a display";
+    }
+    if (sourceKind === "window") {
+      const w = windows.find((x) => x.id === selectedWindow);
+      return w ? windowLabel(w) : windows.length ? "Choose a window" : "No windows available";
+    }
+    if (!selectedArea) return "No area selected";
+    const d = displays.find((x) => x.id === selectedArea.display_id);
+    return `${Math.round(selectedArea.width)} x ${Math.round(selectedArea.height)} on ${
+      d?.name ?? `Display ${selectedArea.display_id}`
+    }`;
+  })();
+  const hasPick =
+    sourceKind === "display"
+      ? selectedDisplay != null
+      : sourceKind === "window"
+      ? windows.some((w) => w.id === selectedWindow)
+      : selectedArea != null;
+  const selectedWindowSource = windows.find((w) => w.id === selectedWindow) ?? null;
+
+  return (
+    <main className="cap accent-blue">
       {compositeProgress !== null && (
         <CompositeProgressOverlay value={compositeProgress} />
       )}
 
-      <SettingsPanel
-        hotkey={hotkey}
-        onHotkey={async (combo) => {
-          try {
-            await invoke("set_hotkey", { combo });
-            setHotkey(combo);
-          } catch (e) {
-            setError(String(e));
-          }
-        }}
-        countdownDuration={countdownDuration}
-        onCountdownDuration={setCountdownDuration}
-        lengthCapMode={lengthCapMode}
-        onLengthCapMode={setLengthCapMode}
-        lengthCapTargetSec={lengthCapTargetSec}
-        onLengthCapTargetSec={setLengthCapTargetSec}
-        noiseReduction={noiseReduction}
-        onNoiseReduction={(v) => {
-          setNoiseReduction(v);
-          invoke("set_noise_reduction", { level: v }).catch((e) => setError(String(e)));
-        }}
-      />
+      <div ref={topRef}>
+        <div className="cap-header" data-tauri-drag-region>
+          <button
+            className="cap-icon-btn"
+            aria-label="Recordings"
+            title="Recordings"
+            onClick={() => openRecordingsWindow().catch(() => {})}
+          >
+            {Glyph.recordings}
+          </button>
+          <button
+            className="cap-icon-btn"
+            aria-label="Settings"
+            title="Settings"
+            onClick={() => setView("settings")}
+          >
+            {Glyph.gear}
+          </button>
+        </div>
 
-      <SourceTiles
-        sourceKind={sourceKind}
-        onSourceKind={setSourceKind}
-        onAreaClick={handleAreaTileClick}
-        selectedArea={selectedArea}
-        displays={displays}
-        disabled={recording}
-      />
+        <div className="cap-brand">
+          <ZeigenMark />
+          <span className="cap-brand-name">Zeigen</span>
+          {recording && (
+            <span className="cap-rec-chip">
+              <span className="rec-dot" /> {state === "paused" ? "Paused" : "REC"}{" "}
+              {fmtTime(progress.elapsed_s)}
+            </span>
+          )}
+        </div>
 
-      <div
-        style={{
-          margin: "12px 14px 0",
-          padding: "10px 16px",
-          background: "var(--bg-sidebar)",
-          borderRadius: "var(--r-lg)",
-          display: "grid",
-          // minmax(0, 1fr) instead of 1fr — without the explicit 0 min,
-          // a 1fr track grows to fit its intrinsic min-content (e.g. a
-          // long select option label) and pushes the fixed-width capture
-          // window into horizontal scroll.
-          gridTemplateColumns: "auto minmax(0, 1fr)",
-          rowGap: 14,
-          columnGap: 12,
-          alignItems: "center",
-        }}
-      >
-        <RowLabel icon={I.webcam} label="Camera" />
-        <CameraRow
-          cameras={cameras}
-          value={selectedCamera}
-          onChange={setSelectedCamera}
-          cameraState={cameraState}
-          disabled={recording}
-        />
-
-        {selectedCamera != null && (
-          <>
-            <RowLabel icon={I.roundness} label="Bubble" />
-            <RoundnessRow
-              value={bubbleRoundness}
-              onChange={(v) => {
-                setBubbleRoundness(v);
-                // Live-preview push to the floating bubble window; the
-                // window also reads get_settings on mount, so a missed
-                // event can't leave it stale.
-                emit("bubble-style", { roundness: v }).catch(() => {});
-                invoke("set_bubble_roundness", { roundness: v }).catch((e) =>
-                  setError(String(e)),
-                );
-              }}
-              // Roundness is captured into the recording at start — a
-              // mid-recording (or mid-countdown) change would only apply to
-              // the next one, so lock the control to match.
-              disabled={recording || state === "countdown"}
+        <section className="cap-section">
+          <span className="cap-label">Record</span>
+          <div className="cap-tiles">
+            <SourceTile
+              label="Display"
+              icon={Glyph.display}
+              on={sourceKind === "display"}
+              disabled={recording}
+              onClick={() => handleDisplayTileClick().catch((e) => setError(String(e)))}
             />
-          </>
-        )}
+            <SourceTile
+              label="Window"
+              icon={Glyph.window}
+              on={sourceKind === "window"}
+              disabled={recording}
+              onClick={handleWindowTileClick}
+            />
+            <SourceTile
+              label="Area"
+              icon={Glyph.area}
+              on={sourceKind === "area"}
+              disabled={recording}
+              onClick={handleAreaTileClick}
+            />
+          </div>
 
-        <RowLabel icon={I.mic} label="Microphone" />
-        <select
-          className="select"
-          value={selectedMic ?? ""}
-          onChange={(e) => setSelectedMic(e.target.value || null)}
-          disabled={recording}
-          style={{ width: "100%", fontSize: 12.5 }}
-        >
-          <option value="">No microphone</option>
-          {mics.map((m) => (
-            <option key={m.uid} value={m.uid}>
-              {m.name}
-            </option>
-          ))}
-        </select>
-
-        {sourceKind === "display" ? (
-          <>
-            <RowLabel icon={I.monitor} label="Screen" />
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <select
-                className="select"
-                value={selectedDisplay ?? ""}
-                onChange={(e) => setSelectedDisplay(Number(e.target.value))}
-                disabled={recording}
-                style={{ flex: 1, fontSize: 12.5 }}
-              >
-                {displays.map((d, i) => (
-                  <option key={d.id} value={d.id}>
-                    {displays.length > 1 && `${i + 1} · `}{d.name} — {d.width}×{d.height}
-                  </option>
-                ))}
-              </select>
-              <button
-                className="btn-ghost"
-                title="Identify displays"
-                onClick={() =>
-                  openIdentifyOverlays(displays).catch((e) => setError(String(e)))
-                }
-                disabled={recording || displays.length === 0}
-                style={{
-                  padding: 5,
-                  color: "var(--fg-secondary)",
-                  flexShrink: 0,
-                  opacity: recording || displays.length === 0 ? 0.4 : 1,
-                  cursor:
-                    recording || displays.length === 0
-                      ? "not-allowed"
-                      : "pointer",
-                }}
-              >
-                {I.search}
-              </button>
-            </div>
-          </>
-        ) : sourceKind === "window" ? (
-          <>
-            <RowLabel icon={I.window} label="Window" />
-            {/* minWidth:0 on both the flex container (grid item) and the
-                WindowRow wrapper — without them the intermediate flex child
-                keeps min-width:auto and grows to the longest option's text,
-                widening the fixed 560px window into a scrollbar. WindowRow
-                clamps internally too; this preserves that chain across the
-                extra nesting the picker button adds. */}
-            <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-              <div style={{ flex: 1, minWidth: 0, overflow: "hidden" }}>
-                <WindowRow
-                  windows={windows}
-                  value={selectedWindow}
-                  onChange={setSelectedWindow}
-                  onIdentify={(w) =>
-                    openIdentifyWindowOverlay(w).catch((e) => setError(String(e)))
+          <div className="cap-pickline">
+            <div className={`cap-pick${hasPick ? "" : " empty"}${pickDisabled ? " disabled" : ""}`}>
+              <span className="cap-pick-text">{pick}</span>
+              {sourceKind !== "area" && Glyph.chevron}
+              {sourceKind === "display" ? (
+                <select
+                  className="cap-overlay-select"
+                  aria-label="Display"
+                  value={selectedDisplay ?? ""}
+                  onChange={(e) => setSelectedDisplay(Number(e.target.value))}
+                  disabled={pickDisabled}
+                >
+                  {displays.map((d, i) => (
+                    <option key={d.id} value={d.id}>
+                      {displays.length > 1 && `${i + 1} · `}
+                      {d.name}, {d.width} x {d.height}
+                    </option>
+                  ))}
+                </select>
+              ) : sourceKind === "window" ? (
+                <select
+                  className="cap-overlay-select"
+                  aria-label="Window"
+                  value={selectedWindow ?? ""}
+                  onChange={(e) =>
+                    setSelectedWindow(e.target.value === "" ? null : Number(e.target.value))
                   }
-                  disabled={recording}
-                />
-              </div>
-              {/* Spike trigger for the hover picker (feel-check only). */}
-              <button
-                onClick={() =>
-                  openWindowPicker().catch((e) => setError(String(e)))
-                }
-                disabled={recording}
-                style={{
-                  padding: "6px 10px",
-                  fontSize: 12,
-                  fontFamily: "var(--font-system)",
-                  borderRadius: 6,
-                  border: "1px solid var(--border, rgba(255,255,255,0.14))",
-                  background: "transparent",
-                  color: "var(--fg-secondary, #ccc)",
-                  cursor: recording ? "default" : "pointer",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                Hover pick
-              </button>
+                  disabled={recording || windows.length === 0}
+                >
+                  <option value="" disabled>
+                    Choose a window
+                  </option>
+                  {windows.map((w) => (
+                    <option key={w.id} value={w.id}>
+                      {w.app} - {w.title.trim() || "Untitled"}
+                    </option>
+                  ))}
+                </select>
+              ) : null}
             </div>
-          </>
-        ) : (
-          <>
-            <RowLabel icon={I.area} label="Area" />
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <div
-                style={{
-                  flex: 1,
-                  fontSize: 12.5,
-                  color: selectedArea ? "var(--fg-primary)" : "var(--fg-tertiary)",
-                  fontFamily: "var(--font-system)",
-                }}
-              >
-                {selectedArea
-                  ? (() => {
-                      const d = displays.find((x) => x.id === selectedArea.display_id);
-                      const name = d?.name ?? `Display ${selectedArea.display_id}`;
-                      return `${Math.round(selectedArea.width)} × ${Math.round(selectedArea.height)} on ${name}`;
-                    })()
-                  : "No area selected"}
-              </div>
+            {sourceKind === "display" ? (
               <button
-                className="btn-ghost"
-                onClick={openAreaPicker}
-                disabled={recording || displays.length === 0}
-                style={{
-                  padding: "5px 10px",
-                  fontSize: 12,
-                  color: "var(--fg-secondary)",
-                  flexShrink: 0,
-                  opacity: recording || displays.length === 0 ? 0.4 : 1,
-                  cursor:
-                    recording || displays.length === 0
-                      ? "not-allowed"
-                      : "pointer",
-                }}
+                className="cap-text-btn"
+                title="Show each display's number"
+                onClick={() => openIdentifyOverlays(displays).catch((e) => setError(String(e)))}
+                disabled={pickDisabled}
               >
+                Identify
+              </button>
+            ) : sourceKind === "window" ? (
+              <button
+                className="cap-text-btn"
+                title="Outline the chosen window"
+                onClick={() =>
+                  selectedWindowSource &&
+                  openIdentifyWindowOverlay(selectedWindowSource).catch((e) =>
+                    setError(String(e)),
+                  )
+                }
+                disabled={recording || !selectedWindowSource}
+              >
+                Identify
+              </button>
+            ) : (
+              <button className="cap-text-btn" onClick={openAreaPicker} disabled={pickDisabled}>
                 {selectedArea ? "Redraw" : "Select"}
               </button>
-            </div>
-          </>
-        )}
+            )}
+          </div>
+        </section>
+
+        <section className="cap-section devices">
+          <span className="cap-label">Camera and microphone</span>
+          <DeviceRow
+            kind="Camera"
+            icon={Glyph.camera}
+            on={cameraName != null}
+            name={cameraName ?? offCamera?.name ?? "No camera found"}
+            options={cameras.map((c) => ({ value: String(c.index), label: c.name }))}
+            value={selectedCamera == null ? "" : String(selectedCamera)}
+            onPick={(v) => setSelectedCamera(Number(v))}
+            onToggle={() => setSelectedCamera(cameraName != null ? null : offCamera?.index ?? null)}
+            disabled={recording}
+          />
+          <DeviceRow
+            kind="Microphone"
+            icon={Glyph.mic}
+            on={selectedMic != null}
+            name={
+              mics.find((m) => m.uid === selectedMic)?.name ?? offMic?.name ?? "No microphone found"
+            }
+            options={mics.map((m) => ({ value: m.uid, label: m.name }))}
+            value={selectedMic ?? ""}
+            onPick={(v) => setSelectedMic(v)}
+            onToggle={() => setSelectedMic(selectedMic != null ? null : offMic?.uid ?? null)}
+            disabled={recording}
+          />
+        </section>
       </div>
 
       <div style={{ flex: 1 }} />
 
-      <StatusStrip
-        error={error}
-        lastSaved={lastSaved}
-        finalizeInfo={finalizeInfo}
-        progress={progress}
-        state={state}
-        onDismiss={() => {
-          setError(null);
-          setLastSaved(null);
-          setFinalizeInfo(null);
-        }}
-      />
-
-      <FooterBar
-        recording={recording}
-        state={state}
-        elapsed={progress.elapsed_s}
-        canStart={state === "idle" && canStartNow}
-        onStart={start}
-        onStop={stop}
-      />
+      <div ref={bottomRef}>
+        <StatusLine
+          error={error}
+          lastSaved={lastSaved}
+          finalizeInfo={finalizeInfo}
+          progress={progress}
+          state={state}
+          onDismiss={() => {
+            setError(null);
+            setLastSaved(null);
+            setFinalizeInfo(null);
+          }}
+        />
+        {recording ? (
+          <button className="cap-start stop" onClick={stop} disabled={state === "paused"}>
+            <span className="cap-start-dot square" aria-hidden="true" />
+            Stop
+            <span className="cap-start-time">{fmtTime(progress.elapsed_s)}</span>
+          </button>
+        ) : (
+          <button
+            className="cap-start"
+            onClick={start}
+            disabled={state !== "idle" || !canStartNow}
+          >
+            <span className="cap-start-dot" aria-hidden="true" />
+            {state === "countdown" ? "Starting" : "Start recording"}
+            <span className="cap-start-key">{hotkeyGlyphs(hotkey)}</span>
+          </button>
+        )}
+        <div className="cap-foot">
+          {countdownDuration === 0 ? "No countdown" : `${countdownDuration} s countdown`} · saves
+          to ~/Movies/Zeigen
+        </div>
+      </div>
     </main>
+  );
+}
+
+const WINDOW_W = 380;
+const WINDOW_H = 600;
+
+function windowLabel(w: WindowSource): string {
+  const t = w.title.trim();
+  return t ? `${w.app} - ${t}` : w.app;
+}
+
+// "CmdOrCtrl+Shift+P" -> "⇧⌘P", modifiers in macOS order.
+function hotkeyGlyphs(combo: string): string {
+  const MODS: Record<string, string> = {
+    cmdorctrl: "⌘",
+    commandorcontrol: "⌘",
+    cmd: "⌘",
+    command: "⌘",
+    super: "⌘",
+    meta: "⌘",
+    ctrl: "⌃",
+    control: "⌃",
+    alt: "⌥",
+    option: "⌥",
+    shift: "⇧",
+  };
+  const ORDER = "⌃⌥⇧⌘";
+  const mods: string[] = [];
+  let key = "";
+  for (const part of combo.split("+").map((s) => s.trim()).filter(Boolean)) {
+    const g = MODS[part.toLowerCase()];
+    if (g) mods.push(g);
+    else key = part.length === 1 ? part.toUpperCase() : part;
+  }
+  mods.sort((a, b) => ORDER.indexOf(a) - ORDER.indexOf(b));
+  return mods.join("") + key;
+}
+
+// Line icons from the capture-compact mockup (24x24, stroke).
+const svg24 = (children: React.ReactNode, size = 17) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={1.7}
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    {children}
+  </svg>
+);
+const Glyph = {
+  recordings: svg24(
+    <>
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <path d="m10 9 5 3-5 3z" />
+    </>,
+  ),
+  gear: svg24(
+    <>
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" />
+    </>,
+  ),
+  back: svg24(<path d="m15 6-6 6 6 6" />),
+  display: svg24(
+    <>
+      <rect x="3" y="4" width="18" height="12" rx="2" />
+      <path d="M8 20h8M12 16v4" />
+    </>,
+    20,
+  ),
+  window: svg24(
+    <>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M3 9h18" />
+    </>,
+    20,
+  ),
+  area: svg24(
+    <path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3" />,
+    20,
+  ),
+  camera: svg24(
+    <>
+      <rect x="3" y="6" width="13" height="12" rx="2" />
+      <path d="m16 10 5-3v10l-5-3" />
+    </>,
+    16,
+  ),
+  mic: svg24(
+    <>
+      <rect x="9" y="3" width="6" height="11" rx="3" />
+      <path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
+    </>,
+    16,
+  ),
+  chevron: svg24(<path d="m6 9 6 6 6-6" />, 12),
+};
+
+function ZeigenMark() {
+  return (
+    <svg width="30" height="30" viewBox="0 0 120 120" aria-hidden="true" style={{ flexShrink: 0 }}>
+      <rect x="6" y="6" width="108" height="108" rx="26" fill="var(--accent)" />
+      <path d="M28 32 H92 V46 L48 78 H92 V92 H28 V78 L72 46 H28 Z" fill="var(--accent-fg)" />
+    </svg>
+  );
+}
+
+function SourceTile({
+  label,
+  icon,
+  on,
+  disabled,
+  onClick,
+}: {
+  label: string;
+  icon: React.ReactNode;
+  on: boolean;
+  disabled: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={`cap-tile${on ? " on" : ""}`}
+      aria-pressed={on}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      {icon}
+      {label}
+    </button>
+  );
+}
+
+// One device: its name over a transparent native <select> (click the row to
+// choose) and an On/Off pill above it. Off is "no device"; the select's value
+// is "" then, so choosing any device (even the one shown) turns it on.
+function DeviceRow({
+  kind,
+  icon,
+  on,
+  name,
+  options,
+  value,
+  onPick,
+  onToggle,
+  disabled,
+}: {
+  kind: string;
+  icon: React.ReactNode;
+  on: boolean;
+  name: string;
+  options: Array<{ value: string; label: string }>;
+  value: string;
+  onPick: (v: string) => void;
+  onToggle: () => void;
+  disabled: boolean;
+}) {
+  const empty = options.length === 0;
+  return (
+    <div className={`cap-device${on ? "" : " off"}${disabled ? " disabled" : ""}`}>
+      <span className="cap-device-icon">{icon}</span>
+      <span className="cap-device-name">{name}</span>
+      <select
+        className="cap-overlay-select"
+        aria-label={kind}
+        value={value}
+        onChange={(e) => onPick(e.target.value)}
+        disabled={disabled || empty}
+      >
+        <option value="" disabled>
+          {kind} off
+        </option>
+        {options.map((o) => (
+          <option key={o.value} value={o.value}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+      <button
+        className={`cap-pill${on ? "" : " off"}`}
+        aria-label={`${kind} ${on ? "on" : "off"}`}
+        aria-pressed={on}
+        onClick={onToggle}
+        disabled={disabled || (empty && !on)}
+      >
+        {on ? "On" : "Off"}
+      </button>
+    </div>
+  );
+}
+
+function StatusLine({
+  error,
+  lastSaved,
+  finalizeInfo,
+  progress,
+  state,
+  onDismiss,
+}: {
+  error: string | null;
+  lastSaved: string | null;
+  finalizeInfo: FinalizedRecording | null;
+  progress: { frames: number; dropped: number; elapsed_s: number };
+  state: EngineState;
+  onDismiss: () => void;
+}) {
+  let tone: "error" | "success" | "muted";
+  let label: string;
+  let body: string;
+  let path = false;
+  if (error) {
+    [tone, label, body] = ["error", "Error", error];
+  } else if (state === "idle" && finalizeInfo) {
+    [tone, label, body, path] = ["success", "Ready", finalizeInfo.scratch_mp4_path, true];
+  } else if (state === "idle" && lastSaved) {
+    [tone, label, body, path] = ["success", "Saved", lastSaved, true];
+  } else if (state !== "idle" && progress.dropped > 0) {
+    [tone, label, body] = ["muted", "Frames dropped", `${progress.dropped} of ${progress.frames}`];
+  } else {
+    return null;
+  }
+  return (
+    <div className={`cap-status ${tone}`} role={tone === "error" ? "alert" : undefined}>
+      <span className="cap-status-label">{label}</span>
+      <span className={`cap-status-body${path ? " path" : ""}`} title={body}>
+        {body}
+      </span>
+      {tone !== "muted" && (
+        <button className="cap-status-x" onClick={onDismiss} aria-label="Dismiss">
+          ×
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -2501,39 +2818,18 @@ function CompositeProgressOverlay({ value }: { value: number }) {
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        background: "rgba(0, 0, 0, 0.55)",
-        backdropFilter: "blur(6px)",
-        WebkitBackdropFilter: "blur(6px)",
+        padding: 16,
+        background: "var(--bg-overlay-medium)",
       }}
     >
-      <div
-        style={{
-          minWidth: 320,
-          padding: "20px 22px",
-          borderRadius: 14,
-          background: "var(--bg-window)",
-          border: "1px solid var(--border-faint)",
-          boxShadow: "0 18px 48px rgba(0,0,0,0.45)",
-          display: "flex",
-          flexDirection: "column",
-          gap: 10,
-        }}
-      >
-        <div
-          style={{
-            fontSize: 13,
-            fontWeight: 600,
-            color: "var(--fg-primary)",
-          }}
-        >
-          Compositing recording…
-        </div>
+      <div style={{ width: "100%", display: "flex", flexDirection: "column", gap: 10 }}>
+        <div style={{ fontSize: 13, fontWeight: 600 }}>Compositing recording</div>
         <div
           style={{
             position: "relative",
             height: 6,
             borderRadius: 99,
-            background: "var(--border-faint)",
+            background: "var(--bg-control-on)",
             overflow: "hidden",
           }}
         >
@@ -2565,650 +2861,7 @@ function CompositeProgressOverlay({ value }: { value: number }) {
   );
 }
 
-function BrandBar({
-  recording,
-  elapsed,
-  onRefresh,
-}: {
-  recording: boolean;
-  elapsed: number;
-  onRefresh: () => void;
-}) {
-  return (
-    <div
-      style={{
-        height: 42,
-        padding: "0 14px",
-        display: "flex",
-        alignItems: "center",
-        background: "var(--bg-window)",
-      }}
-    >
-      <svg
-        width="18"
-        height="18"
-        viewBox="0 0 120 120"
-        aria-label="Zeigen"
-        style={{ display: "block", flexShrink: 0 }}
-      >
-        <rect x="6" y="6" width="108" height="108" rx="26" fill="var(--accent)" />
-        <path
-          d="M28 32 H92 V46 L48 78 H92 V92 H28 V78 L72 46 H28 Z"
-          fill="#fff"
-        />
-        <path d="M28 32 H92 V40 H28 Z" fill="#000" opacity="0.14" />
-      </svg>
-      <span
-        style={{
-          marginLeft: 7,
-          fontWeight: 600,
-          fontSize: 13,
-          letterSpacing: "-0.01em",
-        }}
-      >
-        Zeigen
-      </span>
-      {recording && (
-        <span
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 6,
-            marginLeft: 10,
-            padding: "2px 7px",
-            borderRadius: 99,
-            background: "var(--recording-soft)",
-            border: "1px solid var(--recording-ring)",
-            color: "var(--recording-tint)",
-            fontFamily: "var(--font-mono)",
-            fontSize: 11,
-            fontWeight: 500,
-          }}
-        >
-          <span className="rec-dot" /> REC {fmtTime(elapsed)}
-        </span>
-      )}
-      <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 2 }}>
-        <button
-          className="btn-ghost"
-          title="Past recordings"
-          onClick={() => openRecordingsWindow().catch(() => {})}
-          style={{ padding: "4px 8px", fontSize: 12, color: "var(--fg-secondary)" }}
-        >
-          Recordings
-        </button>
-        <button
-          className="btn-ghost"
-          title="Refresh devices"
-          onClick={onRefresh}
-          style={{ padding: 5, color: "var(--fg-secondary)" }}
-        >
-          {I.history}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function SourceTiles({
-  sourceKind,
-  onSourceKind,
-  onAreaClick,
-  selectedArea,
-  displays,
-  disabled,
-}: {
-  sourceKind: SourceKind;
-  onSourceKind: (k: SourceKind) => void;
-  onAreaClick: () => void;
-  selectedArea: AreaSelection | null;
-  displays: Display[];
-  disabled: boolean;
-}) {
-  // Display + Window + Selected Area are wired source kinds. Webcam Only
-  // remains a visual placeholder.
-  const areaSub = (() => {
-    if (sourceKind !== "area") return "Drag a region to record";
-    if (!selectedArea) return "Drag to select";
-    const display = displays.find((d) => d.id === selectedArea.display_id);
-    const dLabel = display?.name ?? `Display ${selectedArea.display_id}`;
-    return `${Math.round(selectedArea.width)} × ${Math.round(selectedArea.height)} on ${dLabel}`;
-  })();
-  const tiles: Array<{
-    id: string;
-    label: string;
-    sub: string;
-    icon: React.ReactNode;
-    kind?: SourceKind;
-    customClick?: () => void;
-  }> = [
-    { id: "display", label: "Entire Display", sub: "Pick a screen", icon: I.monitor, kind: "display" },
-    { id: "window", label: "Window", sub: "Pick an app window", icon: I.window, kind: "window" },
-    { id: "area", label: "Selected Area", sub: areaSub, icon: I.area, kind: "area", customClick: onAreaClick },
-    { id: "webcam", label: "Webcam Only", sub: "Coming soon", icon: I.webcam },
-  ];
-
-  return (
-    <div style={{ padding: 16, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-      {tiles.map((s) => {
-        const selectable = s.kind !== undefined;
-        const active = selectable && s.kind === sourceKind;
-        const dim = !selectable;
-        const interactive = selectable && !disabled;
-        return (
-          <button
-            key={s.id}
-            type="button"
-            onClick={() => {
-              if (!interactive) return;
-              if (s.customClick) s.customClick();
-              else if (s.kind) onSourceKind(s.kind);
-            }}
-            disabled={!interactive}
-            style={{
-              all: "unset",
-              display: "flex",
-              alignItems: "center",
-              gap: 11,
-              padding: "13px 12px",
-              background: active ? "var(--accent-soft)" : "var(--bg-elevated)",
-              border: `1px solid ${active ? "var(--accent-line)" : "transparent"}`,
-              borderRadius: "var(--r-md)",
-              textAlign: "left",
-              color: dim ? "var(--fg-tertiary)" : "var(--fg-primary)",
-              fontFamily: "var(--font-system)",
-              boxShadow: "none",
-              transition: "all 120ms cubic-bezier(0.4, 0, 0.2, 1)",
-              opacity: dim ? 0.42 : disabled ? 0.7 : 1,
-              cursor: interactive ? "pointer" : "not-allowed",
-            }}
-          >
-            <span
-              style={{
-                width: 30,
-                height: 30,
-                borderRadius: "var(--r-sm)",
-                flexShrink: 0,
-                background: active ? "var(--accent)" : "var(--bg-input)",
-                color: active ? "#fff" : "var(--fg-secondary)",
-                display: "inline-flex",
-                alignItems: "center",
-                justifyContent: "center",
-              }}
-            >
-              {s.icon}
-            </span>
-            <span style={{ display: "flex", flexDirection: "column", gap: 1, minWidth: 0 }}>
-              <span style={{ fontSize: 12.5, fontWeight: 600, letterSpacing: "-0.005em" }}>
-                {s.label}
-              </span>
-              <span style={{ fontSize: 11, color: "var(--fg-tertiary)" }}>{s.sub}</span>
-            </span>
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-function WindowRow({
-  windows,
-  value,
-  onChange,
-  onIdentify,
-  disabled,
-}: {
-  windows: WindowSource[];
-  value: number | null;
-  onChange: (n: number | null) => void;
-  onIdentify: (w: WindowSource) => void;
-  disabled: boolean;
-}) {
-  const empty = windows.length === 0;
-  const selected = value == null ? null : windows.find((w) => w.id === value);
-  return (
-    // minWidth: 0 + overflow: hidden on the wrapper, plus minmax(0, 1fr)
-    // on the parent grid (above) — three places to clamp because webkit's
-    // native <select> still tries to grow to its widest option's text in
-    // some layout configs.
-    <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0, overflow: "hidden" }}>
-      <select
-        className="select"
-        value={value ?? ""}
-        onChange={(e) => onChange(e.target.value === "" ? null : Number(e.target.value))}
-        disabled={disabled || empty}
-        style={{
-          flex: 1,
-          minWidth: 0,
-          maxWidth: "100%",
-          fontSize: 12.5,
-          color: value == null ? "var(--fg-tertiary)" : "var(--fg-primary)",
-          textOverflow: "ellipsis",
-        }}
-      >
-        <option value="">{empty ? "No windows available" : "Select a window…"}</option>
-        {windows.map((w) => {
-          // App — Title; fall back to "Untitled" when SCK gives no title
-          // (common for app panels and helper surfaces).
-          const title = w.title.trim() || "Untitled";
-          return (
-            <option key={w.id} value={w.id}>
-              {w.app} — {title}
-            </option>
-          );
-        })}
-      </select>
-      <button
-        className="btn-ghost"
-        title="Identify window"
-        onClick={() => selected && onIdentify(selected)}
-        disabled={disabled || !selected}
-        style={{
-          padding: 5,
-          color: "var(--fg-secondary)",
-          flexShrink: 0,
-          opacity: disabled || !selected ? 0.4 : 1,
-          cursor: disabled || !selected ? "not-allowed" : "pointer",
-        }}
-      >
-        {I.search}
-      </button>
-    </div>
-  );
-}
-
-function RowLabel({ icon, label }: { icon: React.ReactNode; label: string }) {
-  return (
-    <div
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 7,
-        color: "var(--fg-secondary)",
-        fontSize: 12,
-      }}
-    >
-      {icon}
-      <span>{label}</span>
-    </div>
-  );
-}
-
-// Bubble roundness slider: square (0) to full circle (right end). Full
-// circle maps to null so the preference — and each recording's sidecar
-// stamp — omits the field entirely, keeping the legacy byte-identical
-// mask path (see composite.rs bubble_path).
-function RoundnessRow({
-  value,
-  onChange,
-  disabled,
-}: {
-  value: number | null;
-  onChange: (v: number | null) => void;
-  disabled: boolean;
-}) {
-  const pct = Math.round((value ?? 1) * 100);
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-      <input
-        type="range"
-        className="slider"
-        min={0}
-        max={100}
-        value={pct}
-        disabled={disabled}
-        onChange={(e) => {
-          const v = Number(e.target.value);
-          onChange(v >= 100 ? null : v / 100);
-        }}
-        style={{ flex: 1, display: "block", "--fill": `${pct}%` } as React.CSSProperties}
-      />
-      <span
-        style={{
-          fontFamily: "var(--font-mono)",
-          fontSize: 11,
-          color: "var(--fg-tertiary)",
-          width: 44,
-          textAlign: "right",
-          flexShrink: 0,
-        }}
-      >
-        {pct === 100 ? "Circle" : pct === 0 ? "Square" : `${pct}%`}
-      </span>
-    </div>
-  );
-}
-
-function CameraRow({
-  cameras,
-  value,
-  onChange,
-  cameraState,
-  disabled,
-}: {
-  cameras: Device[];
-  value: number | null;
-  onChange: (n: number | null) => void;
-  cameraState: "none" | "selected" | "continuity";
-  disabled: boolean;
-}) {
-  const selectValue = value == null ? NO_CAMERA : String(value);
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-      <select
-        className="select"
-        value={selectValue}
-        onChange={(e) => {
-          const v = e.target.value;
-          onChange(v === NO_CAMERA ? null : Number(v));
-        }}
-        disabled={disabled}
-        style={{
-          flex: 1,
-          fontSize: 12.5,
-          color: cameraState === "none" ? "var(--fg-tertiary)" : "var(--fg-primary)",
-        }}
-      >
-        <option value={NO_CAMERA}>No webcam</option>
-        {cameras.map((c) => (
-          <option key={c.index} value={c.index}>
-            {c.name}
-          </option>
-        ))}
-      </select>
-      {cameraState === "continuity" && <ContinuityPill />}
-    </div>
-  );
-}
-
-function ContinuityPill() {
-  return (
-    <span
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 5,
-        padding: "3px 8px",
-        background: "var(--success-soft)",
-        border: "1px solid oklch(0.66 0.15 155 / 0.34)",
-        borderRadius: 99,
-        color: "var(--success-tint)",
-        fontSize: 10.5,
-        fontWeight: 500,
-        whiteSpace: "nowrap",
-        letterSpacing: "-0.005em",
-      }}
-    >
-      <span
-        style={{
-          width: 5,
-          height: 5,
-          borderRadius: 99,
-          background: "var(--success-tint)",
-          boxShadow: "0 0 0 2px oklch(0.66 0.15 155 / 0.32)",
-        }}
-      />
-      iPhone connected
-    </span>
-  );
-}
-
-function FooterBar({
-  recording,
-  state,
-  elapsed,
-  canStart,
-  onStart,
-  onStop,
-}: {
-  recording: boolean;
-  state: EngineState;
-  elapsed: number;
-  canStart: boolean;
-  onStart: () => void;
-  onStop: () => void;
-}) {
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        padding: "12px 16px",
-      }}
-    >
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 6,
-          color: "var(--fg-tertiary)",
-          fontSize: 11.5,
-        }}
-      >
-        <Icon d={P.folder} size={12} stroke={1.25} />
-        <span>
-          Saves to{" "}
-          <span style={{ color: "var(--fg-secondary)", fontFamily: "var(--font-mono)", fontSize: 11 }}>
-            ~/Movies/Zeigen
-          </span>
-        </span>
-      </div>
-      {recording ? (
-        <button
-          onClick={onStop}
-          disabled={state === "paused"}
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 8,
-            padding: "7px 14px 7px 11px",
-            background: "var(--recording)",
-            color: "#fff",
-            border: "none",
-            borderRadius: 6,
-            fontFamily: "var(--font-system)",
-            fontWeight: 600,
-            fontSize: 13,
-            letterSpacing: "-0.005em",
-            cursor: "pointer",
-            boxShadow: "var(--shadow-recording-ring)",
-          }}
-        >
-          <span
-            style={{
-              width: 16,
-              height: 16,
-              borderRadius: 4,
-              background: "rgba(255,255,255,0.18)",
-              display: "inline-flex",
-              alignItems: "center",
-              justifyContent: "center",
-            }}
-          >
-            <span style={{ width: 8, height: 8, borderRadius: 2, background: "#fff" }} />
-          </span>
-          <span style={{ fontVariantNumeric: "tabular-nums", fontFamily: "var(--font-mono)", fontSize: 12 }}>
-            Stop · {fmtTime(elapsed)}
-          </span>
-        </button>
-      ) : (
-        <button
-          className="btn-primary"
-          onClick={onStart}
-          disabled={!canStart}
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 8,
-            padding: "8px 16px 8px 12px",
-            fontWeight: 650,
-            letterSpacing: "-0.01em",
-            boxShadow: "var(--shadow-accent-glow)",
-            opacity: canStart ? 1 : 0.55,
-            cursor: canStart ? "pointer" : "not-allowed",
-          }}
-        >
-          <span
-            style={{
-              width: 16,
-              height: 16,
-              borderRadius: 99,
-              background: "rgba(255,255,255,0.2)",
-              display: "inline-flex",
-              alignItems: "center",
-              justifyContent: "center",
-            }}
-          >
-            <span style={{ width: 8, height: 8, borderRadius: 99, background: "#fff" }} />
-          </span>
-          Start Recording
-        </button>
-      )}
-    </div>
-  );
-}
-
-function StatusStrip({
-  error,
-  lastSaved,
-  finalizeInfo,
-  progress,
-  state,
-  onDismiss,
-}: {
-  error: string | null;
-  lastSaved: string | null;
-  finalizeInfo: FinalizedRecording | null;
-  progress: { frames: number; dropped: number; elapsed_s: number };
-  state: EngineState;
-  onDismiss: () => void;
-}) {
-  if (error) {
-    return (
-      <StripRow
-        tone="recording"
-        label="Error"
-        body={error}
-        onDismiss={onDismiss}
-      />
-    );
-  }
-  if (state === "idle" && finalizeInfo) {
-    return (
-      <StripRow
-        tone="success"
-        label="Ready"
-        body={finalizeInfo.scratch_mp4_path}
-        onDismiss={onDismiss}
-      />
-    );
-  }
-  if (state === "idle" && lastSaved) {
-    return (
-      <StripRow
-        tone="success"
-        label="Saved"
-        body={lastSaved}
-        onDismiss={onDismiss}
-      />
-    );
-  }
-  if (state !== "idle" && progress.dropped > 0) {
-    return (
-      <StripRow
-        tone="muted"
-        label="Frames dropped"
-        body={`${progress.dropped} of ${progress.frames}`}
-      />
-    );
-  }
-  return null;
-}
-
-function StripRow({
-  tone,
-  label,
-  body,
-  onDismiss,
-}: {
-  tone: "success" | "recording" | "muted";
-  label: string;
-  body: string;
-  onDismiss?: () => void;
-}) {
-  const palette =
-    tone === "recording"
-      ? {
-          bg: "var(--recording-soft)",
-          border: "oklch(0.63 0.19 25 / 0.35)",
-          accent: "var(--recording-tint)",
-        }
-      : tone === "success"
-      ? {
-          bg: "var(--success-soft)",
-          border: "oklch(0.66 0.15 155 / 0.34)",
-          accent: "var(--success-tint)",
-        }
-      : {
-          bg: "var(--bg-elevated)",
-          border: "var(--border-faint)",
-          accent: "var(--fg-secondary)",
-        };
-  return (
-    <div
-      style={{
-        margin: "0 14px 10px",
-        padding: "6px 10px",
-        background: palette.bg,
-        border: `1px solid ${palette.border}`,
-        borderRadius: 6,
-        display: "flex",
-        alignItems: "center",
-        gap: 8,
-        fontSize: 11.5,
-        minHeight: 26,
-      }}
-    >
-      <span style={{ color: palette.accent, fontWeight: 600, flexShrink: 0 }}>
-        {label}
-      </span>
-      <span
-        style={{
-          color: "var(--fg-secondary)",
-          fontFamily: "var(--font-mono)",
-          fontSize: 11,
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
-          flex: 1,
-        }}
-        title={body}
-      >
-        {body}
-      </span>
-      {onDismiss && (
-        <button
-          onClick={onDismiss}
-          aria-label="Dismiss"
-          style={{
-            background: "transparent",
-            border: "none",
-            color: "var(--fg-tertiary)",
-            cursor: "pointer",
-            padding: 0,
-            lineHeight: 1,
-            fontSize: 14,
-          }}
-        >
-          ×
-        </button>
-      )}
-    </div>
-  );
-}
-
-function SettingsPanel({
+function SettingsView({
   hotkey,
   onHotkey,
   countdownDuration,
@@ -3219,6 +2872,10 @@ function SettingsPanel({
   onLengthCapTargetSec,
   noiseReduction,
   onNoiseReduction,
+  bubbleRoundness,
+  onBubbleRoundness,
+  bubbleLocked,
+  onRefresh,
 }: {
   hotkey: string;
   onHotkey: (combo: string) => void;
@@ -3230,225 +2887,155 @@ function SettingsPanel({
   onLengthCapTargetSec: (v: number) => void;
   noiseReduction: NrLevel;
   onNoiseReduction: (v: NrLevel) => void;
+  bubbleRoundness: number | null;
+  onBubbleRoundness: (v: number | null) => void;
+  bubbleLocked: boolean;
+  onRefresh: () => void;
 }) {
   const [draft, setDraft] = useState(hotkey);
   const dirty = draft.trim() !== hotkey && draft.trim().length > 0;
+  const pct = Math.round((bubbleRoundness ?? 1) * 100);
   return (
-    <div
-      style={{
-        margin: "10px 14px 0",
-        padding: "14px 16px",
-        background: "var(--bg-sidebar)",
-        borderRadius: "var(--r-lg)",
-        display: "flex",
-        flexDirection: "column",
-        gap: 8,
-        fontSize: 12,
-      }}
-    >
-      <span style={{ fontSize: 10.5, fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--fg-tertiary)" }}>Settings</span>
-      <label
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          color: "var(--fg-secondary)",
-        }}
-      >
-        <span style={{ minWidth: 88 }}>Start/Stop hotkey</span>
-        <input
-          className="select"
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          placeholder="CmdOrCtrl+Shift+P"
-          style={{
-            flex: 1,
-            fontFamily: "var(--font-mono)",
-            fontSize: 12,
-          }}
+    <div>
+      <div className="cap-set-row">
+        <span className="cap-label">Start and stop hotkey</span>
+        <div className="cap-set-line">
+          <input
+            className="cap-input"
+            aria-label="Start and stop hotkey"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder="CmdOrCtrl+Shift+P"
+            style={{ flex: 1, minWidth: 0 }}
+          />
+          <button className="cap-btn" disabled={!dirty} onClick={() => onHotkey(draft.trim())}>
+            Apply
+          </button>
+        </div>
+        <span className="cap-help">For example CmdOrCtrl+Shift+P or Alt+Shift+5</span>
+      </div>
+
+      <div className="cap-set-row">
+        <span className="cap-label">Countdown</span>
+        <Segmented
+          label="Countdown"
+          value={countdownDuration}
+          options={[
+            [5, "5 s"],
+            [3, "3 s"],
+            [0, "Off"],
+          ]}
+          onChange={onCountdownDuration}
         />
-        <button
-          className="btn-secondary"
-          disabled={!dirty}
-          onClick={() => onHotkey(draft.trim())}
-          style={{
-            padding: "5px 10px",
-            opacity: dirty ? 1 : 0.5,
-            cursor: dirty ? "pointer" : "not-allowed",
-          }}
-        >
-          Apply
+      </div>
+
+      <div className="cap-set-row">
+        <span className="cap-label">Length cap</span>
+        <div className="cap-set-line">
+          <Segmented
+            label="Length cap"
+            value={lengthCapMode}
+            options={[
+              ["off", "No limit"],
+              ["target", "Set target"],
+            ]}
+            onChange={onLengthCapMode}
+          />
+          {lengthCapMode === "target" && (
+            <>
+              <input
+                className="cap-input num"
+                type="number"
+                min={1}
+                max={120}
+                aria-label="Length cap minutes"
+                value={Math.round(lengthCapTargetSec / 60)}
+                onChange={(e) => {
+                  const m = Math.max(1, Math.min(120, Number(e.target.value) || 1));
+                  onLengthCapTargetSec(m * 60);
+                }}
+              />
+              <span className="cap-help">min</span>
+            </>
+          )}
+        </div>
+      </div>
+
+      <div className="cap-set-row">
+        <span className="cap-label">Noise reduction</span>
+        <Segmented
+          label="Noise reduction"
+          value={noiseReduction}
+          options={[
+            ["off", "Off"],
+            ["low", "Low"],
+            ["med", "Med"],
+            ["high", "High"],
+          ]}
+          onChange={onNoiseReduction}
+        />
+      </div>
+
+      {/* Full circle maps to null so the preference, and each recording's
+          sidecar stamp, omits the field (the legacy mask path). */}
+      <div className="cap-set-row">
+        <span className="cap-label">Webcam bubble shape</span>
+        <div className="cap-set-line">
+          <input
+            type="range"
+            className="slider"
+            aria-label="Webcam bubble shape"
+            min={0}
+            max={100}
+            value={pct}
+            disabled={bubbleLocked}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              onBubbleRoundness(v >= 100 ? null : v / 100);
+            }}
+            style={{ flex: 1, display: "block", "--fill": `${pct}%` } as React.CSSProperties}
+          />
+          <span className="cap-help" style={{ width: 44, textAlign: "right" }}>
+            {pct === 100 ? "Circle" : pct === 0 ? "Square" : `${pct}%`}
+          </span>
+        </div>
+      </div>
+
+      <div className="cap-set-row">
+        <span className="cap-label">Devices</span>
+        <button className="cap-btn" onClick={onRefresh} style={{ alignSelf: "flex-start" }}>
+          Refresh devices
         </button>
-      </label>
-      <span style={{ color: "var(--fg-tertiary)", fontSize: 11 }}>
-        Examples: CmdOrCtrl+Shift+P, Alt+Shift+5
-      </span>
-      <label
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          color: "var(--fg-secondary)",
-          marginTop: 4,
-        }}
-      >
-        <span style={{ minWidth: 88 }}>Countdown</span>
-        <div
-          role="radiogroup"
-          aria-label="Countdown duration"
-          style={{
-            display: "inline-flex",
-            background: "var(--bg-input)",
-            borderRadius: "var(--r-sm)",
-            padding: 2,
-          }}
+        <span className="cap-help">Look again for displays, windows, cameras and microphones</span>
+      </div>
+    </div>
+  );
+}
+
+function Segmented<T extends string | number>({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: T;
+  options: Array<[T, string]>;
+  onChange: (v: T) => void;
+}) {
+  return (
+    <div className="segmented" role="radiogroup" aria-label={label} style={{ alignSelf: "flex-start" }}>
+      {options.map(([v, text]) => (
+        <button
+          key={String(v)}
+          role="radio"
+          aria-checked={value === v}
+          className={value === v ? "on" : undefined}
+          onClick={() => onChange(v)}
         >
-          {([5, 3, 0] as CountdownDuration[]).map((v) => {
-            const active = countdownDuration === v;
-            return (
-              <button
-                key={v}
-                role="radio"
-                aria-checked={active}
-                onClick={() => onCountdownDuration(v)}
-                style={{
-                  background: active ? "var(--bg-raised)" : "transparent",
-                  color: active ? "var(--fg-primary)" : "var(--fg-secondary)",
-                  border: "none",
-                  cursor: "pointer",
-                  padding: "4px 10px",
-                  borderRadius: "var(--r-xs)",
-                  fontSize: 12,
-                  fontWeight: active ? 600 : 500,
-                }}
-              >
-                {v === 0 ? "Off" : `${v}s`}
-              </button>
-            );
-          })}
-        </div>
-      </label>
-      <label
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          color: "var(--fg-secondary)",
-        }}
-      >
-        <span style={{ minWidth: 88 }}>Length cap</span>
-        <div
-          role="radiogroup"
-          aria-label="Length cap mode"
-          style={{
-            display: "inline-flex",
-            background: "var(--bg-input)",
-            borderRadius: "var(--r-sm)",
-            padding: 2,
-          }}
-        >
-          {(["off", "target"] as LengthCapMode[]).map((v) => {
-            const active = lengthCapMode === v;
-            return (
-              <button
-                key={v}
-                role="radio"
-                aria-checked={active}
-                onClick={() => onLengthCapMode(v)}
-                style={{
-                  background: active ? "var(--bg-raised)" : "transparent",
-                  color: active ? "var(--fg-primary)" : "var(--fg-secondary)",
-                  border: "none",
-                  cursor: "pointer",
-                  padding: "4px 10px",
-                  borderRadius: "var(--r-xs)",
-                  fontSize: 12,
-                  fontWeight: active ? 600 : 500,
-                }}
-              >
-                {v === "off" ? "No limit" : "Set target"}
-              </button>
-            );
-          })}
-        </div>
-        {lengthCapMode === "target" && (
-          <>
-            <input
-              type="number"
-              min={1}
-              max={120}
-              aria-label="Length cap minutes"
-              value={Math.round(lengthCapTargetSec / 60)}
-              onChange={(e) => {
-                const m = Math.max(1, Math.min(120, Number(e.target.value) || 1));
-                onLengthCapTargetSec(m * 60);
-              }}
-              style={{
-                width: 56,
-                background: "var(--bg-input)",
-                border: "1px solid var(--border-subtle)",
-                borderRadius: "var(--r-sm)",
-                color: "var(--fg-primary)",
-                fontFamily: "var(--font-mono)",
-                fontSize: 12,
-                padding: "4px 8px",
-                textAlign: "center",
-                // Plain typeable field — no select chevron, no spinner arrows.
-                appearance: "textfield",
-                MozAppearance: "textfield",
-                WebkitAppearance: "textfield",
-              }}
-            />
-            <span style={{ color: "var(--fg-tertiary)", fontSize: 11 }}>min</span>
-          </>
-        )}
-      </label>
-      <label
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          color: "var(--fg-secondary)",
-        }}
-      >
-        <span style={{ minWidth: 88 }}>Noise reduction</span>
-        <div
-          role="radiogroup"
-          aria-label="Noise reduction"
-          style={{
-            display: "inline-flex",
-            background: "var(--bg-input)",
-            borderRadius: "var(--r-sm)",
-            padding: 2,
-          }}
-        >
-          {(["off", "low", "med", "high"] as NrLevel[]).map((v) => {
-            const active = noiseReduction === v;
-            const label =
-              v === "off" ? "Off" : v === "low" ? "Low" : v === "med" ? "Med" : "High";
-            return (
-              <button
-                key={v}
-                role="radio"
-                aria-checked={active}
-                onClick={() => onNoiseReduction(v)}
-                style={{
-                  background: active ? "var(--bg-raised)" : "transparent",
-                  color: active ? "var(--fg-primary)" : "var(--fg-secondary)",
-                  border: "none",
-                  cursor: "pointer",
-                  padding: "4px 10px",
-                  borderRadius: "var(--r-xs)",
-                  fontSize: 12,
-                  fontWeight: active ? 600 : 500,
-                }}
-              >
-                {label}
-              </button>
-            );
-          })}
-        </div>
-      </label>
+          {text}
+        </button>
+      ))}
     </div>
   );
 }

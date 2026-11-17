@@ -2,10 +2,17 @@
 
 Things left worse than we'd like, with why. Newest at top. Remove an entry when it is paid.
 
+## Compact capture window and hover pickers: untried (2026-11-17)
+
+- Seen only in headless Chrome with stubbed Tauri calls. Not tried in the app: the overlaid title bar (whether the Recordings and Settings icons line up with the traffic lights, and dragging the window by that row), the window growing to fit a long error, and the native selects laid invisibly over the picker line and device rows.
+- The display picker and the window picker's hover on every display have not been run on real displays, including the USB InstantView BenQ. Both rely on the cursor poller and on overlays that stay visible to capture.
+- Esc cancels a picker through the main window, which stays key while the overlays are up. If the user clicks some other app first, Esc goes there; Cancel or (for windows) a click on empty space still works.
+- Hotkey, countdown and length cap are still session-only (they were before this change); only noise reduction and bubble shape persist.
+- The "iPhone connected" pill beside the camera is gone; the camera row shows the device name instead.
+
 ## Review lighter restyle: loose ends (2026-11-17)
 
 - Looked at only in headless Chrome with the Tauri APIs stubbed and a synthetic test video, not in the real WKWebView window. Not seen there: the webcam bubble, the Bubble panel with a real bubble, the camera shading in zoom blocks, the post-save "Reveal in Finder" line, the GIF export rows, and the Save progress fill.
-- The shared `.segmented` control keeps its old look (fill equal to the panel colour plus a hairline border), because the capture window uses it too. On the new panel it reads as an outline. Restyle it once, for all windows, in the capture-window step.
 - At the minimum window width (720) the timeline's trim readout ("In · Out · Length") wraps onto three lines beside the zoom controls.
 - Zoom, scene and blur blocks still fill the whole row height with a 5px radius, inside a lane rounded at 9px; a block starting at 0:00 or ending at the end pokes past the lane's corner by a pixel or two.
 - The video stage keeps its own dark fill and hairline border inside the preview panel (it is the picture surface, and its border is part of what the overlays measure; left alone to keep preview and export matched).
