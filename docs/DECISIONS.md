@@ -4,6 +4,23 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-16 — Past recordings steps 1 and 2 verified by Keith
+
+All pass on the installed build (a33ac50):
+
+- Webcam regression fixed: the 21:07 recording shows its Full webcam scene in the preview and exports with the bubble and the scene; the 16 Nov 10:08 recording still exports with webcam and scenes.
+- Record another without saving keeps the take in the list.
+- Open on an open recording brings its Review to the front.
+- Discard on a reopened recording asks first; Cancel keeps it.
+- Delete from the list works with confirmation, and refuses while the recording is open in Review.
+- The preview cursor is clean.
+
+**Accepted by Keith:** the 30 days count from when the recording was made, and Record another keeps the take.
+
+Tagged `v0.1.13-past-recordings` at a33ac50. Step 3 (thumbnails, total space, last exported file) is not built.
+
+---
+
 ## 2026-11-16 — Step 2 regression: scenes and the export lost the webcam
 
 Keith's first step 2 recording: lip-sync fine across a pause, but a Full webcam scene did nothing in the preview.
