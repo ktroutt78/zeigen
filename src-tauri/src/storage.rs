@@ -93,6 +93,21 @@ pub(crate) fn record_plan(default: &Path, chosen: Option<&Path>, home: &Path) ->
     }
 }
 
+// Creates the library folder inside a save folder that is there. Never creates
+// the save folder itself: with the drive unplugged that would quietly build
+// the missing path on whatever disk still answers to it.
+fn ensure_library(lib: &Path) -> Result<(), String> {
+    if lib.is_dir() {
+        return Ok(());
+    }
+    match lib.parent() {
+        Some(root) if root.is_dir() => {
+            std::fs::create_dir(lib).map_err(|e| format!("create {}: {e}", lib.display()))
+        }
+        _ => Err(format!("{} is not available", lib.display())),
+    }
+}
+
 // One move at a time: finalize, the pending retry and the move offered on a
 // folder change can otherwise pick the same folder.
 static MOVES: Mutex<()> = Mutex::new(());
@@ -102,8 +117,7 @@ static MOVES: Mutex<()> = Mutex::new(());
 // new folder. On failure nothing changes at the source and no partial copy is
 // left. An existing folder of the same name is never overwritten.
 pub(crate) fn move_recording(src: &Path, dest_library: &Path) -> Result<PathBuf, String> {
-    std::fs::create_dir_all(dest_library)
-        .map_err(|e| format!("create {}: {e}", dest_library.display()))?;
+    ensure_library(dest_library)?;
     let same_volume = match (std::fs::metadata(src), std::fs::metadata(dest_library)) {
         (Ok(s), Ok(d)) => s.dev() == d.dev(),
         _ => false,
@@ -117,8 +131,7 @@ pub(crate) fn move_recording_with(src: &Path, dest_library: &Path, copy: bool) -
         return Err(format!("{} is not there", src.display()));
     }
     let name = src.file_name().ok_or("recording folder has no name")?.to_os_string();
-    std::fs::create_dir_all(dest_library)
-        .map_err(|e| format!("create {}: {e}", dest_library.display()))?;
+    ensure_library(dest_library)?;
     let dest = dest_library.join(&name);
     if dest.exists() {
         return Err(format!("{} already exists", dest.display()));
@@ -359,7 +372,8 @@ mod tests {
     fn temp(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("zeigen-storage-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
+        // The chosen save folder exists (a move never creates it).
+        std::fs::create_dir_all(d.join("chosen")).unwrap();
         d
     }
 
@@ -575,5 +589,15 @@ mod tests {
             println!("{} external={}", v.path().display(), is_external(&v.path(), &home));
         }
         assert!(!is_external(&home.join("Movies"), &home));
+    }
+
+    #[test]
+    fn a_move_never_creates_the_save_folder() {
+        let t = temp("nocreate");
+        let src = staged(&t.join("default/.recordings"), "2026-11-17-120000");
+        let gone = t.join("unplugged");
+        assert!(move_recording_with(&src, &library(&gone), true).is_err());
+        assert!(!gone.exists(), "the missing save folder is not created");
+        assert!(src.join("sources/screen.mp4").is_file() && is_pending(&src));
     }
 }
