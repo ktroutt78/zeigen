@@ -3421,6 +3421,8 @@ function VideoStage(props: VideoStageProps) {
     }
   };
 
+  // The play bar sits in its own strip under the picture, so nothing covers
+  // the video; the stage (and every overlay measured from it) takes the rest.
   return (
     <div
       style={{
@@ -3430,10 +3432,19 @@ function VideoStage(props: VideoStageProps) {
         flex: 1,
         minHeight: 0,
         display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
+        flexDirection: "column",
+        gap: 8,
       }}
     >
+      <div
+        style={{
+          flex: 1,
+          minHeight: 0,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
       <div
         ref={stageRef}
         onClick={onStageClick}
@@ -3606,13 +3617,6 @@ function VideoStage(props: VideoStageProps) {
             insetFrac={insetFrac}
           />
         )}
-        <PlayerOverlay
-          playing={props.playing}
-          duration={props.duration}
-          currentTime={props.currentTime}
-          togglePlay={props.togglePlay}
-          playbackRate={props.playbackRate}
-        />
         {!scenePath && (
           <WatermarkPreviewLayer
             stageRef={stageRef}
@@ -3621,6 +3625,14 @@ function VideoStage(props: VideoStageProps) {
           />
         )}
       </div>
+      </div>
+      <PlayBar
+        playing={props.playing}
+        duration={props.duration}
+        currentTime={props.currentTime}
+        togglePlay={props.togglePlay}
+        playbackRate={props.playbackRate}
+      />
     </div>
   );
 }
@@ -4557,7 +4569,7 @@ function toContentFrac(
   return { x: Math.max(0, Math.min(1, fx)), y: Math.max(0, Math.min(1, fy)) };
 }
 
-function PlayerOverlay({
+function PlayBar({
   playing,
   duration,
   currentTime,
@@ -4573,10 +4585,7 @@ function PlayerOverlay({
   return (
     <div
       style={{
-        position: "absolute",
-        left: 12,
-        right: 12,
-        bottom: 12,
+        flexShrink: 0,
         display: "flex",
         alignItems: "center",
         gap: 10,
