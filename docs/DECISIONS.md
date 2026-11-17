@@ -4,6 +4,20 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-16 — Webcam rewrite and stop fixes verified by Keith
+
+All five checks pass on the installed build (2f95819):
+
+1. iPhone zoom kept when recording starts and in the recorded webcam.
+2. Lip-sync at the start.
+3. Pause and resume, twice in one recording: in sync after each resume, nothing odd at the cut.
+4. MacBook camera: fine, no jump in the bubble at the start.
+5. macOS menu-bar stop: ends the recording and opens Review with a playable file.
+
+Tagged at the merge commits, as Keith asked: `v0.1.11-timeline-scenes` (6531312) and `v0.1.12-webcam-native` (e7974d2). Both tags sit before later fixes on main: the split-screen card height and 50-120% slider (bf9d3ad) and the pause sync fix (2f95819).
+
+---
+
 ## 2026-11-16 — Webcam stays in step across pauses
 
 Keith's check of the new webcam recorder: zoom kept and lip-sync at the start pass; after a pause and resume the lips ran ahead of the voice. He asked for it fixed now.
