@@ -3459,6 +3459,43 @@ WATERMARK_SCALE_FRAC=0.08";
         assert!(scene_path_for(&SidecarState::default(), 1920, 1080, 240, &[(0.0, BubbleZone::BottomRight)], None, 1.0).is_none());
     }
 
+    // A recording that follows the bubble: bottom-right, dragged to the top-left
+    // and resting there from 2 s. The layout path exists with no scenes and
+    // carries the move; without bubble_follow (older recordings) it is exactly
+    // the single-zone result.
+    #[test]
+    fn scene_path_replays_a_followed_bubble_move() {
+        use crate::composite::BubbleZone;
+        let e = |t: f64, x: f64, y: f64| BubblePositionEntry { t, x, y, diameter_frac: Some(0.125) };
+        let log = vec![e(0.0, 0.9, 0.85), e(0.4, 0.9, 0.85), e(1.6, 0.5, 0.5), e(2.0, 0.1, 0.15), e(2.4, 0.1, 0.15)];
+        let mut sc = SidecarState { bubble_position_log: log, bubble_follow: Some(true), ..Default::default() };
+        assert_eq!(sc.bubble_zones(), vec![(0.0, BubbleZone::BottomRight), (2.0, BubbleZone::TopLeft)]);
+        let path = scene_path_for(&sc, 1920, 1080, 240, &sc.bubble_zones(), None, 5.0).unwrap();
+        let at = |t: f64| path.samples[(t / path.step).round() as usize];
+        let p = crate::composite::resolve_padding_px(1920) as f64;
+        let br = ((1920.0 - 240.0 - p) / 1920.0, (1080.0 - 240.0 - p) / 1080.0);
+        let tl = (p / 1920.0, p / 1080.0);
+        let near = |s: [f32; 11], (x, y): (f64, f64), tol: f64| (s[5] as f64 - x).abs() < tol && (s[6] as f64 - y).abs() < tol;
+        assert!(near(at(1.9), br, 1e-6), "{:?}", at(1.9));
+        assert!(near(at(4.0), tl, 1e-3), "{:?}", at(4.0));
+
+        // Not following: one zone, so no path without scenes, and the same
+        // samples as the old single-zone call with them.
+        sc.bubble_follow = None;
+        assert_eq!(sc.bubble_zones().len(), 1);
+        assert!(scene_path_for(&sc, 1920, 1080, 240, &sc.bubble_zones(), None, 5.0).is_none());
+        sc.scenes = vec![SceneSeg { start: 1.0, end: 3.0, layout: crate::scene::Layout::FullWebcam }];
+        let one = [(0.0, crate::composite::resolve_zone(None, &sc.bubble_position_log))];
+        assert_eq!(
+            scene_path_for(&sc, 1920, 1080, 240, &sc.bubble_zones(), None, 5.0),
+            scene_path_for(&sc, 1920, 1080, 240, &one, None, 5.0)
+        );
+        // A picked zone wins over following.
+        sc.bubble_follow = Some(true);
+        sc.bubble_zone = Some(BubbleZone::TopRight);
+        assert_eq!(sc.bubble_zones(), vec![(0.0, BubbleZone::TopRight)]);
+    }
+
     // The preview's camera_path command must produce exactly the path the export
     // computes from the equivalent camera zooms.
     #[test]

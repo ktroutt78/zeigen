@@ -301,4 +301,50 @@ mod tests {
         let p = path(&[Scene { start: 3.0, end: 5.5, layout: Layout::FullWebcam }], &[], Some(&cam), &g, 10.0).unwrap();
         assert!(at(&p, 4.0)[7] > 0.99);
     }
+
+    // The bubble moving from its bottom-right default to the top-left at 2 s.
+    fn to_top_left(g: &Geometry) -> Move {
+        Move { t: 2.0, bubble: Rect { x: 0.08, y: 0.08, ..g.bubble }, anchor: (0.0, 0.0) }
+    }
+
+    #[test]
+    fn a_move_glides_the_bubble_to_its_new_spot() {
+        let g = geo(1.0);
+        let m = to_top_left(&g);
+        let p = path(&[], &[m], None, &g, 6.0).unwrap();
+        let (old, new) = (targets(None, &g), targets(None, &Geometry { bubble: m.bubble, ..g }));
+        assert!(close(&at(&p, 1.9), &old[..FIELDS], 1e-6), "old spot before the move");
+        assert!(close(&at(&p, 4.0), &new[..FIELDS], 1e-3), "settled at the new spot");
+        // In between it travels one way, no overshoot or jump.
+        let xs: Vec<f32> = p.samples.iter().map(|s| s[5]).collect();
+        assert!(xs.windows(2).all(|w| w[1] <= w[0]), "x only decreases");
+        assert!(xs.windows(2).all(|w| w[0] - w[1] < 0.05), "no jump");
+        let mid = at(&p, 2.2)[5] as f64;
+        assert!(mid < g.bubble.x - 0.1 && mid > m.bubble.x + 0.1, "{mid}");
+    }
+
+    #[test]
+    fn a_move_with_a_zoom_shrink_keeps_the_new_corner() {
+        let g = geo(0.7);
+        let cam = CameraPath { step: STEP_S, samples: vec![[1.6, 0.5, 0.5]; 601] };
+        let p = path(&[], &[to_top_left(&g)], Some(&cam), &g, 10.0).unwrap();
+        // Shrunk about its new top-left corner once settled.
+        let s = at(&p, 5.0);
+        assert!((s[5] as f64 - 0.08).abs() < 1e-3 && (s[6] as f64 - 0.08).abs() < 1e-3, "{s:?}");
+        assert!((s[7] as f64 - g.bubble.w * 0.7).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_move_under_full_webcam_returns_to_the_new_spot() {
+        let g = geo(1.0);
+        let m = to_top_left(&g);
+        let full = Scene { start: 1.0, end: 5.0, layout: Layout::FullWebcam };
+        let p = path(&[full], &[m], None, &g, 8.0).unwrap();
+        let without = path(&[full], &[], None, &g, 8.0).unwrap();
+        // The full-webcam picture is untouched by the move...
+        assert!(close(&at(&p, 3.0), &at(&without, 3.0).map(f64::from), 1e-6));
+        // ...and the layout comes back to the new spot, not the old one.
+        let new = targets(None, &Geometry { bubble: m.bubble, ..g });
+        assert!(close(&at(&p, 7.0), &new[..FIELDS], 1e-3), "{:?}", at(&p, 7.0));
+    }
 }
