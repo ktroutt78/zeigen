@@ -4,6 +4,20 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-17 — Review and Recordings feedback from Keith's checks
+
+**Review (built, merged as review-feedback):** Export follows the settings with a fixed gap; labels sit above full-width export controls; the tool icons are a row across the top of the right panel so content has equal margins (Keith); the preview panel has one layer (the background canvas now covers only the picture's box, which also matches the export); the title is the name plus length, with "Window recording" etc. when unnamed; "— edited", ".mp4" and "just now" dropped. Margin and Corners are always shown, disabled until a background is chosen: Margin had never been removed, it only ever appeared with a background. The preview skips the gap before the first real frame on recordings made before the recorder fix (`video_start_time`), which I had missed when fixing the export.
+
+**Recordings (built, merged as recordings-feedback):**
+- **Thumbnail did not show the Mark, root cause:** it was remade at the Mark but was the plain screen frame; on Keith's two marked recordings that frame is near-identical to the one a second in (PSNR 48 to 50 dB). The thumbnail is now the finished picture at that moment, drawn by the export's own render (`render_still`), and is remade whenever the edit changes. Cost 0.4 to 1 s typical, up to about 2 s late in a 4-minute webcam take.
+- **Keep rule (Keith):** takes never exported are deleted after 7 days, exported ones after 30, both from when the recording was made. Exported = a Save or a Copy to clipboard succeeded (my call on the clipboard; Keith told). Recorded in `.exported.json` in the recording's folder. Exports made before this are recognised by file name in the save folder. Cards carry an "Exported" badge.
+- Show in Finder reveals the last exported file when it still exists, else the folder. Delete confirmations are an in-window dialog with a red Delete and focus on Cancel (the native dialog cannot colour a button). A refused rename says to rename from Review's title.
+- The Mark can be dragged on the timeline; the preview follows; Esc cancels. Like M, it is not clamped to the trim.
+
+Nothing in this entry has been seen in the real app yet.
+
+---
+
 ## 2026-11-17 — Save location built; capture settings remembered
 
 - **Save to folder** (implementer; I reviewed the move code) built as approved: one module (`storage.rs`) answers where files go; a folder on an external drive is recorded to on this Mac and moved at Stop (copy, check every file's length, rename into place, then delete the original); a failed move leaves the recording on this Mac marked "Not yet moved" and retries at launch and when the Recordings list loads; an unavailable folder falls back to `~/Movies/Zeigen` with a warning at Record and at Save. A move never creates the save folder itself (I tightened this in review: with the drive unplugged it must fail, not build the path elsewhere). Choosing a folder Zeigen cannot write to is refused. With no folder chosen, leftover "not yet moved" markers are cleared so a later choice does not move recordings Keith chose to leave.
