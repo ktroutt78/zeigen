@@ -1,0 +1,171 @@
+/* The Recordings window's library grid. Content sits on the window
+   background; only the thumbnails and the controls carry a fill. */
+
+.rec-grid {
+  display: grid;
+  /* Four across at the default 900px window, more as it widens. */
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 18px 14px;
+}
+
+.rec-card {
+  position: relative;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* The whole card is one button laid over the picture and text, so the
+   "..." button and the rename field can sit beside it, never inside it. */
+.rec-open {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+  outline: none;
+}
+.rec-open:disabled { cursor: not-allowed; }
+
+.rec-thumb {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--bg-sidebar);
+  transition: box-shadow var(--dur-quick) var(--ease-ds);
+}
+.rec-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+  background: var(--bg-canvas);
+}
+.rec-card.disabled .rec-thumb { opacity: 0.5; }
+
+.rec-card:hover .rec-open:not(:disabled) ~ .rec-thumb,
+.rec-open:focus-visible ~ .rec-thumb {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+.rec-badge {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: var(--bg-overlay-thin);
+  color: #fff;
+  font: 600 var(--text-caption) var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.rec-more {
+  position: absolute;
+  z-index: 2;
+  top: 8px;
+  right: 8px;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 7px;
+  background: var(--bg-overlay-medium);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--dur-quick) var(--ease-ds);
+}
+.rec-card:hover .rec-more,
+.rec-card:focus-within .rec-more,
+.rec-more[aria-expanded="true"] { opacity: 1; }
+.rec-more:hover { background: var(--bg-overlay-strong); }
+.rec-more:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.rec-name {
+  font-size: var(--text-body);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rec-meta {
+  font-size: var(--text-small);
+  color: var(--fg-tertiary);
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rec-rename {
+  position: relative;
+  z-index: 2;
+  font: 500 var(--text-body) var(--font-system);
+  color: var(--fg-primary);
+  background: var(--bg-track);
+  border: 1px solid var(--accent);
+  border-radius: var(--r-sm);
+  padding: 1px 5px;
+  margin: -2px -6px -1px;
+  width: calc(100% + 12px);
+  outline: none;
+}
+
+.rec-menu {
+  position: absolute;
+  z-index: 10;
+  top: 38px;
+  right: 8px;
+  min-width: 150px;
+  padding: 4px;
+  border-radius: var(--r-md);
+  background: var(--bg-tray);
+  box-shadow: var(--shadow-tray);
+  backdrop-filter: var(--blur-medium);
+  display: flex;
+  flex-direction: column;
+}
+.rec-menu button {
+  border: 0;
+  background: transparent;
+  color: var(--fg-primary);
+  text-align: left;
+  padding: 6px 10px;
+  border-radius: var(--r-sm);
+  font: 400 var(--text-body) var(--font-system);
+  cursor: pointer;
+  outline: none;
+}
+.rec-menu button:hover,
+.rec-menu button:focus-visible { background: var(--bg-raised); }
+.rec-menu button.danger { color: var(--recording-tint); }
+
+.rec-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  width: 200px;
+  padding: 0 10px;
+  border-radius: var(--r-sm);
+  background: var(--bg-active);
+  color: var(--fg-tertiary);
+}
+.rec-search:focus-within { box-shadow: 0 0 0 2px var(--accent-ring); }
+.rec-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--fg-primary);
+  font: 400 var(--text-body) var(--font-system);
+}
+.rec-search input::placeholder { color: var(--fg-tertiary); }
