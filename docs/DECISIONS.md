@@ -4,6 +4,18 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-17 — Design pass step 3 (capture window) built
+
+Implementer, reviewed by me from its headless-browser screenshots; not seen in the real app or on real displays.
+
+- The capture window is a compact 380x600 launcher: Recordings and Settings as icons in the header, three source tiles (Webcam only dropped, Keith), one picker line with Identify, camera and microphone rows with On/Off pills, a large Start button showing the hotkey, and one quiet line beneath. Settings (hotkey, countdown, length cap, noise reduction, bubble shape, Refresh devices) are an in-window view behind the gear. The window grows to fit a long message instead of scrolling.
+- **Hover to pick on every display.** Keith confirmed the existing window picker highlights windows on BenQ (1): hover runs off the cursor poller, not `mouseMoved`, so the old CLAUDE.md note was out of date (updated). The new display picker uses the same poller and overlay code. Clicking the Display or Window tile starts picking at once; a click picks, Esc or Cancel keeps the previous pick. With one display the tile just selects it.
+- **Esc had never worked in the window picker:** it was handled inside overlays that never become the key window. The main window now listens for it while a picker is up. Limit (DEBT): Esc only cancels while Zeigen's main window is the active one.
+- The shared segmented-control style lost its outline (track fill, lighter selected segment), which also changes Review's controls.
+- Unchanged and noted in DEBT: hotkey, countdown and length cap are remembered only until the app quits.
+
+---
+
 ## 2026-11-17 — Design pass step 2 (Recordings library) built
 
 Implementer, reviewed by me from its headless-browser screenshots; not seen in the real app.
