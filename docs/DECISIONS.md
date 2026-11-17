@@ -4,6 +4,18 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-16 — Scene preview checks verified by Keith
+
+The three preview checks left over from the step 5 changes (bf9d3ad) all pass:
+
+1. Split-screen webcam card matches the screen picture's height in the preview.
+2. Size during zoom at 120%: the bubble grows during a zoom in the preview.
+3. A recording with no scenes looks the same as before in the preview.
+
+With the export side checked earlier from rendered frames, step 5 is verified in both preview and export.
+
+---
+
 ## 2026-11-16 — Webcam rewrite and stop fixes verified by Keith
 
 All five checks pass on the installed build (2f95819):
