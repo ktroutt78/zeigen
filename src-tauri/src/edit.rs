@@ -3784,6 +3784,36 @@ WATERMARK_SCALE_FRAC=0.08";
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // A screen file whose video starts a little after time zero (the mic started
+    // after the screen) reads back with a black filler frame in the gap. The
+    // export's first frame must be the first real picture, not that filler.
+    #[test]
+    fn late_starting_video_does_not_export_a_black_first_frame() {
+        ensure_audio_model_for_tests();
+        let dir = std::env::temp_dir().join(format!("zeigen-latestart-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let screen = dir.join("screen.mp4");
+        let o = Command::new(FFMPEG_PATH)
+            .args(["-y", "-v", "error", "-itsoffset", "0.1", "-f", "lavfi", "-i", "color=c=white:s=1280x720:r=30:d=2",
+                   "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+                   "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac"])
+            .arg(&screen).output().expect("ffmpeg");
+        assert!(o.status.success(), "synth: {}", String::from_utf8_lossy(&o.stderr));
+
+        let out = dir.join("out.mp4");
+        run_v3_export(&screen, &[], &out, &SidecarState::default(),
+            crate::composite::WebcamSize::Medium, None, Mp4Resolution::Source, None, |_| {})
+            .expect("export");
+        let o = Command::new(FFMPEG_PATH)
+            .args(["-v", "error", "-i"]).arg(&out)
+            .args(["-frames:v", "1", "-vf", "scale=1:1:flags=area", "-f", "rawvideo", "-pix_fmt", "gray", "-"])
+            .output().expect("ffmpeg");
+        assert_eq!(o.stdout.len(), 1);
+        assert!(o.stdout[0] > 200, "first exported frame is the picture, not black: {}", o.stdout[0]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // Multi-segment webcam (Continuity drop) -> V3 concatenates the segments
     // back-to-back into one bubble stream and returns a drift caveat note. Also
     // proves the COMMON case (a single clean segment) returns Ok(None) — no note,

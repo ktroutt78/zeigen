@@ -33,6 +33,9 @@ final class RecordingSession: NSObject,
 
     private let lock = NSLock()
     private var started = false
+    // Latest screen frame seen before the writer started, so the file can
+    // open with a real picture at time zero (see the writer-start gate).
+    private var preStartVideo: CMSampleBuffer?
     private var paused = false
     private var firstVideoPTS: CMTime = .invalid
     private var firstAudioPTS: CMTime = .invalid
@@ -969,8 +972,21 @@ final class RecordingSession: NSObject,
                 sessionStartPTS = origin
                 started = true
                 sessionStartedAt = origin
+                // The screen frames that arrived while the mic warmed up were
+                // dropped, so the next one lands a frame or two after time
+                // zero. A video track that starts late reads back with a black
+                // filler frame in the gap (AVAssetReader, the Review player).
+                // Write the screen as it stood, at time zero.
+                if !isVideo, let early = preStartVideo,
+                   let first = adjustTiming(early, offset: CMSampleBufferGetPresentationTimeStamp(early) - origin),
+                   videoInput.isReadyForMoreMediaData, videoInput.append(first) {
+                    lastAppendedRawVideoPTS = origin
+                }
+                preStartVideo = nil
             } else {
-                // Earlier pipeline produced before the other warmed up — drop.
+                // Earlier pipeline produced before the other warmed up: drop,
+                // keeping the latest screen frame for the start.
+                if isVideo { preStartVideo = buffer }
                 return
             }
         }

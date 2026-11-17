@@ -386,8 +386,16 @@ let asset = AVURLAsset(url: inURL)
 // Synchronous track load (CLI tool).
 let sem0 = DispatchSemaphore(value: 0)
 var videoTrack: AVAssetTrack?
+// Where the picture really starts. Recordings made before the engine wrote a
+// frame at time zero have a video track that begins a frame or two late (the mic
+// started after the screen); the reader and the image generator fill that gap
+// with a BLACK frame at PTS 0. Everything that reads frames skips up to here.
+var firstPictureTime = CMTime.zero
 Task {
     videoTrack = try? await asset.loadTracks(withMediaType: .video).first
+    if let segs = try? await videoTrack?.load(.segments), let lead = segs.first, lead.isEmpty {
+        firstPictureTime = lead.timeMapping.target.end
+    }
     sem0.signal()
 }
 sem0.wait()
@@ -634,7 +642,7 @@ func measureBlackCornerReach(_ url: URL) -> Double? {
     let gen = AVAssetImageGenerator(asset: AVURLAsset(url: url))
     gen.requestedTimeToleranceBefore = .zero
     gen.requestedTimeToleranceAfter = CMTime(seconds: 1, preferredTimescale: 600)
-    guard let cg = try? gen.copyCGImage(at: .zero, actualTime: nil), cg.width > 0, cg.height > 0
+    guard let cg = try? gen.copyCGImage(at: firstPictureTime, actualTime: nil), cg.width > 0, cg.height > 0
     else { return nil }
     let w = cg.width, h = cg.height
     var buf = [UInt8](repeating: 0, count: w * h * 4)
@@ -976,9 +984,13 @@ func sampleRegion(_ img: CIImage, _ rect: CGRect) -> (dark: Bool, stroke: Double
 // we composite the source frame CURRENT at tOut (held across gaps) and stamp a regular
 // PTS, so the zoom animates in even 1/fps steps regardless of source frame drops.
 func nextSourceFrame() -> (CMTime, CVPixelBuffer)? {
-    guard let s = readerOutput.copyNextSampleBuffer(),
-          let p = CMSampleBufferGetImageBuffer(s) else { return nil }
-    return (CMSampleBufferGetPresentationTimeStamp(s), p)  // alwaysCopies -> p survives s
+    while let s = readerOutput.copyNextSampleBuffer() {
+        guard let p = CMSampleBufferGetImageBuffer(s) else { return nil }
+        let pts = CMSampleBufferGetPresentationTimeStamp(s)
+        if pts < firstPictureTime { continue }  // the black filler before the picture starts
+        return (pts, p)  // alwaysCopies -> p survives s
+    }
+    return nil
 }
 var pending = nextSourceFrame()   // next source frame not yet reached by the grid
 var held: CVPixelBuffer? = nil    // source frame current at tOut, held across idle gaps
