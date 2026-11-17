@@ -6,8 +6,6 @@ import WebcamBubble from "./components/WebcamBubble";
 import Review from "./Review";
 import CountdownOverlay from "./CountdownOverlay";
 import TimerChipWindow from "./TimerChipWindow";
-import IdentifyOverlay from "./IdentifyOverlay";
-import IdentifyWindowOverlay from "./IdentifyWindowOverlay";
 import MarqueeOverlay from "./MarqueeOverlay";
 import WindowPickerOverlay from "./WindowPickerOverlay";
 import DisplayPickerOverlay from "./DisplayPickerOverlay";
@@ -23,10 +21,6 @@ const root = hash.startsWith("#bubble")
   ? <CountdownOverlay />
   : hash.startsWith("#timer-chip")
   ? <TimerChipWindow />
-  : hash.startsWith("#identify-window")
-  ? <IdentifyWindowOverlay />
-  : hash.startsWith("#identify")
-  ? <IdentifyOverlay />
   : hash.startsWith("#marquee")
   ? <MarqueeOverlay />
   : hash.startsWith("#window-picker")
@@ -42,7 +36,7 @@ const root = hash.startsWith("#bubble")
 // Routes that render in transparent windows must not paint the global dark
 // body background — otherwise the dark fill leaks through the transparent
 // NSWindow and the user sees a solid backdrop instead of their screen.
-const TRANSPARENT_ROUTES = ["#bubble", "#countdown", "#timer-chip", "#identify", "#marquee", "#window-picker", "#display-picker", "#area-indicator"];
+const TRANSPARENT_ROUTES = ["#bubble", "#countdown", "#timer-chip", "#marquee", "#window-picker", "#display-picker", "#area-indicator"];
 if (TRANSPARENT_ROUTES.some((r) => hash.startsWith(r))) {
   document.documentElement.style.background = "transparent";
   document.body.style.background = "transparent";

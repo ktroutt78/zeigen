@@ -172,7 +172,7 @@ async function openCountdown(
 
   // Plant the countdown window via NSWindow.setFrame (Cocoa points) instead
   // of Tauri's constructor x/y/width/height. The constructor route landed
-  // the window at half size on macOS; identify overlays already work around
+  // the window at half size on macOS; the picker overlays already work around
   // this with set_window_frame_cg.
   // Engine reports display frame in CG points (origin AND size — what
   // SCDisplay returns on M-series macs set to a scaled "looks like" mode).
@@ -221,137 +221,12 @@ async function openCountdown(
   });
 }
 
-const IDENTIFY_LABEL_PREFIX = "identify-";
-
 type DisplayShape = {
   x: number;
   y: number;
   width: number;
   height: number;
 };
-
-async function openIdentifyOverlays(displays: DisplayShape[]) {
-  if (displays.length === 0) return;
-  // Primary screen Cocoa height is needed in Rust to flip CG (top-left,
-  // Y down) into Cocoa (bottom-left, Y up) for NSWindow.setFrameOrigin.
-  // Pull it from the Tauri monitor at (0, 0).
-  const monitors = await availableMonitors();
-  const primary =
-    monitors.find((m) => m.position.x === 0 && m.position.y === 0) ||
-    monitors[0];
-  const primaryCocoaHeight =
-    primary && primary.scaleFactor
-      ? primary.size.height / primary.scaleFactor
-      : 1080;
-  for (let i = 0; i < displays.length; i++) {
-    const display = displays[i];
-    const label = `${IDENTIFY_LABEL_PREFIX}${i}`;
-    const existing = await WebviewWindow.getByLabel(label);
-    if (existing) await existing.close().catch(() => {});
-    new WebviewWindow(label, {
-      url: `/#identify?n=${i + 1}`,
-      title: "Identify",
-      // Initial size doesn't matter — Rust setSize resizes after creation.
-      // Constructor x/y omitted because Tauri silently drops negative on
-      // macOS for screens left of primary.
-      width: 400,
-      height: 400,
-      decorations: false,
-      transparent: true,
-      alwaysOnTop: true,
-      skipTaskbar: true,
-      resizable: false,
-      visibleOnAllWorkspaces: true,
-      shadow: false,
-      focus: false,
-    });
-    void (async () => {
-      for (let attempt = 0; attempt < 50; attempt++) {
-        const win = await WebviewWindow.getByLabel(label);
-        if (win) {
-          try {
-            await invoke("set_window_frame_cg", {
-              label,
-              cgX: display.x,
-              cgY: display.y,
-              width: display.width,
-              height: display.height,
-              primaryCocoaHeight,
-            });
-          } catch (e) {
-            console.error(`[identify] ${label} setup failed`, e);
-          }
-          return;
-        }
-        await new Promise((r) => setTimeout(r, 20));
-      }
-      console.error(`[identify] ${label} window never registered`);
-    })();
-  }
-}
-
-const IDENTIFY_WINDOW_LABEL_PREFIX = "identify-window-";
-
-// Outline a captured window with a translucent rectangle + corner badge so
-// the user can confirm "yes, that's the window I picked." Mirrors the
-// display-identify pattern: open a transparent NSWindow at the target's
-// CG bounds, let the overlay component handle its own fade-out and self-close.
-async function openIdentifyWindowOverlay(window: WindowSource) {
-  const monitors = await availableMonitors();
-  const primary =
-    monitors.find((m) => m.position.x === 0 && m.position.y === 0) ||
-    monitors[0];
-  const primaryCocoaHeight =
-    primary && primary.scaleFactor
-      ? primary.size.height / primary.scaleFactor
-      : 1080;
-  const label = `${IDENTIFY_WINDOW_LABEL_PREFIX}${window.id}`;
-  const existing = await WebviewWindow.getByLabel(label);
-  if (existing) await existing.close().catch(() => {});
-  const params = new URLSearchParams({
-    app: window.app,
-    title: window.title,
-  });
-  new WebviewWindow(label, {
-    url: `/#identify-window?${params.toString()}`,
-    title: "Identify",
-    // Initial size doesn't matter — Rust set_window_frame_cg resizes after
-    // creation. Constructor x/y omitted because Tauri silently drops
-    // negative on macOS for screens left of primary.
-    width: 400,
-    height: 400,
-    decorations: false,
-    transparent: true,
-    alwaysOnTop: true,
-    skipTaskbar: true,
-    resizable: false,
-    visibleOnAllWorkspaces: true,
-    shadow: false,
-    focus: false,
-  });
-  void (async () => {
-    for (let attempt = 0; attempt < 50; attempt++) {
-      const win = await WebviewWindow.getByLabel(label);
-      if (win) {
-        try {
-          await invoke("set_window_frame_cg", {
-            label,
-            cgX: window.x,
-            cgY: window.y,
-            width: window.width,
-            height: window.height,
-            primaryCocoaHeight,
-          });
-        } catch (e) {
-          console.error(`[identify-window] ${label} setup failed`, e);
-        }
-        return;
-      }
-      await new Promise((r) => setTimeout(r, 20));
-    }
-    console.error(`[identify-window] ${label} window never registered`);
-  })();
-}
 
 const TIMER_CHIP_LABEL = "timer-chip";
 // Sized to fit the RecordingControlPill (timer + pause + stop). Chrome
@@ -519,7 +394,7 @@ async function openAreaIndicator(rect: {
     url: `/#area-indicator`,
     title: "Recording area",
     // Initial size doesn't matter — set_window_frame_cg resizes after
-    // creation (same pattern as identify/countdown).
+    // creation (same pattern as the countdown).
     width: 400,
     height: 400,
     decorations: false,
@@ -1167,8 +1042,8 @@ function App() {
           case "ready":
             break;
           case "enumerated": {
-            // Main display first, then left to right. The Identify overlay's
-            // numbers follow this order, as does the picker.
+            // Main display first, then left to right; the picker follows
+            // this order.
             const displays = [...ev.displays].sort(
               (a, b) =>
                 Number(b.x === 0 && b.y === 0) - Number(a.x === 0 && a.y === 0) ||
@@ -2429,7 +2304,6 @@ function App() {
       : sourceKind === "window"
       ? windows.some((w) => w.id === selectedWindow)
       : selectedArea != null;
-  const selectedWindowSource = windows.find((w) => w.id === selectedWindow) ?? null;
 
   return (
     <main className="cap accent-blue">
@@ -2506,9 +2380,8 @@ function App() {
                   onChange={(e) => setSelectedDisplay(Number(e.target.value))}
                   disabled={pickDisabled}
                 >
-                  {displays.map((d, i) => (
+                  {displays.map((d) => (
                     <option key={d.id} value={d.id}>
-                      {displays.length > 1 && `${i + 1} · `}
                       {d.name}, {d.width} x {d.height}
                     </option>
                   ))}
@@ -2534,30 +2407,7 @@ function App() {
                 </select>
               ) : null}
             </div>
-            {sourceKind === "display" ? (
-              <button
-                className="cap-text-btn"
-                title="Show each display's number"
-                onClick={() => openIdentifyOverlays(displays).catch((e) => setError(String(e)))}
-                disabled={pickDisabled}
-              >
-                Identify
-              </button>
-            ) : sourceKind === "window" ? (
-              <button
-                className="cap-text-btn"
-                title="Outline the chosen window"
-                onClick={() =>
-                  selectedWindowSource &&
-                  openIdentifyWindowOverlay(selectedWindowSource).catch((e) =>
-                    setError(String(e)),
-                  )
-                }
-                disabled={recording || !selectedWindowSource}
-              >
-                Identify
-              </button>
-            ) : (
+            {sourceKind === "area" && (
               <button className="cap-text-btn" onClick={openAreaPicker} disabled={pickDisabled}>
                 {selectedArea ? "Redraw" : "Select"}
               </button>
