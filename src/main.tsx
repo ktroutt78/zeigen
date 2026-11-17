@@ -11,6 +11,7 @@ import IdentifyWindowOverlay from "./IdentifyWindowOverlay";
 import MarqueeOverlay from "./MarqueeOverlay";
 import WindowPickerOverlay from "./WindowPickerOverlay";
 import AreaIndicator from "./AreaIndicator";
+import RecordingsWindow from "./RecordingsWindow";
 
 const hash = window.location.hash;
 const root = hash.startsWith("#bubble")
@@ -31,6 +32,8 @@ const root = hash.startsWith("#bubble")
   ? <WindowPickerOverlay />
   : hash.startsWith("#area-indicator")
   ? <AreaIndicator />
+  : hash.startsWith("#recordings")
+  ? <RecordingsWindow />
   : <App />;
 
 // Routes that render in transparent windows must not paint the global dark

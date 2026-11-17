@@ -242,6 +242,10 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, state: &UiState) -> tauri::Result<
     }
     let screen_sub = screen_sub.build()?;
 
+    let recordings = MenuItemBuilder::with_id("recordings", "Recordings…")
+        .enabled(!active)
+        .build(app)?;
+
     let quit = MenuItemBuilder::with_id("quit", "Quit Zeigen")
         .accelerator("CmdOrCtrl+Q")
         .build(app)?;
@@ -255,6 +259,8 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, state: &UiState) -> tauri::Result<
         .item(&cam_sub)
         .item(&mic_sub)
         .item(&screen_sub)
+        .separator()
+        .item(&recordings)
         .separator()
         .item(&quit)
         .build()

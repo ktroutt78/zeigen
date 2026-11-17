@@ -5,6 +5,7 @@ mod edit;
 mod engine;
 mod exports;
 mod hotkey;
+mod library;
 mod macos;
 mod prewarm;
 mod settings;
@@ -650,18 +651,20 @@ fn scratch_root_dir() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-// Defense against a malformed/spoofed scratch path. Any commit/discard
-// operation must work against a real subtree of ~/Movies/Zeigen/.scratch
-// — canonicalize both sides so symlinks and `..` segments can't escape.
+// Defense against a malformed/spoofed scratch path. Any discard must work
+// against a real subtree of ~/Movies/Zeigen/.scratch or, for a recording
+// reopened from the library, ~/Movies/Zeigen/.recordings — canonicalize both
+// sides so symlinks and `..` segments can't escape, and never the root itself.
 fn validate_scratch_path(p: &std::path::Path) -> Result<(), String> {
     let canon = p
         .canonicalize()
         .map_err(|e| format!("canonicalize {}: {e}", p.display()))?;
-    let root = scratch_root_dir()?
-        .canonicalize()
-        .map_err(|e| format!("canonicalize scratch root: {e}"))?;
-    if !canon.starts_with(&root) {
-        return Err(format!("path not under scratch root: {}", p.display()));
+    let roots = [scratch_root_dir()?, library::recordings_root()?];
+    let inside = roots.iter().filter_map(|r| r.canonicalize().ok()).any(|root| {
+        canon != root && canon.starts_with(&root)
+    });
+    if !inside {
+        return Err(format!("path not under scratch or recordings root: {}", p.display()));
     }
     Ok(())
 }
@@ -848,6 +851,7 @@ pub fn run() {
             wallpapers::list_wallpapers,
             wallpapers::wallpaper_thumb,
             discard_recording,
+            library::list_recordings,
             clipboard::clipboard_copy_recording,
             exports::cleanup_recording_exports,
             settings::get_settings,
