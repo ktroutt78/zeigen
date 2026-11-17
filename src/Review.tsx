@@ -3543,8 +3543,10 @@ function VideoStage(props: VideoStageProps) {
           width: "100%",
           borderRadius: "var(--r-md)",
           overflow: "hidden",
-          border: "1px solid var(--border-faint)",
-          background: "#14161b",
+          // No fill of its own: the picture (or its background canvas) sits
+          // straight on the preview panel. The border stays, transparent, so
+          // the box every overlay measures is unchanged.
+          border: "1px solid transparent",
         }}
       >
         {/* V2 Step 3: the screen video carries the zoom transform (applied to
@@ -3555,14 +3557,21 @@ function VideoStage(props: VideoStageProps) {
             to this transform wrapper, not the stage div behind it, so without the
             marker onStageClick's deselect never matched. Broke when this wrapper
             was inserted between the video and the stage (V2 Step 3 zoom). */}
-        {/* Background/padding preview (Slice 4): the canvas fills the stage behind
-            the video; the frame wrapper insets + rounds + shadows the video (and
+        {/* Background/padding preview (Slice 4): the canvas fills the picture's
+            box (the export's canvas) behind the video; the frame wrapper insets + rounds + shadows the video (and
             carries the zoom layer). Both collapse to no-ops when bgActive is false
             (no canvas; wrapper is inset:0), so a plain recording is unchanged. */}
         {bgActive && !scenePath && (
           <div
             data-stage-bg="1"
-            style={{ position: "absolute", inset: 0, background: bgCss }}
+            style={{
+              position: "absolute",
+              left: fullBox.x,
+              top: fullBox.y,
+              width: fullBox.w,
+              height: fullBox.h,
+              background: bgCss,
+            }}
           />
         )}
         {/* Path mode: the output picture (the export's canvas) behind the
@@ -3596,7 +3605,6 @@ function VideoStage(props: VideoStageProps) {
                 width: "100%",
                 height: "100%",
                 objectFit: "contain",
-                background: "#000",
                 pointerEvents: "none",
               }}
             />
