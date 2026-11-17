@@ -288,7 +288,7 @@ final class CursorTracker: @unchecked Sendable {
             return
         }
         let size = cursor.image.size
-        guard let png = Self.pngForExport(tiff: tiff, pointWidth: Double(size.width)) else { return }
+        guard let png = CursorArt.png(image: cursor.image, hotSpot: cursor.hotSpot, tiff: tiff) else { return }
         let shape = Shape(
             png: png,
             width: Double(size.width), height: Double(size.height),
@@ -299,19 +299,6 @@ final class CursorTracker: @unchecked Sendable {
         }
         shapeIndexByHash[hash] = index
         currentShape = index
-    }
-
-    // PNG of the one pixel representation whose width is nearest 4x the
-    // point width (ties go to the larger); the largest if the point width
-    // is unknown.
-    static func pngForExport(tiff: Data, pointWidth: Double) -> Data? {
-        let reps = NSBitmapImageRep.imageReps(with: tiff).compactMap { $0 as? NSBitmapImageRep }
-        let target = pointWidth > 0 ? 4 * pointWidth : .infinity
-        let best = reps.min { a, b in
-            let da = abs(Double(a.pixelsWide) - target), db = abs(Double(b.pixelsWide) - target)
-            return da != db ? da < db : a.pixelsWide > b.pixelsWide
-        }
-        return best?.representation(using: .png, properties: [:])
     }
 
     // Caller must hold `lock` (reads cachedWindowFrame).

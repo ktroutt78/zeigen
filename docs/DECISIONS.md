@@ -4,6 +4,18 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-16 — Drawn cursor made sharp: vector art and a proper shrink
+
+Keith: our drawn cursor looks upscaled and soft next to Cap's (which uses SVG cursor art). Sharp is the default, no toggle.
+
+- **Cause 1, the picture.** The export draws the cursor from the picture macOS gives us, scaled by the capture's backing scale, the cursor size setting (1.7) and the zoom, so up to about 10x its point size. macOS offers the arrow and I-beam in pixel versions up to 10x, but the older cursors (pointing hand, grab hands, copy, resize arrows, zoom) only at 1x and 2x. A 32 pt hand was a 64 px picture stretched to 90 px on a 1x capture at 1.7x zoom and to 200 px or more on Retina. For the arrow we also stored the 5x version when a 10x one was there.
+- **Cause 2, the scaling.** The picture was resized with a plain affine transform, which reads only 4 source pixels per output pixel. Shrinking by 3x or more that way gives ragged edges.
+- **Fix.** macOS keeps vector art for its standard cursors (PDFs under HIServices). At capture, a cursor whose pixels are exactly one of the 17 standard cursors is drawn from that art at 10x, with the system's own shadow settings; it is used only when the art's canvas and hotspot equal the live cursor's, so it lands where the old picture did. Everything else keeps its largest pixel version (now the largest, not the one nearest 4x). The export shrinks with Lanczos, then places at sub-pixel positions as before.
+- **Checked:** all 17 standard cursors match their art side by side; the hand recorded by Chrome is pixel-identical to the standard one, so matching works; an export of recording 221117 with the new pictures shows a visibly crisper hand at 1.7x zoom.
+- **Limits:** recordings made before this keep their old cursor pictures (they still get the better shrink). An app's own custom cursor has no art and stays as sharp as the app's picture. Not checked: a new Retina recording, and the Review preview with the larger pictures.
+
+---
+
 ## 2026-11-16 — Dark window recordings got a huge corner radius over a background
 
 Keith's main use (SnowDash, Tableau in window mode with a background) exported with the window's corners rounded so heavily that the tab bar and toolbar ends were cut off.

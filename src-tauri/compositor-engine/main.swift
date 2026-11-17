@@ -1082,8 +1082,11 @@ writerInput.requestMediaDataWhenReady(on: queue) {
         // --- Drawn cursor: on the content plane AFTER the zoom and the motion blur (so it
         // stays sharp) and BEFORE redaction (so a panel still covers it). The hotspot maps
         // to output with the SAME transform as the redaction rects, (src - winOrigin) * s,
-        // and the image grows with the zoom. Plain affine scale (it moves every frame, so
-        // no Lanczos) and no integer snapping, so a moving cursor moves smoothly.
+        // and the image grows with the zoom. The stored picture is about 10x the cursor's
+        // point size, so it is nearly always drawn smaller: Lanczos does the shrink (a
+        // plain affine shrink of 3-6x samples 4 texels and skips the rest, which reads as
+        // ragged, shimmering edges), then a sub-pixel move with no integer snapping, so a
+        // moving cursor moves smoothly.
         if let cf = cursorFile {
             let (fx, fy) = cursorAt(cf, t)
             let shape = cursorShapes[cursorShapeAt(cf, t)]
@@ -1094,8 +1097,12 @@ writerInput.requestMediaDataWhenReady(on: queue) {
             // Image top-left sits hotX left of / hotY above the hotspot.
             let x0 = hx - shape.hotX * s, y0 = hy + shape.hotY * s - h
             if CGRect(x: x0, y: y0, width: w, height: h).intersects(frameRect) {
-                out = shape.image
-                    .transformed(by: CGAffineTransform(a: k, b: 0, c: 0, d: k, tx: x0, ty: y0))
+                let sized = k < 1
+                    ? shape.image.applyingFilter("CILanczosScaleTransform",
+                        parameters: [kCIInputScaleKey: k, kCIInputAspectRatioKey: 1.0])
+                    : shape.image.transformed(by: CGAffineTransform(scaleX: k, y: k))
+                out = sized
+                    .transformed(by: CGAffineTransform(translationX: x0 - sized.extent.minX, y: y0 - sized.extent.minY))
                     .composited(over: out)
                     .cropped(to: frameRect)
             }
