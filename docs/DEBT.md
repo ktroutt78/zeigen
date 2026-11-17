@@ -2,9 +2,14 @@
 
 Things left worse than we'd like, with why. Newest at top. Remove an entry when it is paid.
 
+## Bubble moves during a recording: rough edges (2026-11-17)
+- The Follow recording choice and the gliding bubble in the Review preview are untried in the app; I cannot operate the Review window. The export was checked on a copy of recording-2026-11-17-173434 (bottom-right at 0.3 s, top-left at 3.5 s).
+- Rest spots are the grid cell (thirds of the frame) the logged bubble centre is in, not the nearest of the nine baked spots. A bubble dropped a little in from a corner (x between about 0.28 and 0.33) snaps to the corner, which is what a drop there looks like it means.
+- The glide starts when the drag ends (the first of two log entries in the same place), so holding the bubble still for about half a second mid-drag counts as a stop there.
+- The preview asks Rust for the fixed-bubble zone (`bubble_start_zone`) when it opens, so for a moment it may draw the bubble bottom-right before moving it to the recorded spot.
+
 ## Countdown Cancel and the moving bubble (2026-11-17)
 - The capture window now stays up during the countdown so its button can read Cancel. Its other controls (source tiles, camera, mic) are not disabled during the countdown; changing one then does nothing to the armed take.
-- A bubble moved during a recording is drawn in one place for the whole take: the export and preview use a single zone (the corner nearest the average logged position), by design since V2 Step 2. The timed positions are still recorded in the sidecar. Plan with Keith, not built.
 
 ## Armed start: untried in the app (2026-11-17)
 - Only the webcam recorder's hold-then-go was run (2.0 s file after 2 s held). The engine's arm/go, the cancel path and the whole start sequence are untried: the terminal has no Screen Recording permission.

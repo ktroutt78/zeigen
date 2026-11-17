@@ -142,6 +142,20 @@ pub struct SidecarState {
     // Declared last.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bubble_size: Option<crate::composite::WebcamSize>,
+    // Replay the bubble's moves during the recording (composite::resolve_zones)
+    // while no bubble_zone is picked. Stamped Some(true) at finalize for new
+    // recordings with a bubble; None on older ones, which keep one zone so their
+    // exports do not change. Declared last.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bubble_follow: Option<bool>,
+}
+
+impl SidecarState {
+    // Where the bubble rests over the recording; element 0 is the zone for
+    // anything that draws one fixed bubble.
+    pub(crate) fn bubble_zones(&self) -> Vec<(f64, crate::composite::BubbleZone)> {
+        crate::composite::resolve_zones(self.bubble_zone, self.bubble_follow, &self.bubble_position_log)
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
@@ -1146,10 +1160,11 @@ fn v3_render(
     };
 
     // Bubble mask + shadow PNGs (identical geometry to V2 build_webcam_overlay).
+    let zones = sidecar.bubble_zones();
     let bubble = match &webcam {
         Some(_) => Some(crate::composite::build_v3_bubble_assets(
             &temp_dir,
-            sidecar.bubble_zone,
+            zones[0].1,
             &sidecar.bubble_position_log,
             sidecar.bubble_roundness,
             webcam_size,
@@ -1194,7 +1209,7 @@ fn v3_render(
     // the compositor draws the bubble the way it always has.
     if let Some(b) = &bubble {
         let dur = probe_duration_seconds(screen_path)?;
-        if let Some(path) = scene_path_for(sidecar, w, h, b.diameter, b.zone, camera.as_ref(), dur) {
+        if let Some(path) = scene_path_for(sidecar, w, h, b.diameter, &zones, camera.as_ref(), dur) {
             let json = serde_json::to_string(&path).map_err(|e| format!("scene json: {e}"))?;
             let p = temp_dir.join("scene.json");
             std::fs::write(&p, json).map_err(|e| format!("write scene.json: {e}"))?;
@@ -1946,38 +1961,51 @@ fn scene_path_for(
     w: u32,
     h: u32,
     diameter: u32,
-    zone: crate::composite::BubbleZone,
+    zones: &[(f64, crate::composite::BubbleZone)],
     camera: Option<&crate::camera::CameraPath>,
     duration: f64,
 ) -> Option<crate::scene::ScenePath> {
-    use crate::scene::{Geometry, Rect, Scene};
+    use crate::scene::{Geometry, Move, Rect, Scene};
     let (wd, hd, d) = (w as f64, h as f64, diameter as f64);
     let k = if has_background(sidecar) { 1.0 - sidecar.frame.map_or(0.0, |f| f.padding) } else { 1.0 };
     let screen = Rect { x: (1.0 - k) / 2.0, y: (1.0 - k) / 2.0, w: k, h: k };
-    // Bubble top-left in recording px, as cicompositor places it.
+    // A zone's bubble rect and shrink anchor. Bubble top-left in recording px, as
+    // cicompositor places it.
     let p = crate::composite::resolve_padding_px(w) as f64;
-    let code = zone.code().as_bytes();
-    let (ax, bx) = match code[1] {
-        b'l' => (0.0, p),
-        b'c' => (0.5, (wd - d) / 2.0),
-        _ => (1.0, wd - d - p),
+    let place = |zone: crate::composite::BubbleZone| {
+        let code = zone.code().as_bytes();
+        let (ax, bx) = match code[1] {
+            b'l' => (0.0, p),
+            b'c' => (0.5, (wd - d) / 2.0),
+            _ => (1.0, wd - d - p),
+        };
+        let (ay, by) = match code[0] {
+            b't' => (0.0, p),
+            b'c' => (0.5, (hd - d) / 2.0),
+            _ => (1.0, hd - d - p),
+        };
+        let rect = Rect { x: screen.x + bx / wd * k, y: screen.y + by / hd * k, w: d / wd * k, h: d / hd * k };
+        (rect, (ax, ay))
     };
-    let (ay, by) = match code[0] {
-        b't' => (0.0, p),
-        b'c' => (0.5, (hd - d) / 2.0),
-        _ => (1.0, hd - d - p),
-    };
+    let (bubble, anchor) = place(zones[0].1);
     let geometry = Geometry {
         aspect: wd / hd,
         screen,
-        bubble: Rect { x: screen.x + bx / wd * k, y: screen.y + by / hd * k, w: d / wd * k, h: d / hd * k },
+        bubble,
         bubble_radius: sidecar.bubble_roundness.map_or(0.5, |r| r.clamp(0.0, 1.0) / 2.0),
-        anchor: (ax, ay),
+        anchor,
         shrink: sidecar.bubble_zoom_scale.unwrap_or(1.0).clamp(0.1, 1.2),
     };
+    let moves: Vec<Move> = zones[1..]
+        .iter()
+        .map(|&(t, z)| {
+            let (bubble, anchor) = place(z);
+            Move { t, bubble, anchor }
+        })
+        .collect();
     let scenes: Vec<Scene> =
         sidecar.scenes.iter().map(|s| Scene { start: s.start, end: s.end, layout: s.layout }).collect();
-    crate::scene::path(&scenes, camera, &geometry, duration)
+    crate::scene::path(&scenes, &moves, camera, &geometry, duration)
 }
 
 // The preview's layout path: the same path the export writes to scene.json. None
@@ -2000,7 +2028,7 @@ pub fn scene_path(
         sidecar.bubble_scale.unwrap_or(1.0),
         width,
     );
-    let zone = crate::composite::resolve_zone(sidecar.bubble_zone, &sidecar.bubble_position_log);
+    let zones = sidecar.bubble_zones();
     let camera = (!zoom_keyframes_to_segments(&sidecar.zoom).is_empty()).then(|| {
         Ok::<_, String>(crate::camera::path(
             &camera_zooms(&sidecar.zoom),
@@ -2011,7 +2039,14 @@ pub fn scene_path(
         ))
     });
     let camera = camera.transpose()?;
-    Ok(scene_path_for(&sidecar, width, height, diameter, zone, camera.as_ref(), duration))
+    Ok(scene_path_for(&sidecar, width, height, diameter, &zones, camera.as_ref(), duration))
+}
+
+// The zone the preview draws a fixed bubble in when there is no layout path:
+// element 0 of the same zone timeline the export uses.
+#[tauri::command]
+pub fn bubble_start_zone(sidecar: SidecarState) -> crate::composite::BubbleZone {
+    sidecar.bubble_zones()[0].1
 }
 
 // The cursor positions the camera re-aims on: the recording's raw cursor log,
@@ -2596,6 +2631,7 @@ mod tests {
             webcam_lead_ms: None,
             name: None,
             bubble_size: None,
+            bubble_follow: None,
         }
     }
 
@@ -3406,7 +3442,7 @@ WATERMARK_SCALE_FRAC=0.08";
         use crate::composite::BubbleZone;
         let mut sc = SidecarState { bubble_zoom_scale: Some(0.7), ..Default::default() };
         let p = crate::composite::resolve_padding_px(1920) as f64;
-        let path = scene_path_for(&sc, 1920, 1080, 240, BubbleZone::BottomRight, None, 1.0).unwrap();
+        let path = scene_path_for(&sc, 1920, 1080, 240, &[(0.0, BubbleZone::BottomRight)], None, 1.0).unwrap();
         let s = path.samples[0];
         let want = [0.0, 0.0, 1.0, 1.0, 1.0, (1920.0 - 240.0 - p) / 1920.0, (1080.0 - 240.0 - p) / 1080.0,
             240.0 / 1920.0, 240.0 / 1080.0, 0.5, 1.0];
@@ -3416,11 +3452,48 @@ WATERMARK_SCALE_FRAC=0.08";
         // With Frame padding the recording and the bubble inset together.
         sc.frame = Some(FrameStyle { padding: 0.1, ..Default::default() });
         sc.background = Some(Background::Solid { hex: "#101010".into() });
-        let s = scene_path_for(&sc, 1920, 1080, 240, BubbleZone::TopLeft, None, 1.0).unwrap().samples[0];
+        let s = scene_path_for(&sc, 1920, 1080, 240, &[(0.0, BubbleZone::TopLeft)], None, 1.0).unwrap().samples[0];
         assert!((s[0] - 0.05).abs() < 1e-6 && (s[2] - 0.9).abs() < 1e-6);
         assert!((s[5] as f64 - (0.05 + p / 1920.0 * 0.9)).abs() < 1e-6 && (s[7] as f64 - 240.0 / 1920.0 * 0.9).abs() < 1e-6);
         // Nothing to lay out differently: no path, so the export is unchanged.
-        assert!(scene_path_for(&SidecarState::default(), 1920, 1080, 240, BubbleZone::BottomRight, None, 1.0).is_none());
+        assert!(scene_path_for(&SidecarState::default(), 1920, 1080, 240, &[(0.0, BubbleZone::BottomRight)], None, 1.0).is_none());
+    }
+
+    // A recording that follows the bubble: bottom-right, dragged to the top-left
+    // and resting there from 2 s. The layout path exists with no scenes and
+    // carries the move; without bubble_follow (older recordings) it is exactly
+    // the single-zone result.
+    #[test]
+    fn scene_path_replays_a_followed_bubble_move() {
+        use crate::composite::BubbleZone;
+        let e = |t: f64, x: f64, y: f64| BubblePositionEntry { t, x, y, diameter_frac: Some(0.125) };
+        let log = vec![e(0.0, 0.9, 0.85), e(0.4, 0.9, 0.85), e(1.6, 0.5, 0.5), e(2.0, 0.1, 0.15), e(2.4, 0.1, 0.15)];
+        let mut sc = SidecarState { bubble_position_log: log, bubble_follow: Some(true), ..Default::default() };
+        assert_eq!(sc.bubble_zones(), vec![(0.0, BubbleZone::BottomRight), (2.0, BubbleZone::TopLeft)]);
+        let path = scene_path_for(&sc, 1920, 1080, 240, &sc.bubble_zones(), None, 5.0).unwrap();
+        let at = |t: f64| path.samples[(t / path.step).round() as usize];
+        let p = crate::composite::resolve_padding_px(1920) as f64;
+        let br = ((1920.0 - 240.0 - p) / 1920.0, (1080.0 - 240.0 - p) / 1080.0);
+        let tl = (p / 1920.0, p / 1080.0);
+        let near = |s: [f32; 11], (x, y): (f64, f64), tol: f64| (s[5] as f64 - x).abs() < tol && (s[6] as f64 - y).abs() < tol;
+        assert!(near(at(1.9), br, 1e-6), "{:?}", at(1.9));
+        assert!(near(at(4.0), tl, 1e-3), "{:?}", at(4.0));
+
+        // Not following: one zone, so no path without scenes, and the same
+        // samples as the old single-zone call with them.
+        sc.bubble_follow = None;
+        assert_eq!(sc.bubble_zones().len(), 1);
+        assert!(scene_path_for(&sc, 1920, 1080, 240, &sc.bubble_zones(), None, 5.0).is_none());
+        sc.scenes = vec![SceneSeg { start: 1.0, end: 3.0, layout: crate::scene::Layout::FullWebcam }];
+        let one = [(0.0, crate::composite::resolve_zone(None, &sc.bubble_position_log))];
+        assert_eq!(
+            scene_path_for(&sc, 1920, 1080, 240, &sc.bubble_zones(), None, 5.0),
+            scene_path_for(&sc, 1920, 1080, 240, &one, None, 5.0)
+        );
+        // A picked zone wins over following.
+        sc.bubble_follow = Some(true);
+        sc.bubble_zone = Some(BubbleZone::TopRight);
+        assert_eq!(sc.bubble_zones(), vec![(0.0, BubbleZone::TopRight)]);
     }
 
     // The preview's camera_path command must produce exactly the path the export

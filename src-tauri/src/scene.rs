@@ -87,16 +87,27 @@ pub struct ScenePath {
     pub samples: Vec<[f32; FIELDS]>,
 }
 
+// The bubble moving to another rest spot at `t` (a recording that follows the
+// floating bubble's moves): its default rect and shrink anchor from then on.
+#[derive(Clone, Copy, Debug)]
+pub struct Move {
+    pub t: f64,
+    pub bubble: Rect,
+    pub anchor: (f64, f64),
+}
+
 // Targets for a layout: the first 11 are the sample fields before shrinking, the
-// 12th is how much the zoom shrink applies (1 in bubble layouts, 0 otherwise).
-fn targets(layout: Option<Layout>, g: &Geometry) -> [f64; FIELDS + 1] {
+// 12th is how much the zoom shrink applies (1 in bubble layouts, 0 otherwise),
+// the 13th and 14th the shrink anchor (it glides with the bubble when it moves).
+fn targets(layout: Option<Layout>, g: &Geometry) -> [f64; FIELDS + 3] {
     let (s, b) = (g.screen, g.bubble);
-    let bubble = |alpha: f64| [s.x, s.y, s.w, s.h, 1.0, b.x, b.y, b.w, b.h, g.bubble_radius, alpha, 1.0];
+    let (ax, ay) = g.anchor;
+    let bubble = |alpha: f64| [s.x, s.y, s.w, s.h, 1.0, b.x, b.y, b.w, b.h, g.bubble_radius, alpha, 1.0, ax, ay];
     match layout {
         None => bubble(1.0),
         Some(Layout::NoBubble) => bubble(0.0),
-        Some(Layout::FullScreen) => [0.0, 0.0, 1.0, 1.0, 0.0, b.x, b.y, b.w, b.h, g.bubble_radius, 0.0, 1.0],
-        Some(Layout::FullWebcam) => [s.x, s.y, s.w, s.h, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0],
+        Some(Layout::FullScreen) => [0.0, 0.0, 1.0, 1.0, 0.0, b.x, b.y, b.w, b.h, g.bubble_radius, 0.0, 1.0, ax, ay],
+        Some(Layout::FullWebcam) => [s.x, s.y, s.w, s.h, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, ax, ay],
         Some(Layout::Split) => {
             // The recording keeps its shape (same fraction of width and height),
             // centred in the left share; the card takes the right share, with the
@@ -105,39 +116,69 @@ fn targets(layout: Option<Layout>, g: &Geometry) -> [f64; FIELDS + 1] {
             let sw = SPLIT_SCREEN_W - 1.5 * m;
             let cx = SPLIT_SCREEN_W + 0.5 * m;
             let y = (1.0 - sw) / 2.0;
-            [m, y, sw, sw, 1.0, cx, y, 1.0 - m - cx, sw, SPLIT_CARD_RADIUS, 1.0, 0.0]
+            [m, y, sw, sw, 1.0, cx, y, 1.0 - m - cx, sw, SPLIT_CARD_RADIUS, 1.0, 0.0, ax, ay]
         }
     }
 }
 
-// None when there is nothing to do: no scenes and no shrink. The renderers then
-// take their existing path untouched.
-pub fn path(scenes: &[Scene], camera: Option<&CameraPath>, g: &Geometry, duration: f64) -> Option<ScenePath> {
+// None when there is nothing to do: no scenes, no shrink and no bubble moves. The
+// renderers then take their existing path untouched.
+//
+// `g` holds the bubble's spot at t = 0; each move changes it from its time on. A
+// move retargets every number to the layout in force with the new spot, so in a
+// bubble layout the bubble glides there on the same springs as a scene change,
+// and in any other layout only the layout it returns to changes.
+pub fn path(
+    scenes: &[Scene],
+    moves: &[Move],
+    camera: Option<&CameraPath>,
+    g: &Geometry,
+    duration: f64,
+) -> Option<ScenePath> {
     let mut scenes: Vec<Scene> = scenes.iter().copied().filter(|s| s.end > s.start).collect();
-    if scenes.is_empty() && g.shrink == 1.0 {
+    if scenes.is_empty() && g.shrink == 1.0 && moves.is_empty() {
         return None;
     }
     scenes.sort_by(|a, b| a.start.total_cmp(&b.start));
 
-    let mut events: Vec<(f64, Option<Layout>)> = Vec::new();
+    enum Event {
+        Layout(Option<Layout>),
+        Move(Rect, (f64, f64)),
+    }
+    let mut events: Vec<(f64, Event)> = Vec::new();
     for (i, s) in scenes.iter().enumerate() {
-        events.push((s.start, Some(s.layout)));
+        events.push((s.start, Event::Layout(Some(s.layout))));
         let joined = scenes.get(i + 1).is_some_and(|n| n.start - s.end <= SETTLE_S);
         if !joined {
-            events.push(((s.end - SETTLE_S).max((s.start + s.end) / 2.0), None));
+            events.push(((s.end - SETTLE_S).max((s.start + s.end) / 2.0), Event::Layout(None)));
         }
     }
+    // Each move goes in before the first scene event after it, leaving the scene
+    // events in their own order.
+    for m in moves {
+        let at = events.iter().position(|e| e.0 > m.t).unwrap_or(events.len());
+        events.insert(at, (m.t, Event::Move(m.bubble, m.anchor)));
+    }
 
-    let mut springs = targets(None, g).map(Spring::at_rest);
+    let mut g = *g;
+    let mut layout: Option<Layout> = None;
+    let mut springs = targets(None, &g).map(Spring::at_rest);
     let mut next = 0;
     let count = (duration.max(0.0) / STEP_S).ceil() as usize + 1;
     let mut samples = Vec::with_capacity(count);
     for i in 0..count {
         let t = i as f64 * STEP_S;
         while next < events.len() && events[next].0 <= t {
-            let (te, layout) = events[next];
+            let te = events[next].0;
+            match events[next].1 {
+                Event::Layout(l) => layout = l,
+                Event::Move(bubble, anchor) => {
+                    g.bubble = bubble;
+                    g.anchor = anchor;
+                }
+            }
             next += 1;
-            for (spring, target) in springs.iter_mut().zip(targets(layout, g)) {
+            for (spring, target) in springs.iter_mut().zip(targets(layout, &g)) {
                 spring.retarget(te, target);
             }
         }
@@ -149,7 +190,7 @@ pub fn path(scenes: &[Scene], camera: Option<&CameraPath>, g: &Geometry, duratio
         let mut out = [0f32; FIELDS];
         let fields = [
             v[0], v[1], v[2], v[3], v[4].clamp(0.0, 1.0),
-            v[5] + (v[7] - w) * g.anchor.0, v[6] + (v[8] - h) * g.anchor.1, w, h,
+            v[5] + (v[7] - w) * v[12], v[6] + (v[8] - h) * v[13], w, h,
             v[9].clamp(0.0, 0.5), v[10].clamp(0.0, 1.0),
         ];
         for (o, f) in out.iter_mut().zip(fields) {
@@ -183,14 +224,14 @@ mod tests {
 
     #[test]
     fn nothing_to_do_is_no_path() {
-        assert!(path(&[], None, &geo(1.0), 10.0).is_none());
-        assert!(path(&[], None, &geo(0.7), 10.0).is_some());
+        assert!(path(&[], &[], None, &geo(1.0), 10.0).is_none());
+        assert!(path(&[], &[], None, &geo(0.7), 10.0).is_some());
     }
 
     #[test]
     fn full_webcam_fills_the_picture_and_returns_by_the_end() {
         let g = geo(1.0);
-        let p = path(&[Scene { start: 2.0, end: 6.0, layout: Layout::FullWebcam }], None, &g, 10.0).unwrap();
+        let p = path(&[Scene { start: 2.0, end: 6.0, layout: Layout::FullWebcam }], &[], None, &g, 10.0).unwrap();
         let default = targets(None, &g);
         assert!(close(&at(&p, 1.9), &default[..FIELDS], 1e-6), "default before the scene");
         // About half a second in, the webcam is nearly full picture and square-cornered.
@@ -207,7 +248,7 @@ mod tests {
     fn layouts_reach_their_targets() {
         let g = geo(1.0);
         for layout in [Layout::NoBubble, Layout::Split, Layout::FullScreen] {
-            let p = path(&[Scene { start: 1.0, end: 8.0, layout }], None, &g, 10.0).unwrap();
+            let p = path(&[Scene { start: 1.0, end: 8.0, layout }], &[], None, &g, 10.0).unwrap();
             let want = targets(Some(layout), &g);
             assert!(close(&at(&p, 5.0), &want[..FIELDS], 1e-3), "{layout:?}");
         }
@@ -227,6 +268,7 @@ mod tests {
                 Scene { start: 1.0, end: 4.0, layout: Layout::FullWebcam },
                 Scene { start: 4.0, end: 8.0, layout: Layout::NoBubble },
             ],
+            &[],
             None,
             &g,
             10.0,
@@ -244,7 +286,7 @@ mod tests {
             step: STEP_S,
             samples: (0..601).map(|i| [if (120..360).contains(&i) { 1.6 } else { 1.0 }, 0.5, 0.5]).collect(),
         };
-        let p = path(&[], Some(&cam), &g, 10.0).unwrap();
+        let p = path(&[], &[], Some(&cam), &g, 10.0).unwrap();
         let (wide, zoomed) = (at(&p, 1.0), at(&p, 4.0));
         assert!((wide[7] as f64 - g.bubble.w).abs() < 1e-6);
         assert!((zoomed[7] as f64 - g.bubble.w * 0.7).abs() < 1e-6);
@@ -252,11 +294,57 @@ mod tests {
         assert!(((zoomed[5] + zoomed[7]) - (wide[5] + wide[7])).abs() < 1e-6);
         assert!(((zoomed[6] + zoomed[8]) - (wide[6] + wide[8])).abs() < 1e-6);
         // Above 100% the bubble grows instead, still about its corner.
-        let big = at(&path(&[], Some(&cam), &geo(1.2), 10.0).unwrap(), 4.0);
+        let big = at(&path(&[], &[], Some(&cam), &geo(1.2), 10.0).unwrap(), 4.0);
         assert!((big[7] as f64 - g.bubble.w * 1.2).abs() < 1e-6);
         assert!(((big[5] + big[7]) - (wide[5] + wide[7])).abs() < 1e-6);
         // No shrink while the webcam is full picture.
-        let p = path(&[Scene { start: 3.0, end: 5.5, layout: Layout::FullWebcam }], Some(&cam), &g, 10.0).unwrap();
+        let p = path(&[Scene { start: 3.0, end: 5.5, layout: Layout::FullWebcam }], &[], Some(&cam), &g, 10.0).unwrap();
         assert!(at(&p, 4.0)[7] > 0.99);
+    }
+
+    // The bubble moving from its bottom-right default to the top-left at 2 s.
+    fn to_top_left(g: &Geometry) -> Move {
+        Move { t: 2.0, bubble: Rect { x: 0.08, y: 0.08, ..g.bubble }, anchor: (0.0, 0.0) }
+    }
+
+    #[test]
+    fn a_move_glides_the_bubble_to_its_new_spot() {
+        let g = geo(1.0);
+        let m = to_top_left(&g);
+        let p = path(&[], &[m], None, &g, 6.0).unwrap();
+        let (old, new) = (targets(None, &g), targets(None, &Geometry { bubble: m.bubble, ..g }));
+        assert!(close(&at(&p, 1.9), &old[..FIELDS], 1e-6), "old spot before the move");
+        assert!(close(&at(&p, 4.0), &new[..FIELDS], 1e-3), "settled at the new spot");
+        // In between it travels one way, no overshoot or jump.
+        let xs: Vec<f32> = p.samples.iter().map(|s| s[5]).collect();
+        assert!(xs.windows(2).all(|w| w[1] <= w[0]), "x only decreases");
+        assert!(xs.windows(2).all(|w| w[0] - w[1] < 0.05), "no jump");
+        let mid = at(&p, 2.2)[5] as f64;
+        assert!(mid < g.bubble.x - 0.1 && mid > m.bubble.x + 0.1, "{mid}");
+    }
+
+    #[test]
+    fn a_move_with_a_zoom_shrink_keeps_the_new_corner() {
+        let g = geo(0.7);
+        let cam = CameraPath { step: STEP_S, samples: vec![[1.6, 0.5, 0.5]; 601] };
+        let p = path(&[], &[to_top_left(&g)], Some(&cam), &g, 10.0).unwrap();
+        // Shrunk about its new top-left corner once settled.
+        let s = at(&p, 5.0);
+        assert!((s[5] as f64 - 0.08).abs() < 1e-3 && (s[6] as f64 - 0.08).abs() < 1e-3, "{s:?}");
+        assert!((s[7] as f64 - g.bubble.w * 0.7).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_move_under_full_webcam_returns_to_the_new_spot() {
+        let g = geo(1.0);
+        let m = to_top_left(&g);
+        let full = Scene { start: 1.0, end: 5.0, layout: Layout::FullWebcam };
+        let p = path(&[full], &[m], None, &g, 8.0).unwrap();
+        let without = path(&[full], &[], None, &g, 8.0).unwrap();
+        // The full-webcam picture is untouched by the move...
+        assert!(close(&at(&p, 3.0), &at(&without, 3.0).map(f64::from), 1e-6));
+        // ...and the layout comes back to the new spot, not the old one.
+        let new = targets(None, &Geometry { bubble: m.bubble, ..g });
+        assert!(close(&at(&p, 7.0), &new[..FIELDS], 1e-3), "{:?}", at(&p, 7.0));
     }
 }

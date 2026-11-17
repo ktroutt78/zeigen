@@ -347,20 +347,6 @@ function zoneVAlign(z: BubbleZone): "top" | "center" | "bottom" {
   return "center"; // center_left, center, center_right
 }
 
-// Mirror of composite.rs resolve_zone's migration path: nearest of the FOUR
-// corners to the position-log centroid; empty log -> bottom_right default.
-// Keep this rule in sync with the Rust side — export re-derives it whenever
-// bubble_zone is absent, so the preview and the exported file must agree.
-function nearestCornerZone(log: BubblePositionEntry[]): BubbleZone {
-  if (log.length === 0) return "bottom_right";
-  const n = log.length;
-  const cx = log.reduce((s, e) => s + e.x, 0) / n;
-  const cy = log.reduce((s, e) => s + e.y, 0) / n;
-  const right = cx >= 0.5;
-  const bottom = cy >= 0.5;
-  return bottom ? (right ? "bottom_right" : "bottom_left") : right ? "top_right" : "top_left";
-}
-
 type SidecarState = {
   trim?: Trim | null;
   bubble_position_log?: BubblePositionEntry[];
@@ -422,6 +408,9 @@ type SidecarState = {
   // The S / M / L the bubble was recorded at, written at finalize.
   // null/undefined = medium. Metadata like name.
   bubble_size?: BubbleSize | null;
+  // Replay the bubble's moves during the recording while no bubble_zone is
+  // picked. Stamped true at finalize for new recordings; absent on older ones.
+  bubble_follow?: boolean | null;
 };
 
 // Mirror of Rust FrameStyle. Every knob is the no-op at 0. padding is the
@@ -800,6 +789,7 @@ function sidecarWritePayload(s: SidecarState, duration: number): SidecarState {
     webcam_lead_ms: s.webcam_lead_ms ?? undefined,
     name: s.name ?? undefined,
     bubble_size: s.bubble_size ?? undefined,
+    bubble_follow: s.bubble_follow ?? undefined,
   };
 }
 
@@ -885,6 +875,8 @@ export default function Review() {
   // dirties the sidecar; untouched recordings keep bubble_zone absent and the
   // export re-derives the same default.
   const [bubbleZone, setBubbleZone] = useState<BubbleZone | null>(null);
+  // Replay the bubble's moves while no zone is picked (bubble_follow).
+  const [bubbleFollow, setBubbleFollow] = useState(false);
   // Bubble "Size": multiplier on the recorded diameter (1 = as recorded).
   const [bubbleScale, setBubbleScale] = useState(1);
   // Original-timeline timestamp for the user's chosen poster frame. null =
@@ -1542,6 +1534,7 @@ export default function Review() {
           if (state.thumbnail_time != null) setThumbnailTime(state.thumbnail_time);
           if (state.bubble_roundness != null) setBubbleRoundness(state.bubble_roundness);
           if (state.bubble_zone != null) setBubbleZone(state.bubble_zone);
+          if (state.bubble_follow) setBubbleFollow(true);
           if (state.bubble_scale != null) setBubbleScale(state.bubble_scale);
           if (state.zoom && state.zoom.length > 0) {
             setZoomSegments(zoomKeyframesToSegments(state.zoom));
@@ -1695,8 +1688,9 @@ export default function Review() {
       webcam_lead_ms: webcamLeadMs,
       name: recordingName,
       bubble_size: recordedBubbleSize,
+      bubble_follow: bubbleFollow ? true : null,
     }),
-    [trim, bubblePositionLog, thumbnailTime, bubbleRoundness, bubbleZone, bubbleScale, zoomSegments, redactions, frame, background, sourceKind, cursorStyle, scenes, bubbleZoomScale, webcamLeadMs, recordingName, recordedBubbleSize],
+    [trim, bubblePositionLog, thumbnailTime, bubbleRoundness, bubbleZone, bubbleScale, zoomSegments, redactions, frame, background, sourceKind, cursorStyle, scenes, bubbleZoomScale, webcamLeadMs, recordingName, recordedBubbleSize, bubbleFollow],
   );
 
 
@@ -1769,14 +1763,31 @@ export default function Review() {
     }
   }, [pickBackground]);
 
-  // V2 Step 2: the zone actually used for the parked preview + picker
-  // highlight. An explicit pick wins; otherwise the migration default
-  // (nearest corner to the log centroid) — the same rule composite::resolve_zone
-  // applies at export when bubble_zone is absent.
-  const effectiveZone: BubbleZone = useMemo(
-    () => bubbleZone ?? nearestCornerZone(bubblePositionLog),
-    [bubbleZone, bubblePositionLog],
-  );
+  // The zone the preview parks a fixed bubble in (used only when there is no
+  // layout path) and the picker highlights: an explicit pick, else the first
+  // zone of the export's own zone timeline (composite::resolve_zones), asked of
+  // Rust so the rule is defined once.
+  const [startZone, setStartZone] = useState<BubbleZone>("bottom_right");
+  useEffect(() => {
+    let cancelled = false;
+    invoke<BubbleZone>("bubble_start_zone", {
+      sidecar: { bubble_position_log: bubblePositionLog, bubble_zone: bubbleZone ?? undefined, bubble_follow: bubbleFollow || undefined },
+    })
+      .then((z) => {
+        if (!cancelled) setStartZone(z);
+      })
+      .catch((e) => setError(`bubble zone: ${e}`));
+    return () => {
+      cancelled = true;
+    };
+  }, [bubblePositionLog, bubbleZone, bubbleFollow]);
+  const effectiveZone: BubbleZone = bubbleZone ?? startZone;
+  // Following the recording's moves: the picker shows Follow recording active.
+  const following = bubbleFollow && bubbleZone == null;
+  const followRecording = useCallback(() => {
+    setBubbleFollow(true);
+    setBubbleZone(null);
+  }, []);
   // Only offer the picker for webcam recordings — a zone is meaningless with
   // no bubble.
   const hasBubble = bubblePositionLog.length > 0;
@@ -2702,6 +2713,8 @@ export default function Review() {
           thumbnail={thumbnailControls}
           bubbleZone={effectiveZone}
           onBubbleZone={setBubbleZone}
+          following={following}
+          onFollow={followRecording}
           bubbleScale={bubbleScale}
           onBubbleScale={setBubbleScale}
           recordedBubbleSize={recordedBubbleSize ?? "medium"}
@@ -4959,12 +4972,13 @@ function ToolTile({
 // V2 Step 2 zone picker: a 2x3 grid (4 corners + top/bottom mid-edges). Each
 // cell is a mini 16:9 frame with a dot at that zone; the export bakes the
 // bubble there and the preview parks it there. `value` is the effective zone
-// (explicit pick or migration default), so the grid always shows a selection.
+// (explicit pick or migration default), or null while following the
+// recording's moves, when no spot is selected.
 function ZonePicker({
   value,
   onChange,
 }: {
-  value: BubbleZone;
+  value: BubbleZone | null;
   onChange: (z: BubbleZone) => void;
 }) {
   return (
@@ -5079,6 +5093,8 @@ function ExportPanel({
   thumbnail,
   bubbleZone,
   onBubbleZone,
+  following,
+  onFollow,
   bubbleScale,
   onBubbleScale,
   recordedBubbleSize,
@@ -5122,6 +5138,10 @@ function ExportPanel({
   // bubble at all (the section is hidden otherwise).
   bubbleZone: BubbleZone;
   onBubbleZone: (z: BubbleZone) => void;
+  // Replaying the bubble's moves during the recording (no fixed spot), and the
+  // choice that turns it on.
+  following: boolean;
+  onFollow: () => void;
   bubbleScale: number;
   onBubbleScale: (s: number) => void;
   // The S / M / L the bubble was recorded at; Size picks are relative to it.
@@ -5485,9 +5505,21 @@ function ExportPanel({
                     />
                   </Field>
                   <Field label="Position">
-                    <ZonePicker value={bubbleZone} onChange={onBubbleZone} />
+                    <div className="segmented full" style={{ marginBottom: 6 }}>
+                      <button className={following ? "on" : ""} onClick={onFollow}>
+                        Follow recording
+                      </button>
+                      <button className={following ? "" : "on"} onClick={() => following && onBubbleZone(bubbleZone)}>
+                        Fixed spot
+                      </button>
+                    </div>
+                    <ZonePicker value={following ? null : bubbleZone} onChange={onBubbleZone} />
                   </Field>
-                  <div style={HINT}>Size and position are baked on export.</div>
+                  <div style={HINT}>
+                    {following
+                      ? "The bubble moves where you moved it while recording."
+                      : "Size and position are baked on export."}
+                  </div>
                 </>
               ) : (
                 <div style={HINT}>No webcam bubble in this recording.</div>
