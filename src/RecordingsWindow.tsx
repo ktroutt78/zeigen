@@ -186,8 +186,13 @@ export default function RecordingsWindow() {
     [load],
   );
 
+  // The last exported file when it is still there (the list checks), else
+  // the recording's folder.
   const onReveal = useCallback((r: LibraryRecording) => {
-    revealItemInDir(folderOf(r)).catch((e) => setError(`show in Finder: ${e}`));
+    const folder = () => revealItemInDir(folderOf(r));
+    (r.exported_path ? revealItemInDir(r.exported_path).catch(folder) : folder()).catch((e) =>
+      setError(`show in Finder: ${e}`),
+    );
   }, []);
 
   const all = lib?.recordings ?? [];
