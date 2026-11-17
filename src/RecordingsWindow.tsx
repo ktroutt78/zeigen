@@ -1,9 +1,11 @@
 // The Recordings window: kept recordings from ~/Movies/Zeigen/.recordings,
 // newest first. Open hands the recording to the main window, which owns the
 // Review windows (open-recording event, handled in App.tsx).
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { ask, message } from "@tauri-apps/plugin-dialog";
 
 export type LibraryRecording = {
   stamp: string;
@@ -49,20 +51,43 @@ export default function RecordingsWindow() {
   const [error, setError] = useState<string | null>(null);
   const [recording, setRecording] = useState(false);
 
-  // Reload on open and whenever the window regains focus (a Discard in
-  // Review may have removed one).
-  useEffect(() => {
-    const load = () =>
+  const load = useCallback(
+    () =>
       invoke<LibraryRecording[]>("list_recordings")
         .then((r) => {
           setItems(r);
           setError(null);
         })
-        .catch((e) => setError(String(e)));
+        .catch((e) => setError(String(e))),
+    [],
+  );
+
+  // Reload on open and whenever the window regains focus (a Discard in
+  // Review may have removed one, a new recording may have been added).
+  useEffect(() => {
     load();
     window.addEventListener("focus", load);
     return () => window.removeEventListener("focus", load);
-  }, []);
+  }, [load]);
+
+  const onDelete = useCallback(
+    async (r: LibraryRecording) => {
+      if (await WebviewWindow.getByLabel(`review-${r.stamp}`)) {
+        await message("This recording is open in Review. Close it first.", { title: "Recordings" });
+        return;
+      }
+      const ok = await ask(
+        `Delete the recording from ${stampDate(r.stamp)}? Files you exported from it stay.`,
+        { title: "Delete recording?", kind: "warning", okLabel: "Delete", cancelLabel: "Cancel" },
+      );
+      if (!ok) return;
+      await invoke("discard_recording", { scratchMp4Path: r.scratch_mp4_path }).catch((e) =>
+        setError(String(e)),
+      );
+      load();
+    },
+    [load],
+  );
 
   // Open is unavailable while a recording runs, like the tray's controls.
   useEffect(() => {
@@ -95,7 +120,7 @@ export default function RecordingsWindow() {
       )}
       {items && items.length === 0 && (
         <div className="faint" style={{ fontSize: "var(--text-body)", padding: "8px 2px" }}>
-          No kept recordings yet.
+          No recordings yet. Recordings are kept here for 30 days.
         </div>
       )}
       {items && items.length > 0 && (
@@ -148,6 +173,13 @@ export default function RecordingsWindow() {
                 }}
               >
                 Open
+              </button>
+              <button
+                className="btn-ghost"
+                onClick={() => onDelete(r)}
+                style={{ fontSize: "var(--text-small)", color: "var(--fg-secondary)" }}
+              >
+                Delete
               </button>
             </div>
           ))}

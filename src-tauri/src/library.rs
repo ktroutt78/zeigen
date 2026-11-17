@@ -3,7 +3,7 @@
 // can reopen one with the exact arguments recording_finalize would give it.
 //
 // Two folder shapes:
-//   with webcam:  sources/screen.mp4 + sources/webcam.mp4 (+ segments, cursor)
+//   with webcam:  sources/screen.mp4 + sources/webcam.mp4 (+ cursor log)
 //   screen only:  recording-<stamp>.mp4 (the screen capture itself)
 // Both keep the edit-state sidecar .recording-<stamp>.annotations.json in the
 // folder root. <folder>/recording-<stamp>.mp4 is the logical key the sidecar
@@ -84,6 +84,44 @@ fn read_folder(dir: &Path) -> Option<LibraryRecording> {
     })
 }
 
+// Recordings are kept this long after they were made, then removed at launch
+// (Keith, 2026-11-16). Age is the recording time in the folder's name, not the
+// folder's modification time, which every reopen and edit would refresh.
+const KEEP_DAYS: i64 = 30;
+
+pub(crate) fn sweep_expired(root: &Path, now: chrono::NaiveDateTime) {
+    let Ok(entries) = std::fs::read_dir(root) else { return };
+    for dir in entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
+        let made = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_prefix("recording-"))
+            .and_then(|s| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d-%H%M%S").ok());
+        if made.is_some_and(|m| now - m > chrono::Duration::days(KEEP_DAYS)) {
+            eprintln!("[library] removing {} (older than {KEEP_DAYS} days)", dir.display());
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+}
+
+// Review is done with a recording but it stays in the library: drop what is
+// rebuilt on the next open (the preview's audio-processed copy of the screen
+// file, as large as the screen file itself) and the export temp files.
+#[tauri::command]
+pub fn release_recording(scratch_mp4_path: String) -> Result<(), String> {
+    let dir = PathBuf::from(&scratch_mp4_path)
+        .parent()
+        .ok_or("recording path has no parent")?
+        .to_path_buf();
+    for preview in [dir.join("preview-screen.mp4"), dir.join("sources/preview-screen.mp4")] {
+        let _ = std::fs::remove_file(preview);
+    }
+    if let Some(stamp) = dir.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_prefix("recording-")) {
+        let _ = crate::exports::cleanup_recording_exports_internal(stamp);
+    }
+    Ok(())
+}
+
 fn dir_size(dir: &Path) -> u64 {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
@@ -161,6 +199,24 @@ mod tests {
         let sidecar_len = std::fs::metadata(a.join(".recording-2026-01-01-100000.annotations.json")).unwrap().len();
         assert_eq!(older.size_bytes, 6 + 3 + sidecar_len);
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sweep_removes_only_recordings_older_than_thirty_days() {
+        let root = std::env::temp_dir().join(format!("zeigen-sweep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let old = root.join("recording-2026-01-01-100000");
+        let fresh = root.join("recording-2026-01-20-100000");
+        let other = root.join(".prewarm");
+        for d in [&old, &fresh, &other] {
+            write(&d.join("x"), "x");
+        }
+        let now = chrono::NaiveDateTime::parse_from_str("2026-02-01-100001", "%Y-%m-%d-%H%M%S").unwrap();
+        sweep_expired(&root, now);
+        assert!(!old.exists(), "31 days old: removed");
+        assert!(fresh.exists(), "12 days old: kept");
+        assert!(other.exists(), "not a recording folder: never touched");
         let _ = std::fs::remove_dir_all(&root);
     }
 

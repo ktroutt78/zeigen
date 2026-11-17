@@ -23,6 +23,7 @@
     "core:window:allow-start-dragging",
     "global-shortcut:default",
     "dialog:allow-ask",
+    "dialog:allow-message",
     "dialog:allow-open"
   ]
 }

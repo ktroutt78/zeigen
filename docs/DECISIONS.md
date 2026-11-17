@@ -4,6 +4,23 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-16 — Past recordings step 1 verified; step 2 built
+
+Keith checked step 1: all five pass. Two asks from the check, both done: a second Open on a recording that is already open brings its Review window to the front (it did nothing visible before), and Discard on a reopened recording asks for confirmation first.
+
+Step 2, as approved:
+
+- **New recordings are made in the library** (`~/Movies/Zeigen/.recordings/`) and stay there. Closing Review and Record another no longer delete anything. Only Discard, the list's Delete button, or the 30-day clean-up remove a recording.
+- **30 days** is counted from when the recording was made (the time in its folder name), checked each time Zeigen starts. Not from when it was last opened: every reopen would otherwise extend it.
+- **Record another keeps the recording even if it was never saved.** Before, it deleted it. My call as the safer reading of "keep"; Keith to say if he wants the old behaviour.
+- **Delete** in the list asks first, and refuses while that recording is open in Review.
+- **Less disk per recording:** the webcam is written straight to one file (the per-pause pieces and the joining step are gone now that one recorder runs through pauses), and the preview's processed copy of the screen file is removed when Review closes; it is rebuilt on each open anyway. Together that was about half of each folder.
+- `.scratch` is no longer used for recordings; what is in it is still swept after 24 hours.
+
+Not checked by me: anything in the app's windows. Rust tests cover the 30-day rule and the folder scan.
+
+---
+
 ## 2026-11-16 — Past recordings: plan approved
 
 Keith approved "Open past recordings in Review" with these calls:

@@ -908,12 +908,7 @@ async function openReview(
 // The Recordings window (kept recordings). One instance: focus it if open.
 const RECORDINGS_LABEL = "recordings";
 async function openRecordingsWindow(): Promise<void> {
-  const existing = await WebviewWindow.getByLabel(RECORDINGS_LABEL);
-  if (existing) {
-    await existing.unminimize().catch(() => {});
-    await existing.setFocus().catch(() => {});
-    return;
-  }
+  if (await invoke<boolean>("focus_window", { label: RECORDINGS_LABEL })) return;
   new WebviewWindow(RECORDINGS_LABEL, {
     url: "/#recordings",
     title: "Recordings",
@@ -983,7 +978,6 @@ type FinalizedRecording = {
   webcam_path: string | null;
   webcam_lead_ms: number;
   sources_dir: string | null;
-  webcam_segments: string[];
 };
 
 type EngineEvent =
@@ -1937,11 +1931,10 @@ function App() {
         if (ctrlRef.current.state !== "idle") return;
         const rec = e.payload;
         const label = `review-${rec.stamp}`;
-        const existing = await WebviewWindow.getByLabel(label);
-        if (existing || libraryOpen.has(label)) {
-          await existing?.setFocus().catch(() => {});
-          return;
-        }
+        // Already open (reopened earlier, or still open from its recording):
+        // bring that window to the front.
+        if (await invoke<boolean>("focus_window", { label })) return;
+        if (libraryOpen.has(label)) return;
         libraryOpen.add(label);
         incReview();
         await openReview(

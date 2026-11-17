@@ -1934,16 +1934,15 @@ export default function Review() {
     }
   }, [sourcePath]);
 
-  // Close and Record another: a kept (library) recording stays on disk and
-  // only its exports temp dir goes; a fresh recording is discarded as before.
+  // Close and Record another: the recording stays in the library (it can be
+  // reopened from the Recordings window for 30 days); only what the next open
+  // rebuilds goes. Deleting it is Discard's job alone.
   const releaseRecording = useCallback(async () => {
-    if (!kept) return cleanupScratchAndExports();
-    const stamp = sourcePath ? parseStampFromPath(sourcePath) : null;
-    if (!stamp) return;
-    await invoke("cleanup_recording_exports", { stamp }).catch((err) =>
-      console.error("cleanup failed:", err),
+    if (!sourcePath) return;
+    await invoke("release_recording", { scratchMp4Path: sourcePath }).catch((err) =>
+      console.error("release failed:", err),
     );
-  }, [kept, sourcePath, cleanupScratchAndExports]);
+  }, [sourcePath]);
 
   // Mirror lastSavedPath into a ref so the long-lived close-requested
   // handler can read the current value without re-registering on each save.
@@ -2008,7 +2007,18 @@ export default function Review() {
   // confirm modal. The user explicitly chose discard; they meant it.
   // Disabled in the sidebar post-save so users can't accidentally delete
   // the scratch out from under future saves in the same session.
+  // A reopened recording asks first: it was kept on purpose, and this deletes
+  // it for good (Keith, 2026-11-16).
   const onDiscard = useCallback(async () => {
+    if (kept) {
+      const ok = await ask("This deletes the recording for good. It cannot be reopened afterwards.", {
+        title: "Delete this recording?",
+        kind: "warning",
+        okLabel: "Delete",
+        cancelLabel: "Cancel",
+      });
+      if (!ok) return;
+    }
     setDiscarding(true);
     try {
       await cleanupScratchAndExports();
@@ -2016,7 +2026,7 @@ export default function Review() {
     } finally {
       setDiscarding(false);
     }
-  }, [cleanupScratchAndExports, closeWindow]);
+  }, [kept, cleanupScratchAndExports, closeWindow]);
 
   // Reveal — only shown post-save. Points at the most recent save in any
   // format (per D-13 — chronological, not format-prioritized).

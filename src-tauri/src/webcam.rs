@@ -37,57 +37,36 @@ pub fn spawn_recorder(camera_name: &str, out: &Path) -> Result<Child, String> {
         .map_err(|e| format!("failed to spawn webcam-recorder: {e}"))
 }
 
-pub struct WebcamSegmenter {
-    camera_name: String,
+// One recording's webcam: a single helper process writing sources/webcam.mp4
+// from Record to Stop (pauses are cut inside the helper, see pause/resume).
+pub struct WebcamRecorder {
     sources_dir: PathBuf,
-    segments: Vec<PathBuf>,
     current: Option<Child>,
     // Host-clock seconds of the file's frame 0, from the helper's first_frame line.
     first_host_s: Arc<Mutex<Option<f64>>>,
 }
 
-impl WebcamSegmenter {
-    pub fn new(camera_name: String, sources_dir: PathBuf) -> Self {
-        Self {
-            camera_name,
-            sources_dir,
-            segments: Vec::new(),
-            current: None,
-            first_host_s: Arc::new(Mutex::new(None)),
-        }
-    }
-
-    pub fn start_segment(&mut self) -> Result<(), String> {
-        if self.current.is_some() {
-            return Err("webcam segment already running".into());
-        }
-        let segment_index = self.segments.len();
-        let segment_path = self
-            .sources_dir
-            .join(format!("webcam-{segment_index:02}.mp4"));
-
-        let mut child = spawn_recorder(&self.camera_name, &segment_path)?;
+impl WebcamRecorder {
+    pub fn start(camera_name: &str, sources_dir: PathBuf) -> Result<Self, String> {
+        let mut child = spawn_recorder(camera_name, &sources_dir.join("webcam.mp4"))?;
         let stdout = child.stdout.take().ok_or("webcam-recorder: no stdout")?;
-        let first_host_s = (segment_index == 0).then(|| self.first_host_s.clone());
+        let first_host_s = Arc::new(Mutex::new(None));
+        let slot = first_host_s.clone();
         std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
                 if v.get("event").and_then(|e| e.as_str()) == Some("first_frame") {
-                    if let (Some(slot), Some(h)) = (&first_host_s, v.get("host_s").and_then(|h| h.as_f64())) {
-                        if let Ok(mut g) = slot.lock() {
-                            *g = Some(h);
-                        }
+                    if let (Some(h), Ok(mut g)) = (v.get("host_s").and_then(|h| h.as_f64()), slot.lock()) {
+                        *g = Some(h);
                     }
                 }
             }
         });
-
-        self.current = Some(child);
-        self.segments.push(segment_path);
-        Ok(())
+        Ok(Self { sources_dir, current: Some(child), first_host_s })
     }
 
-    pub fn stop_segment(&mut self) -> Result<(), String> {
+    // Finishes the file. A second call is a no-op.
+    pub fn stop(&mut self) -> Result<(), String> {
         let Some(mut child) = self.current.take() else { return Ok(()) };
         if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(b"q\n");
@@ -122,16 +101,12 @@ impl WebcamSegmenter {
         self.first_host_s.lock().ok().and_then(|g| *g)
     }
 
-    pub fn segments(&self) -> &[PathBuf] {
-        &self.segments
-    }
-
     pub fn sources_dir(&self) -> &Path {
         &self.sources_dir
     }
 }
 
-impl Drop for WebcamSegmenter {
+impl Drop for WebcamRecorder {
     fn drop(&mut self) {
         if let Some(mut child) = self.current.take() {
             let _ = child.kill();

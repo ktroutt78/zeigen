@@ -25,11 +25,11 @@ use std::time::Instant;
 use chrono::Local;
 use tauri::{AppHandle, Listener, Manager, State};
 
-use composite::{Corner, WebcamSize, FFMPEG_PATH};
+use composite::{Corner, WebcamSize};
 use devices::DeviceList;
 use edit::BubblePositionEntry;
 use engine::{EngineClient, EngineCommand};
-use webcam::WebcamSegmenter;
+use webcam::WebcamRecorder;
 
 type EngineState<'a> = State<'a, Mutex<EngineClient>>;
 type RecordingState<'a> = State<'a, Mutex<Option<ActiveRecording>>>;
@@ -38,7 +38,7 @@ struct ActiveRecording {
     stamp: String,
     scratch_dir: PathBuf,
     scratch_mp4_path: PathBuf,
-    webcam: Option<WebcamSegmenter>,
+    webcam: Option<WebcamRecorder>,
     // Phase 15 c3: webcam_size/corner aren't read by finalize anymore
     // (composite moved to export). Kept on the struct so engine_start
     // keeps parsing the API contract unchanged — a future settings UI
@@ -173,9 +173,8 @@ fn engine_start(
         let sources_dir = scratch_dir.join("sources");
         std::fs::create_dir_all(&sources_dir)
             .map_err(|e| format!("create {}: {}", sources_dir.display(), e))?;
-        let mut segmenter = WebcamSegmenter::new(name, sources_dir.clone());
-        segmenter.start_segment()?;
-        (sources_dir.join("screen.mp4"), Some(segmenter))
+        let recorder = WebcamRecorder::start(&name, sources_dir.clone())?;
+        (sources_dir.join("screen.mp4"), Some(recorder))
     } else {
         (scratch_mp4_path.clone(), None)
     };
@@ -308,7 +307,7 @@ fn engine_stop(
         .send(&EngineCommand::Stop)?;
     if let Some(rec) = recording.lock().map_err(|e| e.to_string())?.as_mut() {
         if let Some(webcam) = rec.webcam.as_mut() {
-            webcam.stop_segment()?;
+            webcam.stop()?;
         }
     }
     Ok(())
@@ -325,7 +324,7 @@ fn recording_reset(
         .send(&EngineCommand::Stop);
     if let Some(mut rec) = recording.lock().map_err(|e| e.to_string())?.take() {
         if let Some(webcam) = rec.webcam.as_mut() {
-            let _ = webcam.stop_segment();
+            let _ = webcam.stop();
         }
     }
     Ok(())
@@ -340,7 +339,7 @@ fn recording_reset(
 fn recording_cleanup_local(recording: RecordingState<'_>) -> Result<(), String> {
     if let Some(mut rec) = recording.lock().map_err(|e| e.to_string())?.take() {
         if let Some(webcam) = rec.webcam.as_mut() {
-            let _ = webcam.stop_segment();
+            let _ = webcam.stop();
         }
     }
     Ok(())
@@ -439,17 +438,16 @@ fn recording_finalize(
     // None when either side did not report its host time; the constant stands in.
     let mut measured_lead_ms: Option<f64> = None;
 
-    let (sources_dir, segments) = if let Some(mut webcam) = webcam_opt {
+    let sources_dir = if let Some(mut webcam) = webcam_opt {
         // Idempotently finalize the live webcam segment before reading it.
         // On a normal stop, engine_stop already stopped it (take() -> None,
         // no-op). On the MIC_SESSION_FAILED salvage path the engine never
         // received Stop, so this is where the partial last segment's mp4 is
         // finalized — making recording_finalize self-sufficient either way.
-        let _ = webcam.stop_segment();
+        let _ = webcam.stop();
         if let (Some(w), Some(s)) = (webcam.first_host_s(), screen_host_s) {
             measured_lead_ms = Some((w - s) * 1000.0);
         }
-        let segments = webcam.segments().to_vec();
         let sources_dir = webcam.sources_dir().to_path_buf();
         let screen_path = sources_dir.join("screen.mp4");
 
@@ -464,50 +462,10 @@ fn recording_finalize(
         // dead review window — the friendly "saved up to that point"
         // banner is a lie. Bail BEFORE concat so we don't leave an orphan
         // webcam.mp4 in scratch; webcam recorder child is reaped via
-        // WebcamSegmenter::Drop when `rec` goes out of scope on Err
+        // WebcamRecorder::Drop when `rec` goes out of scope on Err
         // return, scratch dir collected by the 24h launch sweeper.
         if !screen_path.is_file() {
             return Err("RECORDING_FAILED_BEFORE_START".into());
-        }
-
-        // Concat the segments into a single playable webcam.mp4 alongside
-        // them. Stream-copy via ffmpeg's concat demuxer — sub-second even
-        // for long recordings and a no-op transcode for the N=1 case.
-        // Phase 15 c3's dual-stream player consumes this; composite still
-        // consumes the per-segment array below, so the concat output is
-        // additive (no behavior change for the existing finalize path).
-        let webcam_concat_path = sources_dir.join("webcam.mp4");
-        {
-            let list_path = sources_dir.join("webcam-segments.txt");
-            let list_body: String = segments
-                .iter()
-                .map(|p| format!("file '{}'\n", p.to_string_lossy().replace('\'', "'\\''")))
-                .collect();
-            std::fs::write(&list_path, list_body)
-                .map_err(|e| format!("write webcam concat list: {e}"))?;
-            let out = std::process::Command::new(FFMPEG_PATH)
-                .args([
-                    "-y",
-                    "-hide_banner",
-                    "-nostats",
-                    "-f", "concat",
-                    "-safe", "0",
-                    "-i", &list_path.to_string_lossy(),
-                    "-c", "copy",
-                    &webcam_concat_path.to_string_lossy(),
-                ])
-                .output()
-                .map_err(|e| format!("spawn webcam concat ffmpeg: {e}"))?;
-            let _ = std::fs::remove_file(&list_path);
-            if !out.status.success() {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                let tail: Vec<&str> = stderr.lines().rev().take(20).collect();
-                let tail_text = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
-                return Err(format!(
-                    "webcam concat failed (exit {:?}):\n{tail_text}",
-                    out.status.code(),
-                ));
-            }
         }
 
         // Phase 15 c3: finalize composite removed. The screen + concat'd
@@ -521,7 +479,7 @@ fn recording_finalize(
         if webcam_path.is_file() {
             webcam_for_dual = Some(webcam_path);
         }
-        (Some(sources_dir), segments)
+        Some(sources_dir)
     } else {
         // Screen-only: no sources/ dir. The "screen path" is
         // scratch_mp4_path itself (engine wrote screen capture directly
@@ -534,7 +492,7 @@ fn recording_finalize(
         if !scratch_mp4_path.is_file() {
             return Err("RECORDING_FAILED_BEFORE_START".into());
         }
-        (None, Vec::new())
+        None
     };
 
     // Phase 15 #4 fix: shift bubble_position_log entries by the SCK
@@ -600,10 +558,6 @@ fn recording_finalize(
         webcam_path: webcam_for_dual.map(|p| p.to_string_lossy().into_owned()),
         webcam_lead_ms: measured_lead_ms.unwrap_or(composite::WEBCAM_LEAD_MS),
         sources_dir: sources_dir.map(|p| p.to_string_lossy().into_owned()),
-        webcam_segments: segments
-            .into_iter()
-            .map(|p| p.to_string_lossy().into_owned())
-            .collect(),
     })
 }
 
@@ -617,7 +571,6 @@ struct FinalizedRecording {
     webcam_path: Option<String>,
     webcam_lead_ms: f64,
     sources_dir: Option<String>,
-    webcam_segments: Vec<String>,
 }
 
 fn movies_dir() -> Result<PathBuf, String> {
@@ -640,12 +593,14 @@ fn sweep_stale_scratch() {
     thumbs::sweep_dir_older_than(&root, std::time::Duration::from_secs(24 * 60 * 60), "scratch-sweep");
 }
 
-// Scratch root: ~/Movies/Zeigen/.scratch. Each recording gets its own
-// subdirectory containing the composited mp4, sidecar, and raw source
-// files. Discard removes the whole subdirectory; commit moves the mp4 out
-// and removes the subdirectory.
+// Where a recording is made and kept: ~/Movies/Zeigen/.recordings (the
+// library, see library.rs). Each recording gets its own subdirectory with the
+// raw source files, the cursor log and the edit-state sidecar; it stays there
+// after Review closes so it can be reopened, until Discard/Delete or the
+// 30-day clean-up. ("scratch" in names here is from when the folder was
+// temporary and lived in .scratch.)
 fn scratch_root_dir() -> Result<PathBuf, String> {
-    let dir = movies_dir()?.join(".scratch");
+    let dir = library::recordings_root()?;
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("create {}: {}", dir.display(), e))?;
     Ok(dir)
@@ -659,7 +614,8 @@ fn validate_scratch_path(p: &std::path::Path) -> Result<(), String> {
     let canon = p
         .canonicalize()
         .map_err(|e| format!("canonicalize {}: {e}", p.display()))?;
-    let roots = [scratch_root_dir()?, library::recordings_root()?];
+    // .scratch: recordings made before the library existed.
+    let roots = [movies_dir()?.join(".scratch"), library::recordings_root()?];
     let inside = roots.iter().filter_map(|r| r.canonicalize().ok()).any(|root| {
         canon != root && canon.starts_with(&root)
     });
@@ -698,6 +654,16 @@ fn discard_recording(scratch_mp4_path: String) -> Result<(), String> {
         let _ = exports::cleanup_recording_exports_internal(&s);
     }
     Ok(())
+}
+
+// Brings a window to the front. False when no window has that label.
+#[tauri::command]
+fn focus_window(app: AppHandle, label: String) -> bool {
+    let Some(w) = app.get_webview_window(&label) else { return false };
+    let _ = w.unminimize();
+    let _ = w.show();
+    let _ = w.set_focus();
+    true
 }
 
 fn stamp_from_scratch_dir_name(dir: &std::path::Path) -> Option<String> {
@@ -784,6 +750,7 @@ pub fn run() {
             exports::sweep_stale_exports();
             thumbs::sweep_stale_thumbs();
             sweep_stale_scratch();
+            library::sweep_expired(&library::recordings_root().unwrap_or_default(), chrono::Local::now().naive_local());
 
             // Tap engine-event window_frame messages into the active
             // recording's CaptureMode so bubble_position_event can convert
@@ -852,6 +819,8 @@ pub fn run() {
             wallpapers::wallpaper_thumb,
             discard_recording,
             library::list_recordings,
+            library::release_recording,
+            focus_window,
             clipboard::clipboard_copy_recording,
             exports::cleanup_recording_exports,
             settings::get_settings,
