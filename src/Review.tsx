@@ -6133,15 +6133,9 @@ function ExportPanel({
       {/* Export: follows the settings, never scrolls away. */}
       <div style={{ flex: "none", padding: "0 16px 16px 10px" }}>
         <h2 style={PANEL_HEADING}>Export</h2>
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "72px minmax(0, 1fr)",
-            gap: "10px 12px",
-            alignItems: "center",
-          }}
-        >
-          <span style={EXPORT_LABEL}>Format</span>
+        {/* Each label sits above a full-width control, so every control shares
+            the Save row's edges. */}
+        <Field label="Format">
           <div className="segmented full">
             {(["mp4", "gif"] as const).map((f) => (
               <button
@@ -6155,57 +6149,43 @@ function ExportPanel({
               </button>
             ))}
           </div>
-          <span style={EXPORT_LABEL}>Resolution</span>
-          {format === "mp4" ? (
+        </Field>
+        <Field label="Resolution">
+          <div className="segmented full">
+            {(format === "mp4" ? mp4ResOptions : gifResOptions).map((r) => (
+              <button
+                key={r}
+                className={(format === "mp4" ? mp4Res : gifRes) === r ? "on" : ""}
+                onClick={() =>
+                  format === "mp4" ? setMp4Res(r) : setGifRes(r as "480p" | "720p" | "source")
+                }
+                disabled={saving}
+                style={EXPORT_SEG_BUTTON}
+              >
+                {r === "source" ? "Source" : r}
+              </button>
+            ))}
+          </div>
+        </Field>
+        {format === "gif" && (
+          <Field label="Frame rate">
             <div className="segmented full">
-              {mp4ResOptions.map((r) => (
+              {([10, 15, 20] as const).map((f) => (
                 <button
-                  key={r}
-                  className={mp4Res === r ? "on" : ""}
-                  onClick={() => setMp4Res(r)}
+                  key={f}
+                  className={gifFps === f ? "on" : ""}
+                  onClick={() => setGifFps(f)}
                   disabled={saving}
                   style={EXPORT_SEG_BUTTON}
                 >
-                  {r === "source" ? "Source" : r}
+                  {f} fps
                 </button>
               ))}
             </div>
-          ) : (
-            <div className="segmented full">
-              {gifResOptions.map((r) => (
-                <button
-                  key={r}
-                  className={gifRes === r ? "on" : ""}
-                  onClick={() => setGifRes(r)}
-                  disabled={saving}
-                  style={EXPORT_SEG_BUTTON}
-                >
-                  {r === "source" ? "Source" : r}
-                </button>
-              ))}
-            </div>
-          )}
-          {format === "gif" && (
-            <>
-              <span style={EXPORT_LABEL}>Frame rate</span>
-              <div className="segmented full">
-                {([10, 15, 20] as const).map((f) => (
-                  <button
-                    key={f}
-                    className={gifFps === f ? "on" : ""}
-                    onClick={() => setGifFps(f)}
-                    disabled={saving}
-                    style={EXPORT_SEG_BUTTON}
-                  >
-                    {f} fps
-                  </button>
-                ))}
-              </div>
-            </>
-          )}
-        </div>
+          </Field>
+        )}
 
-        <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
+        <div style={{ display: "flex", gap: 8 }}>
           <button
             onClick={onSaveClick}
             disabled={saveDisabled}
@@ -6355,10 +6335,8 @@ function ExportPanel({
   );
 }
 
-const EXPORT_LABEL: React.CSSProperties = { fontSize: 12, color: "var(--fg-secondary)" };
-// Export's segmented buttons share the width evenly (no side padding), so four
-// resolutions fit beside the label column.
-const EXPORT_SEG_BUTTON: React.CSSProperties = { padding: "5px 0", minWidth: 0 };
+// Export's segmented buttons share the full width evenly.
+const EXPORT_SEG_BUTTON: React.CSSProperties = { padding: "5px 4px", minWidth: 0 };
 
 // Quiet text-only button (Record another, Discard, Reveal in Finder).
 const TEXT_BUTTON: React.CSSProperties = {
