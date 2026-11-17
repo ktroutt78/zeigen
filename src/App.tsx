@@ -13,6 +13,27 @@ import { openRecordingsWindow } from "./openRecordings";
 
 const DEFAULT_HOTKEY = "CmdOrCtrl+Shift+P";
 
+// A capture-window setting remembered across restarts (this window's own
+// localStorage; these never leave the frontend).
+function useRemembered<T>(key: string, initial: T) {
+  const [value, setValue] = useState<T>(() => {
+    try {
+      const raw = localStorage.getItem(`zeigen.${key}`);
+      return raw == null ? initial : (JSON.parse(raw) as T);
+    } catch {
+      return initial;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(`zeigen.${key}`, JSON.stringify(value));
+    } catch {
+      // Not remembered this time; the setting still applies.
+    }
+  }, [key, value]);
+  return [value, setValue] as const;
+}
+
 const BUBBLE_LABEL = "webcam-bubble";
 let bubbleDeviceName: string | null = null;
 
@@ -1079,17 +1100,26 @@ function App() {
   // backend stamps the value into each recording's sidecar at finalize, so
   // this is a remembered default, not an edit of existing recordings.
   const [bubbleRoundness, setBubbleRoundness] = useState<number | null>(null);
-  const [countdownDuration, setCountdownDuration] =
-    useState<CountdownDuration>(5);
-  const [lengthCapMode, setLengthCapMode] = useState<LengthCapMode>("off");
-  const [lengthCapTargetSec, setLengthCapTargetSec] = useState<number>(600);
+  const [countdownDuration, setCountdownDuration] = useRemembered<CountdownDuration>("countdown", 5);
+  const [lengthCapMode, setLengthCapMode] = useRemembered<LengthCapMode>("lengthCapMode", "off");
+  const [lengthCapTargetSec, setLengthCapTargetSec] = useRemembered<number>("lengthCapTargetSec", 600);
   const [noiseReduction, setNoiseReduction] = useState<NrLevel>("med");
   const [state, setState] = useState<EngineState>("idle");
   const [progress, setProgress] = useState({ frames: 0, dropped: 0, elapsed_s: 0 });
   const [lastSaved, setLastSaved] = useState<string | null>(null);
   const [finalizeInfo, setFinalizeInfo] = useState<FinalizedRecording | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [hotkey, setHotkey] = useState<string>(DEFAULT_HOTKEY);
+  const [hotkey, setHotkey] = useRemembered<string>("hotkey", DEFAULT_HOTKEY);
+  // The backend registers the default at launch; put the remembered one back.
+  useEffect(() => {
+    if (hotkey === DEFAULT_HOTKEY) return;
+    invoke("set_hotkey", { combo: hotkey }).catch((e) => {
+      setHotkey(DEFAULT_HOTKEY);
+      setError(`Couldn't restore the hotkey: ${e}`);
+    });
+    // Once, at launch: later changes go through Settings.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   // The Save to folder's state, re-checked on focus and at Record.
   const [storage, setStorage] = useState<StorageStatus | null>(null);
   const refreshStorage = () =>

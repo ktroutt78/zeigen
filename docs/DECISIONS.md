@@ -4,6 +4,14 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-17 — Save location built; capture settings remembered
+
+- **Save to folder** (implementer; I reviewed the move code) built as approved: one module (`storage.rs`) answers where files go; a folder on an external drive is recorded to on this Mac and moved at Stop (copy, check every file's length, rename into place, then delete the original); a failed move leaves the recording on this Mac marked "Not yet moved" and retries at launch and when the Recordings list loads; an unavailable folder falls back to `~/Movies/Zeigen` with a warning at Record and at Save. A move never creates the save folder itself (I tightened this in review: with the drive unplugged it must fail, not build the path elsewhere). Choosing a folder Zeigen cannot write to is refused. With no folder chosen, leftover "not yet moved" markers are cleared so a later choice does not move recordings Keith chose to leave.
+- **Untested:** a real external drive, unplugging mid-take or before Save, and the app playing video from the chosen folder. Keith tests these on the LaCie.
+- **Hotkey, countdown and length cap are remembered across restarts** (Keith). Kept in the capture window's own storage; the remembered hotkey is re-registered at launch and falls back to the default with a message if that fails.
+
+---
+
 ## 2026-11-17 — Design pass step 3 (capture window) built
 
 Implementer, reviewed by me from its headless-browser screenshots; not seen in the real app or on real displays.

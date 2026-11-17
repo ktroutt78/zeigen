@@ -18,7 +18,6 @@ Things left worse than we'd like, with why. Newest at top. Remove an entry when 
 - Seen only in headless Chrome with stubbed Tauri calls. Not tried in the app: the overlaid title bar (whether the Recordings and Settings icons line up with the traffic lights, and dragging the window by that row), the window growing to fit a long error, and the native selects laid invisibly over the picker line and device rows.
 - The display picker and the window picker's hover on every display have not been run on real displays, including the USB InstantView BenQ. Both rely on the cursor poller and on overlays that stay visible to capture.
 - Esc cancels a picker through the main window, which stays key while the overlays are up. If the user clicks some other app first, Esc goes there; Cancel or (for windows) a click on empty space still works.
-- Hotkey, countdown and length cap are still session-only (they were before this change); only noise reduction and bubble shape persist.
 - The "iPhone connected" pill beside the camera is gone; the camera row shows the device name instead.
 
 ## Review lighter restyle: loose ends (2026-11-17)
