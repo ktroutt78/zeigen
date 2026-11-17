@@ -12,6 +12,7 @@ import type { LibraryRecording } from "./RecordingsWindow";
 import { openRecordingsWindow } from "./openRecordings";
 import { recordingName } from "./recordingLabel";
 import { captureKey, hotkeyGlyphs } from "./hotkey";
+import { startBlockedReason } from "./startReason";
 
 const DEFAULT_HOTKEY = "CmdOrCtrl+Shift+P";
 
@@ -2295,6 +2296,14 @@ function App() {
       d?.name ?? `Display ${selectedArea.display_id}`
     }`;
   })();
+  const blockedReason = startBlockedReason({
+    state,
+    sourceKind,
+    picked: canStartNow,
+    displays: displays.length,
+    windows: windows.length,
+    permissionDenied: error === ERROR_MESSAGES.PERMISSION_DENIED,
+  });
   const hasPick =
     sourceKind === "display"
       ? selectedDisplay != null
@@ -2475,8 +2484,11 @@ function App() {
           </button>
         )}
         <div className="cap-foot">
-          {countdownDuration === 0 ? "No countdown" : `${countdownDuration} s countdown`} · saves
-          to {storage?.destination ?? "~/Movies/Zeigen"}
+          {/* Why Start is disabled, when it is; otherwise what Start will do. */}
+          {blockedReason ??
+            `${countdownDuration === 0 ? "No countdown" : `${countdownDuration} s countdown`} · saves to ${
+              storage?.destination ?? "~/Movies/Zeigen"
+            }`}
         </div>
       </div>
     </main>
