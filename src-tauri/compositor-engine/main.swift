@@ -627,8 +627,7 @@ let insetShort = Double(min(insetW, insetH))
 // Window captures carry their OWN rounded corners with opaque-black gaps (SCK 4:2:0, no
 // alpha to recover). We MEASURE that black gap's reach directly from frame 0 rather than
 // guess a radius from a point constant — the reach varies by window / display / scale, so
-// a constant is fragile (it was too small on real captures). The black is pure, so the
-// reach is unambiguous. windowSource is gated by edit.rs (WINDOW_CORNER=1).
+// a constant is fragile (it was too small on real captures). windowSource is gated by edit.rs (WINDOW_CORNER=1).
 let windowSource = env["WINDOW_CORNER"] == "1"
 // Max reach (source px) of the near-black corner gap across all four corners, from frame 0.
 func measureBlackCornerReach(_ url: URL) -> Double? {
@@ -647,12 +646,22 @@ func measureBlackCornerReach(_ url: URL) -> Double? {
         let i = (y * w + x) * 4
         return (Int(buf[i]) * 30 + Int(buf[i + 1]) * 59 + Int(buf[i + 2]) * 11) / 100
     }
-    // Contiguous near-black run inward from an edge (threshold catches the AA ramp too).
-    let cap = min(w, h) / 4, thr = 60
+    // The gap is pure black (luma 0-6 after 4:2:0); a dark window is not (dark themes
+    // sit at 20-45). Count the pure-black run inward from an edge, then up to 3 px of
+    // the anti-aliased ramp into the window. A threshold loose enough to take the ramp
+    // in one go (it was 60) also swallowed dark windows whole: the run went to the scan
+    // limit and the clip came out a quarter of the window's height (2026-11-16).
+    let black = 12, ramp = 60, rampMax = 3
+    // No window corner reaches this far along rows 1-4 (a 26 pt radius at 2x is ~42 px).
+    // A longer run is black content at the window's edge, not the corner gap: ignore it.
+    let plausible = 64
     func run(_ xs: (Int) -> Int, _ ys: (Int) -> Int, along: Int) -> Int {
         var r = 0
-        for d in 0..<min(cap, along) { if lum(xs(d), ys(d)) < thr { r = d + 1 } else { break } }
-        return r
+        while r < min(plausible, along), lum(xs(r), ys(r)) < black { r += 1 }
+        if r >= plausible { return 0 }
+        var extra = 0
+        while extra < rampMax, r + extra < along, lum(xs(r + extra), ys(r + extra)) < ramp { extra += 1 }
+        return r + extra
     }
     var reach = 0
     for d in [1, 2, 3, 4] {

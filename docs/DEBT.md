@@ -2,6 +2,10 @@
 
 Things left worse than we'd like, with why. Newest at top. Remove an entry when it is paid.
 
+## Window corners: preview and export differ (2026-11-16)
+
+The export rounds a window recording's corners by what it measures in the picture (about 3% of the short side on current macOS windows). The preview rounds by a fixed 5.5% (`WINDOW_CLIP_PREVIEW_FRAC` in `Review.tsx`), so the preview's corners are rounder than the export's. Breaks the preview-equals-export rule. Fix: measure once at finalize, store it in the edit state, and have both use it.
+
 ## Native webcam recorder: what is rough (2026-11-16)
 
 - The recorder's stderr (errors and its frames/duplicated/dropped line) goes to the app's stderr, which is nowhere for a Dock launch.

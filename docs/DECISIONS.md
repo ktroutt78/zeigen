@@ -4,6 +4,17 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-16 — Dark window recordings got a huge corner radius over a background
+
+Keith's main use (SnowDash, Tableau in window mode with a background) exported with the window's corners rounded so heavily that the tab bar and toolbar ends were cut off.
+
+- **Cause:** the export measures how far the black gap outside a window's rounded corner reaches, by walking inward from each corner while the picture is "near black". Near black was luma under 60, chosen to take in the soft edge of the corner. A dark window is under 60 everywhere along its edges (20-45 in these recordings), so the walk never stopped until its limit, a quarter of the window's shorter side. Five of the six kept window recordings measured 247 px on a 990 px tall window (clip 265 px); the one light window measured 9 px.
+- **Fix:** the gap is pure black (luma 0-6), so the walk now counts only pure black (under 12) plus at most 3 px of soft edge, and ignores any run of 64 px or more as black content, not a corner. The five dark recordings now measure 12, 13, 12, 28 (a 3024 px capture) and 36; the light one still 9, so light windows are unchanged.
+- **Known leftovers:** a window that is pure black at all four corners falls back to the fixed 5.5% radius. Recording 223348 measures 36 because of a 33 px black strip down its right edge (not looked into). The preview still rounds windows by a fixed 5.5%, which is heavier than the export's measured corner (about 3%); that mismatch is older than this fix and is why the preview never showed the bug.
+- **Checked:** recording 221117 exported over a wallpaper before and after, by eye. Not checked: Keith's own export in the app.
+
+---
+
 ## 2026-11-16 — Scene preview checks verified by Keith
 
 The three preview checks left over from the step 5 changes (bf9d3ad) all pass:
