@@ -1,0 +1,176 @@
+// The recordings library: kept recordings under ~/Movies/Zeigen/.recordings,
+// one folder per recording in the same layout the scratch dir uses, so Review
+// can reopen one with the exact arguments recording_finalize would give it.
+//
+// Two folder shapes:
+//   with webcam:  sources/screen.mp4 + sources/webcam.mp4 (+ segments, cursor)
+//   screen only:  recording-<stamp>.mp4 (the screen capture itself)
+// Both keep the edit-state sidecar .recording-<stamp>.annotations.json in the
+// folder root. <folder>/recording-<stamp>.mp4 is the logical key the sidecar
+// resolves from even when no file exists there (webcam shape).
+
+use std::path::{Path, PathBuf};
+
+use crate::composite::WEBCAM_LEAD_MS;
+use crate::edit;
+
+#[derive(Debug, serde::Serialize)]
+pub struct LibraryRecording {
+    pub stamp: String,
+    pub scratch_mp4_path: String,
+    pub screen_path: String,
+    pub webcam_path: Option<String>,
+    pub webcam_lead_ms: f64,
+    pub source_kind: String,
+    // None when ffprobe cannot read the screen file.
+    pub duration_s: Option<f64>,
+    pub size_bytes: u64,
+}
+
+pub(crate) fn recordings_root() -> Result<PathBuf, String> {
+    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+    Ok(PathBuf::from(home).join("Movies/Zeigen/.recordings"))
+}
+
+#[tauri::command]
+pub async fn list_recordings() -> Result<Vec<LibraryRecording>, String> {
+    Ok(scan(&recordings_root()?))
+}
+
+// Newest first. Folders without a sidecar or a screen file, or whose sidecar
+// does not parse, are skipped rather than failing the whole list.
+pub(crate) fn scan(root: &Path) -> Vec<LibraryRecording> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut out: Vec<LibraryRecording> = entries
+        .flatten()
+        .filter_map(|e| read_folder(&e.path()))
+        .collect();
+    // Stamps are YYYY-MM-DD-HHMMSS, so string order is time order.
+    out.sort_by(|a, b| b.stamp.cmp(&a.stamp));
+    out
+}
+
+fn read_folder(dir: &Path) -> Option<LibraryRecording> {
+    if !dir.is_dir() {
+        return None;
+    }
+    let stamp = dir.file_name()?.to_str()?.strip_prefix("recording-")?.to_string();
+    let scratch_mp4 = dir.join(format!("recording-{stamp}.mp4"));
+    let sidecar = edit::read_sidecar_path(&scratch_mp4).ok()??;
+
+    // Same choice recording_finalize makes: a sources/screen.mp4 means the
+    // webcam shape; otherwise the logical mp4 is the screen capture.
+    let sources_screen = dir.join("sources/screen.mp4");
+    let (screen, webcam) = if sources_screen.is_file() {
+        let webcam = dir.join("sources/webcam.mp4");
+        (sources_screen, webcam.is_file().then_some(webcam))
+    } else if scratch_mp4.is_file() {
+        (scratch_mp4.clone(), None)
+    } else {
+        return None;
+    };
+
+    Some(LibraryRecording {
+        stamp,
+        scratch_mp4_path: scratch_mp4.to_string_lossy().into_owned(),
+        duration_s: edit::probe_duration_seconds(&screen).ok(),
+        screen_path: screen.to_string_lossy().into_owned(),
+        webcam_path: webcam.map(|p| p.to_string_lossy().into_owned()),
+        webcam_lead_ms: sidecar.webcam_lead_ms.unwrap_or(WEBCAM_LEAD_MS),
+        source_kind: sidecar.source_kind.unwrap_or_else(|| "display".into()),
+        size_bytes: dir_size(dir),
+    })
+}
+
+fn dir_size(dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|e| match e.file_type() {
+            Ok(t) if t.is_dir() => dir_size(&e.path()),
+            Ok(t) if t.is_file() => e.metadata().map(|m| m.len()).unwrap_or(0),
+            _ => 0,
+        })
+        .sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write(path: &Path, body: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+
+    #[test]
+    fn scans_both_shapes_and_skips_folders_without_sidecar() {
+        let root = std::env::temp_dir().join(format!("zeigen-lib-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        // Webcam shape, older, measured lead and window source.
+        let a = root.join("recording-2026-01-01-100000");
+        write(&a.join("sources/screen.mp4"), "screen");
+        write(&a.join("sources/webcam.mp4"), "cam");
+        write(
+            &a.join(".recording-2026-01-01-100000.annotations.json"),
+            r#"{"webcam_lead_ms": -42.5, "source_kind": "window"}"#,
+        );
+
+        // Screen-only shape, newer, old sidecar without lead or source kind.
+        let b = root.join("recording-2026-01-02-100000");
+        write(&b.join("recording-2026-01-02-100000.mp4"), "screen only");
+        write(&b.join(".recording-2026-01-02-100000.annotations.json"), "{}");
+
+        // No sidecar: skipped.
+        let c = root.join("recording-2026-01-03-100000");
+        write(&c.join("recording-2026-01-03-100000.mp4"), "x");
+
+        // Sidecar but no screen file: skipped.
+        let d = root.join("recording-2026-01-04-100000");
+        write(&d.join(".recording-2026-01-04-100000.annotations.json"), "{}");
+
+        // Unparseable sidecar: skipped.
+        let e = root.join("recording-2026-01-05-100000");
+        write(&e.join("recording-2026-01-05-100000.mp4"), "x");
+        write(&e.join(".recording-2026-01-05-100000.annotations.json"), "not json");
+
+        let list = scan(&root);
+        assert_eq!(list.len(), 2);
+
+        let newest = &list[0];
+        assert_eq!(newest.stamp, "2026-01-02-100000");
+        assert_eq!(newest.screen_path, b.join("recording-2026-01-02-100000.mp4").to_string_lossy());
+        assert_eq!(newest.scratch_mp4_path, newest.screen_path);
+        assert!(newest.webcam_path.is_none());
+        assert_eq!(newest.webcam_lead_ms, WEBCAM_LEAD_MS);
+        assert_eq!(newest.source_kind, "display");
+        assert!(newest.duration_s.is_none()); // not a real mp4
+
+        let older = &list[1];
+        assert_eq!(older.stamp, "2026-01-01-100000");
+        assert_eq!(older.scratch_mp4_path, a.join("recording-2026-01-01-100000.mp4").to_string_lossy());
+        assert_eq!(older.screen_path, a.join("sources/screen.mp4").to_string_lossy());
+        assert_eq!(older.webcam_path.as_deref(), Some(&*a.join("sources/webcam.mp4").to_string_lossy()));
+        assert_eq!(older.webcam_lead_ms, -42.5);
+        assert_eq!(older.source_kind, "window");
+        let sidecar_len = std::fs::metadata(a.join(".recording-2026-01-01-100000.annotations.json")).unwrap().len();
+        assert_eq!(older.size_bytes, 6 + 3 + sidecar_len);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Read-only listing of the real library, for eyeballing:
+    // cargo test --lib list_real_library -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn list_real_library() {
+        for r in scan(&recordings_root().unwrap()) {
+            println!("{r:?}");
+        }
+    }
+}

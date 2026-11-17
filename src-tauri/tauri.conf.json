@@ -30,6 +30,7 @@
         "scope": [
           "$HOME/Movies/Zeigen/**",
           "$HOME/Movies/Zeigen/.scratch/**",
+          "$HOME/Movies/Zeigen/.recordings/**",
           "$HOME/Library/Caches/com.zeigen.app/thumbs/**",
           "$HOME/Library/Caches/com.zeigen.app/wallpapers/**",
           "$HOME/Library/Application Support/com.zeigen.app/**"
