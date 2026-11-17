@@ -4,6 +4,12 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-17 — Fixes from the polish test verified by Keith
+
+All pass on the installed build: names without the doubled app ("Tableau - Book1 (Window)") in the title bar, Review's title and the list; real display names ("Built-in Retina Display (Display)"); no black first frame in new or older exports, nor in the preview at 0:00 (this confirms the recorder half, which I could not run); window corners match between preview and export without zoom; Generate shows no bar over the Scene row or Discard. Keith also accepted the rename rules as described (see the entry below).
+
+---
+
 ## 2026-11-17 — Design pass step 1 (Review) built; renaming
 
 - **Review restyle** (implementer, reviewed by me from its headless-browser screenshots; not seen in the real app): the window background is the darkest layer with three panels on it (preview, timeline, right side) and no cards inside them. Timeline rows are borderless and 44px. Settings sit straight on the right panel with sentence-case headings. Export is lighter (segmented choices, 36px Save, copy as an icon button, Record another / Discard as text). Notes and errors sit in the right panel above Export and no longer cover anything; errors wrap so they can be read in full. Keith asked for the mockup's "Recordings" link in the title bar, since the main window is hidden while Review is open.
