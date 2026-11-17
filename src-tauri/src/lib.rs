@@ -962,6 +962,8 @@ pub fn run() {
             update_tray_state,
             update_tray_elapsed,
             set_hotkey,
+            hotkey::hotkey_pause,
+            hotkey::hotkey_resume,
             quit_app,
             macos::set_window_frame_cg,
             macos::picker_cursor_start,

@@ -11,6 +11,7 @@ import { PILL_STRIP_CSS } from "./constants/bubble";
 import type { LibraryRecording } from "./RecordingsWindow";
 import { openRecordingsWindow } from "./openRecordings";
 import { recordingName } from "./recordingLabel";
+import { captureKey, hotkeyGlyphs } from "./hotkey";
 
 const DEFAULT_HOTKEY = "CmdOrCtrl+Shift+P";
 
@@ -2227,12 +2228,8 @@ function App() {
           <SettingsView
             hotkey={hotkey}
             onHotkey={async (combo) => {
-              try {
-                await invoke("set_hotkey", { combo });
-                setHotkey(combo);
-              } catch (e) {
-                setError(String(e));
-              }
+              await invoke("set_hotkey", { combo });
+              setHotkey(combo);
             }}
             countdownDuration={countdownDuration}
             onCountdownDuration={setCountdownDuration}
@@ -2492,33 +2489,6 @@ const WINDOW_H = 600;
 function windowLabel(w: WindowSource): string {
   const t = w.title.trim();
   return t ? `${w.app} - ${t}` : w.app;
-}
-
-// "CmdOrCtrl+Shift+P" -> "⇧⌘P", modifiers in macOS order.
-function hotkeyGlyphs(combo: string): string {
-  const MODS: Record<string, string> = {
-    cmdorctrl: "⌘",
-    commandorcontrol: "⌘",
-    cmd: "⌘",
-    command: "⌘",
-    super: "⌘",
-    meta: "⌘",
-    ctrl: "⌃",
-    control: "⌃",
-    alt: "⌥",
-    option: "⌥",
-    shift: "⇧",
-  };
-  const ORDER = "⌃⌥⇧⌘";
-  const mods: string[] = [];
-  let key = "";
-  for (const part of combo.split("+").map((s) => s.trim()).filter(Boolean)) {
-    const g = MODS[part.toLowerCase()];
-    if (g) mods.push(g);
-    else key = part.length === 1 ? part.toUpperCase() : part;
-  }
-  mods.sort((a, b) => ORDER.indexOf(a) - ORDER.indexOf(b));
-  return mods.join("") + key;
 }
 
 // Line icons from the capture-compact mockup (24x24, stroke).
@@ -2804,7 +2774,8 @@ function SettingsView({
   onStorageChanged,
 }: {
   hotkey: string;
-  onHotkey: (combo: string) => void;
+  // Registers the combination; rejects (keeping the old one) when it can't.
+  onHotkey: (combo: string) => Promise<void>;
   countdownDuration: CountdownDuration;
   onCountdownDuration: (v: CountdownDuration) => void;
   lengthCapMode: LengthCapMode;
@@ -2821,7 +2792,6 @@ function SettingsView({
   saveDirLocked: boolean;
   onStorageChanged: () => Promise<void>;
 }) {
-  const [draft, setDraft] = useState(hotkey);
   // "Moving 9 recordings…", then the result, or why the folder was refused.
   const [moveText, setMoveText] = useState<string | null>(null);
   const [moving, setMoving] = useState(false);
@@ -2857,26 +2827,12 @@ function SettingsView({
     if (typeof picked === "string") await changeSaveDir(picked);
   };
   const saveDirFixed = saveDirLocked || moving;
-  const dirty = draft.trim() !== hotkey && draft.trim().length > 0;
   const pct = Math.round((bubbleRoundness ?? 1) * 100);
   return (
     <div>
       <div className="cap-set-row">
         <span className="cap-label">Start and stop hotkey</span>
-        <div className="cap-set-line">
-          <input
-            className="cap-input"
-            aria-label="Start and stop hotkey"
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            placeholder="CmdOrCtrl+Shift+P"
-            style={{ flex: 1, minWidth: 0 }}
-          />
-          <button className="cap-btn" disabled={!dirty} onClick={() => onHotkey(draft.trim())}>
-            Apply
-          </button>
-        </div>
-        <span className="cap-help">For example CmdOrCtrl+Shift+P or Alt+Shift+5</span>
+        <HotkeyRecorder hotkey={hotkey} onHotkey={onHotkey} />
       </div>
 
       <div className="cap-set-row">
@@ -3001,6 +2957,79 @@ function SettingsView({
         <span className="cap-help">Look again for displays, windows, cameras and microphones</span>
       </div>
     </div>
+  );
+}
+
+// Click, then press the new combination: it is registered at once. Esc cancels.
+// While listening, the current hotkey is unregistered (hotkey_pause) so it
+// can't start a recording, and macOS doesn't swallow it before we see it.
+function HotkeyRecorder({
+  hotkey,
+  onHotkey,
+}: {
+  hotkey: string;
+  onHotkey: (combo: string) => Promise<void>;
+}) {
+  const [listening, setListening] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const btnRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    if (!listening) return;
+    invoke("hotkey_pause").catch(() => {});
+    let done = false;
+    const finish = (msg: string | null) => {
+      done = true;
+      setNote(msg);
+      setListening(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (done) return;
+      const r = captureKey(e);
+      if (r.kind === "wait") return;
+      if (r.kind === "cancel") return finish(null);
+      if (r.kind === "refused") return setNote(r.message);
+      done = true;
+      onHotkey(r.combo)
+        .then(() => finish(null))
+        .catch(() =>
+          finish(`Couldn't use ${hotkeyGlyphs(r.combo)}. macOS or another app may already use it.`),
+        );
+    };
+    // Clicking elsewhere, or leaving the window, cancels.
+    const onBlur = () => !done && finish(null);
+    const onDown = (e: MouseEvent) => e.target !== btnRef.current && onBlur();
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("blur", onBlur);
+    window.addEventListener("mousedown", onDown, true);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("blur", onBlur);
+      window.removeEventListener("mousedown", onDown, true);
+      // Put the (possibly new) hotkey back; a no-op when already registered.
+      invoke("hotkey_resume").catch(() => {});
+    };
+  }, [listening]);
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        className={`cap-input cap-hotkey${listening ? " listening" : ""}`}
+        aria-label="Start and stop hotkey"
+        onClick={() => {
+          setNote(null);
+          setListening(true);
+        }}
+      >
+        {listening ? "Press keys…" : hotkeyGlyphs(hotkey)}
+      </button>
+      <span className="cap-help">
+        {note ?? (listening ? "Esc to cancel" : "Click, then press the new keys")}
+      </span>
+    </>
   );
 }
 
