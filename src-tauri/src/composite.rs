@@ -250,8 +250,7 @@ impl BubbleZone {
 // The zone export bakes: an explicit zone from the sidecar wins; otherwise
 // migrate an old recording to the nearest corner of its position-log
 // centroid; an empty log (screen-only or pre-bubble) falls back to the
-// legacy default corner. Review mirrors this rule for its picker default;
-// keep the two in sync.
+// legacy default corner. Review asks for it through bubble_start_zone.
 pub(crate) fn resolve_zone(zone: Option<BubbleZone>, log: &[BubblePositionEntry]) -> BubbleZone {
     if let Some(z) = zone {
         return z;
@@ -566,8 +565,7 @@ mod tests {
         assert_eq!(mask_file_name("shadow", 240, Some(1.0)), "shadow-240-r100.png");
     }
 
-    // V2 Step 2 migration rule. Review mirrors this in TS (nearestCornerZone);
-    // keep the two in sync.
+    // V2 Step 2 migration rule.
     #[test]
     fn resolve_zone_migration_and_defaults() {
         fn e(x: f64, y: f64) -> BubblePositionEntry {
