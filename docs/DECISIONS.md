@@ -4,6 +4,17 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-16 — Step 2 regression: scenes and the export lost the webcam
+
+Keith's first step 2 recording: lip-sync fine across a pause, but a Full webcam scene did nothing in the preview.
+
+- **Cause (mine):** step 2 writes the webcam as one file, `sources/webcam.mp4`, and removed the numbered pieces (`webcam-00.mp4`). The scene layout and the export find the webcam through `export_inputs_from_source`, which looked only for the numbered pieces and ignored `webcam.mp4`. With no pieces it reported "no webcam": scenes switched off in the preview, and an export would have had no webcam at all. The preview's bubble still showed because Review plays `webcam.mp4` directly. I had assumed the export read `webcam.mp4`; it did not, and nothing I ran exercised that lookup.
+- **Fix:** the lookup uses `webcam.mp4` when it exists and the numbered pieces only when it does not. A test covers a new recording, an old one with both, pieces only, and screen only.
+- **Older recordings:** unaffected by the bug (they still have their pieces); they now use their joined `webcam.mp4`, which holds the same frames.
+- **Checked:** Keith's recording (210755) exported through the test harness shows the Full webcam scene at 0:20 and the bubble at 0:10. The harness passes the webcam file directly, so the lookup itself is proven by the unit test, not by that export. Not checked: the preview in the app.
+
+---
+
 ## 2026-11-16 — Past recordings step 1 verified; step 2 built
 
 Keith checked step 1: all five pass. Two asks from the check, both done: a second Open on a recording that is already open brings its Review window to the front (it did nothing visible before), and Discard on a reopened recording asks for confirmation first.

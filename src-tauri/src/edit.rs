@@ -599,8 +599,8 @@ pub(crate) fn render_preview_audio_path(source: &Path, output: &Path) -> Result<
 // scratch layout is:
 //   <scratch_dir>/recording-<stamp>.mp4           (composited; ignored by c2)
 //   <scratch_dir>/sources/screen.mp4              (raw screen)
-//   <scratch_dir>/sources/webcam-NN.mp4           (raw webcam segments)
-//   <scratch_dir>/sources/webcam.mp4              (c1 concat; ignored, segments preferred)
+//   <scratch_dir>/sources/webcam.mp4              (raw webcam, one file)
+//   <scratch_dir>/sources/webcam-NN.mp4           (older recordings: the pieces it was joined from)
 // For screen-only recordings sources/ doesn't exist and the source path
 // IS the raw screen — return it with an empty segments vec.
 pub(crate) fn export_inputs_from_source(source: &Path) -> (PathBuf, Vec<PathBuf>) {
@@ -611,6 +611,15 @@ pub(crate) fn export_inputs_from_source(source: &Path) -> (PathBuf, Vec<PathBuf>
     let screen = sources_dir.join("screen.mp4");
     if !screen.is_file() {
         return (source.to_path_buf(), Vec::new());
+    }
+    // The webcam is one file, sources/webcam.mp4. Recordings from before the
+    // recorder ran through pauses (2026-11-16) also have the pieces it was
+    // joined from (webcam-NN.mp4); those are only read when the joined file is
+    // missing. Looking for the pieces alone made every newer recording look
+    // webcam-less to scenes and to the export.
+    let webcam = sources_dir.join("webcam.mp4");
+    if webcam.is_file() {
+        return (screen, vec![webcam]);
     }
     let mut segments: Vec<PathBuf> = std::fs::read_dir(&sources_dir)
         .ok()
@@ -3042,6 +3051,32 @@ WATERMARK_SCALE_FRAC=0.08";
             ],
             "image emits kind + absolute path, no color or preset"
         );
+    }
+
+    // The webcam for scenes and export is sources/webcam.mp4; the old pieces
+    // are a fallback only. A recording with just webcam.mp4 (every one since the
+    // recorder ran through pauses) must not come back webcam-less.
+    #[test]
+    fn export_inputs_find_the_single_webcam_file() {
+        let root = std::env::temp_dir().join(format!("zeigen-inputs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mk = |name: &str, files: &[&str]| {
+            let dir = root.join(name).join("sources");
+            std::fs::create_dir_all(&dir).unwrap();
+            for f in files {
+                std::fs::write(dir.join(f), "x").unwrap();
+            }
+            (root.join(name).join("recording.mp4"), dir)
+        };
+        let (src, dir) = mk("new", &["screen.mp4", "webcam.mp4"]);
+        assert_eq!(export_inputs_from_source(&src), (dir.join("screen.mp4"), vec![dir.join("webcam.mp4")]));
+        let (src, dir) = mk("old", &["screen.mp4", "webcam.mp4", "webcam-00.mp4", "webcam-01.mp4"]);
+        assert_eq!(export_inputs_from_source(&src).1, vec![dir.join("webcam.mp4")]);
+        let (src, dir) = mk("pieces", &["screen.mp4", "webcam-01.mp4", "webcam-00.mp4"]);
+        assert_eq!(export_inputs_from_source(&src).1, vec![dir.join("webcam-00.mp4"), dir.join("webcam-01.mp4")]);
+        let (src, _) = mk("screen-only", &["screen.mp4"]);
+        assert!(export_inputs_from_source(&src).1.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     // Window sources emit WINDOW_CORNER=1 (drives the source-space corner mask that
