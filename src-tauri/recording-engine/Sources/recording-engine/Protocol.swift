@@ -91,6 +91,8 @@ enum Event {
     case cursor_track_written(path: String, sample_count: Int)
     // macOS stopped the screen stream mid-recording. The app answers with Stop.
     case stream_stopped
+    // Microphone loudness, 0...1, about 15 times a second while the mic is open.
+    case mic_level(level: Double)
     case error(code: String, message: String)
 }
 
@@ -142,6 +144,8 @@ func emit(_ event: Event) {
         json = ["event": "cursor_track_written", "path": path, "sample_count": sample_count]
     case .stream_stopped:
         json = ["event": "stream_stopped"]
+    case .mic_level(let level):
+        json = ["event": "mic_level", "level": level]
     case .error(let code, let message):
         json = ["event": "error", "code": code, "message": message]
     }

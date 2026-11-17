@@ -252,3 +252,10 @@ Naming consistency: both enumerators ultimately read from AVFoundation, so the s
 - All sizes in bytes (uints).
 - Newline is `\n`; no trailing whitespace on lines.
 - No JSON pretty-printing in messages — one line per message, compact.
+
+## Microphone monitor (2026-11-17)
+
+- Command `{"command":"mic_monitor","microphone_uid":"<uid>"}` keeps that microphone open; without `microphone_uid` it closes it. Ignored while a recording runs and applied when it ends.
+- Event `{"event":"mic_level","level":0.0-1.0}` about 15 times a second while the mic is open (loudest sample, -50 to 0 dBFS).
+- `start` borrows the open microphone when it is the same device; otherwise it opens it.
+- `started` is emitted when the file begins (with `first_frame`), not when the streams are asked to start.

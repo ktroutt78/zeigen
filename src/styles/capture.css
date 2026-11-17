@@ -146,6 +146,17 @@
   gap: 10px;
   font-size: 13px;
 }
+/* Live mic level: a blue fill behind the row's content. */
+.cap-meter {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  transition: width 90ms linear;
+  pointer-events: none;
+}
+.cap-device > :not(.cap-meter):not(.cap-overlay-select) { position: relative; }
 .cap-device:has(select:focus-visible) { outline: 2px solid var(--accent-ring); }
 .cap-device.disabled { opacity: 0.5; }
 .cap-device-icon { color: var(--fg-secondary); display: flex; flex-shrink: 0; }

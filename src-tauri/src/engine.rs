@@ -40,6 +40,11 @@ pub enum EngineCommand {
         // recordings keep the visible cursor — byte-identical to pre-V3.
         capture_cursor: bool,
     },
+    // Keep this microphone open for the level meter (None closes it). A
+    // recording borrows the open mic, so it is live from the first moment.
+    MicMonitor {
+        microphone_uid: Option<String>,
+    },
     Pause,
     Resume,
     Stop,

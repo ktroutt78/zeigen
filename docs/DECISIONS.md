@@ -4,6 +4,15 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-17 — Mic kept open while the capture window shows; level meter
+
+- **Problem** (Keith): with the 2 s wait, takes started reliably but clipped his first words, because the recording only begins once mic audio arrives and macOS restarts the mic just after it opens.
+- **Decision** (Keith, as Cap does): while the capture window is showing and the mic is On, keep the mic open and show a live level filling the microphone row. Close it when the window hides or the mic is turned Off, so the orange dot is not always on.
+- **How:** the engine has one mic owner, `MicMonitor`. The app asks for it with `mic_monitor`; it emits `mic_level` about 15 times a second. A recording no longer opens the mic: it borrows the running monitor's buffers, so macOS's restart has happened long before Start. The app also keeps the mic open from Start (including a hotkey start with the window hidden) until the recording ends, so a countdown warms a cold mic.
+- **`started` now means the file has begun.** The engine used to send it when the streams were asked to start; the timer then sat at 0:00 until audio arrived. With the countdown off the Start button reads "Starting…" until then.
+- **Not exact to the millisecond:** the file begins at the first screen frame after go, about a tenth of a second on this morning's good take. The 2 s wait stays as the fallback for a mic that is cold at Start (countdown off, window hidden).
+- **Camera row:** no preview added. The floating bubble is already the live camera check, and a second camera client risks the iPhone camera-mode restart (CLAUDE.md gotcha).
+
 ## 2026-11-17 — Mic start wait raised from 250 ms to 2 s
 
 - **Symptom** (Keith): every take failed with "The microphone produced no audio" on the MacBook Pro Microphone, after working the same morning.

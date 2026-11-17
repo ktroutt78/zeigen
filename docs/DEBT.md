@@ -2,6 +2,12 @@
 
 Things left worse than we'd like, with why. Newest at top. Remove an entry when it is paid.
 
+## Mic kept open and level meter: untried in the app (2026-11-17)
+- Tested only as far as the engine alone opening the mic, sending levels and closing it. Borrowing the open mic for a recording, the meter in the row, "Starting…" and the window-hide close are untried (the terminal has no Screen Recording permission).
+- Window hide is read from the page's visibility (`document.hidden`); if WKWebView does not report a hidden or minimised window, the mic stays open until Review opens.
+- The meter shows the loudest sample (-50 to 0 dB), with no clipping warning.
+- With the countdown off and the capture window hidden (hotkey start), the mic is cold and the take starts when audio arrives, up to about half a second late.
+
 ## Mic start wait and failed-start clean-up: untried in the app (2026-11-17)
 - The 2 s mic wait and the removal of a failed take's folder are covered by tests and the system log only (the terminal has no Screen Recording permission).
 - A take that fails before it starts is removed whole, including its short webcam clip. `recording_cleanup_local` is no longer called by the app and could be deleted.

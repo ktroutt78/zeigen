@@ -1256,6 +1256,9 @@ function App() {
             // Keep the raw code+message in logs regardless of banner copy.
             console.error("[engine] error", ev.code, ev.message);
             setError(ERROR_MESSAGES[ev.code] ?? `${ev.code}: ${ev.message}`);
+            // With the countdown off the window says "Starting…" until the
+            // file begins; a failure ends that too.
+            setStarting(false);
             // The engine self-resets to idle on any error it emits, so the
             // frontend must NOT send Stop (that would produce a follow-on
             // INVALID_STATE that overwrites the original error).
@@ -1865,6 +1868,23 @@ function App() {
       win.hide().catch(() => {});
     }
   }, [state, reviewActivity, compositeProgress]);
+
+  // Keep the microphone open while the capture window is showing with the mic
+  // on (it drives the level meter and means the mic is already live at
+  // Start), and from Start until the recording ends. Closed otherwise, so the
+  // orange mic dot is not on all the time.
+  const [docVisible, setDocVisible] = useState(!document.hidden);
+  useEffect(() => {
+    const onVis = () => setDocVisible(!document.hidden);
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, []);
+  const micOpen =
+    selectedMic != null &&
+    (starting || state !== "idle" || (reviewActivity === 0 && docVisible));
+  useEffect(() => {
+    invoke("mic_monitor", { microphoneUid: micOpen ? selectedMic : null }).catch(() => {});
+  }, [micOpen, selectedMic]);
 
   // Listen for tray clicks and global hotkey toggles.
   useEffect(() => {
@@ -2502,6 +2522,7 @@ function App() {
             onPick={(v) => setSelectedMic(v)}
             onToggle={() => setSelectedMic(selectedMic != null ? null : offMic?.uid ?? null)}
             disabled={recording}
+            meter={selectedMic != null}
           />
         </section>
       </div>
@@ -2532,10 +2553,10 @@ function App() {
           <button
             className="cap-start"
             onClick={start}
-            disabled={state !== "idle" || !canStartNow}
+            disabled={state !== "idle" || starting || !canStartNow}
           >
             <span className="cap-start-dot" aria-hidden="true" />
-            {state === "countdown" ? "Starting" : "Start recording"}
+            {state === "countdown" || starting ? "Starting…" : "Start recording"}
             <span className="cap-start-key">{hotkeyGlyphs(hotkey)}</span>
           </button>
         )}
@@ -2673,6 +2694,7 @@ function DeviceRow({
   onPick,
   onToggle,
   disabled,
+  meter,
 }: {
   kind: string;
   icon: React.ReactNode;
@@ -2683,10 +2705,12 @@ function DeviceRow({
   onPick: (v: string) => void;
   onToggle: () => void;
   disabled: boolean;
+  meter?: boolean;
 }) {
   const empty = options.length === 0;
   return (
     <div className={`cap-device${on ? "" : " off"}${disabled ? " disabled" : ""}`}>
+      {meter && <MicMeter />}
       <span className="cap-device-icon">{icon}</span>
       <span className="cap-device-name">{name}</span>
       <select
@@ -2716,6 +2740,29 @@ function DeviceRow({
       </button>
     </div>
   );
+}
+
+// The live microphone level, filling the row from the left. It listens to the
+// engine itself and writes the width directly, so 15 readings a second do not
+// re-render the capture window.
+function MicMeter() {
+  const fill = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    let last = 0;
+    const idle = window.setInterval(() => {
+      if (performance.now() - last > 400 && fill.current) fill.current.style.width = "0%";
+    }, 400);
+    const unlisten = listen<{ event: string; level?: number }>("engine-event", (e) => {
+      if (e.payload.event !== "mic_level" || !fill.current) return;
+      last = performance.now();
+      fill.current.style.width = `${Math.round((e.payload.level ?? 0) * 100)}%`;
+    });
+    return () => {
+      window.clearInterval(idle);
+      unlisten.then((fn) => fn());
+    };
+  }, []);
+  return <span ref={fill} className="cap-meter" aria-hidden="true" />;
 }
 
 function StatusLine({

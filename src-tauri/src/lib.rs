@@ -293,6 +293,14 @@ fn parse_corner(s: Option<&str>) -> Corner {
 }
 
 #[tauri::command]
+fn mic_monitor(engine: EngineState<'_>, microphone_uid: Option<String>) -> Result<(), String> {
+    engine
+        .lock()
+        .map_err(|e| e.to_string())?
+        .send(&EngineCommand::MicMonitor { microphone_uid })
+}
+
+#[tauri::command]
 fn engine_pause(
     engine: EngineState<'_>,
     recording: RecordingState<'_>,
@@ -978,6 +986,7 @@ pub fn run() {
             engine_start,
             prewarm::prewarm_capture,
             prewarm::prewarm_abort,
+            mic_monitor,
             engine_pause,
             engine_resume,
             engine_stop,

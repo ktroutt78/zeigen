@@ -19,13 +19,12 @@ final class StreamStopWatcher: NSObject, SCStreamDelegate, @unchecked Sendable {
 
 final class RecordingSession: NSObject,
     SCStreamOutput,
-    AVCaptureAudioDataOutputSampleBufferDelegate,
     @unchecked Sendable
 {
     private let outputURL: URL
     private let stream: SCStream
     private let stopWatcher: StreamStopWatcher
-    private let captureSession: AVCaptureSession?
+    private let mic: MicMonitor?
     private let writer: AVAssetWriter
     private let videoInput: AVAssetWriterInput
     private let audioInput: AVAssetWriterInput?
@@ -73,7 +72,6 @@ final class RecordingSession: NSObject,
     private var lastVideoBuffer: CMSampleBuffer?
     private var lastVideoArrivalHost: CMTime = .invalid
     private var heartbeatTimer: DispatchSourceTimer?
-    private let audioQueue: DispatchQueue?
 
     // V3 Phase A cursor telemetry. Non-nil iff capture_cursor is on, in
     // which case a telemetry sidecar is written at stop and the system
@@ -130,7 +128,7 @@ final class RecordingSession: NSObject,
 
     init(
         source: Source,
-        microphoneUID: String?,
+        mic: MicMonitor?,
         outputPath: String,
         maxFPS: Int,
         captureCursor: Bool,
@@ -289,50 +287,11 @@ final class RecordingSession: NSObject,
         }
         writer.add(videoInput)
 
-        // AVCaptureSession owns the mic when one is requested. Track B's
-        // defining shape: mic CMSampleBuffers route through this session,
-        // not through SCStream. SCStreamConfiguration.captureMicrophone
-        // stays unset.
-        var captureSession: AVCaptureSession? = nil
+        // The mic is the engine's MicMonitor, usually already running for
+        // the level meter. The recording borrows its buffers (start/stop
+        // below); SCStreamConfiguration.captureMicrophone stays unset.
         var audioInput: AVAssetWriterInput? = nil
-        var audioOutputToWire: AVCaptureAudioDataOutput? = nil
-        if let micUID = microphoneUID {
-            let discovery = AVCaptureDevice.DiscoverySession(
-                deviceTypes: [.microphone, .external],
-                mediaType: .audio,
-                position: .unspecified
-            )
-            guard let micDevice = discovery.devices.first(where: { $0.uniqueID == micUID }) else {
-                throw EngineError(code: "MIC_NOT_FOUND", message: "microphone_uid \(micUID) not present")
-            }
-
-            let cs = AVCaptureSession()
-            let micInput = try AVCaptureDeviceInput(device: micDevice)
-            guard cs.canAddInput(micInput) else {
-                throw EngineError(code: "INTERNAL", message: "AVCaptureSession cannot add mic input")
-            }
-            cs.addInput(micInput)
-
-            // Force mono Float32 PCM at 48 kHz so the AAC encoder sees the
-            // sample rate it writes at, and so the Phase-12 limiter's
-            // UnsafeMutablePointer<Float> cast matches the buffer shape
-            // (PLAN c2 §"Verification steps" FLAG 2).
-            let ao = AVCaptureAudioDataOutput()
-            ao.audioSettings = [
-                AVFormatIDKey: kAudioFormatLinearPCM,
-                AVLinearPCMBitDepthKey: 32,
-                AVLinearPCMIsFloatKey: true,
-                AVLinearPCMIsBigEndianKey: false,
-                AVLinearPCMIsNonInterleaved: false,
-                AVSampleRateKey: 48_000.0,
-                AVNumberOfChannelsKey: 1,
-            ]
-            guard cs.canAddOutput(ao) else {
-                throw EngineError(code: "INTERNAL", message: "AVCaptureSession cannot add audio output")
-            }
-            cs.addOutput(ao)
-            audioOutputToWire = ao
-
+        if mic != nil {
             let settings: [String: Any] = [
                 AVFormatIDKey: kAudioFormatMPEG4AAC,
                 AVSampleRateKey: 48_000,
@@ -346,7 +305,6 @@ final class RecordingSession: NSObject,
             }
             writer.add(input)
             audioInput = input
-            captureSession = cs
         }
 
         let config = Self.makeConfig(
@@ -366,20 +324,15 @@ final class RecordingSession: NSObject,
         let stream = SCStream(filter: filter, configuration: config, delegate: stopWatcher)
 
         self.stream = stream
-        self.captureSession = captureSession
+        self.mic = mic
         self.writer = writer
         self.videoInput = videoInput
         self.audioInput = audioInput
-        let audioQ: DispatchQueue? = (audioOutputToWire != nil) ? DispatchQueue(label: "engine.audio") : nil
-        self.audioQueue = audioQ
         super.init()
 
         stopWatcher.onStop = { [weak self] error in self?.streamStoppedBySystem(error) }
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: DispatchQueue(label: "engine.video"))
-        if let ao = audioOutputToWire, let aq = audioQ {
-            ao.setSampleBufferDelegate(self, queue: aq)
-        }
-        if let cs = captureSession {
+        if let cs = mic?.session {
             interruptionObserver = NotificationCenter.default.addObserver(
                 forName: AVCaptureSession.wasInterruptedNotification, object: cs, queue: nil
             ) { [weak self] note in self?.handleSessionInterruption(note) }
@@ -391,8 +344,9 @@ final class RecordingSession: NSObject,
 
     func start() async throws {
         try await stream.startCapture()
-        captureSession?.startRunning()
-        if captureSession != nil {
+        mic?.setSink { [weak self] buffer in self?.micOutput(buffer) }
+        mic?.start()
+        if mic != nil {
             do {
                 try verifyClockParity()
             } catch {
@@ -400,7 +354,7 @@ final class RecordingSession: NSObject,
                 // before propagating so the engine returns to idle cleanly.
                 removeNotificationObservers()
                 try? await stream.stopCapture()
-                captureSession?.stopRunning()
+                mic?.setSink(nil)
                 throw error
             }
             // Engineering-only fault injection — not in IPC contract (D-12).
@@ -637,13 +591,11 @@ final class RecordingSession: NSObject,
         // menu-bar screen-sharing menu); stopCapture then throws -3808. That
         // must not skip finalizing the file below.
         do { try await stream.stopCapture() } catch { logStderr("stopCapture: \(error)") }
-        captureSession?.stopRunning()
-        // Symmetric drain for AVCaptureSession: stream.stopCapture()
-        // awaits SCK in-flight callbacks, but captureSession.stopRunning()
-        // returns sync — we need to flush the audio output's delegate
-        // queue before markAsFinished so no late captureOutput races the
-        // writer transition. sync block is a barrier on the audio queue.
-        audioQueue?.sync { }
+        // Symmetric drain for the mic: stream.stopCapture() awaits SCK
+        // in-flight callbacks; letting go of the monitor drains its queue,
+        // so no late buffer races markAsFinished. The monitor itself keeps
+        // running or not as the engine decides.
+        mic?.setSink(nil)
 
         // Trim-up via the normal append() path so pause-offset is applied
         // identically to other samples. Build the dup under a brief lock
@@ -824,8 +776,7 @@ final class RecordingSession: NSObject,
             let ms = Int(Double(DispatchTime.now().uptimeNanoseconds - stopStart.uptimeNanoseconds) / 1_000_000)
             logStderr("TEARDOWN_TIMEOUT after \(ms)ms during fatal-error path")
         }
-        captureSession?.stopRunning()
-        audioQueue?.sync { }
+        mic?.setSink(nil)
 
         // Fatal-error teardown finalizes whatever was captured without
         // running stop()'s trim-up + endSession alignment. We're saving
@@ -880,10 +831,10 @@ final class RecordingSession: NSObject,
         append(sampleBuffer, to: videoInput, isVideo: true)
     }
 
-    // MARK: AVCaptureAudioDataOutputSampleBufferDelegate
+    // MARK: Microphone buffers (from MicMonitor)
 
-    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        guard sampleBuffer.isValid, let audioInput else { return }
+    private func micOutput(_ sampleBuffer: CMSampleBuffer) {
+        guard let audioInput else { return }
         // D-15c: stamp arrival on receipt — before the limiter and the
         // pause/cutoff checks in append() — so the cessation watchdog sees
         // a live mic even while paused (buffers still flow when paused).
@@ -914,6 +865,9 @@ final class RecordingSession: NSObject,
         var sessionStartedAt: CMTime?
         defer {
             if let t = sessionStartedAt {
+                // `started` means the file has begun: the app starts its
+                // timer here, not when the streams were asked to start.
+                emit(.started(started_at: ISO8601DateFormatter().string(from: Date())))
                 emit(.first_frame(stream: "screen", host_s: CMTimeGetSeconds(t)))
             }
         }
@@ -1061,7 +1015,7 @@ final class RecordingSession: NSObject,
         }
     }
 
-    // D-01 clock parity smoke. Called after captureSession.startRunning().
+    // D-01 clock parity smoke. Called once the mic is running.
     // Verifies synchronizationClock is non-nil and host-time sampling is
     // well-behaved. ZEIGEN_FORCE_CLOCK_MISMATCH=1 unconditionally fails (D-12).
     private func verifyClockParity() throws {
@@ -1069,7 +1023,7 @@ final class RecordingSession: NSObject,
         if ProcessInfo.processInfo.environment["ZEIGEN_FORCE_CLOCK_MISMATCH"] == "1" {
             throw EngineError(code: "CLOCK_MISMATCH", message: "forced via ZEIGEN_FORCE_CLOCK_MISMATCH=1")
         }
-        guard captureSession?.synchronizationClock != nil else {
+        guard mic?.session.synchronizationClock != nil else {
             throw EngineError(code: "CLOCK_MISMATCH",
                 message: "AVCaptureSession.synchronizationClock is nil after startRunning")
         }

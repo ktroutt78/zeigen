@@ -10,11 +10,19 @@ actor Engine {
 
     private var state: State = .idle
     private var session: RecordingSession?
+    // The open microphone (MicMonitor.swift) and the mic the app wants kept
+    // open for its level meter. A recording keeps its mic open regardless;
+    // the two are reconciled when no recording is running.
+    private var micMonitor: MicMonitor?
+    private var meterMicUID: String?
 
     func handle(_ cmd: Command) async {
         switch cmd.command {
         case "enumerate": await handleEnumerate()
         case "start":     await handleStart(cmd)
+        case "mic_monitor":
+            meterMicUID = cmd.microphone_uid
+            if session == nil { reconcileMic() }
         case "pause":     handlePause()
         case "resume":    handleResume()
         case "stop":      await handleStop()
@@ -146,6 +154,27 @@ actor Engine {
         return (byKey.values.sorted { $0.z < $1.z }, stack)
     }
 
+    // Opens, swaps or closes the mic to match what the meter wants.
+    private func reconcileMic() {
+        if micMonitor?.uid == meterMicUID { return }
+        micMonitor?.stop()
+        micMonitor = nil
+        guard let uid = meterMicUID else { return }
+        do {
+            let monitor = try MicMonitor(uid: uid)
+            monitor.start()
+            micMonitor = monitor
+        } catch {
+            logStderr("mic monitor: \(error)")
+        }
+    }
+
+    private func endSession() {
+        session = nil
+        state = .idle
+        reconcileMic()
+    }
+
     private func handleStart(_ cmd: Command) async {
         guard state == .idle else {
             emit(.error(code: "INVALID_STATE", message: "already recording"))
@@ -182,27 +211,36 @@ actor Engine {
                     await self.handleFatalError(err)
                 }
             }
+            // The recording's mic: the one already open for the meter when
+            // it is the same device, otherwise opened now.
+            if let uid = cmd.microphone_uid {
+                if micMonitor?.uid != uid {
+                    micMonitor?.stop()
+                    micMonitor = try MicMonitor(uid: uid)
+                }
+            }
             let newSession = try await RecordingSession(
                 source: source,
-                microphoneUID: cmd.microphone_uid,
+                mic: cmd.microphone_uid == nil ? nil : micMonitor,
                 outputPath: outputPath,
                 maxFPS: cmd.max_fps ?? 30,
                 captureCursor: cmd.capture_cursor ?? true,
                 onFatalError: onFatal
             )
             try await newSession.start()
+            // `started` is emitted by the session when the file begins.
             session = newSession
             state = .recording
-            let started = ISO8601DateFormatter().string(from: Date())
-            emit(.started(started_at: started))
             startProgressTimer()
             if newSession.capturedWindowID != nil {
                 startWindowFrameTimer()
             }
         } catch let err as EngineError {
             emit(.error(code: err.code, message: err.message))
+            reconcileMic()
         } catch {
             emit(.error(code: "INTERNAL", message: "start failed: \(error)"))
+            reconcileMic()
         }
     }
 
@@ -232,8 +270,10 @@ actor Engine {
         guard state != .idle, let s = session else { return }
         await s.tearDownAfterFatalError()
         emit(.error(code: err.code, message: err.message))
-        session = nil
-        state = .idle
+        // The mic may be what failed: close it so the next use opens it fresh.
+        micMonitor?.stop()
+        micMonitor = nil
+        endSession()
     }
 
     private func handleResume() {
@@ -274,8 +314,7 @@ actor Engine {
         } catch {
             emit(.error(code: "WRITER_FAILED", message: "stop failed: \(error)"))
         }
-        session = nil
-        state = .idle
+        endSession()
     }
 
     private func startProgressTimer() {
