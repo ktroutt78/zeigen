@@ -22,6 +22,9 @@ pub struct Settings {
     // reshapes an existing recording.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bubble_roundness: Option<f64>,
+    // "Save to" folder (storage.rs). None = ~/Movies/Zeigen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save_dir: Option<String>,
 }
 
 impl Default for Settings {
@@ -30,6 +33,7 @@ impl Default for Settings {
             watermark: WatermarkSettings::default(),
             noise_reduction: default_noise_reduction(),
             bubble_roundness: None,
+            save_dir: None,
         }
     }
 }
@@ -91,6 +95,19 @@ fn home_config_dir() -> Option<PathBuf> {
 pub fn bubble_roundness() -> Option<f64> {
     let dir = home_config_dir()?;
     read_settings_from(&dir).bubble_roundness
+}
+
+// The "Save to" folder, read fresh each call (storage.rs resolves it).
+pub fn save_dir() -> Option<PathBuf> {
+    let dir = home_config_dir()?;
+    read_settings_from(&dir).save_dir.map(PathBuf::from)
+}
+
+pub(crate) fn write_save_dir(app: &AppHandle, save_dir: Option<String>) -> Result<(), String> {
+    let dir = config_dir(app)?;
+    let mut settings = read_settings_from(&dir);
+    settings.save_dir = save_dir;
+    write_settings_to(&dir, &settings)
 }
 
 // Noise-reduction strength as an arnndn `mix` (0..1), or None when "off".

@@ -1,5 +1,5 @@
-// The recordings library: kept recordings under ~/Movies/Zeigen/.recordings,
-// one folder per recording in the same layout the scratch dir uses, so Review
+// The recordings library: kept recordings under <active root>/.recordings
+// (storage.rs; ~/Movies/Zeigen/.recordings by default), one folder per recording in the same layout the scratch dir uses, so Review
 // can reopen one with the exact arguments recording_finalize would give it.
 //
 // Two folder shapes:
@@ -22,6 +22,7 @@ use tauri::{AppHandle, Emitter};
 
 use crate::composite::{FFMPEG_PATH, WEBCAM_LEAD_MS};
 use crate::edit::{self, SidecarState};
+use crate::storage;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LibraryRecording {
@@ -39,6 +40,9 @@ pub struct LibraryRecording {
     // None until the thumbnail for the current Mark has been made, or when
     // ffmpeg could not make it; the card shows a placeholder.
     pub thumb_path: Option<String>,
+    // Made while the Save to folder was on a drive and not moved there yet; it
+    // is still in ~/Movies/Zeigen/.recordings (storage.rs).
+    pub pending_move: bool,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -47,36 +51,68 @@ pub struct Library {
     pub recordings: Vec<LibraryRecording>,
 }
 
-pub(crate) fn recordings_root() -> Result<PathBuf, String> {
-    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-    Ok(PathBuf::from(home).join("Movies/Zeigen/.recordings"))
-}
-
 // Fill-ins run one at a time: a second list (the window regaining focus) waits
 // for the first, then finds nothing left to do.
 static REFRESH: Mutex<()> = Mutex::new(());
 
-// Answers from what is on disk, without running ffprobe or ffmpeg. Missing
-// durations and thumbnails are then made on a background thread, and each
-// recording that changed is sent again as a `library-recording` event.
+// Answers from what is on disk, without running ffprobe or ffmpeg. Then, on a
+// background thread: recordings waiting to move to the Save to folder are moved
+// when it is available (a `library-changed` event asks for a fresh list), and
+// missing durations and thumbnails are made, each recording that changed sent
+// again as a `library-recording` event.
 #[tauri::command]
 pub async fn list_recordings(app: AppHandle) -> Result<Library, String> {
-    let recordings = scan(&recordings_root()?);
-    let dirs: Vec<PathBuf> = recordings
-        .iter()
-        .filter_map(|r| Path::new(&r.scratch_mp4_path).parent().map(Path::to_path_buf))
-        .collect();
+    let default_lib = storage::library(&storage::default_root()?);
+    if storage::chosen().is_none() {
+        storage::clear_pending(&default_lib);
+    }
+    let current_lib = storage::library(&storage::active()?.root);
+    let recordings = list_for(&default_lib, &current_lib);
     std::thread::spawn(move || {
         let _one_at_a_time = REFRESH.lock();
-        for dir in dirs {
-            if refresh_folder(&dir, &edit::probe_duration_seconds, &extract_frame) {
-                if let Some(r) = read_folder(&dir) {
+        if retry_pending_moves(&app) > 0 {
+            let _ = app.emit("library-changed", ());
+        }
+        let current_lib = match storage::active() {
+            Ok(a) => storage::library(&a.root),
+            Err(_) => return,
+        };
+        for r in list_for(&default_lib, &current_lib) {
+            let Some(dir) = Path::new(&r.scratch_mp4_path).parent() else { continue };
+            if refresh_folder(dir, &edit::probe_duration_seconds, &extract_frame) {
+                if let Some(r) = read_folder(dir) {
                     let _ = app.emit("library-recording", r);
                 }
             }
         }
     });
     Ok(Library { keep_days: KEEP_DAYS, recordings })
+}
+
+// The current library, plus the default library's recordings still waiting to
+// move when the current library is elsewhere.
+pub(crate) fn list_for(default_lib: &Path, current_lib: &Path) -> Vec<LibraryRecording> {
+    let mut out = scan(current_lib);
+    if current_lib != default_lib {
+        out.extend(scan(default_lib).into_iter().filter(|r| r.pending_move));
+        out.sort_by(|a, b| b.stamp.cmp(&a.stamp));
+    }
+    out
+}
+
+// Moves recordings waiting in the default library to the chosen folder's
+// library when it is available, skipping any being recorded or open in Review.
+// Returns how many moved.
+pub(crate) fn retry_pending_moves(app: &AppHandle) -> usize {
+    let (Ok(default), Some(chosen)) = (storage::default_root(), storage::chosen()) else { return 0 };
+    if !storage::is_available(&chosen) {
+        return 0;
+    }
+    storage::retry_pending(
+        &storage::library(&default),
+        &storage::library(&chosen),
+        &|d| crate::recording_in_use(app, d),
+    )
 }
 
 // Newest first. Folders without a sidecar or a screen file, or whose sidecar
@@ -125,7 +161,7 @@ fn folder(dir: &Path) -> Option<Folder> {
     Some(Folder { stamp, scratch_mp4, screen, webcam, sidecar })
 }
 
-fn read_folder(dir: &Path) -> Option<LibraryRecording> {
+pub(crate) fn read_folder(dir: &Path) -> Option<LibraryRecording> {
     let f = folder(dir)?;
     let duration_s = cached_duration(dir, &f.screen).flatten();
     let thumb = thumb_time(f.sidecar.thumbnail_time, duration_s)
@@ -142,6 +178,7 @@ fn read_folder(dir: &Path) -> Option<LibraryRecording> {
         name: f.sidecar.name,
         size_bytes: dir_size(dir),
         thumb_path: thumb.map(|p| p.to_string_lossy().into_owned()),
+        pending_move: storage::is_pending(dir),
     })
 }
 
@@ -372,6 +409,60 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    // A recording staged in the default library for a Save to folder on a drive
+    // is listed as waiting; once the retry moves it, it is listed from the
+    // chosen library and the default library no longer has it.
+    #[test]
+    fn pending_recording_is_listed_then_moves_to_the_chosen_library() {
+        let root = temp_root("pending");
+        let default_lib = root.join("default/.recordings");
+        let chosen_lib = root.join("chosen/.recordings");
+        let kept = chosen_lib.join("recording-2026-01-01-100000");
+        write(&kept.join("recording-2026-01-01-100000.mp4"), "screen");
+        write(&kept.join(".recording-2026-01-01-100000.annotations.json"), "{}");
+        let staged = default_lib.join("recording-2026-01-02-100000");
+        write(&staged.join("recording-2026-01-02-100000.mp4"), "screen");
+        write(&staged.join(".recording-2026-01-02-100000.annotations.json"), "{}");
+        write(&staged.join(storage::PENDING_MOVE), "");
+        // An ordinary default-library recording is not part of the chosen list.
+        let other = default_lib.join("recording-2026-01-03-100000");
+        write(&other.join("recording-2026-01-03-100000.mp4"), "screen");
+        write(&other.join(".recording-2026-01-03-100000.annotations.json"), "{}");
+
+        let list = list_for(&default_lib, &chosen_lib);
+        let stamps: Vec<_> = list.iter().map(|r| (r.stamp.as_str(), r.pending_move)).collect();
+        assert_eq!(stamps, vec![("2026-01-02-100000", true), ("2026-01-01-100000", false)]);
+
+        assert_eq!(storage::retry_pending(&default_lib, &chosen_lib, &|_| false), 1);
+        let list = list_for(&default_lib, &chosen_lib);
+        assert_eq!(list.len(), 2);
+        let moved = list.iter().find(|r| r.stamp == "2026-01-02-100000").unwrap();
+        assert!(!moved.pending_move);
+        assert!(moved.scratch_mp4_path.starts_with(&*chosen_lib.to_string_lossy()));
+        assert!(scan(&default_lib).iter().all(|r| r.stamp != "2026-01-02-100000"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // The clean-up is given the current library only; another library's
+    // recordings, however old, are not touched.
+    #[test]
+    fn sweep_touches_only_the_library_it_is_given() {
+        let root = temp_root("sweep-current");
+        let current = root.join("chosen/.recordings");
+        let default_lib = root.join("default/.recordings");
+        let old_current = current.join("recording-2026-01-01-100000");
+        let old_default = default_lib.join("recording-2026-01-01-100000");
+        for d in [&old_current, &old_default] {
+            write(&d.join("x"), "x");
+        }
+        write(&old_default.join(storage::PENDING_MOVE), "");
+        let now = chrono::NaiveDateTime::parse_from_str("2026-03-01-100000", "%Y-%m-%d-%H%M%S").unwrap();
+        sweep_expired(&current, now);
+        assert!(!old_current.exists());
+        assert!(old_default.exists(), "not in the current library: not swept");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn thumb_time_prefers_mark_then_one_second_then_midpoint() {
         assert_eq!(thumb_time(Some(7.5), Some(30.0)), Some(7.5));
@@ -501,7 +592,7 @@ mod tests {
     fn real_library_thumbs() {
         let out = std::env::temp_dir().join("zeigen-real-thumbs");
         std::fs::create_dir_all(&out).unwrap();
-        for dir in std::fs::read_dir(recordings_root().unwrap()).unwrap().flatten().map(|e| e.path()) {
+        for dir in std::fs::read_dir(storage::library(&storage::active().unwrap().root)).unwrap().flatten().map(|e| e.path()) {
             let Some(f) = folder(&dir) else { continue };
             let t0 = std::time::Instant::now();
             let d = edit::probe_duration_seconds(&f.screen).ok();
@@ -522,7 +613,7 @@ mod tests {
     #[test]
     #[ignore]
     fn list_real_library() {
-        for r in scan(&recordings_root().unwrap()) {
+        for r in scan(&storage::library(&storage::active().unwrap().root)) {
             println!("{r:?}");
         }
     }

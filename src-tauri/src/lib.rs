@@ -9,6 +9,7 @@ mod library;
 mod macos;
 mod prewarm;
 mod settings;
+mod storage;
 mod thumbs;
 mod tray;
 mod wallpapers;
@@ -71,6 +72,9 @@ struct ActiveRecording {
     // What was recorded ("<app> - <title> (Window)" etc.), built by the main
     // window at Record. Stamped into the sidecar at finalize.
     name: Option<String>,
+    // Some(chosen library) when the recording is staged in the default library
+    // because the Save to folder is on another volume; finalize moves it there.
+    move_to: Option<PathBuf>,
     last_logged: Option<(Instant, f64, f64)>,
 }
 
@@ -167,10 +171,17 @@ fn engine_start(
     }
 
     let stamp = Local::now().format("%Y-%m-%d-%H%M%S").to_string();
-    let scratch_root = scratch_root_dir()?;
-    let scratch_dir = scratch_root.join(format!("recording-{stamp}"));
+    // Where the recording is made (storage.rs): the Save to folder's library,
+    // or the default library when that folder is unavailable (the main window
+    // has already warned) or on another volume (moved there at finalize).
+    let plan = storage::record_plan(&storage::default_root()?, storage::chosen().as_deref(), &storage::home()?);
+    let scratch_dir = plan.library.join(format!("recording-{stamp}"));
     std::fs::create_dir_all(&scratch_dir)
         .map_err(|e| format!("create {}: {}", scratch_dir.display(), e))?;
+    if plan.move_to.is_some() {
+        std::fs::write(scratch_dir.join(storage::PENDING_MOVE), b"")
+            .map_err(|e| format!("mark {}: {e}", scratch_dir.display()))?;
+    }
     let scratch_mp4_path = scratch_dir.join(format!("recording-{stamp}.mp4"));
 
     let (screen_output, webcam) = if let Some(name) = camera_name {
@@ -222,6 +233,7 @@ fn engine_start(
         bubble_position_log: Vec::new(),
         bubble_roundness: settings::bubble_roundness(),
         name,
+        move_to: plan.move_to,
         last_logged: None,
     });
 
@@ -406,8 +418,9 @@ fn bubble_position_event(
     Ok(())
 }
 
+// Async so the move to an external drive (a copy) runs off the main thread.
 #[tauri::command]
-fn recording_finalize(
+async fn recording_finalize(
     // AppHandle retained for the IPC contract; composite-progress emits
     // happened here pre-Phase-15 c3, but the composite moved to export.
     _app: AppHandle,
@@ -418,6 +431,7 @@ fn recording_finalize(
         .map_err(|e| e.to_string())?
         .take()
         .ok_or("no active recording")?;
+    let move_to = rec.move_to.clone();
 
     let stamp = rec.stamp;
     let scratch_dir = rec.scratch_dir;
@@ -548,6 +562,39 @@ fn recording_finalize(
         edit::write_sidecar_path(&scratch_mp4_path, &state)?;
     }
 
+    // Staged on this Mac because the Save to folder is on another volume: move
+    // it there now that every file is closed, before Review sees any path. A
+    // failed move keeps the recording here with its marker (retried later) and
+    // never fails the recording.
+    let mut move_note = None;
+    let (mut scratch_dir, mut scratch_mp4_path) = (scratch_dir, scratch_mp4_path);
+    let (mut screen_for_dual, mut webcam_for_dual, mut sources_dir) = (screen_for_dual, webcam_for_dual, sources_dir);
+    if let Some(dest_lib) = move_to {
+        let src = scratch_dir.clone();
+        let dest_lib2 = dest_lib.clone();
+        let moved = tauri::async_runtime::spawn_blocking(move || storage::move_recording(&src, &dest_lib2))
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r);
+        match moved {
+            Ok(new_dir) => {
+                let rebase = |p: PathBuf| match p.strip_prefix(&scratch_dir) {
+                    Ok(rest) => new_dir.join(rest),
+                    Err(_) => p,
+                };
+                scratch_mp4_path = rebase(scratch_mp4_path);
+                screen_for_dual = screen_for_dual.map(rebase);
+                webcam_for_dual = webcam_for_dual.map(rebase);
+                sources_dir = sources_dir.map(rebase);
+                scratch_dir = new_dir;
+            }
+            Err(e) => {
+                eprintln!("[storage] finalize move failed: {e}");
+                move_note = Some(storage::move_failed_note(&dest_lib));
+            }
+        }
+    }
+
     Ok(FinalizedRecording {
         stamp,
         scratch_dir: scratch_dir.to_string_lossy().into_owned(),
@@ -566,6 +613,7 @@ fn recording_finalize(
         webcam_lead_ms: measured_lead_ms.unwrap_or(composite::WEBCAM_LEAD_MS),
         sources_dir: sources_dir.map(|p| p.to_string_lossy().into_owned()),
         name,
+        move_note,
     })
 }
 
@@ -580,11 +628,8 @@ struct FinalizedRecording {
     webcam_lead_ms: f64,
     sources_dir: Option<String>,
     name: Option<String>,
-}
-
-fn movies_dir() -> Result<PathBuf, String> {
-    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-    Ok(PathBuf::from(home).join("Movies/Zeigen"))
+    // Some when the move to the Save to folder failed; Review shows it.
+    move_note: Option<String>,
 }
 
 // App-launch safety net for scratch dirs orphaned by a crash or force-quit
@@ -592,7 +637,7 @@ fn movies_dir() -> Result<PathBuf, String> {
 // review window closes, so a clean exit always sweeps its own dir — this
 // just covers the unclean case. Best-effort; failures are silent.
 fn sweep_stale_scratch() {
-    let root = match movies_dir().map(|d| d.join(".scratch")) {
+    let root = match storage::default_root().map(|d| d.join(".scratch")) {
         Ok(p) => p,
         Err(_) => return,
     };
@@ -602,36 +647,135 @@ fn sweep_stale_scratch() {
     thumbs::sweep_dir_older_than(&root, std::time::Duration::from_secs(24 * 60 * 60), "scratch-sweep");
 }
 
-// Where a recording is made and kept: ~/Movies/Zeigen/.recordings (the
-// library, see library.rs). Each recording gets its own subdirectory with the
-// raw source files, the cursor log and the edit-state sidecar; it stays there
-// after Review closes so it can be reopened, until Discard/Delete or the
-// 30-day clean-up. ("scratch" in names here is from when the folder was
-// temporary and lived in .scratch.)
-fn scratch_root_dir() -> Result<PathBuf, String> {
-    let dir = library::recordings_root()?;
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("create {}: {}", dir.display(), e))?;
-    Ok(dir)
+// Defense against a malformed/spoofed scratch path. Any discard must work
+// against a recording folder in the default library (or the old .scratch) or
+// the Save to folder's library, never a root itself (storage.rs).
+fn validate_scratch_path(p: &std::path::Path) -> Result<(), String> {
+    storage::validate_recording_dir(p, &storage::recording_roots()?)
 }
 
-// Defense against a malformed/spoofed scratch path. Any discard must work
-// against a real subtree of ~/Movies/Zeigen/.scratch or, for a recording
-// reopened from the library, ~/Movies/Zeigen/.recordings — canonicalize both
-// sides so symlinks and `..` segments can't escape, and never the root itself.
-fn validate_scratch_path(p: &std::path::Path) -> Result<(), String> {
-    let canon = p
-        .canonicalize()
-        .map_err(|e| format!("canonicalize {}: {e}", p.display()))?;
-    // .scratch: recordings made before the library existed.
-    let roots = [movies_dir()?.join(".scratch"), library::recordings_root()?];
-    let inside = roots.iter().filter_map(|r| r.canonicalize().ok()).any(|root| {
-        canon != root && canon.starts_with(&root)
-    });
-    if !inside {
-        return Err(format!("path not under scratch or recordings root: {}", p.display()));
+// A recording folder that must not be moved now: being recorded, or open in
+// Review (window review-<stamp>).
+pub(crate) fn recording_in_use(app: &AppHandle, dir: &std::path::Path) -> bool {
+    let Some(stamp) = stamp_from_scratch_dir_name(dir) else { return true };
+    if app.get_webview_window(&format!("review-{stamp}")).is_some() {
+        return true;
     }
-    Ok(())
+    let state = app.state::<Mutex<Option<ActiveRecording>>>();
+    let active = state.lock().map(|g| g.as_ref().map(|r| r.stamp == stamp).unwrap_or(false));
+    active.unwrap_or(true)
+}
+
+// Lets the webview load video and thumbnails from the Save to folder. The
+// static scope in tauri.conf.json covers only ~/Movies/Zeigen. `**` does not
+// match a leading dot, so the library (.recordings) is allowed on its own.
+fn allow_save_dir<R: tauri::Runtime>(app: &AppHandle<R>, root: &std::path::Path) {
+    let scope = app.asset_protocol_scope();
+    for dir in [root.to_path_buf(), storage::library(root)] {
+        if let Err(e) = scope.allow_directory(&dir, true) {
+            eprintln!("[storage] asset scope {}: {e}", dir.display());
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct StorageStatus {
+    // Where recordings and exports go now, home shown as ~.
+    destination: String,
+    // The Save to setting, None for the default.
+    chosen: Option<String>,
+    chosen_available: bool,
+    // Set when the chosen folder is unavailable.
+    warning: Option<String>,
+}
+
+#[tauri::command]
+fn storage_status() -> Result<StorageStatus, String> {
+    let a = storage::active()?;
+    let chosen = storage::chosen();
+    Ok(StorageStatus {
+        destination: storage::show(&a.root),
+        chosen: chosen.as_deref().map(storage::show),
+        chosen_available: a.fallback_from.is_none(),
+        warning: a.fallback_from.as_deref().map(|c| storage::unavailable_note(c, false)),
+    })
+}
+
+#[derive(serde::Serialize)]
+struct MoveOffer {
+    // The library the recordings are in now.
+    from: String,
+    count: usize,
+    bytes: u64,
+}
+
+// Sets the Save to folder (None = back to ~/Movies/Zeigen). Refused while a
+// recording runs and for a folder Zeigen cannot write to. Returns what the old
+// library holds, so the window can offer to move it.
+#[tauri::command]
+fn set_save_dir(
+    app: AppHandle,
+    recording: RecordingState<'_>,
+    path: Option<String>,
+) -> Result<Option<MoveOffer>, String> {
+    if recording.lock().map_err(|e| e.to_string())?.is_some() {
+        return Err("The folder can't be changed while recording.".into());
+    }
+    let default = storage::default_root()?;
+    let new_root = path.map(PathBuf::from).filter(|p| *p != default);
+    if let Some(p) = &new_root {
+        if !storage::is_available(p) {
+            return Err(format!("Zeigen can't save to {}.", storage::show(p)));
+        }
+    }
+    let old_lib = storage::library(&storage::active()?.root);
+    settings::write_save_dir(&app, new_root.as_ref().map(|p| p.to_string_lossy().into_owned()))?;
+    if let Some(p) = &new_root {
+        allow_save_dir(&app, p);
+    }
+    let new_lib = storage::library(&storage::active()?.root);
+    if old_lib == new_lib {
+        return Ok(None);
+    }
+    let recordings = library::scan(&old_lib);
+    if recordings.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(MoveOffer {
+        from: old_lib.to_string_lossy().into_owned(),
+        count: recordings.len(),
+        bytes: recordings.iter().map(|r| r.size_bytes).sum(),
+    }))
+}
+
+// Moves every recording in the library `from` into the current library, in the
+// background, skipping those being recorded or open in Review. Exported files
+// are never moved. Returns a plain summary.
+#[tauri::command]
+async fn move_recordings(app: AppHandle, from: String) -> Result<String, String> {
+    let from = PathBuf::from(from);
+    if from.file_name().and_then(|n| n.to_str()) != Some(storage::LIBRARY) {
+        return Err(format!("not a recordings library: {}", from.display()));
+    }
+    let a = storage::active()?;
+    if let Some(c) = a.fallback_from {
+        return Err(storage::unavailable_note(&c, false));
+    }
+    let to = storage::library(&a.root);
+    if from == to {
+        return Ok(storage::move_summary(0, &[]));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let label = |d: &std::path::Path| {
+            library::read_folder(d)
+                .and_then(|r| r.name)
+                .unwrap_or_else(|| d.file_name().unwrap_or_default().to_string_lossy().into_owned())
+        };
+        let (moved, failed) = storage::move_library(&from, &to, &|d| recording_in_use(&app, d), &label);
+        storage::move_summary(moved, &failed)
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 // Destructive: removes the entire scratch directory (mp4 + sidecar + raw
@@ -759,7 +903,18 @@ pub fn run() {
             exports::sweep_stale_exports();
             thumbs::sweep_stale_thumbs();
             sweep_stale_scratch();
-            library::sweep_expired(&library::recordings_root().unwrap_or_default(), chrono::Local::now().naive_local());
+            // The 30-day clean-up runs on the current library only.
+            if let Ok(a) = storage::active() {
+                library::sweep_expired(&storage::library(&a.root), chrono::Local::now().naive_local());
+            }
+            if let Some(chosen) = storage::chosen() {
+                allow_save_dir(&handle, &chosen);
+            }
+            // Recordings that could not reach the Save to folder earlier.
+            let handle_for_moves = handle.clone();
+            std::thread::spawn(move || {
+                library::retry_pending_moves(&handle_for_moves);
+            });
 
             // Tap engine-event window_frame messages into the active
             // recording's CaptureMode so bubble_position_event can convert
@@ -831,6 +986,9 @@ pub fn run() {
             discard_recording,
             library::list_recordings,
             library::release_recording,
+            storage_status,
+            set_save_dir,
+            move_recordings,
             focus_window,
             clipboard::clipboard_copy_recording,
             exports::cleanup_recording_exports,
@@ -844,4 +1002,37 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The runtime grant reaches files in the chosen folder's dot-named library,
+    // which a plain allow_directory(root, true) does not (`**` skips a leading
+    // dot), and nothing outside it.
+    #[test]
+    fn asset_scope_allows_the_chosen_library() {
+        let t = std::env::temp_dir().join(format!("zeigen-scope-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        let root = t.join("LaCie/Zeigen");
+        let file = storage::library(&root).join("recording-2026-11-17-100000/sources/screen.mp4");
+        let thumb = storage::library(&root).join("recording-2026-11-17-100000/thumb-1000.jpg");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"x").unwrap();
+        std::fs::write(&thumb, b"x").unwrap();
+        std::fs::write(root.join("Demo.mp4"), b"x").unwrap();
+
+        let app = tauri::test::mock_app();
+        let scope = app.asset_protocol_scope();
+        scope.allow_directory(&root, true).unwrap();
+        assert!(scope.is_allowed(root.join("Demo.mp4")));
+        assert!(!scope.is_allowed(&file), "root/** alone does not reach .recordings");
+
+        allow_save_dir(app.handle(), &root);
+        assert!(scope.is_allowed(&file));
+        assert!(scope.is_allowed(&thumb));
+        assert!(!scope.is_allowed(t.join("LaCie/other.mp4")));
+        let _ = std::fs::remove_dir_all(&t);
+    }
 }
