@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Zeigen capture window, compact</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0;background:#0e0f12}
+button{font:inherit}
+</style>
+</helmet>
+<div style="width: 380px; height: 600px; box-sizing: border-box; background: #17181c; border: 1px solid rgba(255,255,255,0.08); border-radius: 16px; color: #f3f4f6; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', Inter, system-ui, sans-serif; display: flex; flex-direction: column; gap: 18px; padding: 14px 16px 16px">
+
+  <!-- Header -->
+  <div style="display: flex; align-items: center; gap: 10px">
+    <div style="display: flex; gap: 8px" aria-hidden="true">
+      <span style="width: 12px; height: 12px; border-radius: 50%; background: #ff5f57"></span>
+      <span style="width: 12px; height: 12px; border-radius: 50%; background: #febc2e"></span>
+      <span style="width: 12px; height: 12px; border-radius: 50%; background: #28c840"></span>
+    </div>
+    <div style="flex-grow: 1"></div>
+    <button aria-label="Recordings" title="Recordings" style="width: 32px; height: 32px; border: 0; background: transparent; color: #a9acb3; border-radius: 8px; display: flex; align-items: center; justify-content: center; cursor: pointer">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"></rect><path d="m10 9 5 3-5 3z"></path></svg>
+    </button>
+    <button aria-label="Settings" title="Settings" style="width: 32px; height: 32px; border: 0; background: transparent; color: #a9acb3; border-radius: 8px; display: flex; align-items: center; justify-content: center; cursor: pointer">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"></path></svg>
+    </button>
+  </div>
+  <div style="display: flex; align-items: center; gap: 10px; margin-top: -6px">
+    <div style="width: 30px; height: 30px; border-radius: 8px; background: #2f74dc; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 16px" aria-hidden="true">Z</div>
+    <span style="font-size: 20px; font-weight: 650">Zeigen</span>
+  </div>
+
+  <!-- Source -->
+  <div style="display: flex; flex-direction: column; gap: 8px">
+    <span style="font-size: 12px; color: #a9acb3">Record</span>
+    <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px">
+      <button aria-pressed="true" style="height: 76px; border: 1px solid oklch(0.60 0.17 252 / 0.6); background: oklch(0.60 0.17 252 / 0.16); color: #f3f4f6; border-radius: 12px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; font-size: 13px; cursor: pointer; position: relative">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"></rect><path d="M8 20h8M12 16v4"></path></svg>
+        Display
+      </button>
+      <button style="height: 76px; border: 1px solid transparent; background: rgba(255,255,255,0.05); color: #d6d8dd; border-radius: 12px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; font-size: 13px; cursor: pointer">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M3 9h18"></path></svg>
+        Window
+      </button>
+      <button style="height: 76px; border: 1px solid transparent; background: rgba(255,255,255,0.05); color: #d6d8dd; border-radius: 12px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; font-size: 13px; cursor: pointer">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"></path></svg>
+        Area
+      </button>
+    </div>
+    <button style="height: 34px; border: 0; background: transparent; color: #a9acb3; border-radius: 8px; display: flex; align-items: center; gap: 8px; padding: 0 4px; font-size: 13px; cursor: pointer">
+      Built-in Retina Display
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg>
+      <span style="flex-grow: 1"></span>
+      <span style="font-size: 12px; color: #8b8e96">Identify</span>
+    </button>
+  </div>
+
+  <!-- Devices -->
+  <div style="display: flex; flex-direction: column; gap: 6px">
+    <span style="font-size: 12px; color: #a9acb3">Camera and microphone</span>
+    <button style="height: 44px; border: 0; background: rgba(255,255,255,0.05); color: #f3f4f6; border-radius: 10px; display: flex; align-items: center; gap: 10px; padding: 0 12px; font-size: 13px; cursor: pointer">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#a9acb3" stroke-width="1.7" aria-hidden="true"><rect x="3" y="6" width="13" height="12" rx="2"></rect><path d="m16 10 5-3v10l-5-3"></path></svg>
+      KT iPhone Camera
+      <span style="flex-grow: 1"></span>
+      <span style="font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 999px; background: #2f74dc; color: #ffffff">On</span>
+    </button>
+    <button style="height: 44px; border: 0; background: rgba(255,255,255,0.05); color: #f3f4f6; border-radius: 10px; display: flex; align-items: center; gap: 10px; padding: 0 12px; font-size: 13px; cursor: pointer">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#a9acb3" stroke-width="1.7" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M5 11a7 7 0 0 0 14 0M12 18v3"></path></svg>
+      MacBook Pro Microphone
+      <span style="flex-grow: 1"></span>
+      <span style="font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 999px; background: #2f74dc; color: #ffffff">On</span>
+    </button>
+  </div>
+
+  <div style="flex-grow: 1"></div>
+
+  <!-- Start -->
+  <div style="display: flex; flex-direction: column; gap: 10px">
+    <button style="height: 46px; border: 0; background: #2f74dc; color: #ffffff; border-radius: 12px; display: flex; align-items: center; justify-content: center; gap: 10px; font-size: 15px; font-weight: 600; cursor: pointer">
+      <span style="width: 10px; height: 10px; border-radius: 50%; background: #ffffff" aria-hidden="true"></span>
+      Start recording
+      <span style="font-size: 12px; font-weight: 500; opacity: 0.8">⇧⌘P</span>
+    </button>
+    <div style="display: flex; justify-content: center; font-size: 12px; color: #8b8e96">5 s countdown · saves to ~/Movies/Zeigen</div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":380,"height":600}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

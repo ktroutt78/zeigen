@@ -4,6 +4,19 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-17 — Save location setting approved (build after the design pass)
+
+Keith wants to choose where Zeigen saves (Local Documents, or the LaCie external SSD). Approved plan:
+
+- Folder picker in Settings; default stays `~/Movies/Zeigen`. Exports and the library (`.recordings`) both follow it. The Recordings list shows only the current folder's library.
+- Folder unavailable at launch, at Record or at Save: warn clearly, naming the folder, and use `~/Movies/Zeigen` for that recording or export. The setting is kept.
+- **Record internally, then move** when the chosen folder is on an external drive (Keith: yes). A failed move leaves the recording on the internal drive and says so. Internal folders are written directly.
+- Changing the folder offers to move existing recordings (copy, check, then delete the original); never silently. Already-exported mp4s and GIFs stay where they are (Keith).
+- The 30-day clean-up runs on the current folder's library only (Keith: yes).
+- Keith tests the unplugged cases on the LaCie; they cannot be run from the terminal.
+
+---
+
 ## 2026-11-17 — Review polish verified; fixes from Keith's test
 
 Keith passed the three polish items (names, play bar under the picture, row hints). Fixes from his test, built the same day:

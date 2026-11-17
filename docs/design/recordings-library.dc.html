@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Zeigen recordings library</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0;background:#0e0f12}
+button,input{font:inherit}
+</style>
+</helmet>
+<div style="width: 900px; height: 680px; box-sizing: border-box; background: #17181c; border: 1px solid rgba(255,255,255,0.08); border-radius: 14px; color: #f3f4f6; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', Inter, system-ui, sans-serif; display: flex; flex-direction: column; overflow: hidden">
+
+  <!-- Header -->
+  <div style="display: flex; align-items: center; gap: 14px; padding: 14px 20px 10px">
+    <div style="display: flex; gap: 8px" aria-hidden="true">
+      <span style="width: 12px; height: 12px; border-radius: 50%; background: #ff5f57"></span>
+      <span style="width: 12px; height: 12px; border-radius: 50%; background: #febc2e"></span>
+      <span style="width: 12px; height: 12px; border-radius: 50%; background: #28c840"></span>
+    </div>
+  </div>
+  <div style="display: flex; align-items: flex-end; gap: 16px; padding: 4px 24px 18px">
+    <div style="display: flex; flex-direction: column; gap: 4px">
+      <h1 style="margin: 0; font-size: 22px; font-weight: 650">Recordings</h1>
+      <span style="font-size: 12px; color: #8b8e96">9 recordings · 1.0 GB · kept for 30 days</span>
+    </div>
+    <div style="flex-grow: 1"></div>
+    <label style="display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 10px; border-radius: 8px; background: rgba(255,255,255,0.05); color: #8b8e96; font-size: 13px; width: 200px">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></svg>
+      <span style="position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0)">Search recordings</span>
+      <input placeholder="Search" style="border: 0; background: transparent; color: #f3f4f6; outline: none; width: 100%; font-size: 13px">
+    </label>
+  </div>
+
+  <!-- Grid -->
+  <div style="flex-grow: 1; overflow: auto; padding: 0 24px 24px; display: flex; flex-direction: column; gap: 22px">
+    <sc-for list="{{groups}}" as="g" hint-placeholder-count="2">
+      <div style="display: flex; flex-direction: column; gap: 12px">
+        <h2 style="margin: 0; font-size: 13px; font-weight: 600; color: #a9acb3">{{g.label}}</h2>
+        <div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px 14px">
+          <sc-for list="{{g.items}}" as="r" hint-placeholder-count="3">
+            <button style="border: 0; background: transparent; color: inherit; padding: 0; text-align: left; display: flex; flex-direction: column; gap: 8px; cursor: pointer">
+              <div style="position: relative; width: 100%; aspect-ratio: 16 / 9; border-radius: 10px; overflow: hidden; background: {{r.bg}}; box-shadow: {{r.ring}}">
+                <div style="position: absolute; left: 10%; top: 12%; right: 10%; bottom: 12%; border-radius: 5px; background: {{r.win}}; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: 22% minmax(0, 1fr); gap: 5px; padding: 8px" aria-hidden="true">
+                  <span style="background: {{r.block}}; border-radius: 3px"></span>
+                  <span style="background: {{r.block}}; border-radius: 3px"></span>
+                  <span style="background: {{r.block}}; border-radius: 3px"></span>
+                  <span style="grid-column: 1 / 4; background: {{r.block}}; border-radius: 3px"></span>
+                </div>
+                <sc-if value="{{r.cam}}" hint-placeholder-val="{{true}}">
+                  <span style="position: absolute; right: 7%; bottom: 10%; width: 18%; aspect-ratio: 1 / 1; border-radius: 28%; background: #5a606c; box-shadow: 0 4px 10px rgba(0,0,0,0.35)" aria-hidden="true"></span>
+                </sc-if>
+                <span style="position: absolute; left: 8px; bottom: 8px; font-size: 11px; font-weight: 600; padding: 2px 6px; border-radius: 5px; background: rgba(0,0,0,0.6); color: #ffffff; font-family: ui-monospace, 'SF Mono', Menlo, monospace">{{r.len}}</span>
+                <sc-if value="{{r.hover}}" hint-placeholder-val="{{false}}">
+                  <span aria-label="More actions" style="position: absolute; right: 8px; top: 8px; width: 26px; height: 26px; border-radius: 7px; background: rgba(0,0,0,0.55); display: flex; align-items: center; justify-content: center">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="#ffffff" aria-hidden="true"><circle cx="5" cy="12" r="1.8"></circle><circle cx="12" cy="12" r="1.8"></circle><circle cx="19" cy="12" r="1.8"></circle></svg>
+                  </span>
+                </sc-if>
+              </div>
+              <div style="display: flex; flex-direction: column; gap: 2px; min-width: 0">
+                <span style="font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{r.name}}</span>
+                <span style="font-size: 12px; color: #8b8e96">{{r.meta}}</span>
+              </div>
+            </button>
+          </sc-for>
+        </div>
+      </div>
+    </sc-for>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":900,"height":680}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const t = (bg, win, block) => ({ bg, win, block });
+    const dark = t('#2a2d35', '#0f1115', '#1d2027');
+    const light = t('#3a3550', '#f2f1ee', '#dcdad4');
+    const wall = t('#4b3a6b', '#0f1115', '#1d2027');
+    const mk = (name, meta, len, cam, th, hover) => ({ name, meta, len, cam, hover: !!hover, ring: hover ? '0 0 0 2px oklch(0.60 0.17 252)' : 'none', ...th });
+    const groups = [
+      { label: 'Today', items: [
+        mk('Tableau – Book1', '8:27 AM · 12 MB', '0:22', true, light, true),
+      ] },
+      { label: 'Yesterday', items: [
+        mk('Chrome – SnowDash', '9:18 PM · 10 MB', '0:17', true, dark),
+        mk('Built-in Retina Display (Area)', '9:07 PM · 17 MB', '0:30', true, wall),
+        mk('Built-in Retina Display (Area)', '9:06 PM · 22 MB', '0:35', true, wall),
+        mk('BenQ GL2780 (2)', '10:08 AM · 300 MB', '3:49', true, dark),
+        mk('BenQ GL2780 (2)', '9:50 AM · 301 MB', '3:48', true, dark),
+      ] },
+      { label: 'Nov 15', items: [
+        mk('Chrome – SnowDash', '10:45 PM · 16 MB', '1:13', false, dark),
+        mk('Chrome – SnowDash', '10:33 PM · 14 MB', '0:19', false, dark),
+        mk('Chrome – SnowDash', '10:11 PM · 63 MB', '0:39', true, dark),
+      ] },
+    ];
+    return { groups };
+  }
+}
+</script>
+</body>
+</html>
