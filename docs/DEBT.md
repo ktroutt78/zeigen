@@ -8,8 +8,8 @@ Things left worse than we'd like, with why. Newest at top. Remove an entry when 
 - The glide starts when the drag ends (the first of two log entries in the same place), so holding the bubble still for about half a second mid-drag counts as a stop there.
 - The preview asks Rust for the fixed-bubble zone (`bubble_start_zone`) when it opens, so for a moment it may draw the bubble bottom-right before moving it to the recorded spot.
 
-## Countdown Cancel and the moving bubble (2026-11-17)
-- The capture window now stays up during the countdown so its button can read Cancel. Its other controls (source tiles, camera, mic) are not disabled during the countdown; changing one then does nothing to the armed take.
+## Countdown Cancel: untried in the app (2026-11-17)
+- The Cancel button, click-through countdown overlay, Esc from the capture window and the locked controls were checked by reading the code, not by running the app.
 
 ## Armed start: untried in the app (2026-11-17)
 - Only the webcam recorder's hold-then-go was run (2.0 s file after 2 s held). The engine's arm/go, the cancel path and the whole start sequence are untried: the terminal has no Screen Recording permission.
