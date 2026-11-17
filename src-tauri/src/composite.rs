@@ -286,10 +286,10 @@ fn grid_zone(e: &BubblePositionEntry) -> BubbleZone {
 //
 // Not following (a zone was picked, or the recording predates following): one
 // zone, the same as resolve_zone. Following: each logged position is put in its
-// grid zone and runs of the same zone collapse; a run is a rest if it holds at
-// least two entries (the bubble stayed there for one log interval) or is the
-// last, so a drag passing through a zone is not a stop. A move is emitted at the
-// first entry of each rest whose zone differs from the previous rest's.
+// grid zone; a rest is two entries in a row in the same place, so a drag passing
+// through a zone, however slowly, is not a stop. A move is emitted when the
+// bubble comes to rest in a zone other than the previous rest's, so the glide
+// starts as the drag ends.
 pub(crate) fn resolve_zones(
     zone: Option<BubbleZone>,
     follow: Option<bool>,
@@ -298,26 +298,27 @@ pub(crate) fn resolve_zones(
     if follow != Some(true) || zone.is_some() || log.is_empty() {
         return vec![(0.0, resolve_zone(zone, log))];
     }
-    // (start time, zone, entries)
-    let mut runs: Vec<(f64, BubbleZone, usize)> = Vec::new();
-    for e in log {
-        let z = grid_zone(e);
-        match runs.last_mut() {
-            Some(r) if r.1 == z => r.2 += 1,
-            _ => runs.push((e.t, z, 1)),
-        }
-    }
-    let last = runs.len() - 1;
+    // A rest is where two entries in a row are in the same place (the logger
+    // repeats an unmoved position); it begins at the first of them, when the
+    // bubble stopped. Entries logged on the way there are not rests.
+    let still = |a: &BubblePositionEntry, b: &BubblePositionEntry| {
+        (a.x - b.x).abs() <= 0.02 && (a.y - b.y).abs() <= 0.02
+    };
     let mut out: Vec<(f64, BubbleZone)> = Vec::new();
-    for (i, &(t, z, n)) in runs.iter().enumerate() {
-        if n < 2 && i != last {
+    for pair in log.windows(2) {
+        if !still(&pair[0], &pair[1]) {
             continue;
         }
+        let z = grid_zone(&pair[0]);
         match out.last() {
             None => out.push((0.0, z)),
-            Some(&(_, prev)) if prev != z => out.push((t, z)),
+            Some(&(_, prev)) if prev != z => out.push((pair[0].t, z)),
             _ => {}
         }
+    }
+    // Never at rest (one entry, or moving throughout): where it ended up.
+    if out.is_empty() {
+        out.push((0.0, grid_zone(&log[log.len() - 1])));
     }
     out
 }
@@ -623,9 +624,8 @@ mod tests {
     #[test]
     fn zones_follow_a_drag_to_its_rest() {
         let z = resolve_zones(None, Some(true), &dragged_log());
-        // The passes through the middle (one entry each) are not stops; the move
-        // lands at the first entry inside the top-left cell.
-        assert_eq!(z, vec![(0.0, BubbleZone::BottomRight), (1.639, BubbleZone::TopLeft)]);
+        // The entries on the way are not stops; the move lands where the drag ended.
+        assert_eq!(z, vec![(0.0, BubbleZone::BottomRight), (2.047, BubbleZone::TopLeft)]);
     }
 
     #[test]
@@ -641,7 +641,7 @@ mod tests {
     fn zones_clamp_off_frame_positions() {
         // Dragged past the bottom-right edge (onto another display), then past
         // the left edge.
-        let log = [at(0.0, 1.4, 1.2), at(0.4, 1.3, 1.1), at(1.0, -0.3, 0.5), at(1.4, -0.3, 0.5)];
+        let log = [at(0.0, 1.4, 1.2), at(0.4, 1.4, 1.2), at(1.0, -0.3, 0.5), at(1.4, -0.3, 0.5)];
         assert_eq!(
             resolve_zones(None, Some(true), &log),
             vec![(0.0, BubbleZone::BottomRight), (1.0, BubbleZone::CenterLeft)]

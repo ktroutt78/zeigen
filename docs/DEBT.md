@@ -5,8 +5,7 @@ Things left worse than we'd like, with why. Newest at top. Remove an entry when 
 ## Bubble moves during a recording: rough edges (2026-11-17)
 - The Follow recording choice and the gliding bubble in the Review preview are untried in the app; I cannot operate the Review window. The export was checked on a copy of recording-2026-11-17-173434 (bottom-right at 0.3 s, top-left at 3.5 s).
 - Rest spots are the grid cell (thirds of the frame) the logged bubble centre is in, not the nearest of the nine baked spots. A bubble dropped a little in from a corner (x between about 0.28 and 0.33) snaps to the corner, which is what a drop there looks like it means.
-- The glide starts at the first log entry inside the new cell, which can be a fraction of a second before the drag ends (1.64 s against a 2.05 s stop on the example take).
-- A slow drag that lingers 0.2 s or more in a cell on its way counts as a stop there, so the bubble may pause briefly mid-route in the video.
+- The glide starts when the drag ends (the first of two log entries in the same place), so holding the bubble still for about half a second mid-drag counts as a stop there.
 - The preview asks Rust for the fixed-bubble zone (`bubble_start_zone`) when it opens, so for a moment it may draw the bubble bottom-right before moving it to the recorded spot.
 
 ## Countdown Cancel and the moving bubble (2026-11-17)
