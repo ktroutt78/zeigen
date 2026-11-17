@@ -26,10 +26,13 @@ pub fn recorder_binary_path() -> PathBuf {
 
 // Starts the helper writing `out`. It stops on "q" or on stdin EOF, so it
 // also finishes its file and exits when this process dies.
-pub fn spawn_recorder(camera_name: &str, out: &Path) -> Result<Child, String> {
-    Command::new(recorder_binary_path())
-        .arg(camera_name)
-        .arg(out)
+pub fn spawn_recorder(camera_name: &str, out: &Path, hold: bool) -> Result<Child, String> {
+    let mut cmd = Command::new(recorder_binary_path());
+    cmd.arg(camera_name).arg(out);
+    if hold {
+        cmd.arg("--hold");
+    }
+    cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -47,8 +50,10 @@ pub struct WebcamRecorder {
 }
 
 impl WebcamRecorder {
+    // Opens the camera without writing; `go` begins the file. Started when
+    // the countdown starts, so the camera is already running at go.
     pub fn start(camera_name: &str, sources_dir: PathBuf) -> Result<Self, String> {
-        let mut child = spawn_recorder(camera_name, &sources_dir.join("webcam.mp4"))?;
+        let mut child = spawn_recorder(camera_name, &sources_dir.join("webcam.mp4"), true)?;
         let stdout = child.stdout.take().ok_or("webcam-recorder: no stdout")?;
         let first_host_s = Arc::new(Mutex::new(None));
         let slot = first_host_s.clone();
@@ -81,6 +86,10 @@ impl WebcamRecorder {
     // Pause and resume keep the one helper running: it stops writing on
     // "pause" and, on resume, cuts the same total paused time the screen
     // engine reports, so the two files stay in step across pauses.
+    pub fn go(&mut self) -> Result<(), String> {
+        self.send("go\n")
+    }
+
     pub fn pause(&mut self) -> Result<(), String> {
         self.send("pause\n")
     }

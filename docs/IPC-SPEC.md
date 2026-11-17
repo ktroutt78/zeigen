@@ -259,3 +259,10 @@ Naming consistency: both enumerators ultimately read from AVFoundation, so the s
 - Event `{"event":"mic_level","level":0.0-1.0}` about 15 times a second while the mic is open (loudest sample, -50 to 0 dBFS).
 - `start` borrows the open microphone when it is the same device; otherwise it opens it.
 - `started` is emitted when the file begins (with `first_frame`), not when the streams are asked to start.
+
+## Armed start (2026-11-17)
+
+- `start` arms a recording: the screen stream and mic run, nothing is written. Event `{"event":"armed"}` when both deliver.
+- `{"command":"go"}` opens the file on the next mic buffer (next screen frame without a mic); `started` and `first_frame` follow.
+- `{"command":"cancel"}` ends an armed or running recording with no file and no event.
+- webcam-recorder: `--hold` as a third argument opens the camera without writing; a line `go` on stdin begins the file.

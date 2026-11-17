@@ -32,6 +32,9 @@ final class RecordingSession: NSObject,
 
     private let lock = NSLock()
     private var started = false
+    // True from Start until `go`: streams run, nothing is written.
+    private var held = true
+    private var armedSent = false
     // Latest screen frame seen before the writer started, so the file can
     // open with a real picture at time zero (see the writer-start gate).
     private var preStartVideo: CMSampleBuffer?
@@ -543,6 +546,11 @@ final class RecordingSession: NSObject,
         append(dup, to: videoInput, isVideo: true)
     }
 
+    // Opens the file on the next mic buffer (see the writer-start gate).
+    func go() {
+        lock.withLock { held = false }
+    }
+
     func pause() {
         lock.withLock {
             paused = true
@@ -863,7 +871,9 @@ final class RecordingSession: NSObject,
         // its receipt and measures the webcam lead against host_s. Declared
         // before the lock's defer so it runs after the unlock.
         var sessionStartedAt: CMTime?
+        var becameArmed = false
         defer {
+            if becameArmed { emit(.armed) }
             if let t = sessionStartedAt {
                 // `started` means the file has begun: the app starts its
                 // timer here, not when the streams were asked to start.
@@ -913,28 +923,29 @@ final class RecordingSession: NSObject,
             if micDropped { return }
         }
 
-        // Writer-start gate: wait for first sample from each configured
-        // pipeline, then anchor session at max(firstVideoPTS, firstAudioPTS)
-        // so the earlier pipeline's pre-origin samples collapse to ~0
-        // audio prefix (D-02).
+        // Writer-start gate. Start only arms the session: the screen stream
+        // and the mic run and their samples are dropped (keeping the latest
+        // screen frame) until `go`. The file then begins on the next mic
+        // buffer (the next screen frame when there is no mic), so nothing
+        // that takes time to start is inside the recording. Everything that
+        // can disturb the mic (macOS restarts it when the camera opens) has
+        // already happened while armed.
         if !started {
-            let videoReady = firstVideoPTS.isValid
-            let audioReady = (audioInput == nil) || firstAudioPTS.isValid
-            if videoReady && audioReady {
-                let origin: CMTime
-                if audioInput == nil {
-                    origin = firstVideoPTS
-                } else {
-                    origin = CMTimeCompare(firstVideoPTS, firstAudioPTS) > 0 ? firstVideoPTS : firstAudioPTS
-                }
+            let ready = firstVideoPTS.isValid && (audioInput == nil || firstAudioPTS.isValid)
+            if ready && !armedSent {
+                armedSent = true
+                becameArmed = true
+            }
+            let opens = !held && ready && (audioInput == nil ? isVideo : !isVideo)
+            if opens {
+                let origin = rawPTS
                 writer.startWriting()
                 writer.startSession(atSourceTime: origin)
                 sessionStartPTS = origin
                 started = true
                 sessionStartedAt = origin
-                // The screen frames that arrived while the mic warmed up were
-                // dropped, so the next one lands a frame or two after time
-                // zero. A video track that starts late reads back with a black
+                // The file opens on a mic buffer, so the next screen frame
+                // lands a frame or two after time zero. A video track that starts late reads back with a black
                 // filler frame in the gap (AVAssetReader, the Review player).
                 // Write the screen as it stood, at time zero.
                 if !isVideo, let early = preStartVideo,
@@ -944,7 +955,7 @@ final class RecordingSession: NSObject,
                 }
                 preStartVideo = nil
             } else {
-                // Earlier pipeline produced before the other warmed up: drop,
+                // Armed, or waiting for the buffer that opens the file: drop,
                 // keeping the latest screen frame for the start.
                 if isVideo { preStartVideo = buffer }
                 return
@@ -1040,7 +1051,9 @@ final class RecordingSession: NSObject,
     // Marks audio finished; recording continues video-only. No IPC event
     // (deferred to V2.3 per CONTEXT D-07).
     private func handleSessionInterruption(_ note: Notification) {
-        lock.withLock { markMicDropped(reason: "interrupted") }
+        // Only a running file has audio to finish; while armed the mic is
+        // restarted by macOS as other devices open.
+        lock.withLock { if started { markMicDropped(reason: "interrupted") } }
     }
 
     // D-07 bucket-1 action, shared by the interruption observer and the

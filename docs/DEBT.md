@@ -2,6 +2,13 @@
 
 Things left worse than we'd like, with why. Newest at top. Remove an entry when it is paid.
 
+## Armed start: untried in the app (2026-11-17)
+- Only the webcam recorder's hold-then-go was run (2.0 s file after 2 s held). The engine's arm/go, the cancel path and the whole start sequence are untried: the terminal has no Screen Recording permission.
+- The start sound now plays at the instant the file begins, so the mic may pick it up at the very start of a take.
+- macOS shows its screen-recording indicator for the whole countdown, since the stream runs while armed.
+- With no countdown and a camera, the 1.2 s settle is a fixed wait taken from three takes, not a signal from macOS that the mic has settled.
+- `library.rs` still sweeps a `.prewarm` folder that nothing creates any more.
+
 ## Mic kept open and level meter: untried in the app (2026-11-17)
 - Tested only as far as the engine alone opening the mic, sending levels and closing it. Borrowing the open mic for a recording, the meter in the row, "Starting…" and the window-hide close are untried (the terminal has no Screen Recording permission).
 - Window hide is read from the page's visibility (`document.hidden`); if WKWebView does not report a hidden or minimised window, the mic stays open until Review opens.

@@ -7,7 +7,6 @@ mod exports;
 mod hotkey;
 mod library;
 mod macos;
-mod prewarm;
 mod settings;
 mod storage;
 mod thumbs;
@@ -352,10 +351,28 @@ fn recording_reset(
     let _ = engine
         .lock()
         .map_err(|e| e.to_string())?
-        .send(&EngineCommand::Stop);
+        .send(&EngineCommand::Cancel);
     if let Some(mut rec) = recording.lock().map_err(|e| e.to_string())?.take() {
         if let Some(webcam) = rec.webcam.as_mut() {
             let _ = webcam.stop();
+        }
+        // A cancelled countdown: the armed take never began, so its folder goes.
+        drop(DiscardTake(Some(rec.scratch_dir.clone())));
+    }
+    Ok(())
+}
+
+// The countdown has ended: begin writing. engine_start armed the screen
+// stream, the mic and the camera; nothing was written until now.
+#[tauri::command]
+fn engine_go(engine: EngineState<'_>, recording: RecordingState<'_>) -> Result<(), String> {
+    engine
+        .lock()
+        .map_err(|e| e.to_string())?
+        .send(&EngineCommand::Go)?;
+    if let Some(rec) = recording.lock().map_err(|e| e.to_string())?.as_mut() {
+        if let Some(webcam) = rec.webcam.as_mut() {
+            webcam.go()?;
         }
     }
     Ok(())
@@ -550,26 +567,26 @@ async fn recording_finalize(
     // invocation, which precedes SCK by 225-360ms per measurement
     // 2026-06-07). Composite + preview both read the resulting sidecar
     // — single source of truth, no divergence (option B-unified).
-    // Entries with shifted t<0 are dropped: they correspond to bubble
-    // drags before SCK started capturing, so there's no screen content
-    // to overlay them onto.
+    // Entries before time zero collapse to the bubble's position at zero.
     //
     // Fallback when first_frame_at is None (old engine binary, event
     // lost): no shift applied, log written as-is. Identical to pre-fix
     // behavior. No regression.
     let bubble_position_log: Vec<BubblePositionEntry> = if let Some(ff) = first_frame_at {
         let sck_lag = ff.duration_since(started_at).as_secs_f64();
-        bubble_position_log
-            .into_iter()
-            .filter_map(|e| {
-                let t = e.t - sck_lag;
-                if t < 0.0 {
-                    None
-                } else {
-                    Some(BubblePositionEntry { t, ..e })
-                }
-            })
-            .collect()
+        // The recording is armed for the whole countdown, so the bubble's
+        // position at time zero is the last one logged before it.
+        let mut at_zero: Option<BubblePositionEntry> = None;
+        let mut shifted = Vec::new();
+        for e in bubble_position_log {
+            let t = e.t - sck_lag;
+            if t < 0.0 {
+                at_zero = Some(BubblePositionEntry { t: 0.0, ..e });
+            } else {
+                shifted.push(BubblePositionEntry { t, ..e });
+            }
+        }
+        at_zero.into_iter().chain(shifted).collect()
     } else {
         bubble_position_log
     };
@@ -909,7 +926,6 @@ pub fn run() {
             let client = EngineClient::spawn(&handle, engine::engine_binary_path())?;
             app.manage(Mutex::new(client));
             app.manage(Mutex::new(None::<ActiveRecording>));
-            app.manage(Mutex::new(prewarm::PrewarmHandle::default()));
             tray::setup(&handle)?;
 
             // Resolve the bundled RNNoise model and hand its path to the
@@ -984,9 +1000,8 @@ pub fn run() {
             enumerate_devices,
             engine_enumerate,
             engine_start,
-            prewarm::prewarm_capture,
-            prewarm::prewarm_abort,
             mic_monitor,
+            engine_go,
             engine_pause,
             engine_resume,
             engine_stop,

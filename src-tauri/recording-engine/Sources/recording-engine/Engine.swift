@@ -20,6 +20,8 @@ actor Engine {
         switch cmd.command {
         case "enumerate": await handleEnumerate()
         case "start":     await handleStart(cmd)
+        case "go":        session?.go()
+        case "cancel":    await handleCancel()
         case "mic_monitor":
             meterMicUID = cmd.microphone_uid
             if session == nil { reconcileMic() }
@@ -273,6 +275,14 @@ actor Engine {
         // The mic may be what failed: close it so the next use opens it fresh.
         micMonitor?.stop()
         micMonitor = nil
+        endSession()
+    }
+
+    // Ends an armed (or running) recording without saving or reporting it:
+    // a cancelled countdown.
+    private func handleCancel() async {
+        guard let s = session else { return }
+        await s.tearDownAfterFatalError()
         endSession()
     }
 

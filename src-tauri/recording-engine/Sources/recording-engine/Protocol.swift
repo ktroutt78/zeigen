@@ -86,6 +86,9 @@ enum Event {
     // against the webcam recorder's own first_frame host_s. `stream` is
     // always "screen".
     case first_frame(stream: String, host_s: Double)
+    // Start arms a recording; this says its streams are delivering and `go`
+    // will open the file at once.
+    case armed
     // V3 Phase A: emitted after `stopped` when capture_cursor was on and
     // at least one video frame was written.
     case cursor_track_written(path: String, sample_count: Int)
@@ -144,6 +147,8 @@ func emit(_ event: Event) {
         json = ["event": "cursor_track_written", "path": path, "sample_count": sample_count]
     case .stream_stopped:
         json = ["event": "stream_stopped"]
+    case .armed:
+        json = ["event": "armed"]
     case .mic_level(let level):
         json = ["event": "mic_level", "level": level]
     case .error(let code, let message):

@@ -45,6 +45,10 @@ pub enum EngineCommand {
     MicMonitor {
         microphone_uid: Option<String>,
     },
+    // Start arms a recording (streams running, nothing written); Go opens the
+    // file at once. Cancel ends an armed recording without saving it.
+    Go,
+    Cancel,
     Pause,
     Resume,
     Stop,

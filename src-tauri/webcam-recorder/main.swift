@@ -1,6 +1,11 @@
 // webcam-recorder: records one camera to an H.264 mp4 on a fixed 30 fps grid.
 //
-//   webcam-recorder "<camera name>" <out.mp4>
+//   webcam-recorder "<camera name>" <out.mp4> [--hold]
+//
+// With --hold the camera runs but nothing is written until a line "go" on
+// stdin; frame 0 is the first frame after it. The app starts the helper when
+// the countdown starts, so opening the camera (which makes macOS restart the
+// microphone) is over before the recording begins.
 //
 // Replaces the ffmpeg avfoundation webcam process. ffmpeg always picks the
 // camera's highest-rate 1280x720 mode, and with an iPhone (Continuity) camera
@@ -32,7 +37,8 @@ func fail(_ msg: String) -> Never {
     exit(1)
 }
 
-guard CommandLine.arguments.count == 3 else { fail("usage: webcam-recorder <camera name> <out.mp4>") }
+guard (3...4).contains(CommandLine.arguments.count) else { fail("usage: webcam-recorder <camera name> <out.mp4> [--hold]") }
+let hold = CommandLine.arguments.count == 4 && CommandLine.arguments[3] == "--hold"
 let cameraName = CommandLine.arguments[1]
 let outURL = URL(fileURLWithPath: CommandLine.arguments[2])
 
@@ -144,6 +150,7 @@ let videoOutput = AVCaptureVideoDataOutput()
 // 1080p frames and a StopStream/StartStream; without it, 720p and no restart).
 let frames = DispatchQueue(label: "webcam.frames")
 let recorder = Recorder(session: session)
+recorder.paused = hold
 videoOutput.setSampleBufferDelegate(recorder, queue: frames)
 guard session.canAddOutput(videoOutput) else { fail("cannot add video output") }
 session.addOutput(videoOutput)
@@ -172,6 +179,7 @@ Thread.detachNewThread {
     while let line = readLine() {
         let words = line.split(separator: " ")
         if words.first == "q" { break }
+        if words.first == "go" { frames.async { recorder.paused = false } }
         if words.first == "pause" { frames.async { recorder.paused = true } }
         if words.first == "resume", words.count == 2, let cut = Double(words[1]) {
             frames.async { recorder.cutSeconds = cut; recorder.paused = false }

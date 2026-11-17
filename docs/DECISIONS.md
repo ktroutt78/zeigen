@@ -4,6 +4,17 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 
 ---
 
+## 2026-11-17 — Recordings are armed during the countdown and begin writing at go
+
+- **Symptom** (Keith): with the mic warm, the opening words were still cut off on every take.
+- **Measured on the three takes (17:17:32, 17:19:02, 17:19:17):** the file began 135, 158 and 156 ms after go. But the mic then went silent: the surviving take (17:19:02) has exact digital silence for its first 0.55 s and speech only from about 0.70 s, so the first real sound is about 0.85 s after the start sound. Takes from 16:54 show the same 0.55 s; this morning's 08:55 take 0.75 s. It has been there all along.
+- **Root cause, from the system log:** the webcam recorder was launched at go. Opening the camera makes macOS renegotiate voice isolation for com.zeigen.app and restart the microphone ("RequestConfigChange ... restarting IO"): the mic stopped 0.28-0.36 s after go and came back about 0.37 s later, in all three takes. This is also the "macOS restarts the mic" seen earlier today; the cause is the camera opening, not the mic opening. Not reproducible from the terminal (other bundle id, no voice isolation), so the proof is the log plus the silence in the files.
+- **Fix** (Keith's direction): Start now only arms. The screen stream, the mic and the camera start when the countdown starts and nothing is written; `go` opens the file on the next mic buffer, with the latest screen frame at time zero. The webcam recorder takes `--hold` and begins its file on `go`. The engine reports `armed` when its streams deliver.
+- **No countdown:** the button reads "Starting…" until armed, and with a camera until 1.2 s after arming (the restart was over within 0.77 s of the camera opening in all three takes).
+- **The throwaway warm-up recording (prewarm.rs) is deleted:** arming during the countdown warms everything it warmed.
+- **A cancelled countdown** cancels the armed recording and removes its folder.
+- **Bubble position:** positions logged while armed collapse to the position at time zero (they used to be dropped, which was harmless when nothing was logged before the file began).
+
 ## 2026-11-17 — Mic kept open while the capture window shows; level meter
 
 - **Problem** (Keith): with the 2 s wait, takes started reliably but clipped his first words, because the recording only begins once mic audio arrives and macOS restarts the mic just after it opens.
