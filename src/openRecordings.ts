@@ -11,10 +11,12 @@ export async function openRecordingsWindow(): Promise<void> {
   new WebviewWindow(RECORDINGS_LABEL, {
     url: "/#recordings",
     title: "Recordings",
-    width: 560,
-    height: 520,
-    minWidth: 420,
-    minHeight: 280,
+    // Four cards across at the default width (recordings.css, .rec-grid),
+    // two at the minimum.
+    width: 900,
+    height: 680,
+    minWidth: 480,
+    minHeight: 360,
     resizable: true,
     center: true,
   });
