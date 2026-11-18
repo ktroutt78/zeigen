@@ -10,6 +10,7 @@ Append-only log. Newest at top. Don't re-litigate settled decisions — if you w
 - **Decision** (Keith): the bubble stays where it was until it is moved, then glides. Rest positions snap to the nine Review zones. New recordings only (`bubble_follow` stamped at finalize); older takes keep the single spot so their exports do not change. Review's Position has "Follow recording | Fixed spot"; picking a spot overrides the moves, Follow recording brings them back, and is available (off) on old takes.
 - **How:** one zone timeline (`composite::resolve_zones`) feeds the one layout path (`scene::path`) that the preview and the export already share; a move retargets the same springs a scene change uses, so there is no second easing. A rest is two log entries in the same place, and the glide starts when the drag ends.
 - **Cancel during the countdown** (same day): the overlay closes on a cancel from anywhere and passes clicks through, Esc works from the capture window, and the capture window's controls are disabled while a take is armed.
+- **Checked by Keith, 2026-11-17, installed build:** a bubble moved mid-recording stays put until dropped, then glides, and snapping to the nine spots is fine; Fixed spot holds for the whole take and Follow recording brings the moves back; earlier takes look as before, on Fixed spot; the Cancel button during the countdown works and saves no recording.
 
 ## 2026-11-17 — Recordings are armed during the countdown and begin writing at go
 
